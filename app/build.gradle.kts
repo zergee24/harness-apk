@@ -56,7 +56,7 @@ android {
                 "String",
                 "UPDATE_MANIFEST_URL",
                 providers.gradleProperty("prodUpdateManifestUrl")
-                    .orElse("https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/prod/update.json")
+                    .orElse("https://www.zerg.work/harness-apk/prod/update.json")
                     .get()
                     .asBuildConfigString(),
             )
@@ -72,7 +72,7 @@ android {
                 "String",
                 "UPDATE_MANIFEST_URL",
                 providers.gradleProperty("testUpdateManifestUrl")
-                    .orElse("https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/update.json")
+                    .orElse("https://www.zerg.work/harness-apk/test/update.json")
                     .get()
                     .asBuildConfigString(),
             )

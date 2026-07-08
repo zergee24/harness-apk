@@ -5,17 +5,17 @@
 测试通道：
 
 ```text
-https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/update.json
-https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/app-debug.apk
-https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/chunks/app-debug.apk.part-000
+https://www.zerg.work/harness-apk/test/update.json
+https://www.zerg.work/harness-apk/test/app-debug.apk
+https://www.zerg.work/harness-apk/test/chunks/app-debug.apk.part-000
 ```
 
 正式通道：
 
 ```text
-https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/prod/update.json
-https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/prod/app-release.apk
-https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/prod/chunks/app-release.apk.part-000
+https://www.zerg.work/harness-apk/prod/update.json
+https://www.zerg.work/harness-apk/prod/app-release.apk
+https://www.zerg.work/harness-apk/prod/chunks/app-release.apk.part-000
 ```
 
 GitHub Actions:
