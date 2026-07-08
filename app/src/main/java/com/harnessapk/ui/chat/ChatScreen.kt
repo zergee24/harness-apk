@@ -305,8 +305,16 @@ fun ChatScreen(
         selectedModel = selection.model
     }
 
+    var previousAutoScrollKey by remember(conversationId) { mutableStateOf<AutoScrollKey?>(null) }
     LaunchedEffect(autoScrollKey(messages)) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+        val currentKey = autoScrollKey(messages)
+        val scrollMode = chatAutoScrollMode(previous = previousAutoScrollKey, current = currentKey)
+        previousAutoScrollKey = currentKey
+        when (scrollMode) {
+            ChatAutoScrollMode.JUMP_TO_BOTTOM -> listState.scrollToItem(messages.lastIndex)
+            ChatAutoScrollMode.ANIMATE_TO_BOTTOM -> listState.animateScrollToItem(messages.lastIndex)
+            ChatAutoScrollMode.NONE -> Unit
+        }
     }
 
     LaunchedEffect(conversationId, autoFocusInput, messages.size, text, selectedImage) {
@@ -1064,7 +1072,6 @@ internal data class AutoScrollKey(
     val messageCount: Int,
     val lastMessageId: String?,
     val lastMessageStatus: MessageStatus?,
-    val lastMessageContentLength: Int,
     val lastMessageUpdatedAt: Long,
 )
 
@@ -1074,9 +1081,26 @@ internal fun autoScrollKey(messages: List<ChatMessage>): AutoScrollKey {
         messageCount = messages.size,
         lastMessageId = lastMessage?.id,
         lastMessageStatus = lastMessage?.status,
-        lastMessageContentLength = lastMessage?.content?.length ?: 0,
         lastMessageUpdatedAt = lastMessage?.updatedAt ?: 0L,
     )
+}
+
+internal enum class ChatAutoScrollMode {
+    NONE,
+    JUMP_TO_BOTTOM,
+    ANIMATE_TO_BOTTOM,
+}
+
+internal fun chatAutoScrollMode(
+    previous: AutoScrollKey?,
+    current: AutoScrollKey,
+): ChatAutoScrollMode = when {
+    current.messageCount == 0 -> ChatAutoScrollMode.NONE
+    previous == null -> ChatAutoScrollMode.JUMP_TO_BOTTOM
+    previous.messageCount == 0 -> ChatAutoScrollMode.JUMP_TO_BOTTOM
+    current.messageCount > previous.messageCount -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
+    current.lastMessageId != previous.lastMessageId -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
+    else -> ChatAutoScrollMode.NONE
 }
 
 internal fun assistantActivityLabel(messages: List<ChatMessage>): String? {

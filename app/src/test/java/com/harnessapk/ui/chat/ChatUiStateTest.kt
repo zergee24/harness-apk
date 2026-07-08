@@ -324,7 +324,38 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun autoScrollKeyChangesWhenStreamingAssistantContentGrows() {
+    fun autoScrollModeJumpsToBottomOnInitialConversationLoad() {
+        val current = autoScrollKey(
+            listOf(
+                userMessage(id = "first", content = "第一条"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "最后一条"),
+            ),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.JUMP_TO_BOTTOM,
+            chatAutoScrollMode(previous = null, current = current),
+        )
+    }
+
+    @Test
+    fun autoScrollModeJumpsToBottomWhenHistoryLoadsAfterEmptyState() {
+        val previous = autoScrollKey(emptyList())
+        val current = autoScrollKey(
+            listOf(
+                userMessage(id = "first", content = "第一条"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "最后一条"),
+            ),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.JUMP_TO_BOTTOM,
+            chatAutoScrollMode(previous = previous, current = current),
+        )
+    }
+
+    @Test
+    fun autoScrollModeDoesNotFollowStreamingContentGrowth() {
         val firstKey = autoScrollKey(
             listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你")),
         )
@@ -332,7 +363,28 @@ class ChatUiStateTest {
             listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你好，继续")),
         )
 
-        assertEquals(false, firstKey == nextKey)
+        assertEquals(
+            ChatAutoScrollMode.NONE,
+            chatAutoScrollMode(previous = firstKey, current = nextKey),
+        )
+    }
+
+    @Test
+    fun autoScrollModeAnimatesOnlyWhenANewMessageAppears() {
+        val previous = autoScrollKey(
+            listOf(userMessage(id = "first", content = "第一条")),
+        )
+        val current = autoScrollKey(
+            listOf(
+                userMessage(id = "first", content = "第一条"),
+                assistantMessage(status = MessageStatus.PENDING, content = ""),
+            ),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.ANIMATE_TO_BOTTOM,
+            chatAutoScrollMode(previous = previous, current = current),
+        )
     }
 
     @Test
