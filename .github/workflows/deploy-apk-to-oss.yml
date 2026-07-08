@@ -19,6 +19,7 @@ on:
     branches:
       - main
       - apk-test
+      - test
     paths:
       - ".github/workflows/deploy-apk-to-oss.yml"
       - "app/**"
@@ -34,7 +35,7 @@ permissions:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_OSS_DEPLOY_ON_PUSH == 'true'
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'test' || vars.ENABLE_OSS_DEPLOY_ON_PUSH == 'true'
     runs-on: ubuntu-latest
     env:
       OSS_BUCKET: ${{ vars.OSS_BUCKET }}
