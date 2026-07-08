@@ -66,8 +66,8 @@ resolve_base_url() {
   echo "https://${bucket}.${endpoint}/${prefix}"
 }
 
-OSS_BUCKET="${OSS_BUCKET:-harness-zerg}"
-OSS_ENDPOINT="$(normalize_endpoint "${OSS_ENDPOINT:-oss-cn-hangzhou.aliyuncs.com}")"
+OSS_BUCKET="${OSS_BUCKET:-harness--zerg}"
+OSS_ENDPOINT="$(normalize_endpoint "${OSS_ENDPOINT:-oss-ap-southeast-1.aliyuncs.com}")"
 OSS_ACL="${OSS_ACL:-public-read}"
 VERSION_CODE="$(awk -F '= ' '/versionCode = / {print $2; exit}' app/build.gradle.kts | tr -d ' ')"
 BASE_VERSION_NAME="$(sed -n 's/.*versionName = \"\([^\"]*\)\".*/\1/p' app/build.gradle.kts | head -n 1)"
@@ -85,7 +85,7 @@ case "$CHANNEL" in
     ARTIFACT_NAME="app-debug.apk"
     VERSION_NAME="${BASE_VERSION_NAME}-debug"
     OSS_PREFIX="${OSS_TEST_PREFIX:-${OSS_PREFIX:-harness-apk/test}}"
-    OSS_PUBLIC_BASE_URL="${OSS_TEST_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-$(resolve_base_url "$OSS_BUCKET" "$OSS_ENDPOINT" "$OSS_PREFIX")}}"
+    OSS_PUBLIC_BASE_URL="${OSS_TEST_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-https://www.zerg.work/harness-apk/test}}"
     GRADLE_MANIFEST_ARG="-PtestUpdateManifestUrl=${OSS_PUBLIC_BASE_URL%/}/update.json"
     ;;
   prod)
@@ -93,7 +93,7 @@ case "$CHANNEL" in
     ARTIFACT_NAME="app-release.apk"
     VERSION_NAME="${BASE_VERSION_NAME}"
     OSS_PREFIX="${OSS_PROD_PREFIX:-harness-apk/prod}"
-    OSS_PUBLIC_BASE_URL="${OSS_PROD_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-$(resolve_base_url "$OSS_BUCKET" "$OSS_ENDPOINT" "$OSS_PREFIX")}}"
+    OSS_PUBLIC_BASE_URL="${OSS_PROD_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-https://www.zerg.work/harness-apk/prod}}"
     GRADLE_MANIFEST_ARG="-PprodUpdateManifestUrl=${OSS_PUBLIC_BASE_URL%/}/update.json"
     ;;
   *)
