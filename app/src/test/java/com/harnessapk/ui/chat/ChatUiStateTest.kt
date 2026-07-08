@@ -312,6 +312,24 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun chatContentWidthUsesAvailableWidthOnPhone() {
+        assertEquals(390, chatContentMaxWidthDp(availableWidthDp = 390))
+        assertEquals(358, messageBubbleMaxWidthDp(contentWidthDp = 390))
+    }
+
+    @Test
+    fun chatContentWidthIsCappedOnFoldableScreens() {
+        assertEquals(760, chatContentMaxWidthDp(availableWidthDp = 1100))
+        assertEquals(699, messageBubbleMaxWidthDp(contentWidthDp = 760))
+    }
+
+    @Test
+    fun messageBubbleSideKeepsAssistantLeftAndUserRight() {
+        assertEquals(ChatBubbleSide.START, messageBubbleSide(MessageRole.ASSISTANT))
+        assertEquals(ChatBubbleSide.END, messageBubbleSide(MessageRole.USER))
+    }
+
+    @Test
     fun handleStopIntentCancelsActiveSend() {
         val events = mutableListOf<String>()
 

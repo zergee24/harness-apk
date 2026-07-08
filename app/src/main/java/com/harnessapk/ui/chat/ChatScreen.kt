@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -89,6 +90,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.MessageRole
@@ -897,130 +899,147 @@ fun ChatScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),
     ) {
-        ProviderAndModelPicker(
-            providers = providers,
-            selectedProviderId = selectedProviderId,
-            selectedModel = selectedModel,
-            selectedReasoningEffort = selectedReasoningEffort,
-            onOpenModelPicker = { showModelPicker = true },
-            sessionConfigText = sessionConfigButtonText(
-                projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
-            ),
-            onOpenSessionConfig = { showSessionConfig = true },
-        )
+        ResponsiveChatContentRail {
+            ProviderAndModelPicker(
+                providers = providers,
+                selectedProviderId = selectedProviderId,
+                selectedModel = selectedModel,
+                selectedReasoningEffort = selectedReasoningEffort,
+                onOpenModelPicker = { showModelPicker = true },
+                sessionConfigText = sessionConfigButtonText(
+                    projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
+                ),
+                onOpenSessionConfig = { showSessionConfig = true },
+            )
+        }
 
-        errorText?.let { InlineError(it) }
-        sessionStatus?.let { InlineStatus(it) }
+        errorText?.let { ResponsiveChatContentRail { InlineError(it) } }
+        sessionStatus?.let { ResponsiveChatContentRail { InlineStatus(it) } }
 
-        LazyColumn(
+        BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
-            state = listState,
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (messages.isEmpty()) {
-                item { EmptyChatState() }
-            }
-            items(messages, key = { it.id }) { message ->
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (message.role == MessageRole.SYSTEM) {
-                        ContextEventLine(message.content)
-                    } else {
-                        MessageBubble(
-                            message = message,
-                            canWriteBack = message.role == MessageRole.ASSISTANT &&
-                                message.status == MessageStatus.SUCCEEDED &&
-                                canWriteBackMarkdown(selectedProjectId, null, message.content),
-                            onWriteBack = { pendingWriteBack = message },
-                            onCopy = {
-                                clipboard.setText(
-                                    AnnotatedString(
-                                        message.errorMessage?.let(::errorCopyText) ?: message.content,
-                                    ),
-                                )
-                            },
-                            onSelectCopy = { pendingSelectionCopy = message },
-                            isSpeaking = speakingMessageId == message.id,
-                            onSpeak = { speakAssistantMessage(message) },
-                        )
-                    }
-                    markdownFileChangeStates
-                        .filter { it.draft.sourceUserMessageId == message.id }
-                        .forEach { state ->
-                            MarkdownFileChangeCard(
-                                state = state,
-                                onShowDiff = { showMarkdownFileChangeDiff(state) },
-                                onApply = {
-                                    applyMarkdownFileChangeState(
-                                        state = state,
-                                        retainedIndexes = state.items.mapIndexedNotNull { index, item ->
-                                            index.takeIf { item.retained }
-                                        }.toSet(),
-                                    )
-                                },
-                                onRetry = { retryMarkdownFileChange(state) },
-                                onDismiss = {
-                                    upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
-                                },
-                            )
+            val contentMaxWidth = chatContentMaxWidthDp(maxWidth.value.toInt()).dp
+            val bubbleMaxWidth = messageBubbleMaxWidthDp(contentMaxWidth.value.toInt()).dp
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth(),
+                state = listState,
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (messages.isEmpty()) {
+                    item {
+                        ChatContentRail(contentMaxWidth = contentMaxWidth) {
+                            EmptyChatState()
                         }
+                    }
+                }
+                items(messages, key = { it.id }) { message ->
+                    ChatContentRail(contentMaxWidth = contentMaxWidth) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            if (message.role == MessageRole.SYSTEM) {
+                                ContextEventLine(message.content)
+                            } else {
+                                MessageBubble(
+                                    message = message,
+                                    maxBubbleWidth = bubbleMaxWidth,
+                                    canWriteBack = message.role == MessageRole.ASSISTANT &&
+                                        message.status == MessageStatus.SUCCEEDED &&
+                                        canWriteBackMarkdown(selectedProjectId, null, message.content),
+                                    onWriteBack = { pendingWriteBack = message },
+                                    onCopy = {
+                                        clipboard.setText(
+                                            AnnotatedString(
+                                                message.errorMessage?.let(::errorCopyText) ?: message.content,
+                                            ),
+                                        )
+                                    },
+                                    onSelectCopy = { pendingSelectionCopy = message },
+                                    isSpeaking = speakingMessageId == message.id,
+                                    onSpeak = { speakAssistantMessage(message) },
+                                )
+                            }
+                            markdownFileChangeStates
+                                .filter { it.draft.sourceUserMessageId == message.id }
+                                .forEach { state ->
+                                    MarkdownFileChangeCard(
+                                        state = state,
+                                        onShowDiff = { showMarkdownFileChangeDiff(state) },
+                                        onApply = {
+                                            applyMarkdownFileChangeState(
+                                                state = state,
+                                                retainedIndexes = state.items.mapIndexedNotNull { index, item ->
+                                                    index.takeIf { item.retained }
+                                                }.toSet(),
+                                            )
+                                        },
+                                        onRetry = { retryMarkdownFileChange(state) },
+                                        onDismiss = {
+                                            upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
+                                        },
+                                    )
+                                }
+                        }
+                    }
                 }
             }
         }
 
-        busyText?.let { AssistantActivityIndicator(it) }
+        busyText?.let { ResponsiveChatContentRail { AssistantActivityIndicator(it) } }
 
-        ChatInputBar(
-            text = text,
-            onTextChange = { text = it },
-            selectedImage = selectedImage,
-            onPickImage = {
-                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            },
-            onRemoveImage = { selectedImage = null },
-            showWebSearch = shouldShowWebSearchButton(webSearchSettings),
-            webSearchEnabled = webSearchEnabled,
-            onToggleWebSearch = { enabled ->
-                if (enabled && !webSearchSettings.enabled) {
-                    errorText = "请先在设置 -> 搜索能力启用联网搜索"
-                } else {
-                    errorText = null
-                    webSearchEnabled = enabled
-                }
-            },
-            showVoiceInput = shouldShowVoiceInputButton(voiceSettings),
-            onStartVoiceTranscription = {
-                errorText = "语音能力已开启，但当前版本暂未接入可用的语音输入方案"
-            },
-            contextStatus = contextStatus,
-            isCompressingContext = isCompressingContext,
-            onCompressContext = ::compressContextNow,
-            inputFocusRequester = inputFocusRequester,
-            canSend = !isAssistantBusy &&
-                selectedProvider != null &&
-                selectedModel.isNotBlank() &&
-                (text.isNotBlank() || selectedImage != null),
-            isBusy = isAssistantBusy,
-            onSend = {
-                if (isAssistantBusy) {
-                    stopNow()
-                } else {
-                    handleSendIntent(
-                        hasSelectedImage = selectedImage != null,
-                        dismissKeyboard = dismissKeyboard,
-                        sendNow = ::sendNow,
-                    )
-                }
-            },
-            showFileChangeSuggestion = shouldShowFileChangeModeEntry(text),
-            canSendFileChange = shouldShowFileChangeModeEntry(text) && !isAssistantBusy,
-            onSendFileChange = {
-                dismissKeyboard()
-                sendFileChangeNow()
-            },
-        )
+        ResponsiveChatContentRail {
+            ChatInputBar(
+                text = text,
+                onTextChange = { text = it },
+                selectedImage = selectedImage,
+                onPickImage = {
+                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+                onRemoveImage = { selectedImage = null },
+                showWebSearch = shouldShowWebSearchButton(webSearchSettings),
+                webSearchEnabled = webSearchEnabled,
+                onToggleWebSearch = { enabled ->
+                    if (enabled && !webSearchSettings.enabled) {
+                        errorText = "请先在设置 -> 搜索能力启用联网搜索"
+                    } else {
+                        errorText = null
+                        webSearchEnabled = enabled
+                    }
+                },
+                showVoiceInput = shouldShowVoiceInputButton(voiceSettings),
+                onStartVoiceTranscription = {
+                    errorText = "语音能力已开启，但当前版本暂未接入可用的语音输入方案"
+                },
+                contextStatus = contextStatus,
+                isCompressingContext = isCompressingContext,
+                onCompressContext = ::compressContextNow,
+                inputFocusRequester = inputFocusRequester,
+                canSend = !isAssistantBusy &&
+                    selectedProvider != null &&
+                    selectedModel.isNotBlank() &&
+                    (text.isNotBlank() || selectedImage != null),
+                isBusy = isAssistantBusy,
+                onSend = {
+                    if (isAssistantBusy) {
+                        stopNow()
+                    } else {
+                        handleSendIntent(
+                            hasSelectedImage = selectedImage != null,
+                            dismissKeyboard = dismissKeyboard,
+                            sendNow = ::sendNow,
+                        )
+                    }
+                },
+                showFileChangeSuggestion = shouldShowFileChangeModeEntry(text),
+                canSendFileChange = shouldShowFileChangeModeEntry(text) && !isAssistantBusy,
+                onSendFileChange = {
+                    dismissKeyboard()
+                    sendFileChangeNow()
+                },
+            )
+        }
     }
 }
 
@@ -1102,6 +1121,22 @@ internal fun chatAutoScrollMode(
     current.lastMessageId != previous.lastMessageId -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
     else -> ChatAutoScrollMode.NONE
 }
+
+internal enum class ChatBubbleSide {
+    START,
+    END,
+}
+
+internal fun messageBubbleSide(role: MessageRole): ChatBubbleSide =
+    if (role == MessageRole.USER) ChatBubbleSide.END else ChatBubbleSide.START
+
+internal fun chatContentMaxWidthDp(availableWidthDp: Int): Int =
+    availableWidthDp.coerceAtMost(MAX_CHAT_CONTENT_WIDTH_DP).coerceAtLeast(0)
+
+internal fun messageBubbleMaxWidthDp(contentWidthDp: Int): Int =
+    ((contentWidthDp * 92) / 100)
+        .coerceAtMost(MAX_MESSAGE_BUBBLE_WIDTH_DP)
+        .coerceAtLeast(0)
 
 internal fun assistantActivityLabel(messages: List<ChatMessage>): String? {
     val activeAssistant = messages.lastOrNull {
@@ -1555,6 +1590,8 @@ private fun SessionConfigDialog(
 private const val MAX_REVIEW_DIFF_LINES = 120
 private const val MAX_WRITE_BACK_EVENT_PATHS = 3
 private const val MAX_TTS_TEXT_LENGTH = 4_000
+private const val MAX_CHAT_CONTENT_WIDTH_DP = 760
+private const val MAX_MESSAGE_BUBBLE_WIDTH_DP = 700
 private const val MAX_FILE_CHANGE_CARD_ITEMS = 6
 private const val MAX_FILE_CHANGE_CONTEXT_MESSAGES = 10
 private const val MAX_FILE_CHANGE_CONTEXT_MESSAGE_CHARS = 2_000
@@ -1860,8 +1897,38 @@ private fun MarkdownFileChangeItemRow(item: MarkdownFileChangeItem) {
 }
 
 @Composable
+private fun ResponsiveChatContentRail(content: @Composable () -> Unit) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        ChatContentRail(
+            contentMaxWidth = chatContentMaxWidthDp(maxWidth.value.toInt()).dp,
+            content = content,
+        )
+    }
+}
+
+@Composable
+private fun ChatContentRail(
+    contentMaxWidth: Dp,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = contentMaxWidth)
+                .fillMaxWidth(),
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
 private fun MessageBubble(
     message: ChatMessage,
+    maxBubbleWidth: Dp,
     canWriteBack: Boolean,
     onWriteBack: () -> Unit,
     onCopy: () -> Unit,
@@ -1873,10 +1940,13 @@ private fun MessageBubble(
     val selectionCopyText = messageSelectionCopyText(message)
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        horizontalArrangement = when (messageBubbleSide(message.role)) {
+            ChatBubbleSide.START -> Arrangement.Start
+            ChatBubbleSide.END -> Arrangement.End
+        },
     ) {
         Surface(
-            modifier = Modifier.widthIn(max = 360.dp),
+            modifier = Modifier.widthIn(max = maxBubbleWidth),
             shape = RoundedCornerShape(
                 topStart = 18.dp,
                 topEnd = 18.dp,
@@ -1896,8 +1966,7 @@ private fun MessageBubble(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
