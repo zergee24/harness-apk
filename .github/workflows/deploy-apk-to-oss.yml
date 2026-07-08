@@ -3,6 +3,14 @@ name: Deploy APK to OSS
 on:
   workflow_dispatch:
     inputs:
+      channel:
+        description: "Release channel"
+        required: true
+        default: test
+        type: choice
+        options:
+          - test
+          - prod
       release_notes:
         description: "Release notes, one item per line. Empty uses recent commit titles."
         required: false
@@ -33,9 +41,18 @@ jobs:
       OSS_ENDPOINT: ${{ vars.OSS_ENDPOINT }}
       OSS_PREFIX: ${{ vars.OSS_PREFIX }}
       OSS_PUBLIC_BASE_URL: ${{ vars.OSS_PUBLIC_BASE_URL }}
+      OSS_TEST_PREFIX: ${{ vars.OSS_TEST_PREFIX }}
+      OSS_TEST_PUBLIC_BASE_URL: ${{ vars.OSS_TEST_PUBLIC_BASE_URL }}
+      OSS_PROD_PREFIX: ${{ vars.OSS_PROD_PREFIX }}
+      OSS_PROD_PUBLIC_BASE_URL: ${{ vars.OSS_PROD_PUBLIC_BASE_URL }}
       OSS_ACL: ${{ vars.OSS_ACL }}
       ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
       ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+      ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+      ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+      INPUT_CHANNEL: ${{ github.event.inputs.channel || '' }}
 
     steps:
       - name: Checkout
@@ -57,26 +74,52 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          CHANNEL="${INPUT_CHANNEL:-test}"
+          if [ "$CHANNEL" != "test" ] && [ "$CHANNEL" != "prod" ]; then
+            echo "::error::Invalid channel: $CHANNEL"
+            exit 1
+          fi
           : "${OSS_BUCKET:=harness-zerg}"
           : "${OSS_ENDPOINT:=oss-cn-hangzhou.aliyuncs.com}"
-          : "${OSS_PREFIX:=harness-apk/test}"
           : "${OSS_ACL:=public-read}"
           OSS_ENDPOINT="${OSS_ENDPOINT#https://}"
           OSS_ENDPOINT="${OSS_ENDPOINT#http://}"
           OSS_ENDPOINT="${OSS_ENDPOINT%/}"
+          VERSION_CODE="$(awk -F '= ' '/versionCode = / {print $2; exit}' app/build.gradle.kts | tr -d ' ')"
+          BASE_VERSION_NAME="$(sed -n 's/.*versionName = \"\\([^\"]*\\)\".*/\\1/p' app/build.gradle.kts | head -n 1)"
+          if [ "$CHANNEL" = "prod" ]; then
+            OSS_PREFIX="${OSS_PROD_PREFIX:-harness-apk/prod}"
+            OSS_PUBLIC_BASE_URL="${OSS_PROD_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-}}"
+            BUILD_TASK=":app:assembleRelease"
+            BUILD_TYPE="release"
+            ARTIFACT_NAME="app-release.apk"
+            VERSION_NAME="$BASE_VERSION_NAME"
+            MANIFEST_PROPERTY="prodUpdateManifestUrl"
+          else
+            OSS_PREFIX="${OSS_TEST_PREFIX:-${OSS_PREFIX:-harness-apk/test}}"
+            OSS_PUBLIC_BASE_URL="${OSS_TEST_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-}}"
+            BUILD_TASK=":app:assembleDebug"
+            BUILD_TYPE="debug"
+            ARTIFACT_NAME="app-debug.apk"
+            VERSION_NAME="${BASE_VERSION_NAME}-debug"
+            MANIFEST_PROPERTY="testUpdateManifestUrl"
+          fi
           OSS_PREFIX="${OSS_PREFIX#/}"
           OSS_PREFIX="${OSS_PREFIX%/}"
           if [ -z "${OSS_PUBLIC_BASE_URL}" ]; then
             OSS_PUBLIC_BASE_URL="https://${OSS_BUCKET}.${OSS_ENDPOINT}/${OSS_PREFIX}"
           fi
-          VERSION_CODE="$(awk -F '= ' '/versionCode = / {print $2; exit}' app/build.gradle.kts | tr -d ' ')"
-          VERSION_NAME="$(sed -n 's/.*versionName = \"\\([^\"]*\\)\".*/\\1/p' app/build.gradle.kts | head -n 1)-debug"
           {
+            echo "CHANNEL=${CHANNEL}"
             echo "OSS_BUCKET=${OSS_BUCKET}"
             echo "OSS_ENDPOINT=${OSS_ENDPOINT}"
             echo "OSS_PREFIX=${OSS_PREFIX}"
             echo "OSS_ACL=${OSS_ACL}"
             echo "OSS_PUBLIC_BASE_URL=${OSS_PUBLIC_BASE_URL%/}"
+            echo "BUILD_TASK=${BUILD_TASK}"
+            echo "BUILD_TYPE=${BUILD_TYPE}"
+            echo "ARTIFACT_NAME=${ARTIFACT_NAME}"
+            echo "MANIFEST_PROPERTY=${MANIFEST_PROPERTY}"
             echo "VERSION_CODE=${VERSION_CODE}"
             echo "VERSION_NAME=${VERSION_NAME}"
           } >> "$GITHUB_ENV"
@@ -90,8 +133,46 @@ jobs:
             exit 1
           fi
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --console=plain
+      - name: Prepare release signing
+        if: env.CHANNEL == 'prod'
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=false
+          for name in ANDROID_RELEASE_KEYSTORE_BASE64 ANDROID_RELEASE_STORE_PASSWORD ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing $name repository secret for prod signing"
+              missing=true
+            fi
+          done
+          if [ "$missing" = true ]; then
+            exit 1
+          fi
+          KEYSTORE_FILE="$RUNNER_TEMP/harness-release-keystore.jks"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          echo "ANDROID_RELEASE_STORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        run: ./gradlew "$BUILD_TASK" "-P${MANIFEST_PROPERTY}=${OSS_PUBLIC_BASE_URL}/update.json" --console=plain --no-daemon
+
+      - name: Resolve APK output
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = "prod" ]; then
+            APK_PATH="$(find "app/build/outputs/apk/${BUILD_TYPE}" -maxdepth 1 -name 'app-release*.apk' | sort | head -n 1)"
+            if [[ "$APK_PATH" == *unsigned* ]]; then
+              echo "::error::Prod APK is unsigned: $APK_PATH"
+              exit 1
+            fi
+          else
+            APK_PATH="app/build/outputs/apk/${BUILD_TYPE}/app-debug.apk"
+          fi
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "::error::APK output not found"
+            exit 1
+          fi
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
 
       - name: Prepare release notes
         shell: bash
@@ -109,11 +190,12 @@ jobs:
       - name: Prepare release files
         run: |
           python3 scripts/prepare_apk_release.py \
-            --apk app/build/outputs/apk/debug/app-debug.apk \
+            --apk "$APK_PATH" \
             --output-dir build/release-oss \
             --public-base-url "$OSS_PUBLIC_BASE_URL" \
             --version-code "$VERSION_CODE" \
             --version-name "$VERSION_NAME" \
+            --artifact-name "$ARTIFACT_NAME" \
             --min-supported-version-code "$VERSION_CODE" \
             --release-notes-file build/release-notes/notes.txt
 

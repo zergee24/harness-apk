@@ -19,10 +19,11 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
 ```
 
-Debug APK:
+本地打包：
 
-```text
-app/build/outputs/apk/debug/app-debug.apk
+```bash
+scripts/release_apk.sh test
+scripts/release_apk.sh prod
 ```
 
 ## Emulator QA
@@ -36,12 +37,17 @@ adb wait-for-device
 
 ## Release Hosting
 
-Manifest、APK 完整包和 APK 分片由 GitHub Actions 构建后上传到阿里云 OSS：
+Manifest、APK 完整包和 APK 分片由 GitHub Actions 或本地打包机生成后上传到阿里云 OSS。
+测试包和正式包使用独立通道：
 
 ```text
 https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/update.json
 https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/app-debug.apk
 https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/chunks/app-debug.apk.part-000
+
+https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/prod/update.json
+https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/prod/app-release.apk
+https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/prod/chunks/app-release.apk.part-000
 ```
 
 GitHub 仓库需要配置：
@@ -50,14 +56,20 @@ GitHub 仓库需要配置：
 Secrets:
 ALIYUN_ACCESS_KEY_ID
 ALIYUN_ACCESS_KEY_SECRET
+ANDROID_RELEASE_KEYSTORE_BASE64
+ANDROID_RELEASE_STORE_PASSWORD
+ANDROID_RELEASE_KEY_ALIAS
+ANDROID_RELEASE_KEY_PASSWORD
 
 Variables:
 OSS_BUCKET=harness-zerg
 OSS_ENDPOINT=oss-cn-hangzhou.aliyuncs.com
-OSS_PREFIX=harness-apk/test
+OSS_TEST_PREFIX=harness-apk/test
+OSS_PROD_PREFIX=harness-apk/prod
 OSS_ACL=public-read
 ENABLE_OSS_DEPLOY_ON_PUSH=true
 ```
 
-默认可以在 GitHub Actions 手动运行 `Deploy APK to OSS`。如果要推送 `main` 或
-`apk-test` 的应用源码变更后自动部署，把 `ENABLE_OSS_DEPLOY_ON_PUSH` 设为 `true`。
+默认可以在 GitHub Actions 手动运行 `Deploy APK to OSS`，并选择 `test` 或 `prod`。
+推送自动部署只建议用于测试通道；如果要开启，把 `ENABLE_OSS_DEPLOY_ON_PUSH` 设为 `true`。
+`prod` 通道必须配置正式签名 secrets，否则不会上传未签名 APK。

@@ -7,6 +7,17 @@ plugins {
 fun String.asBuildConfigString(): String =
     "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+val releaseStoreFile = providers.environmentVariable("ANDROID_RELEASE_STORE_FILE")
+val releaseStorePassword = providers.environmentVariable("ANDROID_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = providers.environmentVariable("ANDROID_RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { it.isPresent }
+
 android {
     namespace = "com.harnessapk"
     compileSdk = 37
@@ -22,20 +33,33 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+    }
 
-        buildConfigField(
-            "String",
-            "UPDATE_MANIFEST_URL",
-            providers.gradleProperty("updateManifestUrl")
-                .orElse("https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/update.json")
-                .get()
-                .asBuildConfigString(),
-        )
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStoreFile.get())
+                storePassword = releaseStorePassword.get()
+                keyAlias = releaseKeyAlias.get()
+                keyPassword = releaseKeyPassword.get()
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            buildConfigField(
+                "String",
+                "UPDATE_MANIFEST_URL",
+                providers.gradleProperty("prodUpdateManifestUrl")
+                    .orElse("https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/prod/update.json")
+                    .get()
+                    .asBuildConfigString(),
+            )
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -44,6 +68,14 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            buildConfigField(
+                "String",
+                "UPDATE_MANIFEST_URL",
+                providers.gradleProperty("testUpdateManifestUrl")
+                    .orElse("https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/update.json")
+                    .get()
+                    .asBuildConfigString(),
+            )
         }
     }
 

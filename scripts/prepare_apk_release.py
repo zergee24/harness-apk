@@ -43,6 +43,7 @@ def main() -> int:
     parser.add_argument("--public-base-url", required=True)
     parser.add_argument("--version-code", required=True, type=int)
     parser.add_argument("--version-name", required=True)
+    parser.add_argument("--artifact-name")
     parser.add_argument("--min-supported-version-code", type=int)
     parser.add_argument("--release-notes-file", type=Path)
     args = parser.parse_args()
@@ -50,6 +51,7 @@ def main() -> int:
     apk_path = args.apk
     if not apk_path.is_file():
         raise SystemExit(f"APK not found: {apk_path}")
+    artifact_name = args.artifact_name or apk_path.name
 
     output_dir = args.output_dir
     chunks_dir = output_dir / "chunks"
@@ -57,7 +59,7 @@ def main() -> int:
         shutil.rmtree(output_dir)
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
-    hosted_apk = output_dir / "app-debug.apk"
+    hosted_apk = output_dir / artifact_name
     shutil.copy2(apk_path, hosted_apk)
 
     chunk_names: list[str] = []
@@ -67,7 +69,7 @@ def main() -> int:
             payload = source.read(CHUNK_SIZE)
             if not payload:
                 break
-            name = f"app-debug.apk.part-{index:03d}"
+            name = f"{artifact_name}.part-{index:03d}"
             (chunks_dir / name).write_bytes(payload)
             chunk_names.append(name)
             index += 1
@@ -77,7 +79,7 @@ def main() -> int:
         "versionCode": args.version_code,
         "versionName": args.version_name,
         "minSupportedVersionCode": args.min_supported_version_code or args.version_code,
-        "apkUrl": f"{base_url}/app-debug.apk",
+        "apkUrl": f"{base_url}/{artifact_name}",
         "apkChunks": [
             f"{base_url}/chunks/{name}"
             for name in chunk_names
