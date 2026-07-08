@@ -38,11 +38,13 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.outlined.Assignment
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -184,6 +186,7 @@ fun ChatScreen(
     var sessionConfigStatus by remember { mutableStateOf<String?>(null) }
     var isOptimizingPrompt by remember { mutableStateOf(false) }
     var pendingWriteBack by remember { mutableStateOf<ChatMessage?>(null) }
+    var pendingSelectionCopy by remember { mutableStateOf<ChatMessage?>(null) }
     var pendingMarkdownReview by remember { mutableStateOf<MarkdownUpdateReviewState?>(null) }
     var pendingMarkdownReviewDraftId by remember { mutableStateOf<String?>(null) }
     var markdownFileChangeStates by remember(conversationId) { mutableStateOf<List<MarkdownFileChangeState>>(emptyList()) }
@@ -869,6 +872,16 @@ fun ChatScreen(
         )
     }
 
+    pendingSelectionCopy?.let { message ->
+        MessageSelectionCopyDialog(
+            text = messageSelectionCopyText(message),
+            onCopyAll = {
+                clipboard.setText(AnnotatedString(messageSelectionCopyText(message)))
+            },
+            onDismiss = { pendingSelectionCopy = null },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -919,6 +932,7 @@ fun ChatScreen(
                                     ),
                                 )
                             },
+                            onSelectCopy = { pendingSelectionCopy = message },
                             isSpeaking = speakingMessageId == message.id,
                             onSpeak = { speakAssistantMessage(message) },
                         )
@@ -1108,6 +1122,10 @@ internal fun errorDisplayText(errorText: String): String = errorText
 
 internal fun errorCopyText(errorText: String): String = errorText
 
+internal fun messageSelectionCopyText(message: ChatMessage): String =
+    message.errorMessage?.let(::errorCopyText)
+        ?: assistantMessageDisplayText(message)
+
 internal fun handleSendIntent(
     hasSelectedImage: Boolean,
     dismissKeyboard: () -> Unit,
@@ -1144,6 +1162,11 @@ internal fun handleStopIntent(
 
 internal fun sendButtonContentDescription(isBusy: Boolean): String =
     if (isBusy) "暂停生成" else "发送"
+
+internal fun shouldShowCollapsedAttachmentEntry(
+    text: String,
+    hasSelectedImage: Boolean,
+): Boolean = text.isBlank() && !hasSelectedImage
 
 internal enum class FileChangeSendDecision {
     SEND,
@@ -1785,10 +1808,12 @@ private fun MessageBubble(
     canWriteBack: Boolean,
     onWriteBack: () -> Unit,
     onCopy: () -> Unit,
+    onSelectCopy: () -> Unit,
     isSpeaking: Boolean,
     onSpeak: () -> Unit,
 ) {
     val isUser = message.role == MessageRole.USER
+    val selectionCopyText = messageSelectionCopyText(message)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
@@ -1823,9 +1848,9 @@ private fun MessageBubble(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (message.role == MessageRole.ASSISTANT && (message.content.isNotBlank() || message.errorMessage != null)) {
+                    if (selectionCopyText.isNotBlank()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (message.content.isNotBlank()) {
+                            if (message.role == MessageRole.ASSISTANT && message.content.isNotBlank()) {
                                 IconButton(
                                     modifier = Modifier.size(32.dp),
                                     onClick = onSpeak,
@@ -1839,13 +1864,25 @@ private fun MessageBubble(
                             }
                             IconButton(
                                 modifier = Modifier.size(32.dp),
-                                onClick = onCopy,
+                                onClick = onSelectCopy,
                             ) {
                                 Icon(
-                                    imageVector = Icons.Outlined.ContentCopy,
-                                    contentDescription = "复制",
+                                    imageVector = Icons.Outlined.TextFields,
+                                    contentDescription = "选择复制",
                                     modifier = Modifier.size(17.dp),
                                 )
+                            }
+                            if (message.role == MessageRole.ASSISTANT && (message.content.isNotBlank() || message.errorMessage != null)) {
+                                IconButton(
+                                    modifier = Modifier.size(32.dp),
+                                    onClick = onCopy,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.ContentCopy,
+                                        contentDescription = "复制",
+                                        modifier = Modifier.size(17.dp),
+                                    )
+                                }
                             }
                         }
                     }
@@ -1890,6 +1927,38 @@ private fun MessageBubble(
 }
 
 @Composable
+private fun MessageSelectionCopyDialog(
+    text: String,
+    onCopyAll: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择复制") },
+        text = {
+            OutlinedTextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = text,
+                onValueChange = {},
+                readOnly = true,
+                minLines = 4,
+                maxLines = 12,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onCopyAll) {
+                Text("整段复制")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+    )
+}
+
+@Composable
 private fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
@@ -1913,6 +1982,10 @@ private fun ChatInputBar(
     onSendFileChange: () -> Unit,
 ) {
     var showContextDetails by remember { mutableStateOf(false) }
+    val showCollapsedAttachmentEntry = shouldShowCollapsedAttachmentEntry(
+        text = text,
+        hasSelectedImage = selectedImage != null,
+    ) && !isBusy
 
     Surface(
         modifier = Modifier.imePadding(),
@@ -1997,8 +2070,10 @@ private fun ChatInputBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                IconButton(onClick = onPickImage) {
-                    Icon(Icons.Outlined.Image, contentDescription = "选择图片")
+                if (showCollapsedAttachmentEntry) {
+                    IconButton(onClick = onPickImage) {
+                        Icon(Icons.Outlined.Add, contentDescription = "选择图片")
+                    }
                 }
                 OutlinedTextField(
                     modifier = Modifier
@@ -2010,14 +2085,16 @@ private fun ChatInputBar(
                     minLines = 1,
                     maxLines = 5,
                 )
-                FilledIconButton(
-                    enabled = isBusy || canSend,
-                    onClick = onSend,
-                ) {
-                    Icon(
-                        imageVector = if (isBusy) Icons.Filled.Stop else Icons.AutoMirrored.Filled.Send,
-                        contentDescription = sendButtonContentDescription(isBusy),
-                    )
+                if (!showCollapsedAttachmentEntry) {
+                    FilledIconButton(
+                        enabled = isBusy || canSend,
+                        onClick = onSend,
+                    ) {
+                        Icon(
+                            imageVector = if (isBusy) Icons.Filled.Stop else Icons.AutoMirrored.Filled.Send,
+                            contentDescription = sendButtonContentDescription(isBusy),
+                        )
+                    }
                 }
             }
         }
