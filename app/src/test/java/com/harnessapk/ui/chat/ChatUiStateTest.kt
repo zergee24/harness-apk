@@ -274,6 +274,15 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun chatInputShowsLeadingPlusOnlyBeforeComposing() {
+        assertTrue(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = false))
+        assertTrue(shouldShowCollapsedAttachmentEntry(text = "   ", hasSelectedImage = false))
+
+        assertFalse(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
+        assertFalse(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = true))
+    }
+
+    @Test
     fun handleStopIntentCancelsActiveSend() {
         val events = mutableListOf<String>()
 

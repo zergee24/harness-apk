@@ -38,6 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.outlined.Assignment
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Image
@@ -1145,6 +1146,11 @@ internal fun handleStopIntent(
 internal fun sendButtonContentDescription(isBusy: Boolean): String =
     if (isBusy) "暂停生成" else "发送"
 
+internal fun shouldShowCollapsedAttachmentEntry(
+    text: String,
+    hasSelectedImage: Boolean,
+): Boolean = text.isBlank() && !hasSelectedImage
+
 internal enum class FileChangeSendDecision {
     SEND,
     BLOCKED_NEEDS_PROJECT,
@@ -1913,6 +1919,10 @@ private fun ChatInputBar(
     onSendFileChange: () -> Unit,
 ) {
     var showContextDetails by remember { mutableStateOf(false) }
+    val showCollapsedAttachmentEntry = shouldShowCollapsedAttachmentEntry(
+        text = text,
+        hasSelectedImage = selectedImage != null,
+    ) && !isBusy
 
     Surface(
         modifier = Modifier.imePadding(),
@@ -1997,8 +2007,10 @@ private fun ChatInputBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                IconButton(onClick = onPickImage) {
-                    Icon(Icons.Outlined.Image, contentDescription = "选择图片")
+                if (showCollapsedAttachmentEntry) {
+                    IconButton(onClick = onPickImage) {
+                        Icon(Icons.Outlined.Add, contentDescription = "选择图片")
+                    }
                 }
                 OutlinedTextField(
                     modifier = Modifier
@@ -2010,14 +2022,16 @@ private fun ChatInputBar(
                     minLines = 1,
                     maxLines = 5,
                 )
-                FilledIconButton(
-                    enabled = isBusy || canSend,
-                    onClick = onSend,
-                ) {
-                    Icon(
-                        imageVector = if (isBusy) Icons.Filled.Stop else Icons.AutoMirrored.Filled.Send,
-                        contentDescription = sendButtonContentDescription(isBusy),
-                    )
+                if (!showCollapsedAttachmentEntry) {
+                    FilledIconButton(
+                        enabled = isBusy || canSend,
+                        onClick = onSend,
+                    ) {
+                        Icon(
+                            imageVector = if (isBusy) Icons.Filled.Stop else Icons.AutoMirrored.Filled.Send,
+                            contentDescription = sendButtonContentDescription(isBusy),
+                        )
+                    }
                 }
             }
         }
