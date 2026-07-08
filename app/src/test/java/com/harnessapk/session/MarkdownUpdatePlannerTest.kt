@@ -95,8 +95,11 @@ class MarkdownUpdatePlannerTest {
             projectContext = "移动端长期项目",
             markdowns = emptyList(),
             userRequest = "写一份 PRD",
+            conversationContext = "用户：讨论 App 项目方向\n助手：建议先做 Markdown 项目工作台",
         )
 
+        assertTrue(messages.last().text.contains("会话上下文："))
+        assertTrue(messages.last().text.contains("建议先做 Markdown 项目工作台"))
         assertTrue(messages.last().text.contains("本轮用户文件变更请求："))
         assertTrue(messages.last().text.contains("写一份 PRD"))
         assertTrue(messages.last().text.contains("现有 Markdown：\n- 无"))

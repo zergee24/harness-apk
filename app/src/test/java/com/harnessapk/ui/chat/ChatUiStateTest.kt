@@ -395,6 +395,7 @@ class ChatUiStateTest {
     @Test
     fun fileChangeSuggestionOnlyRespondsToMarkdownWritingIntent() {
         assertTrue(shouldSuggestFileChangeMode("帮我写 PRD，并生成 md"))
+        assertTrue(shouldSuggestFileChangeMode("生成md"))
         assertTrue(shouldSuggestFileChangeMode("整理 README"))
         assertTrue(shouldSuggestFileChangeMode("把这段沉淀到项目"))
         assertFalse(shouldSuggestFileChangeMode("这个功能怎么理解？"))
@@ -403,8 +404,33 @@ class ChatUiStateTest {
     @Test
     fun fileChangeEntryOnlyShowsForMarkdownWritingIntent() {
         assertTrue(shouldShowFileChangeModeEntry("帮我写 PRD"))
+        assertTrue(shouldShowFileChangeModeEntry("生成md"))
         assertFalse(shouldShowFileChangeModeEntry("普通问答"))
         assertFalse(shouldShowFileChangeModeEntry(""))
+    }
+
+    @Test
+    fun markdownFileChangeConversationContextKeepsRecentUserAndAssistantMessages() {
+        val context = markdownFileChangeConversationContext(
+            messages = listOf(
+                userMessage(content = "讨论移动端项目方向"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "建议做 Markdown 优先的项目工作台"),
+                ChatMessage(
+                    id = "system",
+                    conversationId = "conversation",
+                    role = MessageRole.SYSTEM,
+                    content = "已沉淀到项目：old.md",
+                    status = MessageStatus.SUCCEEDED,
+                    providerId = null,
+                    model = null,
+                    errorMessage = null,
+                ),
+            ),
+        )
+
+        assertTrue(context.contains("用户：讨论移动端项目方向"))
+        assertTrue(context.contains("助手：建议做 Markdown 优先的项目工作台"))
+        assertFalse(context.contains("已沉淀到项目"))
     }
 
     @Test
@@ -446,11 +472,14 @@ class ChatUiStateTest {
         assertEquals("M", markdownFileChangeOperationLabel(items[1]))
     }
 
-    private fun userMessage(): ChatMessage = ChatMessage(
-        id = "user",
+    private fun userMessage(
+        id: String = "user",
+        content: String = "hello",
+    ): ChatMessage = ChatMessage(
+        id = id,
         conversationId = "conversation",
         role = MessageRole.USER,
-        content = "hello",
+        content = content,
         status = MessageStatus.SUCCEEDED,
         providerId = null,
         model = null,

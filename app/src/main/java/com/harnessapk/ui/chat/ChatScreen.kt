@@ -572,6 +572,7 @@ fun ChatScreen(
                     projectContext = projectContext,
                     markdowns = snapshots,
                     userRequest = userRequest,
+                    conversationContext = markdownFileChangeConversationContext(messages),
                     providerId = selectedProviderId,
                     modelOverride = selectedModel,
                 )
@@ -1214,6 +1215,19 @@ internal fun shouldSuggestFileChangeMode(text: String): Boolean {
 internal fun shouldShowFileChangeModeEntry(text: String): Boolean =
     shouldSuggestFileChangeMode(text)
 
+internal fun markdownFileChangeConversationContext(messages: List<ChatMessage>): String =
+    messages
+        .filter {
+            it.content.isNotBlank() &&
+                it.status == MessageStatus.SUCCEEDED &&
+                (it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT)
+        }
+        .takeLast(MAX_FILE_CHANGE_CONTEXT_MESSAGES)
+        .joinToString(separator = "\n\n") { message ->
+            val role = if (message.role == MessageRole.USER) "用户" else "助手"
+            "$role：${message.content.trim().take(MAX_FILE_CHANGE_CONTEXT_MESSAGE_CHARS)}"
+        }
+
 internal fun markdownFileChangeCardTitle(
     status: MarkdownFileChangeStatus,
     itemCount: Int,
@@ -1518,8 +1532,11 @@ private const val MAX_REVIEW_DIFF_LINES = 120
 private const val MAX_WRITE_BACK_EVENT_PATHS = 3
 private const val MAX_TTS_TEXT_LENGTH = 4_000
 private const val MAX_FILE_CHANGE_CARD_ITEMS = 6
+private const val MAX_FILE_CHANGE_CONTEXT_MESSAGES = 10
+private const val MAX_FILE_CHANGE_CONTEXT_MESSAGE_CHARS = 2_000
 private val fileChangeSuggestionKeywords = listOf(
     "生成 md",
+    "生成md",
     "生成markdown",
     "生成 markdown",
     "写 prd",
