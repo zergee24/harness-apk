@@ -1163,10 +1163,26 @@ internal fun handleStopIntent(
 internal fun sendButtonContentDescription(isBusy: Boolean): String =
     if (isBusy) "暂停生成" else "发送"
 
+internal enum class ChatInputTrailingAction {
+    ATTACHMENT,
+    SEND,
+}
+
 internal fun shouldShowCollapsedAttachmentEntry(
     text: String,
     hasSelectedImage: Boolean,
 ): Boolean = text.isBlank() && !hasSelectedImage
+
+internal fun chatInputTrailingAction(
+    text: String,
+    hasSelectedImage: Boolean,
+    isBusy: Boolean,
+): ChatInputTrailingAction =
+    if (shouldShowCollapsedAttachmentEntry(text, hasSelectedImage) && !isBusy) {
+        ChatInputTrailingAction.ATTACHMENT
+    } else {
+        ChatInputTrailingAction.SEND
+    }
 
 internal enum class FileChangeSendDecision {
     SEND,
@@ -1982,10 +1998,11 @@ private fun ChatInputBar(
     onSendFileChange: () -> Unit,
 ) {
     var showContextDetails by remember { mutableStateOf(false) }
-    val showCollapsedAttachmentEntry = shouldShowCollapsedAttachmentEntry(
+    val trailingAction = chatInputTrailingAction(
         text = text,
         hasSelectedImage = selectedImage != null,
-    ) && !isBusy
+        isBusy = isBusy,
+    )
 
     Surface(
         modifier = Modifier.imePadding(),
@@ -2070,11 +2087,6 @@ private fun ChatInputBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                if (showCollapsedAttachmentEntry) {
-                    IconButton(onClick = onPickImage) {
-                        Icon(Icons.Outlined.Add, contentDescription = "选择图片")
-                    }
-                }
                 OutlinedTextField(
                     modifier = Modifier
                         .weight(1f)
@@ -2085,8 +2097,11 @@ private fun ChatInputBar(
                     minLines = 1,
                     maxLines = 5,
                 )
-                if (!showCollapsedAttachmentEntry) {
-                    FilledIconButton(
+                when (trailingAction) {
+                    ChatInputTrailingAction.ATTACHMENT -> IconButton(onClick = onPickImage) {
+                        Icon(Icons.Outlined.Add, contentDescription = "选择图片")
+                    }
+                    ChatInputTrailingAction.SEND -> FilledIconButton(
                         enabled = isBusy || canSend,
                         onClick = onSend,
                     ) {
