@@ -1,6 +1,7 @@
 package com.harnessapk.session
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -39,6 +40,23 @@ class MarkdownUpdatePlannerTest {
         assertEquals("requirements/prd.md", plan.proposals[0].path)
         assertEquals("补充验收标准", plan.proposals[0].reason)
         assertEquals(MarkdownUpdateOperation.CREATE, plan.proposals[1].operation)
+    }
+
+    @Test
+    fun parseMarkdownUpdatePlanResponseRejectsTextFenceWithReadableError() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            parseMarkdownUpdatePlanResponse(
+                """
+                ```text
+                test/
+                ├── context.md
+                └── README.md
+                ```
+                """.trimIndent(),
+            )
+        }
+
+        assertEquals("LLM 未返回 Markdown 更新 JSON", error.message)
     }
 
     @Test
