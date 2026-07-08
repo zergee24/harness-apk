@@ -36,18 +36,28 @@ adb wait-for-device
 
 ## Release Hosting
 
-Manifest 和 APK 推荐放在对象存储，通过自定义 HTTPS 域名访问：
+Manifest、APK 完整包和 APK 分片由 GitHub Actions 构建后上传到阿里云 OSS：
 
 ```text
-https://download.example.com/harness-apk/update.json
-https://download.example.com/harness-apk/releases/0.1.0/app-release.apk
+https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/update.json
+https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/app-debug.apk
+https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/chunks/app-debug.apk.part-000
 ```
 
-上传 APK 后运行：
+GitHub 仓库需要配置：
 
-```bash
-scripts/compute-sha256.sh app-release.apk
+```text
+Secrets:
+ALIYUN_ACCESS_KEY_ID
+ALIYUN_ACCESS_KEY_SECRET
+
+Variables:
+OSS_BUCKET=harness-zerg
+OSS_ENDPOINT=oss-cn-hangzhou.aliyuncs.com
+OSS_PREFIX=harness-apk/test
+OSS_ACL=public-read
+ENABLE_OSS_DEPLOY_ON_PUSH=true
 ```
 
-把 SHA-256 写入生产 `update.json`。
-
+默认可以在 GitHub Actions 手动运行 `Deploy APK to OSS`。如果要推送 `main` 或
+`apk-test` 的应用源码变更后自动部署，把 `ENABLE_OSS_DEPLOY_ON_PUSH` 设为 `true`。

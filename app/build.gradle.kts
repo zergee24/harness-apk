@@ -4,6 +4,9 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+fun String.asBuildConfigString(): String =
+    "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 android {
     namespace = "com.harnessapk"
     compileSdk = 37
@@ -23,7 +26,10 @@ android {
         buildConfigField(
             "String",
             "UPDATE_MANIFEST_URL",
-            "\"https://gitee.com/arc-zerg/harness/raw/apk-test/release/test/update.json\"",
+            providers.gradleProperty("updateManifestUrl")
+                .orElse("https://harness-zerg.oss-cn-hangzhou.aliyuncs.com/harness-apk/test/update.json")
+                .get()
+                .asBuildConfigString(),
         )
     }
 
