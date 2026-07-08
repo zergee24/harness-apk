@@ -57,6 +57,10 @@ GitHub 仓库需要配置：
 Secrets:
 ALIYUN_ACCESS_KEY_ID
 ALIYUN_ACCESS_KEY_SECRET
+ANDROID_TEST_KEYSTORE_BASE64
+ANDROID_TEST_STORE_PASSWORD
+ANDROID_TEST_KEY_ALIAS
+ANDROID_TEST_KEY_PASSWORD
 ANDROID_RELEASE_KEYSTORE_BASE64
 ANDROID_RELEASE_STORE_PASSWORD
 ANDROID_RELEASE_KEY_ALIAS
@@ -68,12 +72,11 @@ OSS_ENDPOINT=oss-ap-southeast-1.aliyuncs.com
 OSS_TEST_PREFIX=harness-apk/test
 OSS_PROD_PREFIX=harness-apk/prod
 OSS_ACL=public-read
-ENABLE_OSS_DEPLOY_ON_PUSH=true
 ```
 
 默认可以在 GitHub Actions 手动运行 `Deploy APK to OSS`，并选择 `test` 或 `prod`。
-推送自动部署只建议用于测试通道；如果要开启，把 `ENABLE_OSS_DEPLOY_ON_PUSH` 设为 `true`。
-`prod` 通道必须配置正式签名 secrets，否则不会上传未签名 APK。
+推送到 `test` 分支会自动部署测试通道；正式通道只建议手动运行 workflow 并选择 `prod`。
+`test` 和 `prod` 通道都必须配置固定签名 secrets，避免同包名覆盖安装时出现签名不一致。
 
 版本策略：
 

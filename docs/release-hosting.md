@@ -48,9 +48,10 @@ scripts/release_apk.sh test --version-code 1015009 --upload
 GitHub 配置：
 
 - Secrets: `ALIYUN_ACCESS_KEY_ID`, `ALIYUN_ACCESS_KEY_SECRET`
+- Test signing secrets: `ANDROID_TEST_KEYSTORE_BASE64`, `ANDROID_TEST_STORE_PASSWORD`, `ANDROID_TEST_KEY_ALIAS`, `ANDROID_TEST_KEY_PASSWORD`
 - Prod signing secrets: `ANDROID_RELEASE_KEYSTORE_BASE64`, `ANDROID_RELEASE_STORE_PASSWORD`, `ANDROID_RELEASE_KEY_ALIAS`, `ANDROID_RELEASE_KEY_PASSWORD`
 - Variables: `OSS_BUCKET`, `OSS_ENDPOINT`, `OSS_TEST_PREFIX`, `OSS_PROD_PREFIX`, `OSS_ACL`
-- 可选 Variables: `ENABLE_OSS_DEPLOY_ON_PUSH=true` 时，推送 `main` 或 `apk-test` 的应用源码变更会自动部署；未开启时只支持手动运行 workflow。
+- 推送 `test` 分支会自动部署测试通道；正式通道通过手动运行 workflow 并选择 `prod` 部署。
 
 要求：
 
@@ -59,5 +60,5 @@ GitHub 配置：
 - `update.json` 同时写入完整包 `apkUrl` 和分片 `apkChunks`，客户端优先使用分片。
 - OSS 对象需要可公开读取，默认上传对象 ACL 为 `public-read`。
 - Debug 包只读取测试通道 manifest；release 包只读取正式通道 manifest。
-- `prod` 通道必须签名后上传；未配置正式签名时，脚本只允许本地生成 unsigned APK 做结构验证，不允许上传。
+- `test` 和 `prod` 通道都必须使用固定签名；未配置对应签名时，发布脚本和 GitHub Actions 都会失败。
 - 如后续绑定中国内地自定义域名，需要按云厂商要求完成 ICP 备案。

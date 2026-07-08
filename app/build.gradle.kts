@@ -7,6 +7,17 @@ plugins {
 fun String.asBuildConfigString(): String =
     "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+val testStoreFile = providers.environmentVariable("ANDROID_TEST_STORE_FILE")
+val testStorePassword = providers.environmentVariable("ANDROID_TEST_STORE_PASSWORD")
+val testKeyAlias = providers.environmentVariable("ANDROID_TEST_KEY_ALIAS")
+val testKeyPassword = providers.environmentVariable("ANDROID_TEST_KEY_PASSWORD")
+val hasTestSigning = listOf(
+    testStoreFile,
+    testStorePassword,
+    testKeyAlias,
+    testKeyPassword,
+).all { it.isPresent }
+
 val releaseStoreFile = providers.environmentVariable("ANDROID_RELEASE_STORE_FILE")
 val releaseStorePassword = providers.environmentVariable("ANDROID_RELEASE_STORE_PASSWORD")
 val releaseKeyAlias = providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS")
@@ -44,6 +55,14 @@ android {
     }
 
     signingConfigs {
+        if (hasTestSigning) {
+            create("test") {
+                storeFile = file(testStoreFile.get())
+                storePassword = testStorePassword.get()
+                keyAlias = testKeyAlias.get()
+                keyPassword = testKeyPassword.get()
+            }
+        }
         if (hasReleaseSigning) {
             create("release") {
                 storeFile = file(releaseStoreFile.get())
@@ -76,6 +95,9 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            if (hasTestSigning) {
+                signingConfig = signingConfigs.getByName("test")
+            }
             buildConfigField(
                 "String",
                 "UPDATE_MANIFEST_URL",

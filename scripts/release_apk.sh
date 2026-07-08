@@ -70,6 +70,14 @@ require_env() {
   fi
 }
 
+require_signing_env() {
+  local prefix="$1"
+  require_env "${prefix}_STORE_FILE"
+  require_env "${prefix}_STORE_PASSWORD"
+  require_env "${prefix}_KEY_ALIAS"
+  require_env "${prefix}_KEY_PASSWORD"
+}
+
 normalize_endpoint() {
   local endpoint="$1"
   endpoint="${endpoint#https://}"
@@ -104,6 +112,7 @@ fi
 
 case "$CHANNEL" in
   test)
+    require_signing_env ANDROID_TEST
     BUILD_TASK=":app:assembleDebug"
     APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
     ARTIFACT_NAME="app-debug.apk"
@@ -113,6 +122,7 @@ case "$CHANNEL" in
     GRADLE_MANIFEST_ARG="-PtestUpdateManifestUrl=${OSS_PUBLIC_BASE_URL%/}/update.json"
     ;;
   prod)
+    require_signing_env ANDROID_RELEASE
     BUILD_TASK=":app:assembleRelease"
     ARTIFACT_NAME="app-release.apk"
     VERSION_NAME="${BASE_VERSION_NAME}"

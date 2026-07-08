@@ -25,8 +25,6 @@ on:
         type: string
   push:
     branches:
-      - main
-      - apk-test
       - test
     paths:
       - ".github/workflows/deploy-apk-to-oss.yml"
@@ -43,7 +41,7 @@ permissions:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'test' || vars.ENABLE_OSS_DEPLOY_ON_PUSH == 'true'
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'test'
     runs-on: ubuntu-latest
     env:
       OSS_BUCKET: ${{ vars.OSS_BUCKET }}
@@ -57,6 +55,10 @@ jobs:
       OSS_ACL: ${{ vars.OSS_ACL }}
       ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
       ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+      ANDROID_TEST_KEYSTORE_BASE64: ${{ secrets.ANDROID_TEST_KEYSTORE_BASE64 }}
+      ANDROID_TEST_STORE_PASSWORD: ${{ secrets.ANDROID_TEST_STORE_PASSWORD }}
+      ANDROID_TEST_KEY_ALIAS: ${{ secrets.ANDROID_TEST_KEY_ALIAS }}
+      ANDROID_TEST_KEY_PASSWORD: ${{ secrets.ANDROID_TEST_KEY_PASSWORD }}
       ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
       ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
       ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
@@ -161,24 +163,38 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare release signing
-        if: env.CHANNEL == 'prod'
+      - name: Prepare APK signing
         shell: bash
         run: |
           set -euo pipefail
+          if [ "$CHANNEL" = "prod" ]; then
+            SIGNING_PREFIX="ANDROID_RELEASE"
+            KEYSTORE_FILE="$RUNNER_TEMP/harness-release-keystore.jks"
+          else
+            SIGNING_PREFIX="ANDROID_TEST"
+            KEYSTORE_FILE="$RUNNER_TEMP/harness-test-keystore.jks"
+          fi
+          required_names=(
+            "${SIGNING_PREFIX}_KEYSTORE_BASE64"
+            "${SIGNING_PREFIX}_STORE_PASSWORD"
+            "${SIGNING_PREFIX}_KEY_ALIAS"
+            "${SIGNING_PREFIX}_KEY_PASSWORD"
+          )
           missing=false
-          for name in ANDROID_RELEASE_KEYSTORE_BASE64 ANDROID_RELEASE_STORE_PASSWORD ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD; do
+          for name in "${required_names[@]}"; do
             if [ -z "${!name}" ]; then
-              echo "::error::Missing $name repository secret for prod signing"
+              echo "::error::Missing $name repository secret for ${CHANNEL} signing"
               missing=true
             fi
           done
           if [ "$missing" = true ]; then
             exit 1
           fi
-          KEYSTORE_FILE="$RUNNER_TEMP/harness-release-keystore.jks"
-          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
-          echo "ANDROID_RELEASE_STORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+          base64_name="${SIGNING_PREFIX}_KEYSTORE_BASE64"
+          printf '%s' "${!base64_name}" | base64 --decode > "$KEYSTORE_FILE"
+          {
+            echo "${SIGNING_PREFIX}_STORE_FILE=$KEYSTORE_FILE"
+          } >> "$GITHUB_ENV"
 
       - name: Build APK
         run: |
