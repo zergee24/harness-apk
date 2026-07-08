@@ -373,7 +373,22 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun autoScrollModeDoesNotFollowStreamingContentGrowth() {
+    fun autoScrollModeFollowsStreamingContentGrowthWhenUserIsNearBottom() {
+        val firstKey = autoScrollKey(
+            listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你")),
+        )
+        val nextKey = autoScrollKey(
+            listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你好，继续")),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.STREAM_TO_BOTTOM,
+            chatAutoScrollMode(previous = firstKey, current = nextKey, canFollowStreaming = true),
+        )
+    }
+
+    @Test
+    fun autoScrollModeDoesNotFollowStreamingContentGrowthWhenUserScrolledAway() {
         val firstKey = autoScrollKey(
             listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你")),
         )
@@ -383,7 +398,7 @@ class ChatUiStateTest {
 
         assertEquals(
             ChatAutoScrollMode.NONE,
-            chatAutoScrollMode(previous = firstKey, current = nextKey),
+            chatAutoScrollMode(previous = firstKey, current = nextKey, canFollowStreaming = false),
         )
     }
 

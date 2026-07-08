@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -70,6 +71,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -200,6 +202,7 @@ fun ChatScreen(
     var textToSpeech by remember { mutableStateOf<TextToSpeech?>(null) }
     var initialProjectApplied by remember { mutableStateOf(false) }
     var autoFocusInputRequested by remember(conversationId) { mutableStateOf(false) }
+    var streamingAutoScrollEnabled by remember(conversationId) { mutableStateOf(true) }
     val markdownUpdatePlanner = remember(container) {
         MarkdownUpdatePlannerUseCase(
             providerRepository = container.providerRepository,
@@ -308,13 +311,33 @@ fun ChatScreen(
     }
 
     var previousAutoScrollKey by remember(conversationId) { mutableStateOf<AutoScrollKey?>(null) }
+    LaunchedEffect(conversationId) {
+        snapshotFlow { listState.isScrollInProgress to listState.canFollowStreaming(messages.lastIndex) }
+            .collect { (isScrollInProgress, isNearBottom) ->
+                when {
+                    isNearBottom -> streamingAutoScrollEnabled = true
+                    isScrollInProgress -> streamingAutoScrollEnabled = false
+                }
+            }
+    }
     LaunchedEffect(autoScrollKey(messages)) {
         val currentKey = autoScrollKey(messages)
-        val scrollMode = chatAutoScrollMode(previous = previousAutoScrollKey, current = currentKey)
+        val scrollMode = chatAutoScrollMode(
+            previous = previousAutoScrollKey,
+            current = currentKey,
+            canFollowStreaming = streamingAutoScrollEnabled || listState.canFollowStreaming(messages.lastIndex),
+        )
         previousAutoScrollKey = currentKey
         when (scrollMode) {
             ChatAutoScrollMode.JUMP_TO_BOTTOM -> listState.scrollToItem(messages.lastIndex)
-            ChatAutoScrollMode.ANIMATE_TO_BOTTOM -> listState.animateScrollToItem(messages.lastIndex)
+            ChatAutoScrollMode.ANIMATE_TO_BOTTOM -> {
+                streamingAutoScrollEnabled = true
+                listState.animateScrollToItem(messages.lastIndex)
+            }
+            ChatAutoScrollMode.STREAM_TO_BOTTOM -> {
+                streamingAutoScrollEnabled = true
+                listState.scrollToItem(messages.lastIndex)
+            }
             ChatAutoScrollMode.NONE -> Unit
         }
     }
@@ -1091,6 +1114,7 @@ internal data class AutoScrollKey(
     val messageCount: Int,
     val lastMessageId: String?,
     val lastMessageStatus: MessageStatus?,
+    val lastMessageContentLength: Int,
     val lastMessageUpdatedAt: Long,
 )
 
@@ -1100,6 +1124,7 @@ internal fun autoScrollKey(messages: List<ChatMessage>): AutoScrollKey {
         messageCount = messages.size,
         lastMessageId = lastMessage?.id,
         lastMessageStatus = lastMessage?.status,
+        lastMessageContentLength = lastMessage?.content?.length ?: 0,
         lastMessageUpdatedAt = lastMessage?.updatedAt ?: 0L,
     )
 }
@@ -1108,18 +1133,31 @@ internal enum class ChatAutoScrollMode {
     NONE,
     JUMP_TO_BOTTOM,
     ANIMATE_TO_BOTTOM,
+    STREAM_TO_BOTTOM,
 }
 
 internal fun chatAutoScrollMode(
     previous: AutoScrollKey?,
     current: AutoScrollKey,
+    canFollowStreaming: Boolean = false,
 ): ChatAutoScrollMode = when {
     current.messageCount == 0 -> ChatAutoScrollMode.NONE
     previous == null -> ChatAutoScrollMode.JUMP_TO_BOTTOM
     previous.messageCount == 0 -> ChatAutoScrollMode.JUMP_TO_BOTTOM
     current.messageCount > previous.messageCount -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
     current.lastMessageId != previous.lastMessageId -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
+    canFollowStreaming &&
+        current.lastMessageStatus == MessageStatus.STREAMING &&
+        current.lastMessageContentLength > previous.lastMessageContentLength -> ChatAutoScrollMode.STREAM_TO_BOTTOM
     else -> ChatAutoScrollMode.NONE
+}
+
+private fun LazyListState.canFollowStreaming(lastMessageIndex: Int): Boolean {
+    if (lastMessageIndex < 0) return false
+    val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull() ?: return true
+    if (lastVisibleItem.index < lastMessageIndex) return false
+    val distanceToBottom = (lastVisibleItem.offset + lastVisibleItem.size) - layoutInfo.viewportEndOffset
+    return distanceToBottom <= STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD_PX
 }
 
 internal enum class ChatBubbleSide {
@@ -1592,6 +1630,7 @@ private const val MAX_WRITE_BACK_EVENT_PATHS = 3
 private const val MAX_TTS_TEXT_LENGTH = 4_000
 private const val MAX_CHAT_CONTENT_WIDTH_DP = 760
 private const val MAX_MESSAGE_BUBBLE_WIDTH_DP = 700
+private const val STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 640
 private const val MAX_FILE_CHANGE_CARD_ITEMS = 6
 private const val MAX_FILE_CHANGE_CONTEXT_MESSAGES = 10
 private const val MAX_FILE_CHANGE_CONTEXT_MESSAGE_CHARS = 2_000
