@@ -13,6 +13,7 @@ SCRIPT = ROOT / "scripts" / "release_apk.sh"
 class ReleaseSigningEnvTest(unittest.TestCase):
     """Checks release scripts fail before building when fixed signing is missing."""
 
+    # This keeps signing validation ahead of slower Gradle and OSS work.
     def run_script(self, channel: str) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp_dir:
             android_home = os.environ.get("ANDROID_HOME") or "/Users/tony/Library/Android/sdk"
