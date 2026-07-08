@@ -79,14 +79,18 @@ jobs:
             echo "::error::Invalid channel: $CHANNEL"
             exit 1
           fi
-          : "${OSS_BUCKET:=harness-zerg}"
-          : "${OSS_ENDPOINT:=oss-cn-hangzhou.aliyuncs.com}"
+          : "${OSS_BUCKET:=harness--zerg}"
+          : "${OSS_ENDPOINT:=oss-ap-southeast-1.aliyuncs.com}"
           : "${OSS_ACL:=public-read}"
           OSS_ENDPOINT="${OSS_ENDPOINT#https://}"
           OSS_ENDPOINT="${OSS_ENDPOINT#http://}"
           OSS_ENDPOINT="${OSS_ENDPOINT%/}"
-          VERSION_CODE="$(awk -F '= ' '/versionCode = / {print $2; exit}' app/build.gradle.kts | tr -d ' ')"
-          BASE_VERSION_NAME="$(sed -n 's/.*versionName = \"\\([^\"]*\\)\".*/\\1/p' app/build.gradle.kts | head -n 1)"
+          VERSION_CODE="$(awk -F '= *' '/versionCode = / {gsub(/ /, "", $2); print $2; exit}' app/build.gradle.kts)"
+          BASE_VERSION_NAME="$(awk -F '"' '/versionName = / {print $2; exit}' app/build.gradle.kts)"
+          if [ -z "$VERSION_CODE" ] || [ -z "$BASE_VERSION_NAME" ]; then
+            echo "::error::Failed to resolve versionCode or versionName from app/build.gradle.kts"
+            exit 1
+          fi
           if [ "$CHANNEL" = "prod" ]; then
             OSS_PREFIX="${OSS_PROD_PREFIX:-harness-apk/prod}"
             OSS_PUBLIC_BASE_URL="${OSS_PROD_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-}}"
