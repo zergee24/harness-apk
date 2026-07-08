@@ -1,0 +1,452 @@
+package com.harnessapk.ui.chat
+
+import com.harnessapk.chat.ChatMessage
+import com.harnessapk.chat.MessageRole
+import com.harnessapk.chat.MessageStatus
+import com.harnessapk.chat.ReasoningEffort
+import com.harnessapk.provider.ProviderProfile
+import com.harnessapk.session.MarkdownFileChangeItem
+import com.harnessapk.session.MarkdownFileChangeStatus
+import com.harnessapk.session.MarkdownUpdateOperation
+import com.harnessapk.ui.model.resolveModelSelection
+import com.harnessapk.ui.model.selectableModelsForProvider
+import com.harnessapk.voice.VoiceSettings
+import com.harnessapk.websearch.WebSearchSettings
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ChatUiStateTest {
+    @Test
+    fun assistantActivityLabelShowsThinkingForPendingAssistant() {
+        val messages = listOf(assistantMessage(status = MessageStatus.PENDING))
+
+        assertEquals("助手正在思考...", assistantActivityLabel(messages))
+    }
+
+    @Test
+    fun assistantActivityLabelShowsReplyingForStreamingAssistant() {
+        val messages = listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你好"))
+
+        assertEquals("助手正在回复...", assistantActivityLabel(messages))
+    }
+
+    @Test
+    fun assistantActivityLabelIsNullWhenThereIsNoActiveAssistant() {
+        val messages = listOf(
+            userMessage(),
+            assistantMessage(status = MessageStatus.SUCCEEDED, content = "你好"),
+        )
+
+        assertNull(assistantActivityLabel(messages))
+    }
+
+    @Test
+    fun assistantMessageDisplayTextUsesThinkingTextWhenPendingContentIsBlank() {
+        val message = assistantMessage(status = MessageStatus.PENDING)
+
+        assertEquals("助手正在思考...", assistantMessageDisplayText(message))
+    }
+
+    @Test
+    fun assistantMessageDisplayTextUsesPausedTextWhenCancelledContentIsBlank() {
+        val message = assistantMessage(status = MessageStatus.CANCELLED)
+
+        assertEquals("已暂停生成", assistantMessageDisplayText(message))
+    }
+
+    @Test
+    fun selectableModelsForProviderUsesConfiguredModels() {
+        val provider = providerProfile(
+            defaultModel = "gpt-5.5",
+            availableModels = listOf("gpt-5.5", "gpt-5.5-pro"),
+        )
+
+        assertEquals(listOf("gpt-5.5", "gpt-5.5-pro"), selectableModelsForProvider(provider))
+    }
+
+    @Test
+    fun selectableModelsForProviderFallsBackToDefaultModelWhenListIsEmpty() {
+        val provider = providerProfile(
+            defaultModel = "kimi-k2.7-code",
+            availableModels = emptyList(),
+        )
+
+        assertEquals(listOf("kimi-k2.7-code"), selectableModelsForProvider(provider))
+    }
+
+    @Test
+    fun resolveModelSelectionUsesSavedDefaultProviderAndModel() {
+        val providers = listOf(
+            providerProfile(id = "kimi", name = "Kimi", defaultModel = "kimi-k2.7-code", availableModels = listOf("kimi-k2.7-code")),
+            providerProfile(id = "openai", name = "OpenAI", defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5", "gpt-5.5-mini")),
+        )
+
+        val selection = resolveModelSelection(
+            providers = providers,
+            currentProviderId = null,
+            currentModel = "",
+            preferredProviderId = "openai",
+            preferredModel = "gpt-5.5-mini",
+        )
+
+        assertEquals("openai", selection.providerId)
+        assertEquals("gpt-5.5-mini", selection.model)
+    }
+
+    @Test
+    fun resolveModelSelectionFallsBackWhenSavedDefaultIsUnavailable() {
+        val providers = listOf(
+            providerProfile(id = "kimi", name = "Kimi", defaultModel = "kimi-k2.7-code", availableModels = listOf("kimi-k2.7-code")),
+        )
+
+        val selection = resolveModelSelection(
+            providers = providers,
+            currentProviderId = null,
+            currentModel = "",
+            preferredProviderId = "openai",
+            preferredModel = "gpt-5.5",
+        )
+
+        assertEquals("kimi", selection.providerId)
+        assertEquals("kimi-k2.7-code", selection.model)
+    }
+
+    @Test
+    fun resolveModelSelectionKeepsCurrentValidSelection() {
+        val providers = listOf(
+            providerProfile(id = "kimi", name = "Kimi", defaultModel = "kimi-k2.7-code", availableModels = listOf("kimi-k2.7-code")),
+            providerProfile(id = "openai", name = "OpenAI", defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5", "gpt-5.5-mini")),
+        )
+
+        val selection = resolveModelSelection(
+            providers = providers,
+            currentProviderId = "kimi",
+            currentModel = "kimi-k2.7-code",
+            preferredProviderId = "openai",
+            preferredModel = "gpt-5.5-mini",
+        )
+
+        assertEquals("kimi", selection.providerId)
+        assertEquals("kimi-k2.7-code", selection.model)
+    }
+
+    @Test
+    fun modelPickerButtonTextUsesSelectedProviderAndModel() {
+        val providers = listOf(providerProfile(defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")))
+
+        assertEquals("OpenAI · gpt-5.5 · 推理高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.HIGH))
+    }
+
+    @Test
+    fun modelPickerButtonTextSupportsExtraHighReasoningEffort() {
+        val providers = listOf(providerProfile(defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")))
+
+        assertEquals("OpenAI · gpt-5.5 · 推理超高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.XHIGH))
+    }
+
+    @Test
+    fun modelPickerButtonTextPromptsWhenThereIsNoProvider() {
+        assertEquals("先配置模型", modelPickerButtonText(emptyList(), null, "", ReasoningEffort.HIGH))
+    }
+
+    @Test
+    fun modelPickerButtonTextOmitsReasoningForNonOpenAiProvider() {
+        val providers = listOf(
+            providerProfile(
+                name = "Kimi",
+                defaultModel = "kimi-k2.7-code",
+                availableModels = listOf("kimi-k2.7-code"),
+            ),
+        )
+
+        assertEquals("Kimi · kimi-k2.7-code", modelPickerButtonText(providers, "provider", "kimi-k2.7-code", ReasoningEffort.HIGH))
+    }
+
+    @Test
+    fun errorDisplayTextUsesFirstLineOfDetailedLog() {
+        val log = """
+            LLM 请求失败：timeout
+            --- 诊断日志 ---
+            Base URL: https://happycode.vip/v1
+        """.trimIndent()
+
+        assertEquals("LLM 请求失败：timeout", errorDisplayText(log))
+    }
+
+    @Test
+    fun errorCopyTextKeepsFullDetailedLog() {
+        val log = """
+            LLM 请求失败：timeout
+            --- 诊断日志 ---
+            Base URL: https://happycode.vip/v1
+        """.trimIndent()
+
+        assertEquals(log, errorCopyText(log))
+    }
+
+    @Test
+    fun handleSendIntentDismissesKeyboardBeforeSendingText() {
+        val events = mutableListOf<String>()
+
+        handleSendIntent(
+            hasSelectedImage = false,
+            dismissKeyboard = { events += "dismiss" },
+            sendNow = { events += "send" },
+        )
+
+        assertEquals(listOf("dismiss", "send"), events)
+    }
+
+    @Test
+    fun shouldAutoFocusChatInputOnlyForFreshRequestedEmptyConversation() {
+        assertEquals(
+            true,
+            shouldAutoFocusChatInput(
+                autoFocusRequested = true,
+                autoFocusAlreadyRequested = false,
+                hasMessages = false,
+                text = "",
+                hasSelectedImage = false,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldAutoFocusChatInput(
+                autoFocusRequested = false,
+                autoFocusAlreadyRequested = false,
+                hasMessages = false,
+                text = "",
+                hasSelectedImage = false,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldAutoFocusChatInput(
+                autoFocusRequested = true,
+                autoFocusAlreadyRequested = true,
+                hasMessages = false,
+                text = "",
+                hasSelectedImage = false,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldAutoFocusChatInput(
+                autoFocusRequested = true,
+                autoFocusAlreadyRequested = false,
+                hasMessages = true,
+                text = "",
+                hasSelectedImage = false,
+            ),
+        )
+        assertEquals(
+            false,
+            shouldAutoFocusChatInput(
+                autoFocusRequested = true,
+                autoFocusAlreadyRequested = false,
+                hasMessages = false,
+                text = "hello",
+                hasSelectedImage = false,
+            ),
+        )
+    }
+
+    @Test
+    fun handleSendIntentSendsSelectedImageWithoutConfirmation() {
+        val events = mutableListOf<String>()
+
+        handleSendIntent(
+            hasSelectedImage = true,
+            dismissKeyboard = { events += "dismiss" },
+            sendNow = { events += "send" },
+        )
+
+        assertEquals(listOf("dismiss", "send"), events)
+    }
+
+    @Test
+    fun sendButtonContentDescriptionUsesPauseWhenBusy() {
+        assertEquals("暂停生成", sendButtonContentDescription(isBusy = true))
+        assertEquals("发送", sendButtonContentDescription(isBusy = false))
+    }
+
+    @Test
+    fun handleStopIntentCancelsActiveSend() {
+        val events = mutableListOf<String>()
+
+        handleStopIntent(
+            cancelActiveSend = { events += "cancel" },
+            cancelVisibleAssistant = { events += "mark-cancelled" },
+        )
+
+        assertEquals(listOf("cancel", "mark-cancelled"), events)
+    }
+
+    @Test
+    fun autoScrollKeyChangesWhenStreamingAssistantContentGrows() {
+        val firstKey = autoScrollKey(
+            listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你")),
+        )
+        val nextKey = autoScrollKey(
+            listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你好，继续")),
+        )
+
+        assertEquals(false, firstKey == nextKey)
+    }
+
+    @Test
+    fun sessionConfigButtonTextStaysCompact() {
+        assertEquals("Harness", sessionConfigButtonText(projectName = "Harness"))
+        assertEquals("临时", sessionConfigButtonText(projectName = null))
+    }
+
+    @Test
+    fun sessionConfigDoesNotSurfacePromptUsageStatusInMainChat() {
+        val source = java.io.File("src/main/java/com/harnessapk/ui/chat/ChatScreen.kt").readText()
+
+        assertFalse(source.contains("已使用优化提示词"))
+        assertFalse(source.contains(" · 提示词"))
+    }
+
+    @Test
+    fun chatInputDoesNotExposeSystemVoiceButton() {
+        val source = java.io.File("src/main/java/com/harnessapk/ui/chat/ChatScreen.kt").readText()
+
+        assertFalse(source.contains("onVoiceInput"))
+    }
+
+    @Test
+    fun chatCapabilityButtonsAreHiddenWhenGlobalCapabilitiesAreDisabled() {
+        assertFalse(shouldShowWebSearchButton(WebSearchSettings(enabled = false)))
+        assertFalse(shouldShowVoiceInputButton(VoiceSettings(speechInputEnabled = false)))
+    }
+
+    @Test
+    fun chatCapabilityButtonsAreVisibleWhenGlobalCapabilitiesAreEnabled() {
+        assertTrue(shouldShowWebSearchButton(WebSearchSettings(enabled = true)))
+        assertTrue(shouldShowVoiceInputButton(VoiceSettings(speechInputEnabled = true)))
+    }
+
+    @Test
+    fun markdownReviewConfirmTextAllowsWithdrawingAll() {
+        assertEquals("撤回全部", markdownReviewConfirmText(emptySet()))
+        assertEquals("写入保留项", markdownReviewConfirmText(setOf(0)))
+    }
+
+    @Test
+    fun markdownWriteBackFailureFeedbackUsesVisibleErrorText() {
+        val feedback = markdownWriteBackFailureFeedback(
+            IllegalArgumentException("LLM 未返回 Markdown 更新 JSON"),
+        )
+
+        assertEquals("LLM 未返回 Markdown 更新 JSON", feedback.errorText)
+        assertNull(feedback.statusText)
+    }
+
+    @Test
+    fun markdownWriteBackAppliedEventListsWrittenFiles() {
+        assertEquals(
+            "已沉淀到项目：requirements/prd.md、reports/review.md",
+            markdownWriteBackAppliedEvent(listOf("requirements/prd.md", "reports/review.md")),
+        )
+    }
+
+    @Test
+    fun fileChangeSuggestionOnlyRespondsToMarkdownWritingIntent() {
+        assertTrue(shouldSuggestFileChangeMode("帮我写 PRD，并生成 md"))
+        assertTrue(shouldSuggestFileChangeMode("整理 README"))
+        assertTrue(shouldSuggestFileChangeMode("把这段沉淀到项目"))
+        assertFalse(shouldSuggestFileChangeMode("这个功能怎么理解？"))
+    }
+
+    @Test
+    fun fileChangeEntryOnlyShowsForMarkdownWritingIntent() {
+        assertTrue(shouldShowFileChangeModeEntry("帮我写 PRD"))
+        assertFalse(shouldShowFileChangeModeEntry("普通问答"))
+        assertFalse(shouldShowFileChangeModeEntry(""))
+    }
+
+    @Test
+    fun fileChangeModeDoesNotSendWithoutProject() {
+        assertEquals(
+            FileChangeSendDecision.BLOCKED_NEEDS_PROJECT,
+            decideFileChangeSend(selectedProjectId = null, text = "生成 PRD", hasSelectedImage = false, isBusy = false),
+        )
+    }
+
+    @Test
+    fun fileChangeModeDoesNotSendImageAttachments() {
+        assertEquals(
+            FileChangeSendDecision.BLOCKED_UNSUPPORTED_IMAGE,
+            decideFileChangeSend(selectedProjectId = "project", text = "生成 PRD", hasSelectedImage = true, isBusy = false),
+        )
+    }
+
+    @Test
+    fun fileChangeCardShowsCompactReadyTitleAndLimitsVisibleItems() {
+        val items = (1..8).map { index ->
+            MarkdownFileChangeItem(
+                draftId = "draft",
+                operation = if (index == 1) MarkdownUpdateOperation.CREATE else MarkdownUpdateOperation.UPDATE,
+                path = "docs/file-$index.md",
+                title = "文件 $index",
+                reason = "测试",
+                markdown = "# 文件 $index",
+                addedLineCount = index,
+                removedLineCount = index - 1,
+                retained = true,
+            )
+        }
+
+        assertEquals("已生成 8 个 Markdown 文件变更", markdownFileChangeCardTitle(MarkdownFileChangeStatus.READY, 8))
+        assertEquals(6, visibleMarkdownFileChangeItems(items).size)
+        assertEquals(2, hiddenMarkdownFileChangeItemCount(items))
+        assertEquals("A", markdownFileChangeOperationLabel(items.first()))
+        assertEquals("M", markdownFileChangeOperationLabel(items[1]))
+    }
+
+    private fun userMessage(): ChatMessage = ChatMessage(
+        id = "user",
+        conversationId = "conversation",
+        role = MessageRole.USER,
+        content = "hello",
+        status = MessageStatus.SUCCEEDED,
+        providerId = null,
+        model = null,
+        errorMessage = null,
+    )
+
+    private fun assistantMessage(
+        status: MessageStatus,
+        content: String = "",
+    ): ChatMessage = ChatMessage(
+        id = "assistant-$status",
+        conversationId = "conversation",
+        role = MessageRole.ASSISTANT,
+        content = content,
+        status = status,
+        providerId = "provider",
+        model = "model",
+        errorMessage = null,
+    )
+
+    private fun providerProfile(
+        id: String = "provider",
+        name: String = "OpenAI",
+        defaultModel: String,
+        availableModels: List<String>,
+    ): ProviderProfile = ProviderProfile(
+        id = id,
+        name = name,
+        baseUrl = "https://happycode.vip/v1",
+        defaultModel = defaultModel,
+        defaultVisionModel = null,
+        supportsVision = false,
+        enabled = true,
+        hasApiKey = true,
+        availableModels = availableModels,
+    )
+}
