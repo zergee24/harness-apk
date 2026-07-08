@@ -32,13 +32,19 @@ import org.commonmark.parser.Parser
 sealed interface MarkdownBlock {
     data class Heading(val level: Int, val text: List<MarkdownInline>) : MarkdownBlock
     data class Paragraph(val text: List<MarkdownInline>) : MarkdownBlock
-    data class BulletList(val items: List<List<MarkdownInline>>) : MarkdownBlock
-    data class OrderedList(val startNumber: Int, val items: List<List<MarkdownInline>>) : MarkdownBlock
+    data class BulletList(val items: List<MarkdownListItem>) : MarkdownBlock
+    data class OrderedList(val startNumber: Int, val items: List<MarkdownListItem>) : MarkdownBlock
     data class Quote(val blocks: List<MarkdownBlock>) : MarkdownBlock
     data class Code(val literal: String, val info: String?) : MarkdownBlock
     data class Table(val headers: List<List<MarkdownInline>>, val rows: List<List<List<MarkdownInline>>>) : MarkdownBlock
     data object Divider : MarkdownBlock
 }
+
+@Immutable
+data class MarkdownListItem(
+    val text: List<MarkdownInline>,
+    val children: List<MarkdownBlock> = emptyList(),
+)
 
 @Immutable
 sealed interface MarkdownInline {
@@ -76,6 +82,24 @@ private val markdownParser = Parser.builder()
 private val headingWithoutSpaceAtStart = Regex("^(\\s{0,3})(#{1,6})(?!#)(?=\\S)")
 private val inlineHeadingMarker = Regex("(?<=[^#\\s])(#{1,6})(?!#)(?=[\\p{L}\\p{N}])")
 private val thematicBreakLine = Regex("^\\s{0,3}([-*_])(?:\\s*\\1){2,}\\s*$")
+private val compactFence = Regex("```([^`]*)```")
+private val compactFenceLanguages = listOf(
+    "bash",
+    "shell",
+    "sh",
+    "zsh",
+    "kotlin",
+    "java",
+    "python",
+    "javascript",
+    "typescript",
+    "json",
+    "text",
+    "xml",
+    "html",
+    "css",
+    "sql",
+)
 
 private fun normalizeModelMarkdown(markdown: String): String {
     var inFence = false
@@ -83,17 +107,19 @@ private fun normalizeModelMarkdown(markdown: String): String {
         markdown.lineSequence().forEach { rawLine ->
             val trimmed = rawLine.trimStart()
             when {
-                trimmed.startsWith("```") || trimmed.startsWith("~~~") -> {
+                (trimmed.startsWith("```") || trimmed.startsWith("~~~")) && !hasSingleLineFence(rawLine) -> {
                     inFence = !inFence
                     add(rawLine)
                 }
                 inFence -> add(rawLine)
                 else -> {
-                    normalizeHeadingLine(rawLine).lineSequence().forEach { line ->
-                        if (thematicBreakLine.matches(line) && lastOrNull()?.isNotBlank() == true) {
-                            add("")
+                    normalizeCompactCodeFences(rawLine).lineSequence().forEach { compactLine ->
+                        normalizeHeadingLine(compactLine).lineSequence().forEach { line ->
+                            if (thematicBreakLine.matches(line) && lastOrNull()?.isNotBlank() == true) {
+                                add("")
+                            }
+                            add(line)
                         }
-                        add(line)
                     }
                 }
             }
@@ -110,11 +136,53 @@ private fun normalizeHeadingLine(line: String): String =
             }
         }
 
+private fun hasSingleLineFence(line: String): Boolean {
+    val first = line.indexOf("```")
+    return first >= 0 && line.indexOf("```", startIndex = first + 3) >= 0
+}
+
+private fun normalizeCompactCodeFences(line: String): String {
+    if (!hasSingleLineFence(line)) return line
+    val output = StringBuilder()
+    var cursor = 0
+    compactFence.findAll(line).forEach { match ->
+        val prefix = line.substring(cursor, match.range.first)
+        if (prefix.isNotEmpty()) output.append(prefix.trimEnd()).append('\n')
+        val (language, literal) = splitCompactFencePayload(match.groupValues[1])
+        output.append("```")
+        if (language.isNotBlank()) output.append(language)
+        output.append('\n')
+        output.append(literal)
+        output.append('\n').append("```")
+        cursor = match.range.last + 1
+        val suffixStartsText = line.getOrNull(cursor)?.isWhitespace() == false
+        if (suffixStartsText) output.append('\n')
+    }
+    if (cursor < line.length) {
+        output.append(line.substring(cursor).trimStart())
+    }
+    return output.toString().trimEnd()
+}
+
+private fun splitCompactFencePayload(payload: String): Pair<String, String> {
+    val trimmed = payload.trim()
+    val language = compactFenceLanguages.firstOrNull { language ->
+        trimmed == language ||
+            trimmed.startsWith("$language ") ||
+            trimmed.startsWith("$language\n") ||
+            (language in compactShellLanguages && trimmed.startsWith(language) && trimmed.length > language.length)
+    }.orEmpty()
+    if (language.isBlank()) return "" to trimmed
+    return language to trimmed.removePrefix(language).trimStart()
+}
+
+private val compactShellLanguages = setOf("bash", "shell", "sh", "zsh")
+
 private fun Node.toBlocks(): List<MarkdownBlock> = when (this) {
     is Heading -> listOf(MarkdownBlock.Heading(level, inlineChildren()))
     is Paragraph -> listOf(MarkdownBlock.Paragraph(inlineChildren()))
-    is BulletList -> listOf(MarkdownBlock.BulletList(listItemInlineChildren()))
-    is OrderedList -> listOf(MarkdownBlock.OrderedList(markerStartNumber ?: 1, listItemInlineChildren()))
+    is BulletList -> listOf(MarkdownBlock.BulletList(listItems()))
+    is OrderedList -> listOf(MarkdownBlock.OrderedList(markerStartNumber ?: 1, listItems()))
     is BlockQuote -> listOf(MarkdownBlock.Quote(children().flatMap { it.toBlocks() }.toList()))
     is FencedCodeBlock -> listOf(MarkdownBlock.Code(literal.trimEnd(), info))
     is IndentedCodeBlock -> listOf(MarkdownBlock.Code(literal.trimEnd(), null))
@@ -144,35 +212,47 @@ private fun TableRow.inlineCells(): List<List<MarkdownInline>> =
         .map { it.inlineChildren() }
         .toList()
 
-private fun Node.listItemInlineChildren(): List<List<MarkdownInline>> =
+private fun Node.listItems(): List<MarkdownListItem> =
     children()
         .filterIsInstance<ListItem>()
-        .map { item ->
-            val blocks = item.children().flatMap { it.toBlocks() }
-            blocks.flatMap { block ->
-                when (block) {
-                    is MarkdownBlock.Heading -> block.text
-                    is MarkdownBlock.Paragraph -> block.text
-                    is MarkdownBlock.Code -> listOf(MarkdownInline.Code(block.literal))
-                    is MarkdownBlock.Quote -> listOf(MarkdownInline.Text(block.blocks.joinToString(" ") { it.toPlainText() }))
-                    MarkdownBlock.Divider -> emptyList()
-                    is MarkdownBlock.BulletList -> listOf(MarkdownInline.Text(block.items.joinToString(" ") { it.plainText() }))
-                    is MarkdownBlock.OrderedList -> listOf(MarkdownInline.Text(block.items.joinToString(" ") { it.plainText() }))
-                    is MarkdownBlock.Table -> listOf(MarkdownInline.Text(block.toPlainText()))
-                }
-            }.toList()
-        }.toList()
+        .map { it.toListItem() }
+        .toList()
+
+private fun ListItem.toListItem(): MarkdownListItem {
+    val text = mutableListOf<MarkdownInline>()
+    val children = mutableListOf<MarkdownBlock>()
+    children().forEach { child ->
+        child.toBlocks().forEach { block ->
+            when (block) {
+                is MarkdownBlock.Heading -> text.addAll(block.text)
+                is MarkdownBlock.Paragraph -> text.addAll(block.text)
+                is MarkdownBlock.Code,
+                is MarkdownBlock.Quote,
+                is MarkdownBlock.BulletList,
+                is MarkdownBlock.OrderedList,
+                is MarkdownBlock.Table,
+                MarkdownBlock.Divider -> children.add(block)
+            }
+        }
+    }
+    return MarkdownListItem(text = text, children = children)
+}
 
 private fun MarkdownBlock.toPlainText(): String = when (this) {
     is MarkdownBlock.Heading -> text.plainText()
     is MarkdownBlock.Paragraph -> text.plainText()
-    is MarkdownBlock.BulletList -> items.joinToString(" ") { it.plainText() }
-    is MarkdownBlock.OrderedList -> items.joinToString(" ") { it.plainText() }
+    is MarkdownBlock.BulletList -> items.joinToString(" ") { it.toPlainText() }
+    is MarkdownBlock.OrderedList -> items.joinToString(" ") { it.toPlainText() }
     is MarkdownBlock.Quote -> blocks.joinToString(" ") { it.toPlainText() }
     is MarkdownBlock.Code -> literal
     is MarkdownBlock.Table -> (headers + rows.flatten()).joinToString(" ") { it.plainText() }
     MarkdownBlock.Divider -> ""
 }
+
+private fun MarkdownListItem.toPlainText(): String =
+    (listOf(text.plainText()) + children.map { it.toPlainText() })
+        .filter { it.isNotBlank() }
+        .joinToString(" ")
 
 private fun Node.inlineChildren(): List<MarkdownInline> {
     val collector = InlineCollector()

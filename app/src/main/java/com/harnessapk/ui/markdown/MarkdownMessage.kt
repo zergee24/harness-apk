@@ -67,10 +67,11 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
             color = textColor,
             style = MaterialTheme.typography.titleMedium.copy(
                 fontSize = when (block.level) {
-                    1 -> 22.sp
-                    2 -> 19.sp
-                    else -> 17.sp
+                    1 -> markdownHeadingFontSizeSp(level = 1).sp
+                    2 -> markdownHeadingFontSizeSp(level = 2).sp
+                    else -> markdownHeadingFontSizeSp(level = 3).sp
                 },
+                lineHeight = markdownHeadingLineHeightSp(block.level).sp,
                 fontWeight = FontWeight.SemiBold,
             ),
         )
@@ -78,18 +79,18 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
             text = block.text.toAnnotatedString(textColor),
             color = textColor,
             style = MaterialTheme.typography.bodyMedium,
-            lineHeight = 21.sp,
+            lineHeight = markdownBodyLineHeightSp().sp,
         )
-        is MarkdownBlock.BulletList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            block.items.forEach { item ->
-                MarkdownListRow(marker = "•", text = item, textColor = textColor)
-            }
-        }
-        is MarkdownBlock.OrderedList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            block.items.forEachIndexed { index, item ->
-                MarkdownListRow(marker = "${block.startNumber + index}.", text = item, textColor = textColor)
-            }
-        }
+        is MarkdownBlock.BulletList -> MarkdownList(
+            items = block.items,
+            textColor = textColor,
+            markerForIndex = { "•" },
+        )
+        is MarkdownBlock.OrderedList -> MarkdownList(
+            items = block.items,
+            textColor = textColor,
+            markerForIndex = { index -> "${block.startNumber + index}." },
+        )
         is MarkdownBlock.Quote -> Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -124,8 +125,8 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp,
+                        fontSize = markdownCodeFontSizeSp().sp,
+                        lineHeight = markdownCodeLineHeightSp().sp,
                     ),
                 )
             }
@@ -136,24 +137,53 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
 }
 
 @Composable
+private fun MarkdownList(
+    items: List<MarkdownListItem>,
+    textColor: Color,
+    markerForIndex: (Int) -> String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        items.forEachIndexed { index, item ->
+            MarkdownListRow(
+                marker = markerForIndex(index),
+                item = item,
+                textColor = textColor,
+            )
+        }
+    }
+}
+
+@Composable
 private fun MarkdownListRow(
     marker: String,
-    text: List<MarkdownInline>,
+    item: MarkdownListItem,
     textColor: Color,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = marker,
-            color = textColor.copy(alpha = 0.72f),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            modifier = Modifier.weight(1f),
-            text = text.toAnnotatedString(textColor),
-            color = textColor,
-            style = MaterialTheme.typography.bodyMedium,
-            lineHeight = 21.sp,
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = marker,
+                color = textColor.copy(alpha = 0.72f),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                modifier = Modifier.weight(1f),
+                text = item.text.toAnnotatedString(textColor),
+                color = textColor,
+                style = MaterialTheme.typography.bodyMedium,
+                lineHeight = markdownBodyLineHeightSp().sp,
+            )
+        }
+        if (item.children.isNotEmpty()) {
+            Column(
+                modifier = Modifier.padding(start = 22.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                item.children.forEach { child ->
+                    MarkdownBlockView(block = child, textColor = textColor)
+                }
+            }
+        }
     }
 }
 
@@ -243,3 +273,21 @@ private fun AnnotatedString.Builder.appendInlineList(
         }
     }
 }
+
+internal fun markdownHeadingFontSizeSp(level: Int): Int = when (level) {
+    1 -> 22
+    2 -> 19
+    else -> 17
+}
+
+internal fun markdownHeadingLineHeightSp(level: Int): Int = when (level) {
+    1 -> 30
+    2 -> 27
+    else -> 25
+}
+
+internal fun markdownBodyLineHeightSp(): Int = 22
+
+internal fun markdownCodeFontSizeSp(): Int = 13
+
+internal fun markdownCodeLineHeightSp(): Int = 22

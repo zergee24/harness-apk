@@ -28,6 +28,45 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun preservesNestedBulletAndOrderedLists() {
+        val blocks = parseMarkdownBlocks(
+            """
+            - 一级 A
+              - 二级 A1
+              - 二级 A2
+                1. 三级有序 A2.1
+            - 一级 B
+            """.trimIndent(),
+        )
+
+        val list = blocks.single { it is MarkdownBlock.BulletList } as MarkdownBlock.BulletList
+        assertEquals("一级 A", list.items[0].text.plainText())
+        val nestedBullet = list.items[0].children.single { it is MarkdownBlock.BulletList } as MarkdownBlock.BulletList
+        assertEquals(listOf("二级 A1", "二级 A2"), nestedBullet.items.map { it.text.plainText() })
+        val nestedOrdered = nestedBullet.items[1].children.single { it is MarkdownBlock.OrderedList } as MarkdownBlock.OrderedList
+        assertEquals("三级有序 A2.1", nestedOrdered.items.single().text.plainText())
+        assertEquals("一级 B", list.items[1].text.plainText())
+    }
+
+    @Test
+    fun parsesCompactSingleLineFencedCodeFromModelOutput() {
+        val blocks = parseMarkdownBlocks("安装后执行：```bashgit --version```然后继续。")
+
+        assertTrue(blocks.debugText(), blocks[0] is MarkdownBlock.Paragraph)
+        val code = blocks.single { it is MarkdownBlock.Code } as MarkdownBlock.Code
+        assertEquals("bash", code.info)
+        assertEquals("git --version", code.literal)
+        assertTrue(blocks.debugText(), blocks.last() is MarkdownBlock.Paragraph)
+    }
+
+    @Test
+    fun markdownTextMetricsLeaveRoomForWrappedHeadingsAndCode() {
+        assertTrue(markdownHeadingLineHeightSp(level = 1) > markdownHeadingFontSizeSp(level = 1))
+        assertTrue(markdownHeadingLineHeightSp(level = 2) > markdownHeadingFontSizeSp(level = 2))
+        assertTrue(markdownCodeLineHeightSp() > markdownCodeFontSizeSp())
+    }
+
+    @Test
     fun parsesLinksAndQuotes() {
         val blocks = parseMarkdownBlocks(
             """
@@ -142,8 +181,8 @@ class MarkdownMessageParserTest {
                 is MarkdownBlock.Paragraph -> "paragraph: ${block.text.plainText()}"
                 is MarkdownBlock.Table -> "table: ${block.headers.map { it.plainText() }} / ${block.rows.map { row -> row.map { it.plainText() } }}"
                 is MarkdownBlock.Divider -> "divider"
-                is MarkdownBlock.BulletList -> "bullet: ${block.items.map { it.plainText() }}"
-                is MarkdownBlock.OrderedList -> "ordered: ${block.items.map { it.plainText() }}"
+                is MarkdownBlock.BulletList -> "bullet: ${block.items.map { it.text.plainText() }}"
+                is MarkdownBlock.OrderedList -> "ordered: ${block.items.map { it.text.plainText() }}"
                 is MarkdownBlock.Code -> "code: ${block.literal}"
                 is MarkdownBlock.Quote -> "quote: ${block.blocks.debugText()}"
             }
