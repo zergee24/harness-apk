@@ -298,12 +298,17 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun chatInputShowsLeadingPlusOnlyBeforeComposing() {
+    fun chatInputUsesAttachmentAsTrailingActionBeforeComposing() {
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = false))
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "   ", hasSelectedImage = false))
 
         assertFalse(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
         assertFalse(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = true))
+
+        assertEquals(ChatInputTrailingAction.ATTACHMENT, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false))
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "你好", hasSelectedImage = false, isBusy = false))
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = true, isBusy = false))
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true))
     }
 
     @Test
