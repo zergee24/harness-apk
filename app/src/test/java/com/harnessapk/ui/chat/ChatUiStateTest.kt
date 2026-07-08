@@ -188,6 +188,30 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun messageSelectionCopyTextUsesVisibleContent() {
+        val message = assistantMessage(
+            status = MessageStatus.SUCCEEDED,
+            content = "第一段 **重点**\n第二段",
+        )
+
+        assertEquals("第一段 **重点**\n第二段", messageSelectionCopyText(message))
+    }
+
+    @Test
+    fun messageSelectionCopyTextUsesFullErrorLogWhenPresent() {
+        val message = assistantMessage(
+            status = MessageStatus.FAILED,
+            content = "",
+            errorMessage = "LLM 请求失败：timeout\n--- 诊断日志 ---\nBase URL: https://happycode.vip/v1",
+        )
+
+        assertEquals(
+            "LLM 请求失败：timeout\n--- 诊断日志 ---\nBase URL: https://happycode.vip/v1",
+            messageSelectionCopyText(message),
+        )
+    }
+
+    @Test
     fun handleSendIntentDismissesKeyboardBeforeSendingText() {
         val events = mutableListOf<String>()
 
@@ -431,6 +455,7 @@ class ChatUiStateTest {
     private fun assistantMessage(
         status: MessageStatus,
         content: String = "",
+        errorMessage: String? = null,
     ): ChatMessage = ChatMessage(
         id = "assistant-$status",
         conversationId = "conversation",
@@ -439,7 +464,7 @@ class ChatUiStateTest {
         status = status,
         providerId = "provider",
         model = "model",
-        errorMessage = null,
+        errorMessage = errorMessage,
     )
 
     private fun providerProfile(
