@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="update_apks" path="updates/" />
+    <cache-path name="project_exports" path="project-exports/" />
+    <files-path name="project_files" path="projects/" />
+</paths>

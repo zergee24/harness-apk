@@ -1,0 +1,11 @@
+{
+  "versionCode": 1,
+  "versionName": "0.1.0",
+  "minSupportedVersionCode": 1,
+  "apkUrl": "https://download.example.com/harness-apk/releases/0.1.0/app-release.apk",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "releaseNotes": [
+    "首个家用测试版"
+  ],
+  "publishedAt": "2026-07-05T00:00:00Z"
+}

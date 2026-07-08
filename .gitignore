@@ -1,0 +1,10 @@
+.DS_Store
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+*.aab
+
+# Release artifacts are generated locally or by CI and uploaded to OSS.
+release/test/
