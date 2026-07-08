@@ -18,6 +18,14 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { it.isPresent }
 
+val appVersionCode = providers.gradleProperty("versionCodeOverride")
+    .map { it.toInt() }
+    .orElse(1015000)
+    .get()
+val appVersionName = providers.gradleProperty("versionNameOverride")
+    .orElse("0.1.15")
+    .get()
+
 android {
     namespace = "com.harnessapk"
     compileSdk = 37
@@ -26,8 +34,8 @@ android {
         applicationId = "com.harnessapk"
         minSdk = 26
         targetSdk = 37
-        versionCode = 16
-        versionName = "0.1.15"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

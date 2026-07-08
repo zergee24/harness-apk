@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: scripts/release_apk.sh <test|prod> [--upload]
+Usage: scripts/release_apk.sh <test|prod> [--upload] [--version-code CODE] [--version-name NAME]
 
 Builds the selected channel, prepares update.json plus APK chunks, and optionally
 uploads the prepared files to OSS when --upload is provided.
@@ -18,10 +18,28 @@ fi
 CHANNEL="$1"
 shift
 UPLOAD=false
+VERSION_CODE_OVERRIDE="${APK_VERSION_CODE:-}"
+VERSION_NAME_OVERRIDE="${APK_VERSION_NAME:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --upload)
       UPLOAD=true
+      ;;
+    --version-code)
+      shift
+      if [ "$#" -eq 0 ]; then
+        usage
+        exit 64
+      fi
+      VERSION_CODE_OVERRIDE="$1"
+      ;;
+    --version-name)
+      shift
+      if [ "$#" -eq 0 ]; then
+        usage
+        exit 64
+      fi
+      VERSION_NAME_OVERRIDE="$1"
       ;;
     *)
       usage
@@ -69,8 +87,14 @@ resolve_base_url() {
 OSS_BUCKET="${OSS_BUCKET:-harness--zerg}"
 OSS_ENDPOINT="$(normalize_endpoint "${OSS_ENDPOINT:-oss-ap-southeast-1.aliyuncs.com}")"
 OSS_ACL="${OSS_ACL:-public-read}"
-VERSION_CODE="$(awk -F '= ' '/versionCode = / {print $2; exit}' app/build.gradle.kts | tr -d ' ')"
-BASE_VERSION_NAME="$(sed -n 's/.*versionName = \"\([^\"]*\)\".*/\1/p' app/build.gradle.kts | head -n 1)"
+BASE_VERSION_CODE="$(sed -n 's/.*orElse(\([0-9][0-9]*\)).*/\1/p' app/build.gradle.kts | head -n 1)"
+BASE_VERSION_NAME="$(sed -n 's/.*orElse("\([^"]*\)").*/\1/p' app/build.gradle.kts | head -n 1)"
+VERSION_CODE="${VERSION_CODE_OVERRIDE:-$BASE_VERSION_CODE}"
+BASE_VERSION_NAME="${VERSION_NAME_OVERRIDE:-$BASE_VERSION_NAME}"
+if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+  echo "version-code must be a positive integer: $VERSION_CODE" >&2
+  exit 64
+fi
 NOTES_DIR="build/release-notes"
 mkdir -p "$NOTES_DIR"
 NOTES_FILE="$NOTES_DIR/${CHANNEL}.txt"
@@ -102,7 +126,10 @@ case "$CHANNEL" in
     ;;
 esac
 
-./gradlew "$BUILD_TASK" "$GRADLE_MANIFEST_ARG" --console=plain --no-daemon
+./gradlew "$BUILD_TASK" "$GRADLE_MANIFEST_ARG" \
+  "-PversionCodeOverride=${VERSION_CODE}" \
+  "-PversionNameOverride=${BASE_VERSION_NAME}" \
+  --console=plain --no-daemon
 
 if [ "$CHANNEL" = "prod" ]; then
   APK_PATH="$(find app/build/outputs/apk/release -maxdepth 1 -name 'app-release*.apk' | sort | head -n 1)"

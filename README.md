@@ -24,6 +24,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 ```bash
 scripts/release_apk.sh test
 scripts/release_apk.sh prod
+scripts/release_apk.sh test --version-code 1015009
 ```
 
 ## Emulator QA
@@ -73,3 +74,10 @@ ENABLE_OSS_DEPLOY_ON_PUSH=true
 默认可以在 GitHub Actions 手动运行 `Deploy APK to OSS`，并选择 `test` 或 `prod`。
 推送自动部署只建议用于测试通道；如果要开启，把 `ENABLE_OSS_DEPLOY_ON_PUSH` 设为 `true`。
 `prod` 通道必须配置正式签名 secrets，否则不会上传未签名 APK。
+
+版本策略：
+
+- `versionName` 按产品版本走，例如 `0.1.15`；测试包自动显示为 `0.1.15-debug`。
+- `versionCode` 按机器更新版本走，必须递增。当前基础 code 使用 `1015000` 这类格式，对应 `0.1.15`。
+- GitHub Actions 的 `test` 通道默认使用 `基础 versionCode + GitHub run number`，所以同一个 `versionName` 可以重复打测试包并触发更新。
+- 本地打测试包时，如需强制让手机收到更新，传 `--version-code` 或环境变量 `APK_VERSION_CODE`。

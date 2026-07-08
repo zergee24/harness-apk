@@ -15,6 +15,14 @@ on:
         description: "Release notes, one item per line. Empty uses recent commit titles."
         required: false
         type: string
+      version_code:
+        description: "Optional APK versionCode override. Test channel defaults to base versionCode + GitHub run number."
+        required: false
+        type: string
+      version_name:
+        description: "Optional base versionName override, for example 0.1.15. Debug suffix is added automatically for test."
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -54,6 +62,8 @@ jobs:
       ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
       ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
       INPUT_CHANNEL: ${{ github.event.inputs.channel || '' }}
+      INPUT_VERSION_CODE: ${{ github.event.inputs.version_code || '' }}
+      INPUT_VERSION_NAME: ${{ github.event.inputs.version_name || '' }}
 
     steps:
       - name: Checkout
@@ -86,10 +96,22 @@ jobs:
           OSS_ENDPOINT="${OSS_ENDPOINT#https://}"
           OSS_ENDPOINT="${OSS_ENDPOINT#http://}"
           OSS_ENDPOINT="${OSS_ENDPOINT%/}"
-          VERSION_CODE="$(awk -F '= *' '/versionCode = / {gsub(/ /, "", $2); print $2; exit}' app/build.gradle.kts)"
-          BASE_VERSION_NAME="$(awk -F '"' '/versionName = / {print $2; exit}' app/build.gradle.kts)"
-          if [ -z "$VERSION_CODE" ] || [ -z "$BASE_VERSION_NAME" ]; then
-            echo "::error::Failed to resolve versionCode or versionName from app/build.gradle.kts"
+          BASE_VERSION_CODE="$(sed -n 's/.*orElse(\([0-9][0-9]*\)).*/\1/p' app/build.gradle.kts | head -n 1)"
+          BASE_VERSION_NAME="$(sed -n 's/.*orElse("\([^"]*\)").*/\1/p' app/build.gradle.kts | head -n 1)"
+          BASE_VERSION_NAME="${INPUT_VERSION_NAME:-$BASE_VERSION_NAME}"
+          if [ -z "$BASE_VERSION_CODE" ] || [ -z "$BASE_VERSION_NAME" ]; then
+            echo "::error::Failed to resolve base versionCode or versionName from app/build.gradle.kts"
+            exit 1
+          fi
+          if [ -n "$INPUT_VERSION_CODE" ]; then
+            VERSION_CODE="$INPUT_VERSION_CODE"
+          elif [ "$CHANNEL" = "test" ]; then
+            VERSION_CODE=$((BASE_VERSION_CODE + GITHUB_RUN_NUMBER))
+          else
+            VERSION_CODE="$BASE_VERSION_CODE"
+          fi
+          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+            echo "::error::version_code must be a positive integer: $VERSION_CODE"
             exit 1
           fi
           if [ "$CHANNEL" = "prod" ]; then
@@ -126,6 +148,7 @@ jobs:
             echo "ARTIFACT_NAME=${ARTIFACT_NAME}"
             echo "MANIFEST_PROPERTY=${MANIFEST_PROPERTY}"
             echo "VERSION_CODE=${VERSION_CODE}"
+            echo "BASE_VERSION_NAME=${BASE_VERSION_NAME}"
             echo "VERSION_NAME=${VERSION_NAME}"
           } >> "$GITHUB_ENV"
 
@@ -158,7 +181,12 @@ jobs:
           echo "ANDROID_RELEASE_STORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
 
       - name: Build APK
-        run: ./gradlew "$BUILD_TASK" "-P${MANIFEST_PROPERTY}=${OSS_PUBLIC_BASE_URL}/update.json" --console=plain --no-daemon
+        run: |
+          ./gradlew "$BUILD_TASK" \
+            "-P${MANIFEST_PROPERTY}=${OSS_PUBLIC_BASE_URL}/update.json" \
+            "-PversionCodeOverride=${VERSION_CODE}" \
+            "-PversionNameOverride=${BASE_VERSION_NAME}" \
+            --console=plain --no-daemon
 
       - name: Resolve APK output
         shell: bash
