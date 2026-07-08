@@ -1,0 +1,127 @@
+name: Deploy APK to OSS
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "Release notes, one item per line. Empty uses recent commit titles."
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+      - apk-test
+    paths:
+      - ".github/workflows/deploy-apk-to-oss.yml"
+      - "app/**"
+      - "build.gradle.kts"
+      - "gradle/**"
+      - "gradle.properties"
+      - "gradlew"
+      - "settings.gradle.kts"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_OSS_DEPLOY_ON_PUSH == 'true'
+    runs-on: ubuntu-latest
+    env:
+      OSS_BUCKET: ${{ vars.OSS_BUCKET }}
+      OSS_ENDPOINT: ${{ vars.OSS_ENDPOINT }}
+      OSS_PREFIX: ${{ vars.OSS_PREFIX }}
+      OSS_PUBLIC_BASE_URL: ${{ vars.OSS_PUBLIC_BASE_URL }}
+      OSS_ACL: ${{ vars.OSS_ACL }}
+      ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+      ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Resolve release settings
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${OSS_BUCKET:=harness-zerg}"
+          : "${OSS_ENDPOINT:=oss-cn-hangzhou.aliyuncs.com}"
+          : "${OSS_PREFIX:=harness-apk/test}"
+          : "${OSS_ACL:=public-read}"
+          OSS_ENDPOINT="${OSS_ENDPOINT#https://}"
+          OSS_ENDPOINT="${OSS_ENDPOINT#http://}"
+          OSS_ENDPOINT="${OSS_ENDPOINT%/}"
+          OSS_PREFIX="${OSS_PREFIX#/}"
+          OSS_PREFIX="${OSS_PREFIX%/}"
+          if [ -z "${OSS_PUBLIC_BASE_URL}" ]; then
+            OSS_PUBLIC_BASE_URL="https://${OSS_BUCKET}.${OSS_ENDPOINT}/${OSS_PREFIX}"
+          fi
+          VERSION_CODE="$(awk -F '= ' '/versionCode = / {print $2; exit}' app/build.gradle.kts | tr -d ' ')"
+          VERSION_NAME="$(sed -n 's/.*versionName = \"\\([^\"]*\\)\".*/\\1/p' app/build.gradle.kts | head -n 1)-debug"
+          {
+            echo "OSS_BUCKET=${OSS_BUCKET}"
+            echo "OSS_ENDPOINT=${OSS_ENDPOINT}"
+            echo "OSS_PREFIX=${OSS_PREFIX}"
+            echo "OSS_ACL=${OSS_ACL}"
+            echo "OSS_PUBLIC_BASE_URL=${OSS_PUBLIC_BASE_URL%/}"
+            echo "VERSION_CODE=${VERSION_CODE}"
+            echo "VERSION_NAME=${VERSION_NAME}"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate OSS credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$ALIYUN_ACCESS_KEY_ID" ] || [ -z "$ALIYUN_ACCESS_KEY_SECRET" ]; then
+            echo "::error::Missing ALIYUN_ACCESS_KEY_ID or ALIYUN_ACCESS_KEY_SECRET repository secrets"
+            exit 1
+          fi
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --console=plain
+
+      - name: Prepare release notes
+        shell: bash
+        env:
+          INPUT_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/release-notes
+          if [ -n "$INPUT_RELEASE_NOTES" ]; then
+            printf '%s\n' "$INPUT_RELEASE_NOTES" > build/release-notes/notes.txt
+          else
+            git log --pretty=format:'%s' -n 8 > build/release-notes/notes.txt
+          fi
+
+      - name: Prepare release files
+        run: |
+          python3 scripts/prepare_apk_release.py \
+            --apk app/build/outputs/apk/debug/app-debug.apk \
+            --output-dir build/release-oss \
+            --public-base-url "$OSS_PUBLIC_BASE_URL" \
+            --version-code "$VERSION_CODE" \
+            --version-name "$VERSION_NAME" \
+            --min-supported-version-code "$VERSION_CODE" \
+            --release-notes-file build/release-notes/notes.txt
+
+      - name: Upload release files to OSS
+        run: python3 scripts/upload_to_oss.py build/release-oss
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-apk-${{ env.VERSION_NAME }}
+          path: build/release-oss
