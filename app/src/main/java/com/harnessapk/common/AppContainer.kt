@@ -12,6 +12,7 @@ import com.harnessapk.network.OpenAiCompatibleClient
 import com.harnessapk.project.FileProjectRepository
 import com.harnessapk.project.ProjectWorkspaceGatewayAdapter
 import com.harnessapk.provider.ProviderRepository
+import com.harnessapk.provider.ProviderCapabilityCatalogClient
 import com.harnessapk.security.ApiKeyCipher
 import com.harnessapk.session.PromptOptimizerUseCase
 import com.harnessapk.storage.AppDatabase
@@ -46,12 +47,14 @@ class AppContainer(context: Context) {
     val chatHttpClient = AppHttpClients.chat()
     val updateHttpClient = AppHttpClients.updates()
     val webSearchHttpClient = AppHttpClients.webSearch()
+    val providerCatalogHttpClient = AppHttpClients.providerCatalog()
     val gitEngine = JGitEngine()
     val providerRepository = ProviderRepository(
         dao = database.providerProfileDao(),
         cipher = apiKeyCipher,
         timeProvider = SystemTimeProvider,
     )
+    val providerCapabilityCatalogClient = ProviderCapabilityCatalogClient(providerCatalogHttpClient, json)
     val chatRepository = ChatRepository(
         conversationDao = database.conversationDao(),
         messageDao = database.messageDao(),

@@ -53,6 +53,27 @@ class ModelCapabilityResolverTest {
     }
 
     @Test
+    fun providerProfileModelConfigWinsOverRemoteCatalogForSavedModel() {
+        val resolver = ModelCapabilityResolver(
+            bundledCatalog = catalog("bundled", providerTemplate(modelCapability("gpt-5.5", 128_000))),
+            remoteCatalog = catalog("remote", providerTemplate(modelCapability("gpt-5.5", 200_000))),
+        )
+        val provider = providerProfile(
+            name = "OpenAI",
+            id = "openai-profile",
+            modelConfigs = listOf(
+                ModelConfig("gpt-5.5", contextWindowTokens = 300_000, compressionThresholdPercent = 62),
+            ),
+        )
+
+        val resolved = resolver.resolve(provider, "gpt-5.5")
+
+        assertEquals(300_000, resolved.contextWindowTokens)
+        assertEquals(62, resolved.compressionThresholdPercent)
+        assertEquals(CapabilitySource.LOCAL_OVERRIDE, resolved.source)
+    }
+
+    @Test
     fun providerProfileModelConfigBackfillsUnknownCatalogModel() {
         val provider = providerProfile(
             name = "Custom",

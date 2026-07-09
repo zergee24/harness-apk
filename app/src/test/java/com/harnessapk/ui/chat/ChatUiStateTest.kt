@@ -136,6 +136,25 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun resolveModelSelectionCanUseCapabilityProvidedModels() {
+        val providers = listOf(
+            providerProfile(id = "openai", name = "OpenAI", defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")),
+        )
+
+        val selection = resolveModelSelection(
+            providers = providers,
+            currentProviderId = null,
+            currentModel = "",
+            preferredProviderId = "openai",
+            preferredModel = "gpt-5.5-pro",
+            selectableModelsForProvider = { listOf("gpt-5.5", "gpt-5.5-pro") },
+        )
+
+        assertEquals("openai", selection.providerId)
+        assertEquals("gpt-5.5-pro", selection.model)
+    }
+
+    @Test
     fun modelPickerButtonTextUsesModelAndReasoningEffortOnly() {
         val providers = listOf(providerProfile(defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")))
 

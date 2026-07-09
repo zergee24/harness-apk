@@ -100,10 +100,24 @@ class ModelCapabilityResolver(
                 source = CapabilitySource.FALLBACK,
                 catalogVersion = null,
             )
-        val override = provider?.let {
+        val savedConfigOverride = if (base.source == CapabilitySource.PROVIDER_PROFILE) {
+            null
+        } else {
+            provider?.modelConfigs
+                ?.firstOrNull { it.id == normalizedModelId }
+                ?.let { config ->
+                    ModelCapabilityOverride(
+                        providerProfileId = provider.id,
+                        modelId = normalizedModelId,
+                        contextWindowTokens = config.contextWindowTokens,
+                        compressionThresholdPercent = config.compressionThresholdPercent,
+                    )
+                }
+        }
+        val explicitOverride = provider?.let {
             overridesByProviderAndModel[it.id to normalizedModelId]
         }?.takeIf { !it.hidden }
-        return base.toResolved(provider, override)
+        return base.toResolved(provider, explicitOverride ?: savedConfigOverride)
     }
 
     fun selectableModels(provider: ProviderProfile): List<ResolvedModelCapability> {

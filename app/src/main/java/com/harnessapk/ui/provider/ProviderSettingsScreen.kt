@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
@@ -46,15 +47,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.harnessapk.BuildConfig
 import com.harnessapk.common.AppContainer
+import com.harnessapk.provider.CapabilitySource
 import com.harnessapk.provider.ModelConfig
+import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.ProviderCapabilityCatalog
 import com.harnessapk.provider.ProviderDraft
 import com.harnessapk.provider.ProviderProfile
 import com.harnessapk.provider.ProviderTemplate
 import com.harnessapk.provider.ProviderTemplates
+import com.harnessapk.provider.ResolvedModelCapability
 import com.harnessapk.provider.defaultModelConfig
+import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.storage.DefaultModelPreference
+import com.harnessapk.storage.ProviderCapabilityCatalogSnapshot
 import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.ui.model.selectableModelsForProvider
 import kotlinx.coroutines.launch
@@ -68,11 +76,23 @@ fun ProviderSettingsScreen(
     val defaultModelPreference by container.settingsStore.defaultModelPreference.collectAsState(
         initial = DefaultModelPreference(),
     )
+    val catalogSnapshot by container.settingsStore.providerCapabilityCatalogSnapshot.collectAsState(
+        initial = ProviderCapabilityCatalogSnapshot(),
+    )
     val scope = rememberCoroutineScope()
     val defaultTemplate = ProviderTemplates.default
+    val remoteCatalog = remember(catalogSnapshot.rawJson) {
+        catalogSnapshot.rawJson?.let { rawJson ->
+            runCatching { parseProviderCapabilityCatalogJson(rawJson, container.json) }.getOrNull()
+        }
+    }
+    val capabilityResolver = remember(remoteCatalog, providers) {
+        ModelCapabilityResolver(remoteCatalog = remoteCatalog)
+    }
     var defaultProviderId by remember { mutableStateOf<String?>(null) }
     var defaultModelName by remember { mutableStateOf("") }
     var defaultStatus by remember { mutableStateOf<String?>(null) }
+    var catalogStatus by remember { mutableStateOf<String?>(null) }
     var name by remember { mutableStateOf(defaultTemplate.name) }
     var baseUrl by remember { mutableStateOf(defaultTemplate.baseUrl) }
     var apiKey by remember { mutableStateOf("") }
@@ -90,7 +110,7 @@ fun ProviderSettingsScreen(
         baseUrl = defaultTemplate.baseUrl
         apiKey = ""
         model = defaultTemplate.defaultModel
-        modelConfigs = defaultTemplate.modelConfigs
+        modelConfigs = modelConfigsForTemplate(defaultTemplate, remoteCatalog)
         visionModel = defaultTemplate.defaultVisionModel.orEmpty()
         supportsVision = defaultTemplate.supportsVision
         nativeWebSearchMode = defaultTemplate.nativeWebSearchMode
@@ -101,7 +121,7 @@ fun ProviderSettingsScreen(
         name = template.name
         baseUrl = template.baseUrl
         model = template.defaultModel
-        modelConfigs = template.modelConfigs
+        modelConfigs = modelConfigsForTemplate(template, remoteCatalog)
         visionModel = template.defaultVisionModel.orEmpty()
         supportsVision = template.supportsVision
         nativeWebSearchMode = template.nativeWebSearchMode
@@ -179,10 +199,13 @@ fun ProviderSettingsScreen(
                 providers = providers,
                 selectedProviderId = defaultProviderId,
                 selectedModel = defaultModelName,
+                modelOptions = defaultModelOptionsForProvider(providers, defaultProviderId, capabilityResolver),
                 status = defaultStatus,
+                catalogVersion = catalogSnapshot.catalogVersion ?: "bundled",
+                catalogStatus = catalogStatus ?: catalogSnapshot.errorMessage,
                 onSelectProvider = { provider ->
                     defaultProviderId = provider.id
-                    defaultModelName = selectableModelsForProvider(provider).firstOrNull().orEmpty()
+                    defaultModelName = capabilityResolver.selectableModels(provider).firstOrNull()?.modelId.orEmpty()
                     defaultStatus = null
                 },
                 onSelectModel = {
@@ -203,6 +226,28 @@ fun ProviderSettingsScreen(
                             }.onFailure {
                                 defaultStatus = it.message
                             }
+                        }
+                    }
+                },
+                onRefreshCatalog = {
+                    scope.launch {
+                        catalogStatus = "正在更新模型清单..."
+                        runCatching {
+                            val fetched = container.providerCapabilityCatalogClient
+                                .fetchDocument(BuildConfig.PROVIDER_CATALOG_URL)
+                            container.settingsStore.setProviderCapabilityCatalog(
+                                rawJson = fetched.rawJson,
+                                catalogVersion = fetched.catalog.catalogVersion,
+                                sha256 = fetched.sha256,
+                                fetchedAt = System.currentTimeMillis(),
+                            )
+                            fetched.catalog.catalogVersion
+                        }.onSuccess { version ->
+                            catalogStatus = "模型清单已更新：$version"
+                        }.onFailure {
+                            val message = it.message ?: "模型清单更新失败"
+                            container.settingsStore.setProviderCapabilityCatalogError(message)
+                            catalogStatus = message
                         }
                     }
                 },
@@ -295,6 +340,7 @@ fun ProviderSettingsScreen(
             items(providers, key = { it.id }) { provider ->
                 ProviderRow(
                     provider = provider,
+                    capabilities = capabilityResolver.selectableModels(provider),
                     onEdit = { editProvider(provider) },
                     onDelete = { providerToDelete = provider },
                 )
@@ -308,10 +354,14 @@ private fun DefaultModelCard(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
     selectedModel: String,
+    modelOptions: List<String>,
     status: String?,
+    catalogVersion: String,
+    catalogStatus: String?,
     onSelectProvider: (ProviderProfile) -> Unit,
     onSelectModel: (String) -> Unit,
     onSave: () -> Unit,
+    onRefreshCatalog: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -335,6 +385,41 @@ private fun DefaultModelCard(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "模型清单：$catalogVersion",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        catalogStatus?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    TextButton(onClick = onRefreshCatalog) {
+                        Icon(Icons.Outlined.Sync, contentDescription = null)
+                        Text("更新", modifier = Modifier.padding(start = 6.dp))
+                    }
+                }
             }
             if (providers.isEmpty()) {
                 Text(
@@ -365,7 +450,7 @@ private fun DefaultModelCard(
                         .fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    defaultModelOptionsForProvider(providers, selectedProviderId).forEach { model ->
+                    modelOptions.forEach { model ->
                         FilterChip(
                             selected = model == selectedModel,
                             onClick = { onSelectModel(model) },
@@ -680,6 +765,7 @@ private fun ModelConfigDataBar(
 @Composable
 private fun ProviderRow(
     provider: ProviderProfile,
+    capabilities: List<ResolvedModelCapability>,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -703,17 +789,24 @@ private fun ProviderRow(
                 Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("文本模型：${provider.defaultModel}", style = MaterialTheme.typography.bodySmall)
                 Text(
-                    text = "可选模型：${provider.availableModels.joinToString("、")}",
+                    text = "可选模型：${capabilities.map { it.modelId }.joinToString("、")}",
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = "上下文：${provider.modelConfigs.joinToString("、") { "${it.id} ${it.contextWindowTokens.toCompactTokenText()}" }}",
+                    text = "上下文：${capabilities.joinToString("、") { "${it.modelId} ${it.contextWindowTokens.toCompactTokenText()}" }}",
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
+                capabilities.firstOrNull { it.modelId == provider.defaultModel }?.let { capability ->
+                    Text(
+                        text = "能力来源：${capabilitySourceSummary(capability)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Text(
                     text = "模型内搜索：${if (isNativeWebSearchEnabled(provider.nativeWebSearchMode)) "开启" else "关闭"}",
                     style = MaterialTheme.typography.bodySmall,
@@ -778,6 +871,34 @@ internal fun nativeWebSearchModeForSwitch(providerName: String, enabled: Boolean
     }
 }
 
+internal fun modelConfigsForTemplate(
+    template: ProviderTemplate,
+    catalog: ProviderCapabilityCatalog?,
+): List<ModelConfig> {
+    val capabilityTemplate = catalog?.providers?.firstOrNull {
+        it.providerId.equals(template.name, ignoreCase = true) ||
+            it.displayName.equals(template.name, ignoreCase = true)
+    } ?: return template.modelConfigs
+    return capabilityTemplate.models.map {
+        ModelConfig(
+            id = it.id,
+            contextWindowTokens = it.contextWindowTokens,
+            compressionThresholdPercent = it.compressionThresholdPercent,
+        )
+    }.ifEmpty { template.modelConfigs }
+}
+
+internal fun capabilitySourceSummary(capability: ResolvedModelCapability): String =
+    when (capability.source) {
+        CapabilitySource.REMOTE -> listOf("remote", capability.catalogVersion)
+            .filterNotNull()
+            .joinToString(" · ")
+        CapabilitySource.LOCAL_OVERRIDE -> "本地覆盖"
+        CapabilitySource.PROVIDER_PROFILE -> "本地配置"
+        CapabilitySource.BUNDLED -> "内置清单"
+        CapabilitySource.FALLBACK -> "保守默认"
+    }
+
 private fun ModelConfig.normalizedModelConfig(): ModelConfig = copy(
     id = id.trim(),
     contextWindowTokens = contextWindowTokens.coerceIn(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS),
@@ -794,9 +915,13 @@ private fun Int.toCompactTokenText(): String =
 internal fun defaultModelOptionsForProvider(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
+    resolver: ModelCapabilityResolver? = null,
 ): List<String> =
     providers.firstOrNull { it.id == selectedProviderId }
-        ?.let(::selectableModelsForProvider)
+        ?.let { provider ->
+            resolver?.selectableModels(provider)?.map { it.modelId }
+                ?: selectableModelsForProvider(provider)
+        }
         .orEmpty()
 
 private fun Int.roundToThousands(): Int = (this / 1_000) * 1_000

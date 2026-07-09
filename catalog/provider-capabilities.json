@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "2026.07.09.1",
+  "generatedAt": "2026-07-09T00:00:00+08:00",
+  "providers": [
+    {
+      "providerId": "kimi",
+      "displayName": "Kimi",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "defaultModelId": "kimi-k2.7-code",
+      "models": [
+        {
+          "modelId": "kimi-k2.7-code",
+          "contextWindowTokens": 256000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text", "image"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "webSearch": { "mode": "enable_search_boolean", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        },
+        {
+          "modelId": "kimi-k2.7-code-highspeed",
+          "contextWindowTokens": 256000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text", "image"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "webSearch": { "mode": "enable_search_boolean", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        },
+        {
+          "modelId": "kimi-k2.6",
+          "contextWindowTokens": 256000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text", "image"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "webSearch": { "mode": "enable_search_boolean", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        }
+      ]
+    },
+    {
+      "providerId": "deepseek",
+      "displayName": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "defaultModelId": "deepseek-v4-pro",
+      "models": [
+        {
+          "modelId": "deepseek-v4-pro",
+          "contextWindowTokens": 1000000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "timeouts": { "readMs": 180000 }
+        },
+        {
+          "modelId": "deepseek-v4-flash",
+          "contextWindowTokens": 1000000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "timeouts": { "readMs": 180000 }
+        }
+      ]
+    },
+    {
+      "providerId": "openai",
+      "displayName": "OpenAI",
+      "baseUrl": "https://happycode.vip/v1",
+      "defaultModelId": "gpt-5.5",
+      "models": [
+        {
+          "modelId": "gpt-5.5",
+          "contextWindowTokens": 200000,
+          "maxOutputTokens": 32000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text", "image"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "supportsReasoningEffort": true,
+          "reasoningEffortOptions": ["low", "medium", "high", "xhigh"],
+          "defaultReasoningEffort": "high",
+          "webSearch": { "mode": "openai_web_search_options", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        }
+      ]
+    },
+    {
+      "providerId": "glm",
+      "displayName": "GLM",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "defaultModelId": "glm-5.2",
+      "models": [
+        {
+          "modelId": "glm-5.2",
+          "contextWindowTokens": 1000000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "webSearch": { "mode": "glm_web_search_tool", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        },
+        {
+          "modelId": "glm-5-turbo",
+          "contextWindowTokens": 200000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "webSearch": { "mode": "glm_web_search_tool", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        },
+        {
+          "modelId": "glm-4.7",
+          "contextWindowTokens": 128000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "webSearch": { "mode": "glm_web_search_tool", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        },
+        {
+          "modelId": "glm-5v-turbo",
+          "contextWindowTokens": 128000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text", "image"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "webSearch": { "mode": "glm_web_search_tool", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        }
+      ]
+    }
+  ]
+}

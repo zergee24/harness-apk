@@ -108,8 +108,10 @@ import com.harnessapk.chat.supportsReasoningEffort
 import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.provider.ProviderProfile
+import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.provider.modelConfigForProvider
+import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.session.MarkdownFileChangeController
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeState
@@ -128,9 +130,9 @@ import com.harnessapk.session.buildMarkdownDiff
 import com.harnessapk.session.markdownReviewSummary
 import com.harnessapk.session.canWriteBackMarkdown
 import com.harnessapk.storage.DefaultModelPreference
+import com.harnessapk.storage.ProviderCapabilityCatalogSnapshot
 import com.harnessapk.ui.markdown.MarkdownMessage
 import com.harnessapk.ui.model.resolveModelSelection
-import com.harnessapk.ui.model.selectableModelsForProvider
 import com.harnessapk.websearch.WebSearchContext
 import com.harnessapk.websearch.WebSearchRequest
 import com.harnessapk.websearch.WebSearchSettings
@@ -159,6 +161,9 @@ fun ChatScreen(
     val providers by container.providerRepository.observeEnabled().collectAsState(initial = emptyList())
     val defaultModelPreference by container.settingsStore.defaultModelPreference.collectAsState(
         initial = DefaultModelPreference(),
+    )
+    val providerCatalogSnapshot by container.settingsStore.providerCapabilityCatalogSnapshot.collectAsState(
+        initial = ProviderCapabilityCatalogSnapshot(),
     )
     val webSearchSettings by container.settingsStore.webSearchSettings.collectAsState(
         initial = WebSearchSettings(),
@@ -209,6 +214,19 @@ fun ChatScreen(
     var initialProjectApplied by remember { mutableStateOf(false) }
     var autoFocusInputRequested by remember(conversationId) { mutableStateOf(false) }
     var streamingAutoScrollEnabled by remember(conversationId) { mutableStateOf(true) }
+    val remoteProviderCatalog = remember(providerCatalogSnapshot.rawJson) {
+        providerCatalogSnapshot.rawJson?.let { rawJson ->
+            runCatching { parseProviderCapabilityCatalogJson(rawJson, container.json) }.getOrNull()
+        }
+    }
+    val capabilityResolver = remember(remoteProviderCatalog) {
+        ModelCapabilityResolver(remoteCatalog = remoteProviderCatalog)
+    }
+    val selectableModelsByProviderId = remember(providers, capabilityResolver) {
+        providers.associate { provider ->
+            provider.id to capabilityResolver.selectableModels(provider).map { it.modelId }
+        }
+    }
     val markdownUpdatePlanner = remember(container) {
         MarkdownUpdatePlannerUseCase(
             providerRepository = container.providerRepository,
@@ -304,13 +322,16 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(providers, defaultModelPreference) {
+    LaunchedEffect(providers, defaultModelPreference, selectableModelsByProviderId) {
         val selection = resolveModelSelection(
             providers = providers,
             currentProviderId = selectedProviderId,
             currentModel = selectedModel,
             preferredProviderId = defaultModelPreference.providerId,
             preferredModel = defaultModelPreference.model,
+            selectableModelsForProvider = { provider ->
+                selectableModelsByProviderId[provider.id].orEmpty()
+            },
         )
         selectedProviderId = selection.providerId
         selectedModel = selection.model
@@ -864,9 +885,10 @@ fun ChatScreen(
             selectedProviderId = selectedProviderId,
             selectedModel = selectedModel,
             selectedReasoningEffort = selectedReasoningEffort,
+            selectableModelsByProviderId = selectableModelsByProviderId,
             onSelectProvider = { provider ->
                 selectedProviderId = provider.id
-                selectedModel = selectableModelsForProvider(provider).firstOrNull().orEmpty()
+                selectedModel = selectableModelsByProviderId[provider.id].orEmpty().firstOrNull().orEmpty()
                 selectedReasoningEffort = defaultReasoningEffort()
             },
             onModelChange = { selectedModel = it },
@@ -1733,13 +1755,14 @@ private fun ModelPickerDialog(
     selectedProviderId: String?,
     selectedModel: String,
     selectedReasoningEffort: ReasoningEffort,
+    selectableModelsByProviderId: Map<String, List<String>>,
     onSelectProvider: (ProviderProfile) -> Unit,
     onModelChange: (String) -> Unit,
     onReasoningEffortChange: (ReasoningEffort) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val selectedProvider = providers.firstOrNull { it.id == selectedProviderId } ?: providers.firstOrNull()
-    val selectableModels = selectedProvider?.let(::selectableModelsForProvider).orEmpty()
+    val selectableModels = selectedProvider?.let { selectableModelsByProviderId[it.id] }.orEmpty()
     val showReasoningEffort = selectedProvider?.let { supportsReasoningEffort(it, selectedModel) } == true
     AlertDialog(
         onDismissRequest = onDismiss,

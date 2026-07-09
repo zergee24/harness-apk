@@ -14,23 +14,38 @@ class ProviderCapabilityCatalogClient(
     suspend fun fetch(
         url: String,
         expectedSha256: String? = null,
-    ): ProviderCapabilityCatalog = withContext(Dispatchers.IO) {
+    ): ProviderCapabilityCatalog = fetchDocument(url, expectedSha256).catalog
+
+    suspend fun fetchDocument(
+        url: String,
+        expectedSha256: String? = null,
+    ): FetchedProviderCapabilityCatalog = withContext(Dispatchers.IO) {
         val request = Request.Builder().url(url).get().build()
         okHttpClient.newCall(request).execute().use { response ->
             require(response.isSuccessful) {
                 "模型能力清单下载失败：HTTP ${response.code}"
             }
             val body = response.body.string()
+            val actualSha256 = body.sha256Hex()
             expectedSha256?.takeIf { it.isNotBlank() }?.let { expected ->
-                val actual = body.sha256Hex()
-                require(actual.equals(expected, ignoreCase = true)) {
+                require(actualSha256.equals(expected, ignoreCase = true)) {
                     "模型能力清单校验失败"
                 }
             }
-            parseProviderCapabilityCatalogJson(body, json)
+            FetchedProviderCapabilityCatalog(
+                rawJson = body,
+                sha256 = actualSha256,
+                catalog = parseProviderCapabilityCatalogJson(body, json),
+            )
         }
     }
 }
+
+data class FetchedProviderCapabilityCatalog(
+    val rawJson: String,
+    val sha256: String,
+    val catalog: ProviderCapabilityCatalog,
+)
 
 private fun String.sha256Hex(): String {
     val digest = MessageDigest.getInstance("SHA-256")

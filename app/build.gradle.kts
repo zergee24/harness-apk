@@ -87,6 +87,14 @@ android {
                     .get()
                     .asBuildConfigString(),
             )
+            buildConfigField(
+                "String",
+                "PROVIDER_CATALOG_URL",
+                providers.gradleProperty("prodProviderCatalogUrl")
+                    .orElse("https://www.zerg.work/harness-apk/catalog/provider-capabilities.json")
+                    .get()
+                    .asBuildConfigString(),
+            )
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -103,6 +111,14 @@ android {
                 "UPDATE_MANIFEST_URL",
                 providers.gradleProperty("testUpdateManifestUrl")
                     .orElse("https://www.zerg.work/harness-apk/test/update.json")
+                    .get()
+                    .asBuildConfigString(),
+            )
+            buildConfigField(
+                "String",
+                "PROVIDER_CATALOG_URL",
+                providers.gradleProperty("testProviderCatalogUrl")
+                    .orElse("https://www.zerg.work/harness-apk/test/provider-capabilities.json")
                     .get()
                     .asBuildConfigString(),
             )

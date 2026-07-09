@@ -19,6 +19,7 @@ fun resolveModelSelection(
     currentModel: String,
     preferredProviderId: String?,
     preferredModel: String?,
+    selectableModelsForProvider: (ProviderProfile) -> List<String> = ::selectableModelsForProvider,
 ): ModelSelection {
     if (providers.isEmpty()) return ModelSelection(providerId = null, model = "")
 
@@ -26,22 +27,26 @@ fun resolveModelSelection(
     if (currentProvider != null) {
         return ModelSelection(
             providerId = currentProvider.id,
-            model = modelOrFallback(currentProvider, currentModel),
+            model = modelOrFallback(currentProvider, currentModel, selectableModelsForProvider),
         )
     }
 
     val preferredProvider = providers.firstOrNull { it.id == preferredProviderId }
     val provider = preferredProvider ?: providers.first()
     val model = if (preferredProvider != null) {
-        modelOrFallback(provider, preferredModel.orEmpty())
+        modelOrFallback(provider, preferredModel.orEmpty(), selectableModelsForProvider)
     } else {
-        modelOrFallback(provider, "")
+        modelOrFallback(provider, "", selectableModelsForProvider)
     }
 
     return ModelSelection(providerId = provider.id, model = model)
 }
 
-private fun modelOrFallback(provider: ProviderProfile, model: String): String {
+private fun modelOrFallback(
+    provider: ProviderProfile,
+    model: String,
+    selectableModelsForProvider: (ProviderProfile) -> List<String>,
+): String {
     val selectableModels = selectableModelsForProvider(provider)
     return model.trim().takeIf { it in selectableModels }
         ?: selectableModels.firstOrNull().orEmpty()

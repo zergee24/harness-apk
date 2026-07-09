@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "test-2026.07.09.1",
+  "generatedAt": "2026-07-09T00:00:00+08:00",
+  "providers": [
+    {
+      "providerId": "openai",
+      "displayName": "OpenAI",
+      "baseUrl": "https://happycode.vip/v1",
+      "defaultModelId": "gpt-5.5",
+      "models": [
+        {
+          "modelId": "gpt-5.5",
+          "contextWindowTokens": 200000,
+          "maxOutputTokens": 32000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text", "image"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "supportsReasoningEffort": true,
+          "reasoningEffortOptions": ["low", "medium", "high", "xhigh"],
+          "defaultReasoningEffort": "high",
+          "webSearch": { "mode": "openai_web_search_options", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        },
+        {
+          "modelId": "gpt-5.5-test",
+          "contextWindowTokens": 200000,
+          "defaultCompressionThresholdPercent": 70,
+          "inputModalities": ["text"],
+          "outputModalities": ["text"],
+          "supportsStreaming": true,
+          "supportsReasoningEffort": true,
+          "reasoningEffortOptions": ["low", "medium", "high", "xhigh"],
+          "defaultReasoningEffort": "high",
+          "webSearch": { "mode": "openai_web_search_options", "defaultEnabled": false },
+          "timeouts": { "readMs": 180000 }
+        }
+      ]
+    }
+  ]
+}
