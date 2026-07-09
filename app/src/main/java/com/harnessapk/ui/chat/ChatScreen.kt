@@ -146,6 +146,8 @@ fun ChatScreen(
     conversationId: String,
     initialProjectId: String? = null,
     autoFocusInput: Boolean = false,
+    sessionConfigRequestKey: Int = 0,
+    onSessionConfigRequestConsumed: () -> Unit = {},
     contentPadding: PaddingValues,
 ) {
     val messages by container.chatRepository.observeMessages(conversationId).collectAsState(initial = emptyList())
@@ -370,6 +372,13 @@ fun ChatScreen(
     LaunchedEffect(webSearchSettings.enabled) {
         if (!shouldShowWebSearchButton(webSearchSettings)) {
             webSearchEnabled = false
+        }
+    }
+
+    LaunchedEffect(sessionConfigRequestKey) {
+        if (sessionConfigRequestKey > 0) {
+            showSessionConfig = true
+            onSessionConfigRequestConsumed()
         }
     }
 
@@ -930,20 +939,6 @@ fun ChatScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),
     ) {
-        ResponsiveChatContentRail {
-            ProviderAndModelPicker(
-                providers = providers,
-                selectedProviderId = selectedProviderId,
-                selectedModel = selectedModel,
-                selectedReasoningEffort = selectedReasoningEffort,
-                onOpenModelPicker = { showModelPicker = true },
-                sessionConfigText = sessionConfigButtonText(
-                    projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
-                ),
-                onOpenSessionConfig = { showSessionConfig = true },
-            )
-        }
-
         errorText?.let { ResponsiveChatContentRail { InlineError(it) } }
         sessionStatus?.let { ResponsiveChatContentRail { InlineStatus(it) } }
 
@@ -1043,6 +1038,11 @@ fun ChatScreen(
                 onStartVoiceTranscription = {
                     errorText = "语音能力已开启，但当前版本暂未接入可用的语音输入方案"
                 },
+                providers = providers,
+                selectedProviderId = selectedProviderId,
+                selectedModel = selectedModel,
+                selectedReasoningEffort = selectedReasoningEffort,
+                onOpenModelPicker = { showModelPicker = true },
                 contextStatus = contextStatus,
                 isCompressingContext = isCompressingContext,
                 onCompressContext = ::compressContextNow,
@@ -1231,11 +1231,11 @@ internal fun modelPickerButtonText(
 ): String {
     val selectedProvider = providers.firstOrNull { it.id == selectedProviderId } ?: return "先配置模型"
     val reasoningText = if (supportsReasoningEffort(selectedProvider, selectedModel)) {
-        " · 推理${selectedReasoningEffort.label}"
+        " · ${selectedReasoningEffort.label}"
     } else {
         ""
     }
-    return "${selectedProvider.name} · $selectedModel$reasoningText"
+    return "$selectedModel$reasoningText"
 }
 
 internal fun errorDisplayText(errorText: String): String = errorText
@@ -1402,10 +1402,6 @@ private fun ContextEventLine(text: String) {
         }
     }
 }
-
-internal fun sessionConfigButtonText(
-    projectName: String?,
-): String = projectName ?: "临时"
 
 private data class MarkdownUpdateReviewState(
     val proposals: List<MarkdownUpdateProposal>,
@@ -1694,59 +1690,6 @@ internal fun markdownWriteBackAppliedEvent(paths: List<String>): String {
         "已沉淀到项目"
     } else {
         "已沉淀到项目：${visiblePaths.joinToString("、")}"
-    }
-}
-
-@Composable
-private fun ProviderAndModelPicker(
-    providers: List<ProviderProfile>,
-    selectedProviderId: String?,
-    selectedModel: String,
-    selectedReasoningEffort: ReasoningEffort,
-    onOpenModelPicker: () -> Unit,
-    sessionConfigText: String,
-    onOpenSessionConfig: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        shadowElevation = 1.dp,
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedButton(
-                modifier = Modifier.weight(1f),
-                enabled = providers.isNotEmpty(),
-                onClick = onOpenModelPicker,
-            ) {
-                Text(
-                    text = modelPickerButtonText(providers, selectedProviderId, selectedModel, selectedReasoningEffort),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            OutlinedButton(
-                modifier = Modifier.widthIn(max = 156.dp),
-                onClick = onOpenSessionConfig,
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Outlined.Assignment,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                )
-                Text(
-                    text = sessionConfigText,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
     }
 }
 
@@ -2162,6 +2105,11 @@ private fun ChatInputBar(
     onToggleWebSearch: (Boolean) -> Unit,
     showVoiceInput: Boolean,
     onStartVoiceTranscription: () -> Unit,
+    providers: List<ProviderProfile>,
+    selectedProviderId: String?,
+    selectedModel: String,
+    selectedReasoningEffort: ReasoningEffort,
+    onOpenModelPicker: () -> Unit,
     contextStatus: ContextWindowStatus,
     isCompressingContext: Boolean,
     onCompressContext: () -> Unit,
@@ -2228,6 +2176,13 @@ private fun ChatInputBar(
                         label = { Text("语音") },
                     )
                 }
+                ModelStatusChip(
+                    providers = providers,
+                    selectedProviderId = selectedProviderId,
+                    selectedModel = selectedModel,
+                    selectedReasoningEffort = selectedReasoningEffort,
+                    onOpenModelPicker = onOpenModelPicker,
+                )
                 ContextStatusChip(
                     contextStatus = contextStatus,
                     expanded = showContextDetails,
@@ -2290,6 +2245,28 @@ private fun ChatInputBar(
             }
         }
     }
+}
+
+@Composable
+private fun ModelStatusChip(
+    providers: List<ProviderProfile>,
+    selectedProviderId: String?,
+    selectedModel: String,
+    selectedReasoningEffort: ReasoningEffort,
+    onOpenModelPicker: () -> Unit,
+) {
+    FilterChip(
+        selected = false,
+        enabled = providers.isNotEmpty(),
+        onClick = onOpenModelPicker,
+        label = {
+            Text(
+                text = modelPickerButtonText(providers, selectedProviderId, selectedModel, selectedReasoningEffort),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+    )
 }
 
 @Composable

@@ -102,6 +102,7 @@ fun HarnessApkApp() {
     val canGoBack = route != null && route != Routes.Conversations
     var mainMode by rememberSaveable { mutableStateOf(MainMode.SESSION) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
+    var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
     val isHomeRoute = route == Routes.Conversations || route == null
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
@@ -155,6 +156,10 @@ fun HarnessApkApp() {
                             },
                             onOpenSettings = { navController.navigate(Routes.Settings) },
                         )
+                    } else if (route == Routes.ChatPattern) {
+                        IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
+                            Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
+                        }
                     }
                 },
             )
@@ -217,6 +222,8 @@ fun HarnessApkApp() {
                     conversationId = entry.arguments?.getString("conversationId").orEmpty(),
                     initialProjectId = entry.arguments?.getString("projectId"),
                     autoFocusInput = entry.arguments?.getBoolean("focusInput") == true,
+                    sessionConfigRequestKey = chatSessionConfigRequestKey,
+                    onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
                     contentPadding = padding,
                 )
             }

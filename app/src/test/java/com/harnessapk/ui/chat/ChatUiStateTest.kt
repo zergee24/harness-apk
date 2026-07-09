@@ -134,17 +134,17 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun modelPickerButtonTextUsesSelectedProviderAndModel() {
+    fun modelPickerButtonTextUsesModelAndReasoningEffortOnly() {
         val providers = listOf(providerProfile(defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")))
 
-        assertEquals("OpenAI · gpt-5.5 · 推理高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.HIGH))
+        assertEquals("gpt-5.5 · 高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.HIGH))
     }
 
     @Test
     fun modelPickerButtonTextSupportsExtraHighReasoningEffort() {
         val providers = listOf(providerProfile(defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")))
 
-        assertEquals("OpenAI · gpt-5.5 · 推理超高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.XHIGH))
+        assertEquals("gpt-5.5 · 超高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.XHIGH))
     }
 
     @Test
@@ -162,7 +162,7 @@ class ChatUiStateTest {
             ),
         )
 
-        assertEquals("Kimi · kimi-k2.7-code", modelPickerButtonText(providers, "provider", "kimi-k2.7-code", ReasoningEffort.HIGH))
+        assertEquals("kimi-k2.7-code", modelPickerButtonText(providers, "provider", "kimi-k2.7-code", ReasoningEffort.HIGH))
     }
 
     @Test
@@ -426,12 +426,6 @@ class ChatUiStateTest {
             ChatAutoScrollMode.ANIMATE_TO_BOTTOM,
             chatAutoScrollMode(previous = previous, current = current),
         )
-    }
-
-    @Test
-    fun sessionConfigButtonTextStaysCompact() {
-        assertEquals("Harness", sessionConfigButtonText(projectName = "Harness"))
-        assertEquals("临时", sessionConfigButtonText(projectName = null))
     }
 
     @Test

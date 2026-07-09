@@ -50,7 +50,7 @@ internal fun contextWindowStatusText(status: ContextWindowStatus): String {
 }
 
 internal fun contextWindowStatusCompactText(status: ContextWindowStatus): String =
-    "${contextWindowUsagePercent(status)}% · ${status.usedTokens.toKiloText()}"
+    "${contextWindowUsagePercent(status)}%"
 
 internal fun contextWindowUsagePercent(status: ContextWindowStatus): Int =
     (contextWindowUsageProgress(status) * 100).roundToInt()
