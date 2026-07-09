@@ -57,7 +57,7 @@ internal class IncrementalMarkdownBlockCache(
         val maxLength = source.length.coerceAtMost(maxStableChunkChars)
         val safeBoundary = latestSafeBoundary(source, maxLength)
         if (safeBoundary != null) return safeBoundary
-        if (source.take(maxLength).hasUnclosedFence()) return null
+        if (source.take(maxLength).hasOpenStreamingStructure()) return null
         return if (source.length > maxStableChunkChars + maxTailChars) maxStableChunkChars else null
     }
 
@@ -84,7 +84,7 @@ internal class IncrementalMarkdownBlockCache(
         val listBreaks = listBoundary.findAll(window).map { it.range.first }
         return (paragraphBreaks + headingBreaks + listBreaks)
             .filter { it >= MIN_SAFE_BOUNDARY_CHARS }
-            .filterNot { source.take(it).hasUnclosedFence() }
+            .filterNot { source.take(it).hasOpenStreamingStructure() }
             .maxOrNull()
     }
 
@@ -121,4 +121,46 @@ private fun String.hasUnclosedFence(): Boolean {
         activeMarker = if (activeMarker == marker) null else activeMarker ?: marker
     }
     return activeMarker != null
+}
+
+private fun String.hasOpenStreamingStructure(): Boolean =
+    hasUnclosedFence() || hasUnclosedDisplayMath() || hasUnclosedTable()
+
+private fun String.hasUnclosedDisplayMath(): Boolean {
+    var dollarMathOpen = false
+    var bracketMathOpen = false
+    lineSequence().forEach { line ->
+        when (line.trim()) {
+            "$$" -> dollarMathOpen = !dollarMathOpen
+            "\\[" -> bracketMathOpen = true
+            "\\]" -> bracketMathOpen = false
+        }
+    }
+    return dollarMathOpen || bracketMathOpen
+}
+
+private fun String.hasUnclosedTable(): Boolean {
+    val lines = lines()
+    val delimiterIndex = lines.indexOfFirst { it.isGfmTableDelimiterLine() }
+    if (delimiterIndex <= 0) return false
+    if (!lines[delimiterIndex - 1].isLikelyTableRow()) return false
+    return lines
+        .drop(delimiterIndex + 1)
+        .none { it.isBlank() }
+}
+
+private fun String.isLikelyTableRow(): Boolean {
+    val trimmed = trim()
+    return trimmed.count { it == '|' } >= 2
+}
+
+private fun String.isGfmTableDelimiterLine(): Boolean {
+    val cells = trim().trim('|').split('|')
+    if (cells.size < 2) return false
+    return cells.all { cell ->
+        val normalized = cell.trim()
+        normalized.length >= 3 &&
+            normalized.all { it == '-' || it == ':' } &&
+            normalized.any { it == '-' }
+    }
 }

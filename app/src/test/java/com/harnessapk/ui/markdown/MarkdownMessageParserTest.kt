@@ -242,6 +242,59 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun incrementalParserKeepsUnclosedDisplayMathInTailDuringStreaming() {
+        val cache = IncrementalMarkdownBlockCache(
+            maxStableChunkChars = 24,
+            maxTailChars = 12,
+            parse = { source -> listOf(MarkdownBlock.Paragraph(listOf(MarkdownInline.Text(source)))) },
+        )
+        val source = """
+            已经稳定的前言。
+
+            $$
+            E = mc^2
+            + a_1
+            + a_2
+            + a_3
+            + a_4
+            + a_5
+            + a_6
+        """.trimIndent()
+
+        val chunks = cache.chunksFor(source)
+
+        assertEquals(listOf(true, false), chunks.map { it.stable })
+        assertEquals("已经稳定的前言。\n\n", chunks.first().source)
+        assertTrue(chunks.last().source.startsWith("$$"))
+        assertEquals(source.removePrefix(chunks.first().source), chunks.last().source)
+    }
+
+    @Test
+    fun incrementalParserKeepsStreamingTableInTailUntilBlankLineClosesIt() {
+        val cache = IncrementalMarkdownBlockCache(
+            maxStableChunkChars = 36,
+            maxTailChars = 16,
+            parse = { source -> listOf(MarkdownBlock.Paragraph(listOf(MarkdownInline.Text(source)))) },
+        )
+        val source = """
+            已经稳定的前言。
+
+            | 命令 | 用途 |
+            | --- | --- |
+            | git status | 查看状态 |
+            | git add . | 暂存 |
+            | git commit | 提交 |
+        """.trimIndent()
+
+        val chunks = cache.chunksFor(source)
+
+        assertEquals(listOf(true, false), chunks.map { it.stable })
+        assertEquals("已经稳定的前言。\n\n", chunks.first().source)
+        assertTrue(chunks.last().source.startsWith("| 命令 | 用途 |"))
+        assertEquals(source.removePrefix(chunks.first().source), chunks.last().source)
+    }
+
+    @Test
     fun parsesMarkdownRegressionCorpus() {
         val samples = listOf(
             "nested_lists.md" to MarkdownBlock.BulletList::class,
