@@ -1,7 +1,13 @@
 package com.harnessapk.ui.provider
 
 import com.harnessapk.provider.ModelConfig
+import com.harnessapk.provider.ModelCapability
+import com.harnessapk.provider.ProviderCapabilityCatalog
+import com.harnessapk.provider.ProviderCapabilityTemplate
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.CapabilitySource
+import com.harnessapk.provider.ProviderTemplates
+import com.harnessapk.provider.ResolvedModelCapability
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -56,18 +62,116 @@ class ProviderSettingsUiStateTest {
     }
 
     @Test
-    fun modelConfigListMaintainsReasoningSwitchIndependently() {
-        val configs = listOf(
-            ModelConfig("gpt-5.5", supportsReasoningEffort = true),
-            ModelConfig("gpt-5.5-mini", supportsReasoningEffort = false),
+    fun templateModelConfigsPreferRemoteCatalogModels() {
+        val template = ProviderTemplates.defaults.first { it.name == "OpenAI" }
+        val catalog = ProviderCapabilityCatalog(
+            catalogVersion = "remote",
+            providers = listOf(
+                ProviderCapabilityTemplate(
+                    providerId = "openai",
+                    displayName = "OpenAI",
+                    defaultModelId = "gpt-5.5",
+                    models = listOf(
+                        ModelCapability(
+                            id = "gpt-5.5",
+                            contextWindowTokens = 200_000,
+                            compressionThresholdPercent = 70,
+                            inputModalities = listOf("text", "image"),
+                            reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
+                            defaultReasoningEffort = "high",
+                            webSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
+                            readTimeoutMillis = 240_000L,
+                        ),
+                        ModelCapability(
+                            id = "gpt-5.5-mini",
+                            contextWindowTokens = 128_000,
+                            compressionThresholdPercent = 65,
+                        ),
+                    ),
+                ),
+            ),
         )
 
+        val configs = modelConfigsForTemplate(template, catalog)
+
+        assertEquals(listOf("gpt-5.5", "gpt-5.5-mini"), configs.map { it.id })
+        assertEquals(200_000, configs.first().contextWindowTokens)
+        assertEquals(listOf("text", "image"), configs.first().inputModalities)
+        assertEquals(listOf("low", "medium", "high", "xhigh"), configs.first().reasoningEffortOptions)
+        assertEquals("high", configs.first().defaultReasoningEffort)
+        assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, configs.first().webSearchMode)
+        assertEquals(240_000L, configs.first().readTimeoutMillis)
+    }
+
+    @Test
+    fun capabilitySourceSummaryShowsRemoteVersionAndLocalOverride() {
         assertEquals(
-            listOf(
-                ModelConfig("gpt-5.5", supportsReasoningEffort = false),
-                ModelConfig("gpt-5.5-mini", supportsReasoningEffort = false),
+            "remote · 2026.07.09",
+            capabilitySourceSummary(
+                resolvedCapability(
+                    source = CapabilitySource.REMOTE,
+                    catalogVersion = "2026.07.09",
+                ),
             ),
-            updateModelConfigAt(configs, index = 0) { it.copy(supportsReasoningEffort = false) },
+        )
+        assertEquals(
+            "本地覆盖",
+            capabilitySourceSummary(
+                resolvedCapability(
+                    source = CapabilitySource.LOCAL_OVERRIDE,
+                    catalogVersion = "2026.07.09",
+                ),
+            ),
         )
     }
+
+    @Test
+    fun modelConfigDataBarProgressIsBounded() {
+        assertEquals(0.2f, modelConfigDataBarProgress(value = 200_000, maxValue = 1_000_000), 0.001f)
+        assertEquals(1f, modelConfigDataBarProgress(value = 2_000_000, maxValue = 1_000_000), 0.001f)
+        assertEquals(0f, modelConfigDataBarProgress(value = -1, maxValue = 1_000_000), 0.001f)
+        assertEquals(0f, modelConfigDataBarProgress(value = 100, maxValue = 0), 0.001f)
+    }
+
+    @Test
+    fun modelCapabilityHelpersUpdateOneModelConfig() {
+        val config = ModelConfig("gpt-5.5")
+        val withImage = updateInputModality(config, modality = "image", enabled = true)
+        val withReasoning = updateReasoningCapability(withImage, enabled = true)
+        val withSearch = updateModelWebSearchMode(withReasoning, providerName = "OpenAI", enabled = true)
+        val withTool = withSearch.copy(supportsToolCalling = true)
+        val withTimeout = updateReadTimeoutSeconds(withTool, seconds = 240)
+
+        assertEquals(listOf("text", "image"), withImage.inputModalities)
+        assertEquals(listOf("low", "medium", "high", "xhigh"), withReasoning.reasoningEffortOptions)
+        assertEquals("high", withReasoning.defaultReasoningEffort)
+        assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, withSearch.webSearchMode)
+        assertEquals(true, withTool.supportsToolCalling)
+        assertEquals(240_000L, withTimeout.readTimeoutMillis)
+        assertEquals(
+            listOf("text"),
+            updateInputModality(withTimeout, modality = "image", enabled = false).inputModalities,
+        )
+    }
+
+    private fun resolvedCapability(
+        source: CapabilitySource,
+        catalogVersion: String?,
+    ): ResolvedModelCapability = ResolvedModelCapability(
+        providerProfileId = "provider",
+        providerName = "OpenAI",
+        modelId = "gpt-5.5",
+        contextWindowTokens = 200_000,
+        compressionThresholdPercent = 70,
+        maxOutputTokens = null,
+        inputModalities = listOf("text"),
+        outputModalities = listOf("text"),
+        reasoningEffortOptions = emptyList(),
+        defaultReasoningEffort = null,
+        webSearchMode = NativeWebSearchMode.DISABLED,
+        supportsToolCalling = false,
+        readTimeoutMillis = 180_000L,
+        source = source,
+        catalogVersion = catalogVersion,
+    )
 }

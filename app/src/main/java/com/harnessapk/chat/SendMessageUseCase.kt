@@ -8,13 +8,14 @@ import android.util.Base64
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.AppError
 import com.harnessapk.common.toUserMessage
-import com.harnessapk.network.ChatRequest
 import com.harnessapk.network.OpenAiCompatibleClient
 import com.harnessapk.network.OutgoingChatMessage
+import com.harnessapk.provider.ModelCapabilityResolver
+import com.harnessapk.provider.ModelConfig
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.ProviderCapabilityCatalog
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderProfile
-import com.harnessapk.provider.modelConfigForProvider
 import com.harnessapk.session.SessionRequestContext
 import com.harnessapk.session.buildSessionOutgoingMessages
 import com.harnessapk.websearch.WebSearchContext
@@ -22,6 +23,8 @@ import com.harnessapk.websearch.toVisibleSourcesMarkdown
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
+import java.util.UUID
+import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
 class SendMessageUseCase(
@@ -32,6 +35,11 @@ class SendMessageUseCase(
     private val dispatchers: AppDispatchers,
     private val contextCompressor: ContextCompressor = ContextCompressor(),
     private val imageCompressionPolicy: ImageCompressionPolicy = ImageCompressionPolicy(),
+    private val requestBuilder: ModelAwareRequestBuilder = ModelAwareRequestBuilder(),
+    private val remoteCapabilityCatalog: suspend () -> ProviderCapabilityCatalog? = { null },
+    private val outputTransformerPipelineFactory: () -> StreamEventTransformerPipeline = {
+        StreamEventTransformerPipeline(listOf(ThinkTagStreamTransformer()))
+    },
 ) {
     suspend fun send(
         conversationId: String,
@@ -53,8 +61,10 @@ class SendMessageUseCase(
                 provider.profile.defaultModel
             }
         val requestModel = modelForRequest(selectedModel)
-        val selectedModelConfig = modelConfigForProvider(provider.profile, selectedModel)
-        if (attachments.isNotEmpty() && !provider.profile.supportsVision) {
+        val resolvedCapability = ModelCapabilityResolver(
+            remoteCatalog = remoteCapabilityCatalog(),
+        ).resolve(provider.profile, requestModel)
+        if (attachments.isNotEmpty() && !resolvedCapability.supportsImageInput()) {
             val assistantId = chatRepository.insertAssistantPending(
                 conversationId,
                 provider.profile.id,
@@ -66,6 +76,13 @@ class SendMessageUseCase(
 
         val userMessageId = chatRepository.insertUserMessage(conversationId, text, attachments)
         var assistantId: String? = null
+        var requestDiagnostics: ModelAwareRequestDiagnostics? = null
+        var accumulator: StreamingMessageAccumulator? = null
+        var streamClock: TimeMark? = null
+        val traceId = UUID.randomUUID().toString()
+        val startedAtMillis = System.currentTimeMillis()
+        var flushCount = 0
+        var receivedChars = 0
 
         try {
             val imageDataUrls = attachments.map { it.toDataUrl() }
@@ -77,7 +94,7 @@ class SendMessageUseCase(
                 currentImageDataUrls = imageDataUrls,
                 existingMemory = existingMemory,
                 nowMillis = System.currentTimeMillis(),
-                policyOverride = compressionPolicyForModel(selectedModelConfig),
+                policyOverride = compressionPolicyForModel(resolvedCapability.toModelConfig()),
             )
             compressed.memoryToSave?.let { memory ->
                 chatRepository.upsertMemory(memory)
@@ -94,33 +111,56 @@ class SendMessageUseCase(
                 requestModel,
             )
             assistantId = nextAssistantId
-            val streamClock = TimeSource.Monotonic.markNow()
-            val streamBuffer = StreamingTextBuffer()
+            val activeStreamClock = TimeSource.Monotonic.markNow()
+            val activeAccumulator = StreamingMessageAccumulator()
+            streamClock = activeStreamClock
+            accumulator = activeAccumulator
+            var latestSnapshot = StreamingMessageSnapshot(
+                status = MessageStatus.PENDING,
+                parts = emptyList(),
+            )
+            val outputTransformerPipeline = outputTransformerPipelineFactory()
+            val modelAwareRequest = requestBuilder.build(
+                provider = provider.profile,
+                apiKey = provider.apiKey,
+                capability = resolvedCapability,
+                messages = buildSessionOutgoingMessages(sessionContext, compressed.messages, webSearchContext),
+                temperature = temperatureForModel(requestModel),
+                selectedReasoningEffort = reasoningEffort,
+                webSearchRequested = nativeWebSearchMode != null,
+            )
+            requestDiagnostics = modelAwareRequest.diagnostics
 
-            client.streamChat(
-                ChatRequest(
-                    baseUrl = provider.profile.baseUrl,
-                    apiKey = provider.apiKey,
-                    model = requestModel,
-                    messages = buildSessionOutgoingMessages(sessionContext, compressed.messages, webSearchContext),
-                    temperature = temperatureForModel(requestModel),
-                    reasoningEffort = reasoningEffortForRequest(provider.profile, requestModel, reasoningEffort),
-                    nativeWebSearchMode = nativeWebSearchMode,
-                ),
-            ).collect { delta ->
-                streamBuffer.append(delta.text, streamClock.elapsedNow().inWholeMilliseconds)?.let {
-                    chatRepository.appendAssistantText(nextAssistantId, it)
+            client.streamChatEvents(modelAwareRequest.request).collect { event ->
+                outputTransformerPipeline.transform(event).forEach { transformedEvent ->
+                    receivedChars += transformedEvent.visiblePayloadLength()
+                    activeAccumulator.onEvent(
+                        transformedEvent,
+                        activeStreamClock.elapsedNow().inWholeMilliseconds,
+                    )?.let { flush ->
+                        flushCount += 1
+                        latestSnapshot = flush.snapshot
+                        chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+                    }
                 }
             }
-            streamBuffer.drain()?.let {
-                chatRepository.appendAssistantText(nextAssistantId, it)
-            }
             webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
-                chatRepository.appendAssistantText(nextAssistantId, it)
+                latestSnapshot = appendVisibleTextPart(latestSnapshot, it)
+                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
             }
             chatRepository.markAssistantSucceeded(nextAssistantId)
         } catch (cancelled: CancellationException) {
-            assistantId?.let { chatRepository.markAssistantCancelled(it) }
+            assistantId?.let { id ->
+                val cancelledSnapshot = cancelStreamingSnapshot(
+                    accumulator = accumulator,
+                    nowMillis = streamClock?.elapsedNow()?.inWholeMilliseconds ?: 0L,
+                )
+                if (cancelledSnapshot == null) {
+                    chatRepository.markAssistantCancelled(id)
+                } else {
+                    chatRepository.replaceMessagePartsFromSnapshot(id, cancelledSnapshot)
+                }
+            }
             throw cancelled
         } catch (error: Throwable) {
             val failedAssistantId = assistantId ?: chatRepository.insertAssistantPending(
@@ -137,6 +177,14 @@ class SendMessageUseCase(
                     error = error,
                     nowMillis = System.currentTimeMillis(),
                     sensitiveTerms = listOf(provider.apiKey, text),
+                    requestDiagnostics = requestDiagnostics,
+                    runtimeDiagnostics = ChatRuntimeDiagnostics(
+                        traceId = traceId,
+                        startedAtMillis = startedAtMillis,
+                        failedAtMillis = System.currentTimeMillis(),
+                        flushCount = flushCount,
+                        receivedChars = receivedChars,
+                    ),
                 ),
             )
         }
@@ -194,6 +242,38 @@ class SendMessageUseCase(
     }
 }
 
+internal fun appendVisibleTextPart(
+    snapshot: StreamingMessageSnapshot,
+    text: String,
+): StreamingMessageSnapshot {
+    if (text.isBlank()) return snapshot
+    return snapshot.copy(
+        parts = snapshot.parts + UiMessagePartDraft(
+            index = snapshot.parts.size,
+            type = UiMessagePartType.TEXT,
+            content = text,
+            metadata = emptyMap(),
+            stable = snapshot.status != MessageStatus.PENDING && snapshot.status != MessageStatus.STREAMING,
+        ),
+    )
+}
+
+internal fun cancelStreamingSnapshot(
+    accumulator: StreamingMessageAccumulator?,
+    nowMillis: Long,
+): StreamingMessageSnapshot? =
+    accumulator?.cancel(nowMillis)?.snapshot
+
+data class ChatRuntimeDiagnostics(
+    val traceId: String,
+    val startedAtMillis: Long,
+    val failedAtMillis: Long,
+    val flushCount: Int,
+    val receivedChars: Int,
+) {
+    val elapsedMillis: Long = (failedAtMillis - startedAtMillis).coerceAtLeast(0L)
+}
+
 internal fun buildChatErrorLog(
     provider: ProviderProfile,
     requestModel: String,
@@ -201,23 +281,63 @@ internal fun buildChatErrorLog(
     error: Throwable,
     nowMillis: Long,
     sensitiveTerms: List<String> = emptyList(),
+    requestDiagnostics: ModelAwareRequestDiagnostics? = null,
+    runtimeDiagnostics: ChatRuntimeDiagnostics? = null,
 ): String {
     val userMessage = error.toUserMessage().asLlmFailureMessage()
-    val details = listOf(
-        userMessage,
-        "--- 诊断日志 ---",
-        "Time: $nowMillis",
-        "Provider: ${provider.name}",
-        "Provider ID: ${provider.id}",
-        "Base URL: ${provider.baseUrl}",
-        "Model: $requestModel",
-        "Conversation: $conversationId",
-        "Exception: ${error::class.java.name}",
-        "Message: ${error.message.orEmpty().ifBlank { "(empty)" }}",
+    val details = (
+        listOf(
+            userMessage,
+            "--- 诊断日志 ---",
+            "Time: $nowMillis",
+            "Provider: ${provider.name}",
+            "Provider ID: ${provider.id}",
+            "Base URL: ${provider.baseUrl}",
+            "Model: $requestModel",
+            "Conversation: $conversationId",
+            "Exception: ${error::class.java.name}",
+            "Message: ${error.message.orEmpty().ifBlank { "(empty)" }}",
+        ) + runtimeDiagnostics.toLogLinesOrEmpty() + requestDiagnostics.toLogLinesOrEmpty()
     ).joinToString("\n")
 
     return details.hideSensitiveTerms(sensitiveTerms)
 }
+
+private fun ChatRuntimeDiagnostics?.toLogLinesOrEmpty(): List<String> =
+    this?.let {
+        listOf(
+            "Trace ID: ${it.traceId}",
+            "Started At: ${it.startedAtMillis}",
+            "Failed At: ${it.failedAtMillis}",
+            "Elapsed Ms: ${it.elapsedMillis}",
+            "Flush Count: ${it.flushCount}",
+            "Received Chars: ${it.receivedChars}",
+        )
+    }.orEmpty()
+
+private fun ModelAwareRequestDiagnostics?.toLogLinesOrEmpty(): List<String> =
+    this?.toLogLines().orEmpty()
+
+private fun StreamEvent.visiblePayloadLength(): Int = when (this) {
+    is StreamEvent.TextDelta -> text.length
+    is StreamEvent.ReasoningDelta -> text.length
+    is StreamEvent.ToolCallDelta -> argumentsDelta.length
+    is StreamEvent.ToolResult -> content.length
+    is StreamEvent.SearchResult -> snippet.length
+    is StreamEvent.Finished,
+    is StreamEvent.RawProviderEvent,
+    is StreamEvent.Usage -> 0
+}
+
+private fun com.harnessapk.provider.ResolvedModelCapability.supportsImageInput(): Boolean =
+    inputModalities.any { it.equals("image", ignoreCase = true) }
+
+private fun com.harnessapk.provider.ResolvedModelCapability.toModelConfig(): ModelConfig =
+    ModelConfig(
+        id = modelId,
+        contextWindowTokens = contextWindowTokens,
+        compressionThresholdPercent = compressionThresholdPercent,
+    )
 
 private fun String.hideSensitiveTerms(sensitiveTerms: List<String>): String {
     return sensitiveTerms

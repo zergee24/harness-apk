@@ -4,6 +4,8 @@ import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.ReasoningEffort
+import com.harnessapk.chat.UiMessagePartDraft
+import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.provider.ProviderProfile
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeStatus
@@ -134,17 +136,36 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun modelPickerButtonTextUsesSelectedProviderAndModel() {
+    fun resolveModelSelectionCanUseCapabilityProvidedModels() {
+        val providers = listOf(
+            providerProfile(id = "openai", name = "OpenAI", defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")),
+        )
+
+        val selection = resolveModelSelection(
+            providers = providers,
+            currentProviderId = null,
+            currentModel = "",
+            preferredProviderId = "openai",
+            preferredModel = "gpt-5.5-pro",
+            selectableModelsForProvider = { listOf("gpt-5.5", "gpt-5.5-pro") },
+        )
+
+        assertEquals("openai", selection.providerId)
+        assertEquals("gpt-5.5-pro", selection.model)
+    }
+
+    @Test
+    fun modelPickerButtonTextUsesModelAndReasoningEffortOnly() {
         val providers = listOf(providerProfile(defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")))
 
-        assertEquals("OpenAI · gpt-5.5 · 推理高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.HIGH))
+        assertEquals("gpt-5.5 · 高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.HIGH))
     }
 
     @Test
     fun modelPickerButtonTextSupportsExtraHighReasoningEffort() {
         val providers = listOf(providerProfile(defaultModel = "gpt-5.5", availableModels = listOf("gpt-5.5")))
 
-        assertEquals("OpenAI · gpt-5.5 · 推理超高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.XHIGH))
+        assertEquals("gpt-5.5 · 超高", modelPickerButtonText(providers, "provider", "gpt-5.5", ReasoningEffort.XHIGH))
     }
 
     @Test
@@ -162,7 +183,7 @@ class ChatUiStateTest {
             ),
         )
 
-        assertEquals("Kimi · kimi-k2.7-code", modelPickerButtonText(providers, "provider", "kimi-k2.7-code", ReasoningEffort.HIGH))
+        assertEquals("kimi-k2.7-code", modelPickerButtonText(providers, "provider", "kimi-k2.7-code", ReasoningEffort.HIGH))
     }
 
     @Test
@@ -195,6 +216,69 @@ class ChatUiStateTest {
         )
 
         assertEquals("第一段 **重点**\n第二段", messageSelectionCopyText(message))
+    }
+
+    @Test
+    fun messageDisplayPartsUsesPersistedPartsWhenAvailable() {
+        val message = assistantMessage(
+            status = MessageStatus.SUCCEEDED,
+            content = "旧 content 缓存",
+        )
+        val parts = listOf(
+            UiMessagePartDraft(
+                index = 0,
+                type = UiMessagePartType.TEXT,
+                content = "稳定块",
+                stable = true,
+            ),
+            UiMessagePartDraft(
+                index = 1,
+                type = UiMessagePartType.TEXT,
+                content = "尾块",
+                stable = false,
+            ),
+        )
+
+        assertEquals(parts, messageDisplayParts(message, parts))
+    }
+
+    @Test
+    fun messageDisplayPartsBackfillsLegacyContentWhenPartsAreMissing() {
+        val message = assistantMessage(
+            status = MessageStatus.SUCCEEDED,
+            content = "旧 content 缓存",
+        )
+
+        val parts = messageDisplayParts(message, emptyList())
+
+        assertEquals(1, parts.size)
+        assertEquals(UiMessagePartType.TEXT, parts.single().type)
+        assertEquals("旧 content 缓存", parts.single().content)
+        assertTrue(parts.single().stable)
+    }
+
+    @Test
+    fun messageSelectionCopyTextPrefersPersistedTextParts() {
+        val message = assistantMessage(
+            status = MessageStatus.SUCCEEDED,
+            content = "旧 content 缓存",
+        )
+        val parts = listOf(
+            UiMessagePartDraft(
+                index = 0,
+                type = UiMessagePartType.REASONING,
+                content = "内部推理",
+                stable = true,
+            ),
+            UiMessagePartDraft(
+                index = 1,
+                type = UiMessagePartType.TEXT,
+                content = "可见正文",
+                stable = true,
+            ),
+        )
+
+        assertEquals("可见正文", messageSelectionCopyText(message, parts))
     }
 
     @Test
@@ -312,6 +396,24 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun chatContentWidthUsesAvailableWidthOnPhone() {
+        assertEquals(390, chatContentMaxWidthDp(availableWidthDp = 390))
+        assertEquals(358, messageBubbleMaxWidthDp(contentWidthDp = 390))
+    }
+
+    @Test
+    fun chatContentWidthIsCappedOnFoldableScreens() {
+        assertEquals(760, chatContentMaxWidthDp(availableWidthDp = 1100))
+        assertEquals(699, messageBubbleMaxWidthDp(contentWidthDp = 760))
+    }
+
+    @Test
+    fun messageBubbleSideKeepsAssistantLeftAndUserRight() {
+        assertEquals(ChatBubbleSide.START, messageBubbleSide(MessageRole.ASSISTANT))
+        assertEquals(ChatBubbleSide.END, messageBubbleSide(MessageRole.USER))
+    }
+
+    @Test
     fun handleStopIntentCancelsActiveSend() {
         val events = mutableListOf<String>()
 
@@ -324,7 +426,46 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun autoScrollKeyChangesWhenStreamingAssistantContentGrows() {
+    fun autoScrollModeJumpsToBottomOnInitialConversationLoad() {
+        val current = autoScrollKey(
+            listOf(
+                userMessage(id = "first", content = "第一条"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "最后一条"),
+            ),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.JUMP_TO_BOTTOM,
+            chatAutoScrollMode(previous = null, current = current),
+        )
+    }
+
+    @Test
+    fun initialConversationLoadScrollTargetUsesBottomOffset() {
+        assertEquals(
+            ChatScrollTarget(index = 9, scrollOffset = CHAT_SCROLL_TO_BOTTOM_OFFSET_PX),
+            chatScrollTarget(ChatAutoScrollMode.JUMP_TO_BOTTOM, lastMessageIndex = 9),
+        )
+    }
+
+    @Test
+    fun autoScrollModeJumpsToBottomWhenHistoryLoadsAfterEmptyState() {
+        val previous = autoScrollKey(emptyList())
+        val current = autoScrollKey(
+            listOf(
+                userMessage(id = "first", content = "第一条"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "最后一条"),
+            ),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.JUMP_TO_BOTTOM,
+            chatAutoScrollMode(previous = previous, current = current),
+        )
+    }
+
+    @Test
+    fun autoScrollModeFollowsStreamingContentGrowthWhenUserIsNearBottom() {
         val firstKey = autoScrollKey(
             listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你")),
         )
@@ -332,13 +473,60 @@ class ChatUiStateTest {
             listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你好，继续")),
         )
 
-        assertEquals(false, firstKey == nextKey)
+        assertEquals(
+            ChatAutoScrollMode.STREAM_TO_BOTTOM,
+            chatAutoScrollMode(previous = firstKey, current = nextKey, canFollowStreaming = true),
+        )
     }
 
     @Test
-    fun sessionConfigButtonTextStaysCompact() {
-        assertEquals("Harness", sessionConfigButtonText(projectName = "Harness"))
-        assertEquals("临时", sessionConfigButtonText(projectName = null))
+    fun autoScrollModeFollowsStreamingPartUpdatesWhenLegacyContentLengthIsUnchanged() {
+        val firstKey = AutoScrollKey(
+            messageCount = 1,
+            lastMessageId = "assistant-1",
+            lastMessageStatus = MessageStatus.STREAMING,
+            lastMessageContentLength = 0,
+            lastMessageUpdatedAt = 100L,
+        )
+        val nextKey = firstKey.copy(lastMessageUpdatedAt = 400L)
+
+        assertEquals(
+            ChatAutoScrollMode.STREAM_TO_BOTTOM,
+            chatAutoScrollMode(previous = firstKey, current = nextKey, canFollowStreaming = true),
+        )
+    }
+
+    @Test
+    fun autoScrollModeDoesNotFollowStreamingContentGrowthWhenUserScrolledAway() {
+        val firstKey = autoScrollKey(
+            listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你")),
+        )
+        val nextKey = autoScrollKey(
+            listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你好，继续")),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.NONE,
+            chatAutoScrollMode(previous = firstKey, current = nextKey, canFollowStreaming = false),
+        )
+    }
+
+    @Test
+    fun autoScrollModeAnimatesOnlyWhenANewMessageAppears() {
+        val previous = autoScrollKey(
+            listOf(userMessage(id = "first", content = "第一条")),
+        )
+        val current = autoScrollKey(
+            listOf(
+                userMessage(id = "first", content = "第一条"),
+                assistantMessage(status = MessageStatus.PENDING, content = ""),
+            ),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.ANIMATE_TO_BOTTOM,
+            chatAutoScrollMode(previous = previous, current = current),
+        )
     }
 
     @Test
@@ -395,6 +583,7 @@ class ChatUiStateTest {
     @Test
     fun fileChangeSuggestionOnlyRespondsToMarkdownWritingIntent() {
         assertTrue(shouldSuggestFileChangeMode("帮我写 PRD，并生成 md"))
+        assertTrue(shouldSuggestFileChangeMode("生成md"))
         assertTrue(shouldSuggestFileChangeMode("整理 README"))
         assertTrue(shouldSuggestFileChangeMode("把这段沉淀到项目"))
         assertFalse(shouldSuggestFileChangeMode("这个功能怎么理解？"))
@@ -403,8 +592,33 @@ class ChatUiStateTest {
     @Test
     fun fileChangeEntryOnlyShowsForMarkdownWritingIntent() {
         assertTrue(shouldShowFileChangeModeEntry("帮我写 PRD"))
+        assertTrue(shouldShowFileChangeModeEntry("生成md"))
         assertFalse(shouldShowFileChangeModeEntry("普通问答"))
         assertFalse(shouldShowFileChangeModeEntry(""))
+    }
+
+    @Test
+    fun markdownFileChangeConversationContextKeepsRecentUserAndAssistantMessages() {
+        val context = markdownFileChangeConversationContext(
+            messages = listOf(
+                userMessage(content = "讨论移动端项目方向"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "建议做 Markdown 优先的项目工作台"),
+                ChatMessage(
+                    id = "system",
+                    conversationId = "conversation",
+                    role = MessageRole.SYSTEM,
+                    content = "已沉淀到项目：old.md",
+                    status = MessageStatus.SUCCEEDED,
+                    providerId = null,
+                    model = null,
+                    errorMessage = null,
+                ),
+            ),
+        )
+
+        assertTrue(context.contains("用户：讨论移动端项目方向"))
+        assertTrue(context.contains("助手：建议做 Markdown 优先的项目工作台"))
+        assertFalse(context.contains("已沉淀到项目"))
     }
 
     @Test
@@ -446,11 +660,14 @@ class ChatUiStateTest {
         assertEquals("M", markdownFileChangeOperationLabel(items[1]))
     }
 
-    private fun userMessage(): ChatMessage = ChatMessage(
-        id = "user",
+    private fun userMessage(
+        id: String = "user",
+        content: String = "hello",
+    ): ChatMessage = ChatMessage(
+        id = id,
         conversationId = "conversation",
         role = MessageRole.USER,
-        content = "hello",
+        content = content,
         status = MessageStatus.SUCCEEDED,
         providerId = null,
         model = null,

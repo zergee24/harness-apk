@@ -38,7 +38,7 @@ class ContextWindowStatusTest {
         assertEquals(400_000, status.maxTokens)
         assertEquals(70, status.compressionThresholdPercent)
         assertEquals("上下文 1.2k / 400.0k", contextWindowStatusText(status))
-        assertEquals("0% · 1.2k", contextWindowStatusCompactText(status))
+        assertEquals("0%", contextWindowStatusCompactText(status))
     }
 
     @Test
@@ -62,7 +62,33 @@ class ContextWindowStatusTest {
 
         assertEquals(100, contextWindowUsagePercent(status))
         assertEquals(1f, contextWindowUsageProgress(status))
-        assertEquals("100% · 21.0k", contextWindowStatusCompactText(status))
+        assertEquals("100%", contextWindowStatusCompactText(status))
+    }
+
+    @Test
+    fun manualCompressionIsAvailableOnlyAtOrAboveThreshold() {
+        assertEquals(
+            false,
+            contextWindowCanManualCompress(
+                ContextWindowStatus(
+                    usedTokens = 69_999,
+                    maxTokens = 100_000,
+                    compressionThresholdPercent = 70,
+                    compressedMessageCount = 0,
+                ),
+            ),
+        )
+        assertEquals(
+            true,
+            contextWindowCanManualCompress(
+                ContextWindowStatus(
+                    usedTokens = 70_000,
+                    maxTokens = 100_000,
+                    compressionThresholdPercent = 70,
+                    compressedMessageCount = 0,
+                ),
+            ),
+        )
     }
 
     @Test

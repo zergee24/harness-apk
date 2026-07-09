@@ -66,9 +66,55 @@ class ProviderRepositoryTest {
         assertEquals(listOf("gpt-5.5", "gpt-5.5-pro", "gpt-5.5-vision"), profile.availableModels)
         assertEquals(200_000, profile.modelConfigs.first { it.id == "gpt-5.5" }.contextWindowTokens)
         assertEquals(
-            "gpt-5.5|200000|70|true\ngpt-5.5-pro|200000|70|true\ngpt-5.5-vision|200000|70|true",
+            "gpt-5.5|200000|70\ngpt-5.5-pro|200000|70\ngpt-5.5-vision|200000|70",
             stored.availableModels,
         )
+    }
+
+    @Test
+    fun saveProviderPersistsPerModelCapabilityOverrides() = runTest {
+        val dao = FakeProviderProfileDao()
+        val repository = ProviderRepository(
+            dao = dao,
+            cipher = ReversingCipher,
+            timeProvider = TimeProvider { 10L },
+        )
+
+        val id = repository.saveProvider(
+            ProviderDraft(
+                name = "OpenAI",
+                baseUrl = "https://happycode.vip/v1",
+                apiKey = "secret-key",
+                defaultModel = "gpt-5.5",
+                defaultVisionModel = null,
+                supportsVision = true,
+                modelConfigs = listOf(
+                    ModelConfig(
+                        id = "gpt-5.5",
+                        contextWindowTokens = 200_000,
+                        compressionThresholdPercent = 68,
+                        maxOutputTokens = 32_000,
+                        inputModalities = listOf("text", "image", "audio"),
+                        outputModalities = listOf("text", "audio"),
+                        reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
+                        defaultReasoningEffort = "high",
+                        webSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
+                        supportsToolCalling = true,
+                        readTimeoutMillis = 240_000L,
+                    ),
+                ),
+            ),
+        )
+
+        val config = repository.findById(id)!!.modelConfigs.single()
+        assertEquals(32_000, config.maxOutputTokens)
+        assertEquals(listOf("text", "image", "audio"), config.inputModalities)
+        assertEquals(listOf("text", "audio"), config.outputModalities)
+        assertEquals(listOf("low", "medium", "high", "xhigh"), config.reasoningEffortOptions)
+        assertEquals("high", config.defaultReasoningEffort)
+        assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, config.webSearchMode)
+        assertEquals(true, config.supportsToolCalling)
+        assertEquals(240_000L, config.readTimeoutMillis)
     }
 
     @Test
@@ -102,44 +148,7 @@ class ProviderRepositoryTest {
 
         assertEquals(listOf("gpt-5.5", "custom-local"), profile.availableModels)
         assertEquals(200_000, profile.modelConfigs.first { it.id == "gpt-5.5" }.contextWindowTokens)
-        assertEquals(true, profile.modelConfigs.first { it.id == "gpt-5.5" }.supportsReasoningEffort)
         assertEquals(200_000, profile.modelConfigs.first { it.id == "custom-local" }.contextWindowTokens)
-        assertEquals(true, profile.modelConfigs.first { it.id == "custom-local" }.supportsReasoningEffort)
-    }
-
-    @Test
-    fun saveProviderPersistsModelCapabilitySwitches() = runTest {
-        val dao = FakeProviderProfileDao()
-        val repository = ProviderRepository(
-            dao = dao,
-            cipher = ReversingCipher,
-            timeProvider = TimeProvider { 10L },
-        )
-
-        val id = repository.saveProvider(
-            ProviderDraft(
-                name = "OpenAI",
-                baseUrl = "https://happycode.vip/v1",
-                apiKey = "secret-key",
-                defaultModel = "gpt-5.5",
-                defaultVisionModel = null,
-                supportsVision = true,
-                availableModels = listOf("gpt-5.5", "custom-model"),
-                modelConfigs = listOf(
-                    ModelConfig("gpt-5.5", supportsReasoningEffort = true),
-                    ModelConfig("custom-model", supportsReasoningEffort = false),
-                ),
-            ),
-        )
-
-        val profile = repository.findById(id)!!
-        val stored = dao.findById(id)!!
-        assertEquals(true, profile.modelConfigs.first { it.id == "gpt-5.5" }.supportsReasoningEffort)
-        assertEquals(false, profile.modelConfigs.first { it.id == "custom-model" }.supportsReasoningEffort)
-        assertEquals(
-            "gpt-5.5|200000|70|true\ncustom-model|200000|70|false",
-            stored.availableModels,
-        )
     }
 
     @Test
@@ -167,6 +176,39 @@ class ProviderRepositoryTest {
         val stored = dao.findById(id)!!
         assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, profile.nativeWebSearchMode)
         assertEquals("OPENAI_WEB_SEARCH_OPTIONS", stored.nativeWebSearchMode)
+    }
+
+    @Test
+    fun saveProviderPersistsCustomRequestOverrides() = runTest {
+        val dao = FakeProviderProfileDao()
+        val repository = ProviderRepository(
+            dao = dao,
+            cipher = ReversingCipher,
+            timeProvider = TimeProvider { 10L },
+        )
+
+        val id = repository.saveProvider(
+            ProviderDraft(
+                name = "OpenAI",
+                baseUrl = "https://happycode.vip/v1",
+                apiKey = "secret-key",
+                defaultModel = "gpt-5.5",
+                defaultVisionModel = null,
+                supportsVision = false,
+                customHeaders = mapOf(
+                    " X-Provider-Feature " to " beta ",
+                    "Blank" to " ",
+                ),
+                customBodyJson = """ { "metadata": { "source": "local-override" } } """,
+            ),
+        )
+
+        val profile = repository.findById(id)!!
+        val stored = dao.findById(id)!!
+        assertEquals(mapOf("X-Provider-Feature" to "beta"), profile.customHeaders)
+        assertEquals("""{ "metadata": { "source": "local-override" } }""", profile.customBodyJson)
+        assertEquals("""{"X-Provider-Feature":"beta"}""", stored.customHeadersJson)
+        assertEquals("""{ "metadata": { "source": "local-override" } }""", stored.customBodyJson)
     }
 
     @Test

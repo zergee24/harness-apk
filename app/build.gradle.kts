@@ -7,6 +7,17 @@ plugins {
 fun String.asBuildConfigString(): String =
     "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+val testStoreFile = providers.environmentVariable("ANDROID_TEST_STORE_FILE")
+val testStorePassword = providers.environmentVariable("ANDROID_TEST_STORE_PASSWORD")
+val testKeyAlias = providers.environmentVariable("ANDROID_TEST_KEY_ALIAS")
+val testKeyPassword = providers.environmentVariable("ANDROID_TEST_KEY_PASSWORD")
+val hasTestSigning = listOf(
+    testStoreFile,
+    testStorePassword,
+    testKeyAlias,
+    testKeyPassword,
+).all { it.isPresent }
+
 val releaseStoreFile = providers.environmentVariable("ANDROID_RELEASE_STORE_FILE")
 val releaseStorePassword = providers.environmentVariable("ANDROID_RELEASE_STORE_PASSWORD")
 val releaseKeyAlias = providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS")
@@ -18,6 +29,14 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { it.isPresent }
 
+val appVersionCode = providers.gradleProperty("versionCodeOverride")
+    .map { it.toInt() }
+    .orElse(1015000)
+    .get()
+val appVersionName = providers.gradleProperty("versionNameOverride")
+    .orElse("0.1.15")
+    .get()
+
 android {
     namespace = "com.harnessapk"
     compileSdk = 37
@@ -26,8 +45,8 @@ android {
         applicationId = "com.harnessapk"
         minSdk = 26
         targetSdk = 37
-        versionCode = 15
-        versionName = "0.1.14"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -36,6 +55,14 @@ android {
     }
 
     signingConfigs {
+        if (hasTestSigning) {
+            create("test") {
+                storeFile = file(testStoreFile.get())
+                storePassword = testStorePassword.get()
+                keyAlias = testKeyAlias.get()
+                keyPassword = testKeyPassword.get()
+            }
+        }
         if (hasReleaseSigning) {
             create("release") {
                 storeFile = file(releaseStoreFile.get())
@@ -60,6 +87,14 @@ android {
                     .get()
                     .asBuildConfigString(),
             )
+            buildConfigField(
+                "String",
+                "PROVIDER_CATALOG_URL",
+                providers.gradleProperty("prodProviderCatalogUrl")
+                    .orElse("https://www.zerg.work/harness-apk/catalog/provider-capabilities.json")
+                    .get()
+                    .asBuildConfigString(),
+            )
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -68,11 +103,22 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            if (hasTestSigning) {
+                signingConfig = signingConfigs.getByName("test")
+            }
             buildConfigField(
                 "String",
                 "UPDATE_MANIFEST_URL",
                 providers.gradleProperty("testUpdateManifestUrl")
                     .orElse("https://www.zerg.work/harness-apk/test/update.json")
+                    .get()
+                    .asBuildConfigString(),
+            )
+            buildConfigField(
+                "String",
+                "PROVIDER_CATALOG_URL",
+                providers.gradleProperty("testProviderCatalogUrl")
+                    .orElse("https://www.zerg.work/harness-apk/test/provider-capabilities.json")
                     .get()
                     .asBuildConfigString(),
             )

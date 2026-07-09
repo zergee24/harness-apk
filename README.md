@@ -24,6 +24,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 ```bash
 scripts/release_apk.sh test
 scripts/release_apk.sh prod
+scripts/release_apk.sh test --version-code 1015009
 ```
 
 ## Emulator QA
@@ -56,6 +57,10 @@ GitHub 仓库需要配置：
 Secrets:
 ALIYUN_ACCESS_KEY_ID
 ALIYUN_ACCESS_KEY_SECRET
+ANDROID_TEST_KEYSTORE_BASE64
+ANDROID_TEST_STORE_PASSWORD
+ANDROID_TEST_KEY_ALIAS
+ANDROID_TEST_KEY_PASSWORD
 ANDROID_RELEASE_KEYSTORE_BASE64
 ANDROID_RELEASE_STORE_PASSWORD
 ANDROID_RELEASE_KEY_ALIAS
@@ -67,9 +72,15 @@ OSS_ENDPOINT=oss-ap-southeast-1.aliyuncs.com
 OSS_TEST_PREFIX=harness-apk/test
 OSS_PROD_PREFIX=harness-apk/prod
 OSS_ACL=public-read
-ENABLE_OSS_DEPLOY_ON_PUSH=true
 ```
 
 默认可以在 GitHub Actions 手动运行 `Deploy APK to OSS`，并选择 `test` 或 `prod`。
-推送自动部署只建议用于测试通道；如果要开启，把 `ENABLE_OSS_DEPLOY_ON_PUSH` 设为 `true`。
-`prod` 通道必须配置正式签名 secrets，否则不会上传未签名 APK。
+推送到 `test` 分支会自动部署测试通道；正式通道只建议手动运行 workflow 并选择 `prod`。
+`test` 和 `prod` 通道都必须配置固定签名 secrets，避免同包名覆盖安装时出现签名不一致。
+
+版本策略：
+
+- `versionName` 按产品版本走，例如 `0.1.15`；测试包自动显示为 `0.1.15-debug`。
+- `versionCode` 按机器更新版本走，必须递增。当前基础 code 使用 `1015000` 这类格式，对应 `0.1.15`。
+- GitHub Actions 的 `test` 通道默认使用 `基础 versionCode + GitHub run number`，所以同一个 `versionName` 可以重复打测试包并触发更新。
+- 本地打测试包时，如需强制让手机收到更新，传 `--version-code` 或环境变量 `APK_VERSION_CODE`。

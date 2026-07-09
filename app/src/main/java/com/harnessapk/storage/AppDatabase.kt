@@ -10,16 +10,18 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ConversationEntity::class,
         MessageEntity::class,
         MessageAttachmentEntity::class,
+        MessagePartEntity::class,
         ProviderProfileEntity::class,
         ConversationMemoryEntity::class,
     ],
-    version = 6,
+    version = 8,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
     abstract fun messageDao(): MessageDao
     abstract fun messageAttachmentDao(): MessageAttachmentDao
+    abstract fun messagePartDao(): MessagePartDao
     abstract fun providerProfileDao(): ProviderProfileDao
     abstract fun conversationMemoryDao(): ConversationMemoryDao
 
@@ -69,6 +71,47 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_5_6: Migration = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE conversations ADD COLUMN projectId TEXT")
+            }
+        }
+
+        val MIGRATION_6_7: Migration = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS message_parts (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        messageId TEXT NOT NULL,
+                        partIndex INTEGER NOT NULL,
+                        type TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        metadataJson TEXT NOT NULL,
+                        stable INTEGER NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_message_parts_messageId ON message_parts(messageId)",
+                )
+                db.execSQL(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS index_message_parts_messageId_partIndex
+                    ON message_parts(messageId, partIndex)
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_7_8: Migration = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE provider_profiles ADD COLUMN customHeadersJson TEXT NOT NULL DEFAULT ''",
+                )
+                db.execSQL(
+                    "ALTER TABLE provider_profiles ADD COLUMN customBodyJson TEXT NOT NULL DEFAULT ''",
+                )
             }
         }
     }

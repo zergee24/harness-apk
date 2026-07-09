@@ -62,6 +62,30 @@ class ModelNativeWebSearchTest {
         )
     }
 
+    @Test
+    fun externalBingModeUsesExternalSearchInsteadOfProviderBody() {
+        val settings = WebSearchSettings(enabled = true)
+
+        assertEquals(
+            null,
+            nativeWebSearchModeForRequest(
+                query = "搜索最新 Android 版本",
+                enabledForSession = true,
+                settings = settings,
+                provider = providerProfile(NativeWebSearchMode.EXTERNAL_BING),
+            ),
+        )
+        assertEquals(
+            true,
+            shouldUseExternalWebSearch(
+                query = "搜索最新 Android 版本",
+                enabledForSession = true,
+                settings = settings,
+                nativeWebSearchMode = NativeWebSearchMode.EXTERNAL_BING,
+            ),
+        )
+    }
+
     private fun providerProfile(nativeWebSearchMode: NativeWebSearchMode): ProviderProfile = ProviderProfile(
         id = "provider",
         name = "OpenAI",

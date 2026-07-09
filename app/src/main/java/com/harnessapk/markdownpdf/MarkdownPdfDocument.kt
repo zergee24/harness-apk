@@ -2,6 +2,7 @@ package com.harnessapk.markdownpdf
 
 import com.harnessapk.ui.markdown.MarkdownBlock
 import com.harnessapk.ui.markdown.MarkdownInline
+import com.harnessapk.ui.markdown.MarkdownListItem
 import com.harnessapk.ui.markdown.parseMarkdownBlocks
 import com.harnessapk.ui.markdown.plainText
 
@@ -45,11 +46,11 @@ private fun MarkdownBlock.toPdfLines(): List<MarkdownPdfLine> = when (this) {
         ),
     )
     is MarkdownBlock.Paragraph -> text.plainText().toTextLines(MarkdownPdfTextStyle.BODY)
-    is MarkdownBlock.BulletList -> items.map {
-        MarkdownPdfLine("• ${it.plainText()}", MarkdownPdfTextStyle.LIST)
+    is MarkdownBlock.BulletList -> items.flatMap {
+        it.toPdfLines(prefix = "•")
     }
-    is MarkdownBlock.OrderedList -> items.mapIndexed { index, item ->
-        MarkdownPdfLine("${startNumber + index}. ${item.plainText()}", MarkdownPdfTextStyle.LIST)
+    is MarkdownBlock.OrderedList -> items.flatMapIndexed { index, item ->
+        item.toPdfLines(prefix = "${startNumber + index}.")
     }
     is MarkdownBlock.Quote -> blocks.flatMap { block ->
         block.toPdfLines().map { line ->
@@ -57,12 +58,23 @@ private fun MarkdownBlock.toPdfLines(): List<MarkdownPdfLine> = when (this) {
         }
     }
     is MarkdownBlock.Code -> literal.toTextLines(MarkdownPdfTextStyle.CODE)
+    is MarkdownBlock.Math -> literal.toTextLines(MarkdownPdfTextStyle.CODE)
+    is MarkdownBlock.Mermaid -> literal.toTextLines(MarkdownPdfTextStyle.CODE)
     is MarkdownBlock.Table -> buildList {
         if (headers.isNotEmpty()) add(MarkdownPdfLine(headers.toTableLine(), MarkdownPdfTextStyle.TABLE))
         rows.forEach { row -> add(MarkdownPdfLine(row.toTableLine(), MarkdownPdfTextStyle.TABLE)) }
     }
     MarkdownBlock.Divider -> listOf(MarkdownPdfLine("", MarkdownPdfTextStyle.DIVIDER))
 }
+
+private fun MarkdownListItem.toPdfLines(prefix: String): List<MarkdownPdfLine> =
+    listOf(MarkdownPdfLine("${taskPrefix(prefix)} ${text.plainText()}", MarkdownPdfTextStyle.LIST)) +
+        children.flatMap { child ->
+            child.toPdfLines().map { line -> line.copy(text = "  ${line.text}") }
+        }
+
+private fun MarkdownListItem.taskPrefix(fallback: String): String =
+    taskChecked?.let { if (it) "[x]" else "[ ]" } ?: fallback
 
 private fun String.toTextLines(style: MarkdownPdfTextStyle): List<MarkdownPdfLine> =
     lineSequence()

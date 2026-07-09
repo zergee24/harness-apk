@@ -43,7 +43,6 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.harnessapk.HarnessApkApplication
 import com.harnessapk.chat.Conversation
-import com.harnessapk.common.AppContainer
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.conversation.ConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
@@ -53,8 +52,11 @@ import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
 import com.harnessapk.ui.settings.SettingsScreen
 import com.harnessapk.ui.skills.SkillsScreen
+import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
+import com.harnessapk.ui.updater.startupUpdateAction
 import com.harnessapk.ui.voice.VoiceSettingsScreen
+import com.harnessapk.updater.ApkDownloadResult
 import com.harnessapk.updater.UpdateCheckResult
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -81,6 +83,8 @@ object Routes {
     }
 }
 
+private val HomeModeSwitcherShape = RoundedCornerShape(16.dp)
+
 internal fun chatRouteQuery(
     projectId: String?,
     focusInput: Boolean,
@@ -102,10 +106,33 @@ fun HarnessApkApp() {
     val canGoBack = route != null && route != Routes.Conversations
     var mainMode by rememberSaveable { mutableStateOf(MainMode.SESSION) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
+    var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
     val isHomeRoute = route == Routes.Conversations || route == null
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
+    var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
+    var downloadedUpdate by remember { mutableStateOf<ApkDownloadResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
+    val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
+
+    LaunchedEffect(container) {
+        val result = runCatching {
+            withContext(container.dispatchers.io) {
+                container.updateRepository.fetchManifest()
+            }
+        }.getOrNull()
+        updateCheckResult = result
+        if (startupUpdateAction(result) == StartupUpdateAction.DOWNLOAD_APK) {
+            result?.manifest?.let { manifest ->
+                downloadedUpdate = runCatching {
+                    withContext(container.dispatchers.io) {
+                        container.updateRepository.downloadApk(manifest)
+                    }
+                }.getOrNull()
+            }
+        }
+    }
+
     val title = when (route) {
         Routes.Settings -> "设置"
         Routes.Providers -> "模型配置"
@@ -141,8 +168,8 @@ fun HarnessApkApp() {
                 actions = {
                     if (isHomeRoute) {
                         HomeTopBarActions(
-                            container = container,
                             showCreate = mainMode == MainMode.SESSION,
+                            showUpdateBadge = showUpdateBadge,
                             onCreate = {
                                 scope.launch {
                                     navController.navigate(
@@ -155,6 +182,10 @@ fun HarnessApkApp() {
                             },
                             onOpenSettings = { navController.navigate(Routes.Settings) },
                         )
+                    } else if (route == Routes.ChatPattern) {
+                        IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
+                            Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
+                        }
                     }
                 },
             )
@@ -217,6 +248,8 @@ fun HarnessApkApp() {
                     conversationId = entry.arguments?.getString("conversationId").orEmpty(),
                     initialProjectId = entry.arguments?.getString("projectId"),
                     autoFocusInput = entry.arguments?.getBoolean("focusInput") == true,
+                    sessionConfigRequestKey = chatSessionConfigRequestKey,
+                    onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
                     contentPadding = padding,
                 )
             }
@@ -232,6 +265,7 @@ fun HarnessApkApp() {
                     onOpenGit = { navController.navigate(Routes.Git) },
                     onOpenSkills = { navController.navigate(Routes.Skills) },
                     onOpenUpdates = { navController.navigate(Routes.Updates) },
+                    showUpdateBadge = showUpdateBadge,
                 )
             }
             composable(Routes.Search) {
@@ -247,7 +281,12 @@ fun HarnessApkApp() {
                 SkillsScreen(container = container, contentPadding = padding)
             }
             composable(Routes.Updates) {
-                UpdateSettingsScreen(container = container, contentPadding = padding)
+                UpdateSettingsScreen(
+                    container = container,
+                    contentPadding = padding,
+                    initialResult = updateCheckResult,
+                    initialDownloaded = downloadedUpdate,
+                )
             }
         }
     }
@@ -268,7 +307,7 @@ private fun ModeSwitcher(
     onModeChange: (MainMode) -> Unit,
 ) {
     Surface(
-        shape = RoundedCornerShape(999.dp),
+        shape = HomeModeSwitcherShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
     ) {
         Row(modifier = Modifier.padding(3.dp)) {
@@ -276,7 +315,7 @@ private fun ModeSwitcher(
                 val selected = item == mode
                 Surface(
                     modifier = Modifier.widthIn(min = 58.dp),
-                    shape = RoundedCornerShape(999.dp),
+                    shape = HomeModeSwitcherShape,
                     color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0f),
                     contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                     onClick = { onModeChange(item) },
@@ -294,26 +333,16 @@ private fun ModeSwitcher(
 
 @Composable
 private fun HomeTopBarActions(
-    container: AppContainer,
     showCreate: Boolean,
+    showUpdateBadge: Boolean,
     onCreate: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
-
-    LaunchedEffect(Unit) {
-        updateCheckResult = runCatching {
-            withContext(container.dispatchers.io) {
-                container.updateRepository.fetchManifest()
-            }
-        }.getOrNull()
-    }
-
     Box {
         IconButton(onClick = onOpenSettings) {
             Icon(Icons.Outlined.Settings, contentDescription = "设置")
         }
-        if (shouldShowUpdateBadge(updateCheckResult)) {
+        if (showUpdateBadge) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)

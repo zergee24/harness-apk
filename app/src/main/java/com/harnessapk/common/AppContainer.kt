@@ -12,6 +12,8 @@ import com.harnessapk.network.OpenAiCompatibleClient
 import com.harnessapk.project.FileProjectRepository
 import com.harnessapk.project.ProjectWorkspaceGatewayAdapter
 import com.harnessapk.provider.ProviderRepository
+import com.harnessapk.provider.ProviderCapabilityCatalogClient
+import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.security.ApiKeyCipher
 import com.harnessapk.session.PromptOptimizerUseCase
 import com.harnessapk.storage.AppDatabase
@@ -19,6 +21,7 @@ import com.harnessapk.storage.AppSettingsStore
 import com.harnessapk.updater.ApkInstaller
 import com.harnessapk.updater.UpdateRepository
 import com.harnessapk.websearch.JinaWebSearchClient
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 
 class AppContainer(context: Context) {
@@ -34,6 +37,8 @@ class AppContainer(context: Context) {
         AppDatabase.MIGRATION_3_4,
         AppDatabase.MIGRATION_4_5,
         AppDatabase.MIGRATION_5_6,
+        AppDatabase.MIGRATION_6_7,
+        AppDatabase.MIGRATION_7_8,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -45,15 +50,18 @@ class AppContainer(context: Context) {
     val chatHttpClient = AppHttpClients.chat()
     val updateHttpClient = AppHttpClients.updates()
     val webSearchHttpClient = AppHttpClients.webSearch()
+    val providerCatalogHttpClient = AppHttpClients.providerCatalog()
     val gitEngine = JGitEngine()
     val providerRepository = ProviderRepository(
         dao = database.providerProfileDao(),
         cipher = apiKeyCipher,
         timeProvider = SystemTimeProvider,
     )
+    val providerCapabilityCatalogClient = ProviderCapabilityCatalogClient(providerCatalogHttpClient, json)
     val chatRepository = ChatRepository(
         conversationDao = database.conversationDao(),
         messageDao = database.messageDao(),
+        messagePartDao = database.messagePartDao(),
         attachmentDao = database.messageAttachmentDao(),
         memoryDao = database.conversationMemoryDao(),
         timeProvider = SystemTimeProvider,
@@ -80,6 +88,10 @@ class AppContainer(context: Context) {
         providerRepository = providerRepository,
         client = openAiClient,
         dispatchers = dispatchers,
+        remoteCapabilityCatalog = {
+            settingsStore.providerCapabilityCatalogSnapshot.first().rawJson
+                ?.let { rawJson -> runCatching { parseProviderCapabilityCatalogJson(rawJson, json) }.getOrNull() }
+        },
     )
     val updateRepository = UpdateRepository(
         okHttpClient = updateHttpClient,

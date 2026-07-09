@@ -9,6 +9,8 @@ import com.harnessapk.storage.MessageAttachmentDao
 import com.harnessapk.storage.MessageAttachmentEntity
 import com.harnessapk.storage.MessageDao
 import com.harnessapk.storage.MessageEntity
+import com.harnessapk.storage.MessagePartDao
+import com.harnessapk.storage.MessagePartEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -138,6 +140,36 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun markAssistantCancelledStabilizesPersistedStreamingParts() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 40L })
+        val conversationId = repository.createConversation()
+        val assistantId = repository.insertAssistantPending(
+            conversationId = conversationId,
+            providerId = "openai",
+            model = "gpt-5.5",
+        )
+        repository.replaceMessagePartsFromSnapshot(
+            assistantId,
+            StreamingMessageSnapshot(
+                status = MessageStatus.STREAMING,
+                parts = listOf(
+                    UiMessagePartDraft(
+                        index = 0,
+                        type = UiMessagePartType.TEXT,
+                        content = "正在回复",
+                        stable = false,
+                    ),
+                ),
+            ),
+        )
+
+        repository.markAssistantCancelled(assistantId)
+
+        assertEquals(MessageStatus.CANCELLED, repository.listMessages(conversationId).single().status)
+        assertEquals(true, repository.listMessageParts(assistantId).single().stable)
+    }
+
+    @Test
     fun appendAssistantTextDoesNotReviveCancelledMessage() = runTest {
         val repository = repository(FakeConversationDao(), TimeProvider { 41L })
         val conversationId = repository.createConversation()
@@ -205,6 +237,114 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun listMessagePartsBackfillsLegacyContentAsSingleTextPart() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 55L })
+        val conversationId = repository.createConversation()
+        val messageId = repository.insertUserMessage(conversationId, "旧消息正文", emptyList())
+
+        val parts = repository.listMessageParts(messageId)
+
+        assertEquals(1, parts.size)
+        assertEquals(UiMessagePartType.TEXT, parts.single().type)
+        assertEquals("旧消息正文", parts.single().content)
+        assertEquals(true, parts.single().stable)
+    }
+
+    @Test
+    fun replaceMessagePartsFromSnapshotPersistsPartsAndUpdatesLegacyVisibleContent() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 56L })
+        val conversationId = repository.createConversation()
+        val messageId = repository.insertAssistantPending(conversationId, "openai", "gpt-5.5")
+        val snapshot = StreamingMessageSnapshot(
+            status = MessageStatus.STREAMING,
+            parts = listOf(
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.REASONING,
+                    content = "内部推理",
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 1,
+                    type = UiMessagePartType.TEXT,
+                    content = "可见答案",
+                    stable = false,
+                ),
+            ),
+        )
+
+        repository.replaceMessagePartsFromSnapshot(messageId, snapshot)
+
+        val parts = repository.listMessageParts(messageId)
+        assertEquals(listOf(UiMessagePartType.REASONING, UiMessagePartType.TEXT), parts.map { it.type })
+        assertEquals(listOf("内部推理", "可见答案"), parts.map { it.content })
+        assertEquals("可见答案", repository.listMessages(conversationId).single().content)
+        assertEquals(MessageStatus.STREAMING, repository.listMessages(conversationId).single().status)
+    }
+
+    @Test
+    fun replaceMessagePartsFromSnapshotPreservesRenderablePartTypesAndMetadata() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 57L })
+        val conversationId = repository.createConversation()
+        val messageId = repository.insertAssistantPending(conversationId, "openai", "gpt-5.5")
+        val snapshot = StreamingMessageSnapshot(
+            status = MessageStatus.SUCCEEDED,
+            parts = listOf(
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.REASONING,
+                    content = "先判断任务",
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 1,
+                    type = UiMessagePartType.TEXT,
+                    content = "这是正文答案。",
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 2,
+                    type = UiMessagePartType.IMAGE,
+                    content = "image://local/1",
+                    metadata = mapOf("mimeType" to "image/png"),
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 3,
+                    type = UiMessagePartType.SEARCH_RESULT,
+                    content = "搜索摘要",
+                    metadata = mapOf("title" to "来源标题", "url" to "https://example.com"),
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 4,
+                    type = UiMessagePartType.FILE_CHANGE,
+                    content = "更新 README.md",
+                    metadata = mapOf("path" to "README.md"),
+                    stable = true,
+                ),
+            ),
+        )
+
+        repository.replaceMessagePartsFromSnapshot(messageId, snapshot)
+
+        val parts = repository.listMessageParts(messageId)
+        assertEquals(
+            listOf(
+                UiMessagePartType.REASONING,
+                UiMessagePartType.TEXT,
+                UiMessagePartType.IMAGE,
+                UiMessagePartType.SEARCH_RESULT,
+                UiMessagePartType.FILE_CHANGE,
+            ),
+            parts.map { it.type },
+        )
+        assertEquals("https://example.com", parts[3].metadata["url"])
+        assertEquals("README.md", parts[4].metadata["path"])
+        assertEquals("这是正文答案。", repository.listMessages(conversationId).single().content)
+    }
+
+    @Test
     fun manualContextCompressionSavesMemoryAndInsertsSystemEvent() = runTest {
         val conversationDao = FakeConversationDao()
         var now = 60L
@@ -241,10 +381,44 @@ class ChatRepositoryTest {
     ): ChatRepository = ChatRepository(
         conversationDao = conversationDao,
         messageDao = FakeMessageDao(),
+        messagePartDao = FakeMessagePartDao(),
         attachmentDao = FakeMessageAttachmentDao(),
         memoryDao = FakeConversationMemoryDao(),
         timeProvider = timeProvider,
     )
+}
+
+private class FakeMessagePartDao : MessagePartDao {
+    private val rows = linkedMapOf<String, MessagePartEntity>()
+
+    override fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>> =
+        MutableStateFlow(rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex })
+
+    override suspend fun listForMessage(messageId: String): List<MessagePartEntity> =
+        rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex }
+
+    override suspend fun insertAll(parts: List<MessagePartEntity>) {
+        parts.forEach { rows[it.id] = it }
+    }
+
+    override suspend fun replaceForMessage(messageId: String, parts: List<MessagePartEntity>) {
+        rows.entries.removeIf { it.value.messageId == messageId }
+        parts.forEach { rows[it.id] = it }
+    }
+
+    override suspend fun deleteForMessage(messageId: String) {
+        rows.entries.removeIf { it.value.messageId == messageId }
+    }
+
+    override suspend fun markStableForMessage(messageId: String, updatedAt: Long) {
+        rows.replaceAll { _, row ->
+            if (row.messageId == messageId) {
+                row.copy(stable = true, updatedAt = updatedAt)
+            } else {
+                row
+            }
+        }
+    }
 }
 
 private class FakeConversationDao : ConversationDao {

@@ -50,7 +50,7 @@ internal fun contextWindowStatusText(status: ContextWindowStatus): String {
 }
 
 internal fun contextWindowStatusCompactText(status: ContextWindowStatus): String =
-    "${contextWindowUsagePercent(status)}% · ${status.usedTokens.toKiloText()}"
+    "${contextWindowUsagePercent(status)}%"
 
 internal fun contextWindowUsagePercent(status: ContextWindowStatus): Int =
     (contextWindowUsageProgress(status) * 100).roundToInt()
@@ -58,6 +58,12 @@ internal fun contextWindowUsagePercent(status: ContextWindowStatus): Int =
 internal fun contextWindowUsageProgress(status: ContextWindowStatus): Float {
     if (status.maxTokens <= 0) return 0f
     return (status.usedTokens.toFloat() / status.maxTokens.toFloat()).coerceIn(0f, 1f)
+}
+
+internal fun contextWindowCanManualCompress(status: ContextWindowStatus): Boolean {
+    if (status.maxTokens <= 0) return false
+    val thresholdTokens = status.maxTokens * (status.compressionThresholdPercent.coerceIn(1, 100) / 100.0)
+    return status.usedTokens >= thresholdTokens
 }
 
 private fun Int.toKiloText(): String =

@@ -28,6 +28,45 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun preservesNestedBulletAndOrderedLists() {
+        val blocks = parseMarkdownBlocks(
+            """
+            - 一级 A
+              - 二级 A1
+              - 二级 A2
+                1. 三级有序 A2.1
+            - 一级 B
+            """.trimIndent(),
+        )
+
+        val list = blocks.single { it is MarkdownBlock.BulletList } as MarkdownBlock.BulletList
+        assertEquals("一级 A", list.items[0].text.plainText())
+        val nestedBullet = list.items[0].children.single { it is MarkdownBlock.BulletList } as MarkdownBlock.BulletList
+        assertEquals(listOf("二级 A1", "二级 A2"), nestedBullet.items.map { it.text.plainText() })
+        val nestedOrdered = nestedBullet.items[1].children.single { it is MarkdownBlock.OrderedList } as MarkdownBlock.OrderedList
+        assertEquals("三级有序 A2.1", nestedOrdered.items.single().text.plainText())
+        assertEquals("一级 B", list.items[1].text.plainText())
+    }
+
+    @Test
+    fun parsesCompactSingleLineFencedCodeFromModelOutput() {
+        val blocks = parseMarkdownBlocks("安装后执行：```bashgit --version```然后继续。")
+
+        assertTrue(blocks.debugText(), blocks[0] is MarkdownBlock.Paragraph)
+        val code = blocks.single { it is MarkdownBlock.Code } as MarkdownBlock.Code
+        assertEquals("bash", code.info)
+        assertEquals("git --version", code.literal)
+        assertTrue(blocks.debugText(), blocks.last() is MarkdownBlock.Paragraph)
+    }
+
+    @Test
+    fun markdownTextMetricsLeaveRoomForWrappedHeadingsAndCode() {
+        assertTrue(markdownHeadingLineHeightSp(level = 1) > markdownHeadingFontSizeSp(level = 1))
+        assertTrue(markdownHeadingLineHeightSp(level = 2) > markdownHeadingFontSizeSp(level = 2))
+        assertTrue(markdownCodeLineHeightSp() > markdownCodeFontSizeSp())
+    }
+
+    @Test
     fun parsesLinksAndQuotes() {
         val blocks = parseMarkdownBlocks(
             """
@@ -70,6 +109,56 @@ class MarkdownMessageParserTest {
         assertEquals(2, table.rows.size)
         assertTrue(table.rows[0][1].any { it is MarkdownInline.Strong })
         assertTrue(table.rows[1][1].any { it is MarkdownInline.Code })
+    }
+
+    @Test
+    fun parsesTaskListItemsWithCheckedState() {
+        val blocks = parseMarkdownBlocks(
+            """
+            - [x] 已完成
+            - [ ] 待处理
+            """.trimIndent(),
+        )
+
+        val list = blocks.single { it is MarkdownBlock.BulletList } as MarkdownBlock.BulletList
+        assertEquals(true, list.items[0].taskChecked)
+        assertEquals("已完成", list.items[0].text.plainText())
+        assertEquals(false, list.items[1].taskChecked)
+        assertEquals("待处理", list.items[1].text.plainText())
+    }
+
+    @Test
+    fun parsesInlineAndBlockMath() {
+        val blocks = parseMarkdownBlocks(
+            """
+            圆面积是 ${'$'}A=\pi r^2${'$'}。
+
+            $$
+            E = mc^2
+            $$
+            """.trimIndent(),
+        )
+
+        val paragraph = blocks.first() as MarkdownBlock.Paragraph
+        assertTrue(paragraph.text.any { it is MarkdownInline.Math && it.literal == "A=\\pi r^2" })
+        val math = blocks.single { it is MarkdownBlock.Math } as MarkdownBlock.Math
+        assertEquals("E = mc^2", math.literal)
+        assertEquals(true, math.display)
+    }
+
+    @Test
+    fun parsesMermaidFenceAsMermaidBlock() {
+        val blocks = parseMarkdownBlocks(
+            """
+            ```mermaid
+            graph TD
+              A --> B
+            ```
+            """.trimIndent(),
+        )
+
+        val mermaid = blocks.single { it is MarkdownBlock.Mermaid } as MarkdownBlock.Mermaid
+        assertEquals("graph TD\n  A --> B", mermaid.literal)
     }
 
     @Test
@@ -135,15 +224,113 @@ class MarkdownMessageParserTest {
         assertEquals(listOf(10, 10, 5), chunks.map { it.source.length })
     }
 
+    @Test
+    fun incrementalParserKeepsUnclosedFenceInTailDuringStreaming() {
+        val cache = IncrementalMarkdownBlockCache(
+            maxStableChunkChars = 24,
+            maxTailChars = 12,
+            parse = { source -> listOf(MarkdownBlock.Paragraph(listOf(MarkdownInline.Text(source)))) },
+        )
+        val source = markdownResource("streaming_unclosed_fence_steps.txt")
+
+        val chunks = cache.chunksFor(source)
+
+        assertEquals(listOf(true, false), chunks.map { it.stable })
+        assertEquals("已经稳定的前言。\n\n", chunks.first().source)
+        assertTrue(chunks.last().source.startsWith("```bash"))
+        assertEquals(source.removePrefix(chunks.first().source), chunks.last().source)
+    }
+
+    @Test
+    fun incrementalParserKeepsUnclosedDisplayMathInTailDuringStreaming() {
+        val cache = IncrementalMarkdownBlockCache(
+            maxStableChunkChars = 24,
+            maxTailChars = 12,
+            parse = { source -> listOf(MarkdownBlock.Paragraph(listOf(MarkdownInline.Text(source)))) },
+        )
+        val source = """
+            已经稳定的前言。
+
+            $$
+            E = mc^2
+            + a_1
+            + a_2
+            + a_3
+            + a_4
+            + a_5
+            + a_6
+        """.trimIndent()
+
+        val chunks = cache.chunksFor(source)
+
+        assertEquals(listOf(true, false), chunks.map { it.stable })
+        assertEquals("已经稳定的前言。\n\n", chunks.first().source)
+        assertTrue(chunks.last().source.startsWith("$$"))
+        assertEquals(source.removePrefix(chunks.first().source), chunks.last().source)
+    }
+
+    @Test
+    fun incrementalParserKeepsStreamingTableInTailUntilBlankLineClosesIt() {
+        val cache = IncrementalMarkdownBlockCache(
+            maxStableChunkChars = 36,
+            maxTailChars = 16,
+            parse = { source -> listOf(MarkdownBlock.Paragraph(listOf(MarkdownInline.Text(source)))) },
+        )
+        val source = """
+            已经稳定的前言。
+
+            | 命令 | 用途 |
+            | --- | --- |
+            | git status | 查看状态 |
+            | git add . | 暂存 |
+            | git commit | 提交 |
+        """.trimIndent()
+
+        val chunks = cache.chunksFor(source)
+
+        assertEquals(listOf(true, false), chunks.map { it.stable })
+        assertEquals("已经稳定的前言。\n\n", chunks.first().source)
+        assertTrue(chunks.last().source.startsWith("| 命令 | 用途 |"))
+        assertEquals(source.removePrefix(chunks.first().source), chunks.last().source)
+    }
+
+    @Test
+    fun parsesMarkdownRegressionCorpus() {
+        val samples = listOf(
+            "nested_lists.md" to MarkdownBlock.BulletList::class,
+            "code_fences.md" to MarkdownBlock.Code::class,
+            "math_chemistry.md" to MarkdownBlock.Math::class,
+            "mermaid_blocks.md" to MarkdownBlock.Mermaid::class,
+            "tables_wide.md" to MarkdownBlock.Table::class,
+            "long_git_usage.md" to MarkdownBlock.Code::class,
+            "chinese_headings_spacing.md" to MarkdownBlock.Heading::class,
+        )
+
+        samples.forEach { (fileName, expectedBlockType) ->
+            val blocks = parseMarkdownBlocks(markdownResource(fileName))
+            assertTrue("$fileName parsed no blocks", blocks.isNotEmpty())
+            assertTrue(
+                "$fileName did not contain ${expectedBlockType.simpleName}: ${blocks.debugText()}",
+                blocks.any { expectedBlockType.isInstance(it) },
+            )
+        }
+    }
+
+    private fun markdownResource(fileName: String): String =
+        requireNotNull(javaClass.getResource("/markdown/$fileName")) { "Missing markdown sample $fileName" }
+            .readText()
+
     private fun List<MarkdownBlock>.debugText(): String =
         joinToString("\n") { block ->
             when (block) {
                 is MarkdownBlock.Heading -> "heading(${block.level}): ${block.text.plainText()}"
                 is MarkdownBlock.Paragraph -> "paragraph: ${block.text.plainText()}"
                 is MarkdownBlock.Table -> "table: ${block.headers.map { it.plainText() }} / ${block.rows.map { row -> row.map { it.plainText() } }}"
+                is MarkdownBlock.Math -> "math: ${block.literal}"
+                is MarkdownBlock.Mermaid -> "mermaid: ${block.literal}"
                 is MarkdownBlock.Divider -> "divider"
-                is MarkdownBlock.BulletList -> "bullet: ${block.items.map { it.plainText() }}"
-                is MarkdownBlock.OrderedList -> "ordered: ${block.items.map { it.plainText() }}"
+                is MarkdownBlock.BulletList -> "bullet: ${block.items.map { "${it.taskChecked}:${it.text.plainText()}" }}"
+                is MarkdownBlock.OrderedList -> "ordered: ${block.items.map { it.text.plainText() }}"
                 is MarkdownBlock.Code -> "code: ${block.literal}"
                 is MarkdownBlock.Quote -> "quote: ${block.blocks.debugText()}"
             }

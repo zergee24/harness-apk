@@ -7,19 +7,26 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -67,10 +74,11 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
             color = textColor,
             style = MaterialTheme.typography.titleMedium.copy(
                 fontSize = when (block.level) {
-                    1 -> 22.sp
-                    2 -> 19.sp
-                    else -> 17.sp
+                    1 -> markdownHeadingFontSizeSp(level = 1).sp
+                    2 -> markdownHeadingFontSizeSp(level = 2).sp
+                    else -> markdownHeadingFontSizeSp(level = 3).sp
                 },
+                lineHeight = markdownHeadingLineHeightSp(block.level).sp,
                 fontWeight = FontWeight.SemiBold,
             ),
         )
@@ -78,18 +86,18 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
             text = block.text.toAnnotatedString(textColor),
             color = textColor,
             style = MaterialTheme.typography.bodyMedium,
-            lineHeight = 21.sp,
+            lineHeight = markdownBodyLineHeightSp().sp,
         )
-        is MarkdownBlock.BulletList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            block.items.forEach { item ->
-                MarkdownListRow(marker = "•", text = item, textColor = textColor)
-            }
-        }
-        is MarkdownBlock.OrderedList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            block.items.forEachIndexed { index, item ->
-                MarkdownListRow(marker = "${block.startNumber + index}.", text = item, textColor = textColor)
-            }
-        }
+        is MarkdownBlock.BulletList -> MarkdownList(
+            items = block.items,
+            textColor = textColor,
+            markerForIndex = { "•" },
+        )
+        is MarkdownBlock.OrderedList -> MarkdownList(
+            items = block.items,
+            textColor = textColor,
+            markerForIndex = { index -> "${block.startNumber + index}." },
+        )
         is MarkdownBlock.Quote -> Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -109,51 +117,200 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
                 block.blocks.forEach { MarkdownBlockView(it, textColor.copy(alpha = 0.82f)) }
             }
         }
-        is MarkdownBlock.Code -> Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f),
-        ) {
-            Box(
-                modifier = Modifier
-                    .horizontalScroll(rememberScrollState())
-                    .padding(12.dp),
-            ) {
-                Text(
-                    text = block.literal,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = TextStyle(
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp,
-                    ),
-                )
-            }
-        }
+        is MarkdownBlock.Code -> MarkdownCodeBlock(block)
+        is MarkdownBlock.Math -> MarkdownMathBlock(block)
+        is MarkdownBlock.Mermaid -> MarkdownMermaidBlock(block)
         is MarkdownBlock.Table -> MarkdownTable(table = block, textColor = textColor)
         MarkdownBlock.Divider -> HorizontalDivider(color = textColor.copy(alpha = 0.18f))
     }
 }
 
 @Composable
+private fun MarkdownCodeBlock(block: MarkdownBlock.Code) {
+    val clipboard = LocalClipboardManager.current
+    val language = block.info.orEmpty().trim().substringBefore(' ').ifBlank { "text" }
+    val codeTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val highlighted = remember(block.literal, language, codeTextColor) {
+        tokenizeCode(block.literal, language).toAnnotatedString(codeTextColor)
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = language,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                IconButton(
+                    modifier = Modifier.size(32.dp),
+                    onClick = { clipboard.setText(AnnotatedString(block.literal)) },
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = "复制代码",
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+            ) {
+                Text(
+                    text = highlighted,
+                    color = codeTextColor,
+                    style = TextStyle(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = markdownCodeFontSizeSp().sp,
+                        lineHeight = markdownCodeLineHeightSp().sp,
+                    ),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownMathBlock(block: MarkdownBlock.Math) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "公式",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "KaTeX 暂不可用，已显示源码",
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                text = block.literal,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = markdownCodeFontSizeSp().sp,
+                    lineHeight = markdownCodeLineHeightSp().sp,
+                ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MarkdownMermaidBlock(block: MarkdownBlock.Mermaid) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "mermaid",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "图表预览暂不可用，已显示源码",
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                text = block.literal,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = markdownCodeFontSizeSp().sp,
+                    lineHeight = markdownCodeLineHeightSp().sp,
+                ),
+            )
+        }
+    }
+}
+
+private fun List<CodeToken>.toAnnotatedString(textColor: Color): AnnotatedString = buildAnnotatedString {
+    forEach { token ->
+        val style = when (token.kind) {
+            CodeTokenKind.KEYWORD -> SpanStyle(color = textColor.copy(alpha = 0.96f), fontWeight = FontWeight.SemiBold)
+            CodeTokenKind.STRING -> SpanStyle(color = textColor.copy(alpha = 0.86f))
+            CodeTokenKind.NUMBER -> SpanStyle(color = textColor.copy(alpha = 0.92f), fontWeight = FontWeight.Medium)
+            CodeTokenKind.COMMENT -> SpanStyle(color = textColor.copy(alpha = 0.62f), fontStyle = FontStyle.Italic)
+            CodeTokenKind.PUNCTUATION -> SpanStyle(color = textColor.copy(alpha = 0.78f))
+            CodeTokenKind.PLAIN -> SpanStyle(color = textColor)
+        }
+        withStyle(style) { append(token.literal) }
+    }
+}
+
+@Composable
+private fun MarkdownList(
+    items: List<MarkdownListItem>,
+    textColor: Color,
+    markerForIndex: (Int) -> String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        items.forEachIndexed { index, item ->
+            MarkdownListRow(
+                marker = item.taskChecked?.let { if (it) "[x]" else "[ ]" } ?: markerForIndex(index),
+                item = item,
+                textColor = textColor,
+            )
+        }
+    }
+}
+
+@Composable
 private fun MarkdownListRow(
     marker: String,
-    text: List<MarkdownInline>,
+    item: MarkdownListItem,
     textColor: Color,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = marker,
-            color = textColor.copy(alpha = 0.72f),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            modifier = Modifier.weight(1f),
-            text = text.toAnnotatedString(textColor),
-            color = textColor,
-            style = MaterialTheme.typography.bodyMedium,
-            lineHeight = 21.sp,
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                modifier = Modifier.width(28.dp),
+                text = marker,
+                color = textColor.copy(alpha = 0.72f),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                modifier = Modifier.weight(1f),
+                text = item.text.toAnnotatedString(textColor),
+                color = textColor,
+                style = MaterialTheme.typography.bodyMedium,
+                lineHeight = markdownBodyLineHeightSp().sp,
+            )
+        }
+        if (item.children.isNotEmpty()) {
+            Column(
+                modifier = Modifier.padding(start = 22.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                item.children.forEach { child ->
+                    MarkdownBlockView(block = child, textColor = textColor)
+                }
+            }
+        }
     }
 }
 
@@ -230,6 +387,15 @@ private fun AnnotatedString.Builder.appendInlineList(
             ) {
                 append(inline.literal)
             }
+            is MarkdownInline.Math -> withStyle(
+                SpanStyle(
+                    fontFamily = FontFamily.Monospace,
+                    color = textColor,
+                    background = textColor.copy(alpha = 0.08f),
+                ),
+            ) {
+                append(inline.literal)
+            }
             is MarkdownInline.Link -> withStyle(
                 SpanStyle(
                     color = textColor,
@@ -243,3 +409,21 @@ private fun AnnotatedString.Builder.appendInlineList(
         }
     }
 }
+
+internal fun markdownHeadingFontSizeSp(level: Int): Int = when (level) {
+    1 -> 22
+    2 -> 19
+    else -> 17
+}
+
+internal fun markdownHeadingLineHeightSp(level: Int): Int = when (level) {
+    1 -> 30
+    2 -> 27
+    else -> 25
+}
+
+internal fun markdownBodyLineHeightSp(): Int = 22
+
+internal fun markdownCodeFontSizeSp(): Int = 13
+
+internal fun markdownCodeLineHeightSp(): Int = 22

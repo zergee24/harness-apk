@@ -30,4 +30,13 @@ class AppHttpClientsTest {
         assertEquals(TimeUnit.SECONDS.toMillis(45).toInt(), client.readTimeoutMillis)
         assertEquals(TimeUnit.SECONDS.toMillis(60).toInt(), client.callTimeoutMillis)
     }
+
+    @Test
+    fun providerCatalogClientUsesThreeSecondTimeouts() {
+        val client = AppHttpClients.providerCatalog()
+
+        assertEquals(TimeUnit.SECONDS.toMillis(3).toInt(), client.connectTimeoutMillis)
+        assertEquals(TimeUnit.SECONDS.toMillis(3).toInt(), client.readTimeoutMillis)
+        assertEquals(TimeUnit.SECONDS.toMillis(3).toInt(), client.callTimeoutMillis)
+    }
 }

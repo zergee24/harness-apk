@@ -19,4 +19,6 @@ data class ProviderProfileEntity(
     val enabled: Boolean,
     val createdAt: Long,
     val updatedAt: Long,
+    val customHeadersJson: String = "",
+    val customBodyJson: String = "",
 )

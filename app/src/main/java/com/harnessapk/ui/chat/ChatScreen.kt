@@ -12,9 +12,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -65,10 +68,12 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -89,19 +94,24 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.PendingImageAttachment
 import com.harnessapk.chat.ReasoningEffort
+import com.harnessapk.chat.UiMessagePartDraft
+import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.chat.defaultReasoningEffort
 import com.harnessapk.chat.supportsReasoningEffort
 import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.provider.ProviderProfile
+import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.provider.modelConfigForProvider
+import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.session.MarkdownFileChangeController
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeState
@@ -120,9 +130,9 @@ import com.harnessapk.session.buildMarkdownDiff
 import com.harnessapk.session.markdownReviewSummary
 import com.harnessapk.session.canWriteBackMarkdown
 import com.harnessapk.storage.DefaultModelPreference
+import com.harnessapk.storage.ProviderCapabilityCatalogSnapshot
 import com.harnessapk.ui.markdown.MarkdownMessage
 import com.harnessapk.ui.model.resolveModelSelection
-import com.harnessapk.ui.model.selectableModelsForProvider
 import com.harnessapk.websearch.WebSearchContext
 import com.harnessapk.websearch.WebSearchRequest
 import com.harnessapk.websearch.WebSearchSettings
@@ -142,6 +152,8 @@ fun ChatScreen(
     conversationId: String,
     initialProjectId: String? = null,
     autoFocusInput: Boolean = false,
+    sessionConfigRequestKey: Int = 0,
+    onSessionConfigRequestConsumed: () -> Unit = {},
     contentPadding: PaddingValues,
 ) {
     val messages by container.chatRepository.observeMessages(conversationId).collectAsState(initial = emptyList())
@@ -149,6 +161,9 @@ fun ChatScreen(
     val providers by container.providerRepository.observeEnabled().collectAsState(initial = emptyList())
     val defaultModelPreference by container.settingsStore.defaultModelPreference.collectAsState(
         initial = DefaultModelPreference(),
+    )
+    val providerCatalogSnapshot by container.settingsStore.providerCapabilityCatalogSnapshot.collectAsState(
+        initial = ProviderCapabilityCatalogSnapshot(),
     )
     val webSearchSettings by container.settingsStore.webSearchSettings.collectAsState(
         initial = WebSearchSettings(),
@@ -198,6 +213,20 @@ fun ChatScreen(
     var textToSpeech by remember { mutableStateOf<TextToSpeech?>(null) }
     var initialProjectApplied by remember { mutableStateOf(false) }
     var autoFocusInputRequested by remember(conversationId) { mutableStateOf(false) }
+    var streamingAutoScrollEnabled by remember(conversationId) { mutableStateOf(true) }
+    val remoteProviderCatalog = remember(providerCatalogSnapshot.rawJson) {
+        providerCatalogSnapshot.rawJson?.let { rawJson ->
+            runCatching { parseProviderCapabilityCatalogJson(rawJson, container.json) }.getOrNull()
+        }
+    }
+    val capabilityResolver = remember(remoteProviderCatalog) {
+        ModelCapabilityResolver(remoteCatalog = remoteProviderCatalog)
+    }
+    val selectableModelsByProviderId = remember(providers, capabilityResolver) {
+        providers.associate { provider ->
+            provider.id to capabilityResolver.selectableModels(provider).map { it.modelId }
+        }
+    }
     val markdownUpdatePlanner = remember(container) {
         MarkdownUpdatePlannerUseCase(
             providerRepository = container.providerRepository,
@@ -293,20 +322,59 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(providers, defaultModelPreference) {
+    LaunchedEffect(providers, defaultModelPreference, selectableModelsByProviderId) {
         val selection = resolveModelSelection(
             providers = providers,
             currentProviderId = selectedProviderId,
             currentModel = selectedModel,
             preferredProviderId = defaultModelPreference.providerId,
             preferredModel = defaultModelPreference.model,
+            selectableModelsForProvider = { provider ->
+                selectableModelsByProviderId[provider.id].orEmpty()
+            },
         )
         selectedProviderId = selection.providerId
         selectedModel = selection.model
     }
 
+    var previousAutoScrollKey by remember(conversationId) { mutableStateOf<AutoScrollKey?>(null) }
+    LaunchedEffect(conversationId) {
+        snapshotFlow { listState.isScrollInProgress to listState.canFollowStreaming(messages.lastIndex) }
+            .collect { (isScrollInProgress, isNearBottom) ->
+                when {
+                    isNearBottom -> streamingAutoScrollEnabled = true
+                    isScrollInProgress -> streamingAutoScrollEnabled = false
+                }
+            }
+    }
     LaunchedEffect(autoScrollKey(messages)) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+        val currentKey = autoScrollKey(messages)
+        val scrollMode = chatAutoScrollMode(
+            previous = previousAutoScrollKey,
+            current = currentKey,
+            canFollowStreaming = streamingAutoScrollEnabled || listState.canFollowStreaming(messages.lastIndex),
+        )
+        previousAutoScrollKey = currentKey
+        when (scrollMode) {
+            ChatAutoScrollMode.JUMP_TO_BOTTOM -> {
+                chatScrollTarget(scrollMode, messages.lastIndex)?.let {
+                    listState.scrollToItem(it.index, it.scrollOffset)
+                }
+            }
+            ChatAutoScrollMode.ANIMATE_TO_BOTTOM -> {
+                streamingAutoScrollEnabled = true
+                chatScrollTarget(scrollMode, messages.lastIndex)?.let {
+                    listState.animateScrollToItem(it.index, it.scrollOffset)
+                }
+            }
+            ChatAutoScrollMode.STREAM_TO_BOTTOM -> {
+                streamingAutoScrollEnabled = true
+                chatScrollTarget(scrollMode, messages.lastIndex)?.let {
+                    listState.scrollToItem(it.index, it.scrollOffset)
+                }
+            }
+            ChatAutoScrollMode.NONE -> Unit
+        }
     }
 
     LaunchedEffect(conversationId, autoFocusInput, messages.size, text, selectedImage) {
@@ -329,6 +397,13 @@ fun ChatScreen(
     LaunchedEffect(webSearchSettings.enabled) {
         if (!shouldShowWebSearchButton(webSearchSettings)) {
             webSearchEnabled = false
+        }
+    }
+
+    LaunchedEffect(sessionConfigRequestKey) {
+        if (sessionConfigRequestKey > 0) {
+            showSessionConfig = true
+            onSessionConfigRequestConsumed()
         }
     }
 
@@ -469,7 +544,7 @@ fun ChatScreen(
     }
 
     fun compressContextNow() {
-        if (isCompressingContext) return
+        if (isCompressingContext || !contextWindowCanManualCompress(contextStatus)) return
         scope.launch {
             isCompressingContext = true
             errorText = null
@@ -572,6 +647,7 @@ fun ChatScreen(
                     projectContext = projectContext,
                     markdowns = snapshots,
                     userRequest = userRequest,
+                    conversationContext = markdownFileChangeConversationContext(messages),
                     providerId = selectedProviderId,
                     modelOverride = selectedModel,
                 )
@@ -809,9 +885,10 @@ fun ChatScreen(
             selectedProviderId = selectedProviderId,
             selectedModel = selectedModel,
             selectedReasoningEffort = selectedReasoningEffort,
+            selectableModelsByProviderId = selectableModelsByProviderId,
             onSelectProvider = { provider ->
                 selectedProviderId = provider.id
-                selectedModel = selectableModelsForProvider(provider).firstOrNull().orEmpty()
+                selectedModel = selectableModelsByProviderId[provider.id].orEmpty().firstOrNull().orEmpty()
                 selectedReasoningEffort = defaultReasoningEffort()
             },
             onModelChange = { selectedModel = it },
@@ -888,130 +965,143 @@ fun ChatScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),
     ) {
-        ProviderAndModelPicker(
-            providers = providers,
-            selectedProviderId = selectedProviderId,
-            selectedModel = selectedModel,
-            selectedReasoningEffort = selectedReasoningEffort,
-            onOpenModelPicker = { showModelPicker = true },
-            sessionConfigText = sessionConfigButtonText(
-                projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
-            ),
-            onOpenSessionConfig = { showSessionConfig = true },
-        )
+        errorText?.let { ResponsiveChatContentRail { InlineError(it) } }
+        sessionStatus?.let { ResponsiveChatContentRail { InlineStatus(it) } }
 
-        errorText?.let { InlineError(it) }
-        sessionStatus?.let { InlineStatus(it) }
-
-        LazyColumn(
+        BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
-            state = listState,
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (messages.isEmpty()) {
-                item { EmptyChatState() }
-            }
-            items(messages, key = { it.id }) { message ->
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (message.role == MessageRole.SYSTEM) {
-                        ContextEventLine(message.content)
-                    } else {
-                        MessageBubble(
-                            message = message,
-                            canWriteBack = message.role == MessageRole.ASSISTANT &&
-                                message.status == MessageStatus.SUCCEEDED &&
-                                canWriteBackMarkdown(selectedProjectId, null, message.content),
-                            onWriteBack = { pendingWriteBack = message },
-                            onCopy = {
-                                clipboard.setText(
-                                    AnnotatedString(
-                                        message.errorMessage?.let(::errorCopyText) ?: message.content,
-                                    ),
-                                )
-                            },
-                            onSelectCopy = { pendingSelectionCopy = message },
-                            isSpeaking = speakingMessageId == message.id,
-                            onSpeak = { speakAssistantMessage(message) },
-                        )
-                    }
-                    markdownFileChangeStates
-                        .filter { it.draft.sourceUserMessageId == message.id }
-                        .forEach { state ->
-                            MarkdownFileChangeCard(
-                                state = state,
-                                onShowDiff = { showMarkdownFileChangeDiff(state) },
-                                onApply = {
-                                    applyMarkdownFileChangeState(
-                                        state = state,
-                                        retainedIndexes = state.items.mapIndexedNotNull { index, item ->
-                                            index.takeIf { item.retained }
-                                        }.toSet(),
-                                    )
-                                },
-                                onRetry = { retryMarkdownFileChange(state) },
-                                onDismiss = {
-                                    upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
-                                },
-                            )
+            val contentMaxWidth = chatContentMaxWidthDp(maxWidth.value.toInt()).dp
+            val bubbleMaxWidth = messageBubbleMaxWidthDp(contentMaxWidth.value.toInt()).dp
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth(),
+                state = listState,
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (messages.isEmpty()) {
+                    item {
+                        ChatContentRail(contentMaxWidth = contentMaxWidth) {
+                            EmptyChatState()
                         }
+                    }
+                }
+                items(messages, key = { it.id }) { message ->
+                    val persistedParts by container.chatRepository
+                        .observeMessageParts(message.id)
+                        .collectAsState(initial = emptyList())
+                    ChatContentRail(contentMaxWidth = contentMaxWidth) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            if (message.role == MessageRole.SYSTEM) {
+                                ContextEventLine(message.content)
+                            } else {
+                                val displayParts = messageDisplayParts(message, persistedParts)
+                                MessageBubble(
+                                    message = message,
+                                    parts = displayParts,
+                                    maxBubbleWidth = bubbleMaxWidth,
+                                    canWriteBack = message.role == MessageRole.ASSISTANT &&
+                                        message.status == MessageStatus.SUCCEEDED &&
+                                        canWriteBackMarkdown(selectedProjectId, null, message.content),
+                                    onWriteBack = { pendingWriteBack = message },
+                                    onCopy = {
+                                        clipboard.setText(
+                                            AnnotatedString(
+                                                messageSelectionCopyText(message, displayParts),
+                                            ),
+                                        )
+                                    },
+                                    onSelectCopy = { pendingSelectionCopy = message },
+                                    isSpeaking = speakingMessageId == message.id,
+                                    onSpeak = { speakAssistantMessage(message) },
+                                )
+                            }
+                            markdownFileChangeStates
+                                .filter { it.draft.sourceUserMessageId == message.id }
+                                .forEach { state ->
+                                    MarkdownFileChangeCard(
+                                        state = state,
+                                        onShowDiff = { showMarkdownFileChangeDiff(state) },
+                                        onApply = {
+                                            applyMarkdownFileChangeState(
+                                                state = state,
+                                                retainedIndexes = state.items.mapIndexedNotNull { index, item ->
+                                                    index.takeIf { item.retained }
+                                                }.toSet(),
+                                            )
+                                        },
+                                        onRetry = { retryMarkdownFileChange(state) },
+                                        onDismiss = {
+                                            upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
+                                        },
+                                    )
+                                }
+                        }
+                    }
                 }
             }
         }
 
-        busyText?.let { AssistantActivityIndicator(it) }
+        busyText?.let { ResponsiveChatContentRail { AssistantActivityIndicator(it) } }
 
-        ChatInputBar(
-            text = text,
-            onTextChange = { text = it },
-            selectedImage = selectedImage,
-            onPickImage = {
-                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            },
-            onRemoveImage = { selectedImage = null },
-            showWebSearch = shouldShowWebSearchButton(webSearchSettings),
-            webSearchEnabled = webSearchEnabled,
-            onToggleWebSearch = { enabled ->
-                if (enabled && !webSearchSettings.enabled) {
-                    errorText = "请先在设置 -> 搜索能力启用联网搜索"
-                } else {
-                    errorText = null
-                    webSearchEnabled = enabled
-                }
-            },
-            showVoiceInput = shouldShowVoiceInputButton(voiceSettings),
-            onStartVoiceTranscription = {
-                errorText = "语音能力已开启，但当前版本暂未接入可用的语音输入方案"
-            },
-            contextStatus = contextStatus,
-            isCompressingContext = isCompressingContext,
-            onCompressContext = ::compressContextNow,
-            inputFocusRequester = inputFocusRequester,
-            canSend = !isAssistantBusy &&
-                selectedProvider != null &&
-                selectedModel.isNotBlank() &&
-                (text.isNotBlank() || selectedImage != null),
-            isBusy = isAssistantBusy,
-            onSend = {
-                if (isAssistantBusy) {
-                    stopNow()
-                } else {
-                    handleSendIntent(
-                        hasSelectedImage = selectedImage != null,
-                        dismissKeyboard = dismissKeyboard,
-                        sendNow = ::sendNow,
-                    )
-                }
-            },
-            showFileChangeSuggestion = shouldShowFileChangeModeEntry(text),
-            canSendFileChange = shouldShowFileChangeModeEntry(text) && !isAssistantBusy,
-            onSendFileChange = {
-                dismissKeyboard()
-                sendFileChangeNow()
-            },
-        )
+        ResponsiveChatContentRail {
+            ChatInputBar(
+                text = text,
+                onTextChange = { text = it },
+                selectedImage = selectedImage,
+                onPickImage = {
+                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+                onRemoveImage = { selectedImage = null },
+                showWebSearch = shouldShowWebSearchButton(webSearchSettings),
+                webSearchEnabled = webSearchEnabled,
+                onToggleWebSearch = { enabled ->
+                    if (enabled && !webSearchSettings.enabled) {
+                        errorText = "请先在设置 -> 搜索能力启用联网搜索"
+                    } else {
+                        errorText = null
+                        webSearchEnabled = enabled
+                    }
+                },
+                showVoiceInput = shouldShowVoiceInputButton(voiceSettings),
+                onStartVoiceTranscription = {
+                    errorText = "语音能力已开启，但当前版本暂未接入可用的语音输入方案"
+                },
+                providers = providers,
+                selectedProviderId = selectedProviderId,
+                selectedModel = selectedModel,
+                selectedReasoningEffort = selectedReasoningEffort,
+                onOpenModelPicker = { showModelPicker = true },
+                contextStatus = contextStatus,
+                isCompressingContext = isCompressingContext,
+                onCompressContext = ::compressContextNow,
+                inputFocusRequester = inputFocusRequester,
+                canSend = !isAssistantBusy &&
+                    selectedProvider != null &&
+                    selectedModel.isNotBlank() &&
+                    (text.isNotBlank() || selectedImage != null),
+                isBusy = isAssistantBusy,
+                onSend = {
+                    if (isAssistantBusy) {
+                        stopNow()
+                    } else {
+                        handleSendIntent(
+                            hasSelectedImage = selectedImage != null,
+                            dismissKeyboard = dismissKeyboard,
+                            sendNow = ::sendNow,
+                        )
+                    }
+                },
+                showFileChangeSuggestion = shouldShowFileChangeModeEntry(text),
+                canSendFileChange = shouldShowFileChangeModeEntry(text) && !isAssistantBusy,
+                onSendFileChange = {
+                    dismissKeyboard()
+                    sendFileChangeNow()
+                },
+            )
+        }
     }
 }
 
@@ -1078,6 +1168,74 @@ internal fun autoScrollKey(messages: List<ChatMessage>): AutoScrollKey {
     )
 }
 
+internal enum class ChatAutoScrollMode {
+    NONE,
+    JUMP_TO_BOTTOM,
+    ANIMATE_TO_BOTTOM,
+    STREAM_TO_BOTTOM,
+}
+
+internal data class ChatScrollTarget(
+    val index: Int,
+    val scrollOffset: Int,
+)
+
+internal fun chatScrollTarget(mode: ChatAutoScrollMode, lastMessageIndex: Int): ChatScrollTarget? {
+    if (lastMessageIndex < 0) return null
+    return when (mode) {
+        ChatAutoScrollMode.JUMP_TO_BOTTOM,
+        ChatAutoScrollMode.STREAM_TO_BOTTOM -> ChatScrollTarget(
+            index = lastMessageIndex,
+            scrollOffset = CHAT_SCROLL_TO_BOTTOM_OFFSET_PX,
+        )
+        ChatAutoScrollMode.ANIMATE_TO_BOTTOM -> ChatScrollTarget(index = lastMessageIndex, scrollOffset = 0)
+        ChatAutoScrollMode.NONE -> null
+    }
+}
+
+internal fun chatAutoScrollMode(
+    previous: AutoScrollKey?,
+    current: AutoScrollKey,
+    canFollowStreaming: Boolean = false,
+): ChatAutoScrollMode = when {
+    current.messageCount == 0 -> ChatAutoScrollMode.NONE
+    previous == null -> ChatAutoScrollMode.JUMP_TO_BOTTOM
+    previous.messageCount == 0 -> ChatAutoScrollMode.JUMP_TO_BOTTOM
+    current.messageCount > previous.messageCount -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
+    current.lastMessageId != previous.lastMessageId -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
+    canFollowStreaming &&
+        current.lastMessageStatus == MessageStatus.STREAMING &&
+        (
+            current.lastMessageContentLength > previous.lastMessageContentLength ||
+                current.lastMessageUpdatedAt > previous.lastMessageUpdatedAt
+            ) -> ChatAutoScrollMode.STREAM_TO_BOTTOM
+    else -> ChatAutoScrollMode.NONE
+}
+
+private fun LazyListState.canFollowStreaming(lastMessageIndex: Int): Boolean {
+    if (lastMessageIndex < 0) return false
+    val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull() ?: return true
+    if (lastVisibleItem.index < lastMessageIndex) return false
+    val distanceToBottom = (lastVisibleItem.offset + lastVisibleItem.size) - layoutInfo.viewportEndOffset
+    return distanceToBottom <= STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD_PX
+}
+
+internal enum class ChatBubbleSide {
+    START,
+    END,
+}
+
+internal fun messageBubbleSide(role: MessageRole): ChatBubbleSide =
+    if (role == MessageRole.USER) ChatBubbleSide.END else ChatBubbleSide.START
+
+internal fun chatContentMaxWidthDp(availableWidthDp: Int): Int =
+    availableWidthDp.coerceAtMost(MAX_CHAT_CONTENT_WIDTH_DP).coerceAtLeast(0)
+
+internal fun messageBubbleMaxWidthDp(contentWidthDp: Int): Int =
+    ((contentWidthDp * 92) / 100)
+        .coerceAtMost(MAX_MESSAGE_BUBBLE_WIDTH_DP)
+        .coerceAtLeast(0)
+
 internal fun assistantActivityLabel(messages: List<ChatMessage>): String? {
     val activeAssistant = messages.lastOrNull {
         it.role == MessageRole.ASSISTANT &&
@@ -1099,6 +1257,23 @@ internal fun assistantMessageDisplayText(message: ChatMessage): String = when {
     else -> ""
 }
 
+internal fun messageDisplayParts(
+    message: ChatMessage,
+    persistedParts: List<UiMessagePartDraft>,
+): List<UiMessagePartDraft> {
+    if (persistedParts.isNotEmpty()) return persistedParts
+    val fallbackText = assistantMessageDisplayText(message).takeIf { it.isNotBlank() } ?: return emptyList()
+    return listOf(
+        UiMessagePartDraft(
+            index = 0,
+            type = UiMessagePartType.TEXT,
+            content = fallbackText,
+            metadata = emptyMap(),
+            stable = message.status != MessageStatus.PENDING && message.status != MessageStatus.STREAMING,
+        ),
+    )
+}
+
 internal fun modelPickerButtonText(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
@@ -1107,11 +1282,11 @@ internal fun modelPickerButtonText(
 ): String {
     val selectedProvider = providers.firstOrNull { it.id == selectedProviderId } ?: return "先配置模型"
     val reasoningText = if (supportsReasoningEffort(selectedProvider, selectedModel)) {
-        " · 推理${selectedReasoningEffort.label}"
+        " · ${selectedReasoningEffort.label}"
     } else {
         ""
     }
-    return "${selectedProvider.name} · $selectedModel$reasoningText"
+    return "$selectedModel$reasoningText"
 }
 
 internal fun errorDisplayText(errorText: String): String = errorText
@@ -1122,9 +1297,17 @@ internal fun errorDisplayText(errorText: String): String = errorText
 
 internal fun errorCopyText(errorText: String): String = errorText
 
-internal fun messageSelectionCopyText(message: ChatMessage): String =
+internal fun messageSelectionCopyText(
+    message: ChatMessage,
+    parts: List<UiMessagePartDraft> = emptyList(),
+): String =
     message.errorMessage?.let(::errorCopyText)
+        ?: parts.visibleText().takeIf { it.isNotBlank() }
         ?: assistantMessageDisplayText(message)
+
+private fun List<UiMessagePartDraft>.visibleText(): String =
+    filter { it.type == UiMessagePartType.TEXT }
+        .joinToString(separator = "") { it.content }
 
 internal fun handleSendIntent(
     hasSelectedImage: Boolean,
@@ -1214,6 +1397,19 @@ internal fun shouldSuggestFileChangeMode(text: String): Boolean {
 internal fun shouldShowFileChangeModeEntry(text: String): Boolean =
     shouldSuggestFileChangeMode(text)
 
+internal fun markdownFileChangeConversationContext(messages: List<ChatMessage>): String =
+    messages
+        .filter {
+            it.content.isNotBlank() &&
+                it.status == MessageStatus.SUCCEEDED &&
+                (it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT)
+        }
+        .takeLast(MAX_FILE_CHANGE_CONTEXT_MESSAGES)
+        .joinToString(separator = "\n\n") { message ->
+            val role = if (message.role == MessageRole.USER) "用户" else "助手"
+            "$role：${message.content.trim().take(MAX_FILE_CHANGE_CONTEXT_MESSAGE_CHARS)}"
+        }
+
 internal fun markdownFileChangeCardTitle(
     status: MarkdownFileChangeStatus,
     itemCount: Int,
@@ -1265,10 +1461,6 @@ private fun ContextEventLine(text: String) {
         }
     }
 }
-
-internal fun sessionConfigButtonText(
-    projectName: String?,
-): String = projectName ?: "临时"
 
 private data class MarkdownUpdateReviewState(
     val proposals: List<MarkdownUpdateProposal>,
@@ -1517,9 +1709,16 @@ private fun SessionConfigDialog(
 private const val MAX_REVIEW_DIFF_LINES = 120
 private const val MAX_WRITE_BACK_EVENT_PATHS = 3
 private const val MAX_TTS_TEXT_LENGTH = 4_000
+private const val MAX_CHAT_CONTENT_WIDTH_DP = 760
+private const val MAX_MESSAGE_BUBBLE_WIDTH_DP = 700
+internal const val CHAT_SCROLL_TO_BOTTOM_OFFSET_PX = 1_000_000
+private const val STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 640
 private const val MAX_FILE_CHANGE_CARD_ITEMS = 6
+private const val MAX_FILE_CHANGE_CONTEXT_MESSAGES = 10
+private const val MAX_FILE_CHANGE_CONTEXT_MESSAGE_CHARS = 2_000
 private val fileChangeSuggestionKeywords = listOf(
     "生成 md",
+    "生成md",
     "生成markdown",
     "生成 markdown",
     "写 prd",
@@ -1554,71 +1753,19 @@ internal fun markdownWriteBackAppliedEvent(paths: List<String>): String {
 }
 
 @Composable
-private fun ProviderAndModelPicker(
-    providers: List<ProviderProfile>,
-    selectedProviderId: String?,
-    selectedModel: String,
-    selectedReasoningEffort: ReasoningEffort,
-    onOpenModelPicker: () -> Unit,
-    sessionConfigText: String,
-    onOpenSessionConfig: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        shadowElevation = 1.dp,
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedButton(
-                modifier = Modifier.weight(1f),
-                enabled = providers.isNotEmpty(),
-                onClick = onOpenModelPicker,
-            ) {
-                Text(
-                    text = modelPickerButtonText(providers, selectedProviderId, selectedModel, selectedReasoningEffort),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            OutlinedButton(
-                modifier = Modifier.widthIn(max = 156.dp),
-                onClick = onOpenSessionConfig,
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Outlined.Assignment,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                )
-                Text(
-                    text = sessionConfigText,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun ModelPickerDialog(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
     selectedModel: String,
     selectedReasoningEffort: ReasoningEffort,
+    selectableModelsByProviderId: Map<String, List<String>>,
     onSelectProvider: (ProviderProfile) -> Unit,
     onModelChange: (String) -> Unit,
     onReasoningEffortChange: (ReasoningEffort) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val selectedProvider = providers.firstOrNull { it.id == selectedProviderId } ?: providers.firstOrNull()
-    val selectableModels = selectedProvider?.let(::selectableModelsForProvider).orEmpty()
+    val selectableModels = selectedProvider?.let { selectableModelsByProviderId[it.id] }.orEmpty()
     val showReasoningEffort = selectedProvider?.let { supportsReasoningEffort(it, selectedModel) } == true
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1819,8 +1966,146 @@ private fun MarkdownFileChangeItemRow(item: MarkdownFileChangeItem) {
 }
 
 @Composable
+private fun ResponsiveChatContentRail(content: @Composable () -> Unit) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        ChatContentRail(
+            contentMaxWidth = chatContentMaxWidthDp(maxWidth.value.toInt()).dp,
+            content = content,
+        )
+    }
+}
+
+@Composable
+private fun ChatContentRail(
+    contentMaxWidth: Dp,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = contentMaxWidth)
+                .fillMaxWidth(),
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun MessagePartsColumn(
+    parts: List<UiMessagePartDraft>,
+    textColor: androidx.compose.ui.graphics.Color,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        parts.forEach { part ->
+            key(part.index, part.type) {
+                MessagePartView(part = part, textColor = textColor)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessagePartView(
+    part: UiMessagePartDraft,
+    textColor: androidx.compose.ui.graphics.Color,
+) {
+    when (part.type) {
+        UiMessagePartType.TEXT -> MarkdownMessage(markdown = part.content, textColor = textColor)
+        UiMessagePartType.REASONING -> ReasoningPart(part)
+        UiMessagePartType.SEARCH_RESULT -> SearchResultPart(part)
+        UiMessagePartType.TOOL_CALL -> MetadataPart(label = "工具调用", content = part.content)
+        UiMessagePartType.TOOL_RESULT -> MetadataPart(label = "工具结果", content = part.content)
+        UiMessagePartType.ERROR_DETAIL -> MetadataPart(label = "错误详情", content = part.content)
+        UiMessagePartType.FILE_CHANGE -> MetadataPart(label = "文件变更", content = part.content)
+        UiMessagePartType.IMAGE -> MetadataPart(label = "图片", content = part.content.ifBlank { "图片附件" })
+        UiMessagePartType.DOCUMENT -> MetadataPart(label = "文档", content = part.content.ifBlank { "文档附件" })
+        UiMessagePartType.SYSTEM_EVENT -> MetadataPart(label = "系统事件", content = part.content)
+    }
+}
+
+@Composable
+private fun ReasoningPart(part: UiMessagePartDraft) {
+    var expanded by remember(part.index) { mutableStateOf(false) }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = if (expanded) "收起思考过程" else "思考过程",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (expanded) {
+                Text(
+                    text = part.content,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchResultPart(part: UiMessagePartDraft) {
+    val title = part.metadata["title"].orEmpty().ifBlank { "搜索结果" }
+    val url = part.metadata["url"].orEmpty()
+    MetadataPart(
+        label = title,
+        content = listOf(url, part.content)
+            .filter { it.isNotBlank() }
+            .joinToString("\n"),
+    )
+}
+
+@Composable
+private fun MetadataPart(
+    label: String,
+    content: String,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (content.isNotBlank()) {
+                Text(
+                    text = content,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun MessageBubble(
     message: ChatMessage,
+    parts: List<UiMessagePartDraft>,
+    maxBubbleWidth: Dp,
     canWriteBack: Boolean,
     onWriteBack: () -> Unit,
     onCopy: () -> Unit,
@@ -1829,13 +2114,16 @@ private fun MessageBubble(
     onSpeak: () -> Unit,
 ) {
     val isUser = message.role == MessageRole.USER
-    val selectionCopyText = messageSelectionCopyText(message)
+    val selectionCopyText = messageSelectionCopyText(message, parts)
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        horizontalArrangement = when (messageBubbleSide(message.role)) {
+            ChatBubbleSide.START -> Arrangement.Start
+            ChatBubbleSide.END -> Arrangement.End
+        },
     ) {
         Surface(
-            modifier = Modifier.widthIn(max = 360.dp),
+            modifier = Modifier.widthIn(max = maxBubbleWidth),
             shape = RoundedCornerShape(
                 topStart = 18.dp,
                 topEnd = 18.dp,
@@ -1855,8 +2143,7 @@ private fun MessageBubble(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -1866,7 +2153,7 @@ private fun MessageBubble(
                     )
                     if (selectionCopyText.isNotBlank()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (message.role == MessageRole.ASSISTANT && message.content.isNotBlank()) {
+                            if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank()) {
                                 IconButton(
                                     modifier = Modifier.size(32.dp),
                                     onClick = onSpeak,
@@ -1888,7 +2175,7 @@ private fun MessageBubble(
                                     modifier = Modifier.size(17.dp),
                                 )
                             }
-                            if (message.role == MessageRole.ASSISTANT && (message.content.isNotBlank() || message.errorMessage != null)) {
+                            if (message.role == MessageRole.ASSISTANT && (selectionCopyText.isNotBlank() || message.errorMessage != null)) {
                                 IconButton(
                                     modifier = Modifier.size(32.dp),
                                     onClick = onCopy,
@@ -1903,15 +2190,17 @@ private fun MessageBubble(
                         }
                     }
                 }
-                SelectionContainer {
-                    MarkdownMessage(
-                        markdown = assistantMessageDisplayText(message),
-                        textColor = if (isUser) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
+                if (parts.isNotEmpty()) {
+                    SelectionContainer {
+                        MessagePartsColumn(
+                            parts = parts,
+                            textColor = if (isUser) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                        )
+                    }
                 }
                 assistantMessageStatusText(message)?.let {
                     Text(
@@ -1986,6 +2275,11 @@ private fun ChatInputBar(
     onToggleWebSearch: (Boolean) -> Unit,
     showVoiceInput: Boolean,
     onStartVoiceTranscription: () -> Unit,
+    providers: List<ProviderProfile>,
+    selectedProviderId: String?,
+    selectedModel: String,
+    selectedReasoningEffort: ReasoningEffort,
+    onOpenModelPicker: () -> Unit,
     contextStatus: ContextWindowStatus,
     isCompressingContext: Boolean,
     onCompressContext: () -> Unit,
@@ -2052,6 +2346,13 @@ private fun ChatInputBar(
                         label = { Text("语音") },
                     )
                 }
+                ModelStatusChip(
+                    providers = providers,
+                    selectedProviderId = selectedProviderId,
+                    selectedModel = selectedModel,
+                    selectedReasoningEffort = selectedReasoningEffort,
+                    onOpenModelPicker = onOpenModelPicker,
+                )
                 ContextStatusChip(
                     contextStatus = contextStatus,
                     expanded = showContextDetails,
@@ -2117,6 +2418,28 @@ private fun ChatInputBar(
 }
 
 @Composable
+private fun ModelStatusChip(
+    providers: List<ProviderProfile>,
+    selectedProviderId: String?,
+    selectedModel: String,
+    selectedReasoningEffort: ReasoningEffort,
+    onOpenModelPicker: () -> Unit,
+) {
+    FilterChip(
+        selected = false,
+        enabled = providers.isNotEmpty(),
+        onClick = onOpenModelPicker,
+        label = {
+            Text(
+                text = modelPickerButtonText(providers, selectedProviderId, selectedModel, selectedReasoningEffort),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+    )
+}
+
+@Composable
 private fun ContextStatusChip(
     contextStatus: ContextWindowStatus,
     expanded: Boolean,
@@ -2124,6 +2447,7 @@ private fun ContextStatusChip(
     onExpandedChange: (Boolean) -> Unit,
     onCompressContext: () -> Unit,
 ) {
+    val canManualCompress = contextWindowCanManualCompress(contextStatus)
     Box {
         FilterChip(
             selected = false,
@@ -2172,13 +2496,19 @@ private fun ContextStatusChip(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 TextButton(
-                    enabled = !isCompressingContext,
+                    enabled = canManualCompress && !isCompressingContext,
                     onClick = {
                         onExpandedChange(false)
                         onCompressContext()
                     },
                 ) {
-                    Text(if (isCompressingContext) "压缩中..." else "手动压缩")
+                    Text(
+                        when {
+                            isCompressingContext -> "压缩中..."
+                            canManualCompress -> "手动压缩"
+                            else -> "暂不需要压缩"
+                        },
+                    )
                 }
             }
         }

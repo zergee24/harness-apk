@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
@@ -24,6 +25,7 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -46,15 +48,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.harnessapk.BuildConfig
 import com.harnessapk.common.AppContainer
+import com.harnessapk.provider.CapabilitySource
 import com.harnessapk.provider.ModelConfig
+import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.ProviderCapabilityCatalog
 import com.harnessapk.provider.ProviderDraft
 import com.harnessapk.provider.ProviderProfile
 import com.harnessapk.provider.ProviderTemplate
 import com.harnessapk.provider.ProviderTemplates
+import com.harnessapk.provider.ResolvedModelCapability
 import com.harnessapk.provider.defaultModelConfig
+import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.storage.DefaultModelPreference
+import com.harnessapk.storage.ProviderCapabilityCatalogSnapshot
 import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.ui.model.selectableModelsForProvider
 import kotlinx.coroutines.launch
@@ -68,11 +77,23 @@ fun ProviderSettingsScreen(
     val defaultModelPreference by container.settingsStore.defaultModelPreference.collectAsState(
         initial = DefaultModelPreference(),
     )
+    val catalogSnapshot by container.settingsStore.providerCapabilityCatalogSnapshot.collectAsState(
+        initial = ProviderCapabilityCatalogSnapshot(),
+    )
     val scope = rememberCoroutineScope()
     val defaultTemplate = ProviderTemplates.default
+    val remoteCatalog = remember(catalogSnapshot.rawJson) {
+        catalogSnapshot.rawJson?.let { rawJson ->
+            runCatching { parseProviderCapabilityCatalogJson(rawJson, container.json) }.getOrNull()
+        }
+    }
+    val capabilityResolver = remember(remoteCatalog, providers) {
+        ModelCapabilityResolver(remoteCatalog = remoteCatalog)
+    }
     var defaultProviderId by remember { mutableStateOf<String?>(null) }
     var defaultModelName by remember { mutableStateOf("") }
     var defaultStatus by remember { mutableStateOf<String?>(null) }
+    var catalogStatus by remember { mutableStateOf<String?>(null) }
     var name by remember { mutableStateOf(defaultTemplate.name) }
     var baseUrl by remember { mutableStateOf(defaultTemplate.baseUrl) }
     var apiKey by remember { mutableStateOf("") }
@@ -90,7 +111,7 @@ fun ProviderSettingsScreen(
         baseUrl = defaultTemplate.baseUrl
         apiKey = ""
         model = defaultTemplate.defaultModel
-        modelConfigs = defaultTemplate.modelConfigs
+        modelConfigs = modelConfigsForTemplate(defaultTemplate, remoteCatalog)
         visionModel = defaultTemplate.defaultVisionModel.orEmpty()
         supportsVision = defaultTemplate.supportsVision
         nativeWebSearchMode = defaultTemplate.nativeWebSearchMode
@@ -101,7 +122,7 @@ fun ProviderSettingsScreen(
         name = template.name
         baseUrl = template.baseUrl
         model = template.defaultModel
-        modelConfigs = template.modelConfigs
+        modelConfigs = modelConfigsForTemplate(template, remoteCatalog)
         visionModel = template.defaultVisionModel.orEmpty()
         supportsVision = template.supportsVision
         nativeWebSearchMode = template.nativeWebSearchMode
@@ -179,10 +200,13 @@ fun ProviderSettingsScreen(
                 providers = providers,
                 selectedProviderId = defaultProviderId,
                 selectedModel = defaultModelName,
+                modelOptions = defaultModelOptionsForProvider(providers, defaultProviderId, capabilityResolver),
                 status = defaultStatus,
+                catalogVersion = catalogSnapshot.catalogVersion ?: "bundled",
+                catalogStatus = catalogStatus ?: catalogSnapshot.errorMessage,
                 onSelectProvider = { provider ->
                     defaultProviderId = provider.id
-                    defaultModelName = selectableModelsForProvider(provider).firstOrNull().orEmpty()
+                    defaultModelName = capabilityResolver.selectableModels(provider).firstOrNull()?.modelId.orEmpty()
                     defaultStatus = null
                 },
                 onSelectModel = {
@@ -203,6 +227,28 @@ fun ProviderSettingsScreen(
                             }.onFailure {
                                 defaultStatus = it.message
                             }
+                        }
+                    }
+                },
+                onRefreshCatalog = {
+                    scope.launch {
+                        catalogStatus = "正在更新模型清单..."
+                        runCatching {
+                            val fetched = container.providerCapabilityCatalogClient
+                                .fetchDocument(BuildConfig.PROVIDER_CATALOG_URL)
+                            container.settingsStore.setProviderCapabilityCatalog(
+                                rawJson = fetched.rawJson,
+                                catalogVersion = fetched.catalog.catalogVersion,
+                                sha256 = fetched.sha256,
+                                fetchedAt = System.currentTimeMillis(),
+                            )
+                            fetched.catalog.catalogVersion
+                        }.onSuccess { version ->
+                            catalogStatus = "模型清单已更新：$version"
+                        }.onFailure {
+                            val message = it.message ?: "模型清单更新失败"
+                            container.settingsStore.setProviderCapabilityCatalogError(message)
+                            catalogStatus = message
                         }
                     }
                 },
@@ -295,6 +341,7 @@ fun ProviderSettingsScreen(
             items(providers, key = { it.id }) { provider ->
                 ProviderRow(
                     provider = provider,
+                    capabilities = capabilityResolver.selectableModels(provider),
                     onEdit = { editProvider(provider) },
                     onDelete = { providerToDelete = provider },
                 )
@@ -308,10 +355,14 @@ private fun DefaultModelCard(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
     selectedModel: String,
+    modelOptions: List<String>,
     status: String?,
+    catalogVersion: String,
+    catalogStatus: String?,
     onSelectProvider: (ProviderProfile) -> Unit,
     onSelectModel: (String) -> Unit,
     onSave: () -> Unit,
+    onRefreshCatalog: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -335,6 +386,41 @@ private fun DefaultModelCard(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "模型清单：$catalogVersion",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        catalogStatus?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    TextButton(onClick = onRefreshCatalog) {
+                        Icon(Icons.Outlined.Sync, contentDescription = null)
+                        Text("更新", modifier = Modifier.padding(start = 6.dp))
+                    }
+                }
             }
             if (providers.isEmpty()) {
                 Text(
@@ -365,7 +451,7 @@ private fun DefaultModelCard(
                         .fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    defaultModelOptionsForProvider(providers, selectedProviderId).forEach { model ->
+                    modelOptions.forEach { model ->
                         FilterChip(
                             selected = model == selectedModel,
                             onClick = { onSelectModel(model) },
@@ -574,7 +660,7 @@ private fun ModelConfigListEditor(
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("可选模型", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                 Text(
-                    text = "每个模型独立维护上下文、自动压缩和推理参数",
+                    text = "每个模型独立维护上下文和自动压缩比例",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -586,6 +672,7 @@ private fun ModelConfigListEditor(
         modelConfigs.forEachIndexed { index, config ->
             ModelConfigEditorRow(
                 config = config,
+                providerName = providerName,
                 canDelete = modelConfigs.size > 1,
                 onChange = { next ->
                     onModelConfigsChange(updateModelConfigAt(modelConfigs, index) { next })
@@ -601,6 +688,7 @@ private fun ModelConfigListEditor(
 @Composable
 private fun ModelConfigEditorRow(
     config: ModelConfig,
+    providerName: String,
     canDelete: Boolean,
     onChange: (ModelConfig) -> Unit,
     onDelete: () -> Unit,
@@ -638,6 +726,7 @@ private fun ModelConfigEditorRow(
             ModelConfigDataBar(
                 label = "上下文",
                 valueText = config.contextWindowTokens.toCompactTokenText(),
+                progress = modelConfigDataBarProgress(config.contextWindowTokens, MAX_CONTEXT_WINDOW_TOKENS),
             )
             Slider(
                 value = config.contextWindowTokens.coerceIn(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS)
@@ -650,6 +739,7 @@ private fun ModelConfigEditorRow(
             ModelConfigDataBar(
                 label = "自动压缩",
                 valueText = "${config.compressionThresholdPercent.coerceIn(1, 95)}%",
+                progress = modelConfigDataBarProgress(config.compressionThresholdPercent, 95),
             )
             Slider(
                 value = config.compressionThresholdPercent.coerceIn(1, 95).toFloat(),
@@ -658,28 +748,76 @@ private fun ModelConfigEditorRow(
                 },
                 valueRange = 1f..95f,
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Text("推理强度", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                    Text(
-                        text = "开启后请求会携带 reasoning_effort",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = config.supportsReasoningEffort,
-                    onCheckedChange = { onChange(config.copy(supportsReasoningEffort = it)) },
-                )
-            }
+            Text("模型能力", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            ModelCapabilitySwitchRow(
+                label = "图片输入",
+                checked = config.inputModalities.orEmpty().contains("image"),
+                onCheckedChange = { enabled ->
+                    onChange(updateInputModality(config, modality = "image", enabled = enabled))
+                },
+            )
+            ModelCapabilitySwitchRow(
+                label = "音频输入",
+                checked = config.inputModalities.orEmpty().contains("audio"),
+                onCheckedChange = { enabled ->
+                    onChange(updateInputModality(config, modality = "audio", enabled = enabled))
+                },
+            )
+            ModelCapabilitySwitchRow(
+                label = "推理强度",
+                checked = !config.reasoningEffortOptions.isNullOrEmpty(),
+                onCheckedChange = { enabled ->
+                    onChange(updateReasoningCapability(config, enabled))
+                },
+            )
+            ModelCapabilitySwitchRow(
+                label = "模型内搜索",
+                checked = config.webSearchMode != null && config.webSearchMode != NativeWebSearchMode.DISABLED,
+                onCheckedChange = { enabled ->
+                    onChange(updateModelWebSearchMode(config, providerName, enabled))
+                },
+            )
+            ModelCapabilitySwitchRow(
+                label = "工具调用",
+                checked = config.supportsToolCalling == true,
+                onCheckedChange = { enabled ->
+                    onChange(config.copy(supportsToolCalling = enabled))
+                },
+            )
+            ModelConfigDataBar(
+                label = "读超时",
+                valueText = "${((config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) / 1000L).toInt()}秒",
+                progress = modelConfigDataBarProgress(
+                    value = ((config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) / 1000L).toInt(),
+                    maxValue = MAX_READ_TIMEOUT_SECONDS,
+                ),
+            )
+            Slider(
+                value = ((config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) / 1000L)
+                    .toFloat()
+                    .coerceIn(MIN_READ_TIMEOUT_SECONDS.toFloat(), MAX_READ_TIMEOUT_SECONDS.toFloat()),
+                onValueChange = {
+                    onChange(updateReadTimeoutSeconds(config, it.toInt()))
+                },
+                valueRange = MIN_READ_TIMEOUT_SECONDS.toFloat()..MAX_READ_TIMEOUT_SECONDS.toFloat(),
+            )
         }
+    }
+}
+
+@Composable
+private fun ModelCapabilitySwitchRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
@@ -687,20 +825,28 @@ private fun ModelConfigEditorRow(
 private fun ModelConfigDataBar(
     label: String,
     valueText: String,
+    progress: Float,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(valueText, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(valueText, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+        }
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
 @Composable
 private fun ProviderRow(
     provider: ProviderProfile,
+    capabilities: List<ResolvedModelCapability>,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -724,23 +870,24 @@ private fun ProviderRow(
                 Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("文本模型：${provider.defaultModel}", style = MaterialTheme.typography.bodySmall)
                 Text(
-                    text = "可选模型：${provider.availableModels.joinToString("、")}",
+                    text = "可选模型：${capabilities.map { it.modelId }.joinToString("、")}",
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = "上下文：${provider.modelConfigs.joinToString("、") { "${it.id} ${it.contextWindowTokens.toCompactTokenText()}" }}",
+                    text = "上下文：${capabilities.joinToString("、") { "${it.modelId} ${it.contextWindowTokens.toCompactTokenText()}" }}",
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    text = "推理强度：${provider.modelConfigs.filter { it.supportsReasoningEffort }.map { it.id }.ifEmpty { listOf("关闭") }.joinToString("、")}",
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                capabilities.firstOrNull { it.modelId == provider.defaultModel }?.let { capability ->
+                    Text(
+                        text = "能力来源：${capabilitySourceSummary(capability)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Text(
                     text = "模型内搜索：${if (isNativeWebSearchEnabled(provider.nativeWebSearchMode)) "开启" else "关闭"}",
                     style = MaterialTheme.typography.bodySmall,
@@ -768,6 +915,14 @@ private fun ProviderRow(
 
 private const val MIN_CONTEXT_WINDOW_TOKENS = 32_000
 private const val MAX_CONTEXT_WINDOW_TOKENS = 1_000_000
+private const val MIN_READ_TIMEOUT_SECONDS = 30
+private const val MAX_READ_TIMEOUT_SECONDS = 300
+private const val DEFAULT_READ_TIMEOUT_MILLIS = 180_000L
+
+internal fun modelConfigDataBarProgress(value: Int, maxValue: Int): Float {
+    if (maxValue <= 0) return 0f
+    return (value.toFloat() / maxValue.toFloat()).coerceIn(0f, 1f)
+}
 
 internal fun updateModelConfigAt(
     configs: List<ModelConfig>,
@@ -792,6 +947,49 @@ internal fun appendModelConfig(configs: List<ModelConfig>, providerName: String)
     return configs + defaultModelConfig(providerName, nextId)
 }
 
+internal fun updateInputModality(
+    config: ModelConfig,
+    modality: String,
+    enabled: Boolean,
+): ModelConfig {
+    val normalized = modality.trim().lowercase()
+    val current = (config.inputModalities ?: listOf("text"))
+        .map { it.trim().lowercase() }
+        .filter { it.isNotBlank() }
+        .toMutableList()
+    if ("text" !in current) current.add(0, "text")
+    if (enabled && normalized !in current) current.add(normalized)
+    if (!enabled) current.remove(normalized)
+    return config.copy(inputModalities = current.distinct())
+}
+
+internal fun updateReasoningCapability(config: ModelConfig, enabled: Boolean): ModelConfig =
+    if (enabled) {
+        config.copy(
+            reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
+            defaultReasoningEffort = "high",
+        )
+    } else {
+        config.copy(reasoningEffortOptions = null, defaultReasoningEffort = null)
+    }
+
+internal fun updateModelWebSearchMode(
+    config: ModelConfig,
+    providerName: String,
+    enabled: Boolean,
+): ModelConfig = config.copy(
+    webSearchMode = if (enabled) {
+        nativeWebSearchModeForSwitch(providerName, enabled = true)
+    } else {
+        NativeWebSearchMode.DISABLED
+    },
+)
+
+internal fun updateReadTimeoutSeconds(config: ModelConfig, seconds: Int): ModelConfig =
+    config.copy(
+        readTimeoutMillis = seconds.coerceIn(MIN_READ_TIMEOUT_SECONDS, MAX_READ_TIMEOUT_SECONDS) * 1000L,
+    )
+
 internal fun isNativeWebSearchEnabled(mode: NativeWebSearchMode): Boolean =
     mode != NativeWebSearchMode.DISABLED
 
@@ -805,10 +1003,52 @@ internal fun nativeWebSearchModeForSwitch(providerName: String, enabled: Boolean
     }
 }
 
+internal fun modelConfigsForTemplate(
+    template: ProviderTemplate,
+    catalog: ProviderCapabilityCatalog?,
+): List<ModelConfig> {
+    val capabilityTemplate = catalog?.providers?.firstOrNull {
+        it.providerId.equals(template.name, ignoreCase = true) ||
+            it.displayName.equals(template.name, ignoreCase = true)
+    } ?: return template.modelConfigs
+    return capabilityTemplate.models.map {
+        ModelConfig(
+            id = it.id,
+            contextWindowTokens = it.contextWindowTokens,
+            compressionThresholdPercent = it.compressionThresholdPercent,
+            maxOutputTokens = it.maxOutputTokens,
+            inputModalities = it.inputModalities,
+            outputModalities = it.outputModalities,
+            reasoningEffortOptions = it.reasoningEffortOptions,
+            defaultReasoningEffort = it.defaultReasoningEffort,
+            webSearchMode = it.webSearchMode,
+            supportsToolCalling = it.supportsToolCalling,
+            readTimeoutMillis = it.readTimeoutMillis,
+        )
+    }.ifEmpty { template.modelConfigs }
+}
+
+internal fun capabilitySourceSummary(capability: ResolvedModelCapability): String =
+    when (capability.source) {
+        CapabilitySource.REMOTE -> listOf("remote", capability.catalogVersion)
+            .filterNotNull()
+            .joinToString(" · ")
+        CapabilitySource.LOCAL_OVERRIDE -> "本地覆盖"
+        CapabilitySource.PROVIDER_PROFILE -> "本地配置"
+        CapabilitySource.BUNDLED -> "内置清单"
+        CapabilitySource.FALLBACK -> "保守默认"
+    }
+
 private fun ModelConfig.normalizedModelConfig(): ModelConfig = copy(
     id = id.trim(),
     contextWindowTokens = contextWindowTokens.coerceIn(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS),
     compressionThresholdPercent = compressionThresholdPercent.coerceIn(1, 95),
+    maxOutputTokens = maxOutputTokens?.coerceAtLeast(1),
+    inputModalities = inputModalities?.map { it.trim().lowercase() }?.filter { it.isNotBlank() }?.distinct(),
+    outputModalities = outputModalities?.map { it.trim().lowercase() }?.filter { it.isNotBlank() }?.distinct(),
+    reasoningEffortOptions = reasoningEffortOptions?.map { it.trim().lowercase() }?.filter { it.isNotBlank() }?.distinct(),
+    defaultReasoningEffort = defaultReasoningEffort?.trim()?.takeIf { it.isNotBlank() },
+    readTimeoutMillis = readTimeoutMillis?.coerceIn(MIN_READ_TIMEOUT_SECONDS * 1000L, MAX_READ_TIMEOUT_SECONDS * 1000L),
 )
 
 private fun Int.toCompactTokenText(): String =
@@ -821,9 +1061,13 @@ private fun Int.toCompactTokenText(): String =
 internal fun defaultModelOptionsForProvider(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
+    resolver: ModelCapabilityResolver? = null,
 ): List<String> =
     providers.firstOrNull { it.id == selectedProviderId }
-        ?.let(::selectableModelsForProvider)
+        ?.let { provider ->
+            resolver?.selectableModels(provider)?.map { it.modelId }
+                ?: selectableModelsForProvider(provider)
+        }
         .orEmpty()
 
 private fun Int.roundToThousands(): Int = (this / 1_000) * 1_000

@@ -139,11 +139,16 @@ fun markdownDiffStats(diff: List<MarkdownDiffLine>): MarkdownDiffStats =
     )
 
 private fun extractJsonObject(response: String): String {
-    val fenced = Regex("```(?:json)?\\s*([\\s\\S]*?)```", RegexOption.IGNORE_CASE)
-        .find(response)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.trim()
+    val fenced = Regex("```\\s*(\\w+)?\\s*\\n([\\s\\S]*?)```", RegexOption.IGNORE_CASE)
+        .findAll(response)
+        .mapNotNull { match ->
+            val language = match.groupValues.getOrNull(1).orEmpty().trim()
+            val content = match.groupValues.getOrNull(2).orEmpty().trim()
+            content.takeIf {
+                content.startsWith("{") || language.equals("json", ignoreCase = true)
+            }
+        }
+        .firstOrNull()
     if (!fenced.isNullOrBlank()) return fenced
     val start = response.indexOf('{')
     val end = response.lastIndexOf('}')

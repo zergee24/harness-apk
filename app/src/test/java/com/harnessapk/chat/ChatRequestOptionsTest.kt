@@ -1,7 +1,6 @@
 package com.harnessapk.chat
 
 import com.harnessapk.provider.ProviderProfile
-import com.harnessapk.provider.ModelConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -58,28 +57,6 @@ class ChatRequestOptionsTest {
     }
 
     @Test
-    fun reasoningEffortUsesModelConfigSwitch() {
-        val provider = providerProfile(
-            name = "HappyCode",
-            defaultModel = "custom-reasoning",
-            modelConfigs = listOf(ModelConfig("custom-reasoning", supportsReasoningEffort = true)),
-        )
-
-        assertEquals("high", reasoningEffortForRequest(provider, "custom-reasoning", ReasoningEffort.HIGH))
-    }
-
-    @Test
-    fun modelConfigSwitchCanDisableReasoningEffortForGptModel() {
-        val provider = providerProfile(
-            name = "OpenAI",
-            defaultModel = "gpt-5.5",
-            modelConfigs = listOf(ModelConfig("gpt-5.5", supportsReasoningEffort = false)),
-        )
-
-        assertNull(reasoningEffortForRequest(provider, "gpt-5.5", ReasoningEffort.HIGH))
-    }
-
-    @Test
     fun nonOpenAiProviderDoesNotUseReasoningEffort() {
         val provider = providerProfile(name = "Kimi", defaultModel = "kimi-k2.7-code")
 
@@ -89,7 +66,6 @@ class ChatRequestOptionsTest {
     private fun providerProfile(
         name: String,
         defaultModel: String,
-        modelConfigs: List<ModelConfig> = emptyList(),
     ): ProviderProfile = ProviderProfile(
         id = name.lowercase(),
         name = name,
@@ -100,6 +76,5 @@ class ChatRequestOptionsTest {
         enabled = true,
         hasApiKey = true,
         availableModels = listOf(defaultModel),
-        modelConfigs = modelConfigs,
     )
 }

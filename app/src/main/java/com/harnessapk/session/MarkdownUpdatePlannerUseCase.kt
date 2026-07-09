@@ -43,6 +43,7 @@ class MarkdownUpdatePlannerUseCase(
         projectContext: String,
         markdowns: List<MarkdownSnapshot>,
         userRequest: String,
+        conversationContext: String = "",
         providerId: String?,
         modelOverride: String?,
     ): MarkdownUpdatePlan = withContext(dispatchers.io) {
@@ -54,6 +55,7 @@ class MarkdownUpdatePlannerUseCase(
             markdowns = markdowns,
             sourceText = content,
             sourceLabel = "本轮用户文件变更请求",
+            conversationContext = conversationContext,
             providerId = providerId,
             modelOverride = modelOverride,
         )
@@ -65,6 +67,7 @@ class MarkdownUpdatePlannerUseCase(
         markdowns: List<MarkdownSnapshot>,
         sourceText: String,
         sourceLabel: String,
+        conversationContext: String = "",
         providerId: String?,
         modelOverride: String?,
     ): MarkdownUpdatePlan {
@@ -85,6 +88,7 @@ class MarkdownUpdatePlannerUseCase(
                     markdowns = markdowns,
                     sourceText = sourceText,
                     sourceLabel = sourceLabel,
+                    conversationContext = conversationContext,
                 ),
                 temperature = temperatureForModel(requestModel),
                 reasoningEffort = reasoningEffortForRequest(provider.profile, requestModel, defaultReasoningEffort()),
@@ -107,6 +111,7 @@ fun buildMarkdownUpdatePlanningMessages(
     markdowns = markdowns,
     sourceText = assistantMarkdown,
     sourceLabel = "本轮助手输出",
+    conversationContext = "",
 )
 
 fun buildMarkdownFileChangePlanningMessages(
@@ -114,12 +119,14 @@ fun buildMarkdownFileChangePlanningMessages(
     projectContext: String,
     markdowns: List<MarkdownSnapshot>,
     userRequest: String,
+    conversationContext: String = "",
 ): List<OutgoingChatMessage> = buildMarkdownUpdatePlanningMessages(
     projectName = projectName,
     projectContext = projectContext,
     markdowns = markdowns,
     sourceText = userRequest,
     sourceLabel = "本轮用户文件变更请求",
+    conversationContext = conversationContext,
 )
 
 private fun buildMarkdownUpdatePlanningMessages(
@@ -128,6 +135,7 @@ private fun buildMarkdownUpdatePlanningMessages(
     markdowns: List<MarkdownSnapshot>,
     sourceText: String,
     sourceLabel: String,
+    conversationContext: String,
 ): List<OutgoingChatMessage> = listOf(
     OutgoingChatMessage(
         role = "system",
@@ -158,6 +166,11 @@ private fun buildMarkdownUpdatePlanningMessages(
                 appendLine("项目上下文：")
                 appendLine(projectContext.trim())
             }
+            if (conversationContext.isNotBlank()) {
+                appendLine()
+                appendLine("会话上下文：")
+                appendLine(conversationContext.trim().take(MAX_CONVERSATION_CONTEXT_CHARS))
+            }
             appendLine()
             appendLine("现有 Markdown：")
             if (markdowns.isEmpty()) {
@@ -178,3 +191,4 @@ private fun buildMarkdownUpdatePlanningMessages(
 )
 
 private const val MAX_MARKDOWN_CONTEXT_CHARS = 6000
+private const val MAX_CONVERSATION_CONTEXT_CHARS = 12000

@@ -8,6 +8,13 @@ import com.harnessapk.storage.ProviderProfileDao
 import com.harnessapk.storage.ProviderProfileEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 
 class ProviderRepository(
@@ -53,6 +60,8 @@ class ProviderRepository(
                 enabled = true,
                 createdAt = now,
                 updatedAt = now,
+                customHeadersJson = draft.customHeaders.encodeCustomHeadersJson(),
+                customBodyJson = draft.customBodyJson.trim(),
             ),
         )
         return id
@@ -88,6 +97,8 @@ class ProviderRepository(
                 nativeWebSearchMode = draft.nativeWebSearchMode.name,
                 enabled = true,
                 updatedAt = now,
+                customHeadersJson = draft.customHeaders.encodeCustomHeadersJson(),
+                customBodyJson = draft.customBodyJson.trim(),
             ),
         )
     }
@@ -134,6 +145,7 @@ class ProviderRepository(
     private fun requireProviderFields(draft: ProviderDraft) {
         require(draft.name.isNotBlank()) { "Provider 名称不能为空" }
         require(draft.defaultModel.isNotBlank()) { "模型不能为空" }
+        requireValidCustomBodyJson(draft.customBodyJson)
     }
 }
 
@@ -142,28 +154,33 @@ data class ProviderWithKey(
     val apiKey: String,
 )
 
-private fun ProviderProfileEntity.toDomain(): ProviderProfile {
-    val storedConfigs = availableModels.decodeStoredModelConfigs()
-    val normalizedConfigs = normalizeStoredAvailableModels(
+private fun ProviderProfileEntity.toDomain(): ProviderProfile = ProviderProfile(
+    id = id,
+    name = name,
+    baseUrl = baseUrl,
+    defaultModel = defaultModel,
+    defaultVisionModel = defaultVisionModel,
+    supportsVision = supportsVision,
+    nativeWebSearchMode = nativeWebSearchMode.decodeNativeWebSearchMode(),
+    enabled = enabled,
+    hasApiKey = encryptedApiKey != null && apiKeyIv != null,
+    availableModels = normalizeAvailableModels(
         defaultModel = defaultModel,
         defaultVisionModel = defaultVisionModel,
-        storedConfigs = storedConfigs,
+        models = availableModels.decodeModelConfigs().map { it.id },
+        modelConfigs = availableModels.decodeModelConfigs(),
         providerName = name,
-    )
-    return ProviderProfile(
-        id = id,
-        name = name,
-        baseUrl = baseUrl,
+    ).map { it.id },
+    modelConfigs = normalizeAvailableModels(
         defaultModel = defaultModel,
         defaultVisionModel = defaultVisionModel,
-        supportsVision = supportsVision,
-        nativeWebSearchMode = nativeWebSearchMode.decodeNativeWebSearchMode(),
-        enabled = enabled,
-        hasApiKey = encryptedApiKey != null && apiKeyIv != null,
-        availableModels = normalizedConfigs.map { it.id },
-        modelConfigs = normalizedConfigs,
-    )
-}
+        models = availableModels.decodeModelConfigs().map { it.id },
+        modelConfigs = availableModels.decodeModelConfigs(),
+        providerName = name,
+    ),
+    customHeaders = customHeadersJson.decodeCustomHeadersJson(),
+    customBodyJson = customBodyJson.trim(),
+)
 
 private fun normalizeAvailableModels(
     defaultModel: String,
@@ -188,36 +205,14 @@ private fun normalizeAvailableModels(
                         ?: fallback.contextWindowTokens,
                     compressionThresholdPercent = explicit.compressionThresholdPercent.takeIf { it > 0 }
                         ?: fallback.compressionThresholdPercent,
-                    supportsReasoningEffort = explicit.supportsReasoningEffort,
-                ).normalized()
-            } ?: fallback
-        }
-}
-
-private fun normalizeStoredAvailableModels(
-    defaultModel: String,
-    defaultVisionModel: String?,
-    storedConfigs: List<StoredModelConfig>,
-    providerName: String,
-): List<ModelConfig> {
-    val explicitConfigs = storedConfigs
-        .filter { it.id.isNotBlank() }
-        .associateBy { it.id.trim() }
-    return (listOf(defaultModel) + storedConfigs.map { it.id } + listOfNotNull(defaultVisionModel))
-        .map { it.trim() }
-        .filter { it.isNotBlank() }
-        .distinct()
-        .map { modelId ->
-            val fallback = defaultModelConfig(providerName, modelId)
-            explicitConfigs[modelId]?.let { explicit ->
-                ModelConfig(
-                    id = modelId,
-                    contextWindowTokens = explicit.contextWindowTokens?.takeIf { it > 0 }
-                        ?: fallback.contextWindowTokens,
-                    compressionThresholdPercent = explicit.compressionThresholdPercent?.takeIf { it > 0 }
-                        ?: fallback.compressionThresholdPercent,
-                    supportsReasoningEffort = explicit.supportsReasoningEffort
-                        ?: fallback.supportsReasoningEffort,
+                    maxOutputTokens = explicit.maxOutputTokens?.takeIf { it > 0 },
+                    inputModalities = explicit.inputModalities.sanitizedModalities(),
+                    outputModalities = explicit.outputModalities.sanitizedModalities(),
+                    reasoningEffortOptions = explicit.reasoningEffortOptions.sanitizedReasoningOptions(),
+                    defaultReasoningEffort = explicit.defaultReasoningEffort?.trim()?.takeIf { it.isNotBlank() },
+                    webSearchMode = explicit.webSearchMode,
+                    supportsToolCalling = explicit.supportsToolCalling,
+                    readTimeoutMillis = explicit.readTimeoutMillis?.takeIf { it > 0 },
                 ).normalized()
             } ?: fallback
         }
@@ -227,34 +222,143 @@ private fun ModelConfig.normalized(): ModelConfig = copy(
     id = id.trim(),
     contextWindowTokens = contextWindowTokens.coerceAtLeast(1),
     compressionThresholdPercent = compressionThresholdPercent.coerceIn(1, 95),
+    maxOutputTokens = maxOutputTokens?.coerceAtLeast(1),
+    inputModalities = inputModalities.sanitizedModalities(),
+    outputModalities = outputModalities.sanitizedModalities(),
+    reasoningEffortOptions = reasoningEffortOptions.sanitizedReasoningOptions(),
+    defaultReasoningEffort = defaultReasoningEffort?.trim()?.takeIf { it.isNotBlank() },
+    readTimeoutMillis = readTimeoutMillis?.coerceAtLeast(1L),
 )
 
 private fun List<ModelConfig>.encodeModelConfigs(): String = joinToString("\n") {
-    "${it.id}|${it.contextWindowTokens}|${it.compressionThresholdPercent}|${it.supportsReasoningEffort}"
+    if (!it.hasAdvancedCapabilityOverrides()) {
+        "${it.id}|${it.contextWindowTokens}|${it.compressionThresholdPercent}"
+    } else {
+        listOf(
+            it.id,
+            it.contextWindowTokens.toString(),
+            it.compressionThresholdPercent.toString(),
+            it.maxOutputTokens.orEmptyField(),
+            it.inputModalities.encodeStringListField(),
+            it.outputModalities.encodeStringListField(),
+            it.reasoningEffortOptions.encodeStringListField(),
+            it.defaultReasoningEffort.orEmpty(),
+            it.webSearchMode?.name.orEmpty(),
+            it.supportsToolCalling?.toString().orEmpty(),
+            it.readTimeoutMillis?.toString().orEmpty(),
+        ).joinToString("|")
+    }
 }
 
-private data class StoredModelConfig(
-    val id: String,
-    val contextWindowTokens: Int?,
-    val compressionThresholdPercent: Int?,
-    val supportsReasoningEffort: Boolean?,
-)
-
-private fun String.decodeStoredModelConfigs(): List<StoredModelConfig> = lines()
+private fun String.decodeModelConfigs(): List<ModelConfig> = lines()
     .map { it.trim() }
     .filter { it.isNotBlank() }
     .map { line ->
         val parts = line.split("|").map { it.trim() }
-        StoredModelConfig(
+        ModelConfig(
             id = parts.first(),
-            contextWindowTokens = parts.getOrNull(1)?.toIntOrNull(),
-            compressionThresholdPercent = parts.getOrNull(2)?.toIntOrNull(),
-            supportsReasoningEffort = parts.getOrNull(3)?.toBooleanStrictOrNull(),
+            contextWindowTokens = parts.getOrNull(1)?.toIntOrNull() ?: -1,
+            compressionThresholdPercent = parts.getOrNull(2)?.toIntOrNull() ?: -1,
+            maxOutputTokens = parts.getOrNull(3)?.toIntOrNull(),
+            inputModalities = parts.getOrNull(4).decodeStringListField(),
+            outputModalities = parts.getOrNull(5).decodeStringListField(),
+            reasoningEffortOptions = parts.getOrNull(6).decodeStringListField(),
+            defaultReasoningEffort = parts.getOrNull(7)?.takeIf { it.isNotBlank() },
+            webSearchMode = parts.getOrNull(8)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { NativeWebSearchMode.valueOf(it) }.getOrNull() },
+            supportsToolCalling = parts.getOrNull(9)?.toBooleanStrictOrNull(),
+            readTimeoutMillis = parts.getOrNull(10)?.toLongOrNull(),
         )
     }
 
+private fun ModelConfig.hasAdvancedCapabilityOverrides(): Boolean =
+    maxOutputTokens != null ||
+        !inputModalities.isNullOrEmpty() ||
+        !outputModalities.isNullOrEmpty() ||
+        !reasoningEffortOptions.isNullOrEmpty() ||
+        !defaultReasoningEffort.isNullOrBlank() ||
+        webSearchMode != null ||
+        supportsToolCalling != null ||
+        readTimeoutMillis != null
+
+private fun Int?.orEmptyField(): String = this?.toString().orEmpty()
+
+private fun List<String>?.encodeStringListField(): String =
+    this.orEmpty()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .joinToString(",")
+
+private fun String?.decodeStringListField(): List<String>? =
+    this?.split(",")
+        ?.map { it.trim() }
+        ?.filter { it.isNotBlank() }
+        ?.distinct()
+        ?.takeIf { it.isNotEmpty() }
+
+private fun List<String>?.sanitizedModalities(): List<String>? =
+    this?.map { it.trim().lowercase() }
+        ?.filter { it.isNotBlank() }
+        ?.distinct()
+        ?.takeIf { it.isNotEmpty() }
+
+private fun List<String>?.sanitizedReasoningOptions(): List<String>? =
+    this?.map { it.trim().lowercase() }
+        ?.filter { it.isNotBlank() }
+        ?.distinct()
+        ?.takeIf { it.isNotEmpty() }
+
 private fun String.decodeNativeWebSearchMode(): NativeWebSearchMode =
     runCatching { NativeWebSearchMode.valueOf(this) }.getOrDefault(NativeWebSearchMode.DISABLED)
+
+private val PROVIDER_JSON = Json { ignoreUnknownKeys = true }
+
+private fun Map<String, String>.encodeCustomHeadersJson(): String {
+    val normalized = normalizedCustomHeaders()
+    if (normalized.isEmpty()) return ""
+    return buildJsonObject {
+        normalized.forEach { (key, value) ->
+            put(key, JsonPrimitive(value))
+        }
+    }.toString()
+}
+
+private fun String.decodeCustomHeadersJson(): Map<String, String> {
+    val trimmed = trim()
+    if (trimmed.isBlank()) return emptyMap()
+    return runCatching {
+        val root = PROVIDER_JSON.parseToJsonElement(trimmed)
+        if (root !is JsonObject) return@runCatching emptyMap()
+        root.mapNotNull { (key, value) ->
+            val headerValue = value.jsonPrimitive.contentOrNull ?: return@mapNotNull null
+            key to headerValue
+        }.toMap().normalizedCustomHeaders()
+    }.getOrDefault(emptyMap())
+}
+
+private fun Map<String, String>.normalizedCustomHeaders(): Map<String, String> {
+    val normalized = linkedMapOf<String, String>()
+    forEach { (rawKey, rawValue) ->
+        val key = rawKey.trim()
+        val value = rawValue.trim()
+        if (key.isNotBlank() && value.isNotBlank()) {
+            normalized[key] = value
+        }
+    }
+    return normalized
+}
+
+private fun requireValidCustomBodyJson(customBodyJson: String) {
+    val trimmed = customBodyJson.trim()
+    if (trimmed.isBlank()) return
+    require(
+        runCatching { PROVIDER_JSON.parseToJsonElement(trimmed).jsonObject }.isSuccess,
+    ) {
+        "自定义请求体必须是 JSON 对象"
+    }
+}
 
 fun defaultModelConfig(providerName: String, modelId: String): ModelConfig {
     val normalizedProvider = providerName.lowercase()
@@ -279,6 +383,5 @@ fun defaultModelConfig(providerName: String, modelId: String): ModelConfig {
         id = modelId.trim(),
         contextWindowTokens = contextWindow,
         compressionThresholdPercent = DEFAULT_COMPRESSION_THRESHOLD_PERCENT,
-        supportsReasoningEffort = "openai" in normalizedProvider || normalizedModel.startsWith("gpt-"),
     )
 }

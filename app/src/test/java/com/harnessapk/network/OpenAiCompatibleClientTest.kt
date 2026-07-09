@@ -1,5 +1,6 @@
 package com.harnessapk.network
 
+import com.harnessapk.chat.StreamEvent
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -9,12 +10,53 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import java.io.InterruptedIOException
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OpenAiCompatibleClientTest {
+    @Test
+    fun streamChatEventsEmitsReasoningTextUsageAndFinishEvents() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    data: {"choices":[{"delta":{"reasoning_content":"先想"}}]}
+                    data: {"choices":[{"delta":{"content":"答案"}}]}
+                    data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}
+                    data: [DONE]
+                    """.trimIndent(),
+                ),
+        )
+        server.start()
+
+        val client = OpenAiCompatibleClient(OKHTTP, Json { ignoreUnknownKeys = true })
+        val result = client.streamChatEvents(
+            ChatRequest(
+                baseUrl = server.url("/v1").toString(),
+                apiKey = "secret-key",
+                model = "test-model",
+                messages = listOf(OutgoingChatMessage(role = "user", text = "hello")),
+            ),
+        ).toList()
+
+        assertEquals(
+            listOf(
+                StreamEvent.ReasoningDelta("先想"),
+                StreamEvent.TextDelta("答案"),
+                StreamEvent.Usage(inputTokens = 5, outputTokens = 7, totalTokens = 12),
+                StreamEvent.Finished("stop"),
+            ),
+            result,
+        )
+        server.shutdown()
+    }
+
     @Test
     fun streamChatPostsToChatCompletionsAndEmitsDeltas() = runTest {
         val server = MockWebServer()
@@ -171,6 +213,80 @@ class OpenAiCompatibleClientTest {
 
         val body = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
         assertEquals("web_search", body["tools"]!!.jsonArray.first().jsonObject["type"]!!.jsonPrimitive.contentOrNull)
+        server.shutdown()
+    }
+
+    @Test
+    fun streamChatMergesCustomHeadersAndBodyWithoutOverwritingAuthorization() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    data: {"choices":[{"delta":{"content":"ok"}}]}
+                    data: [DONE]
+                    """.trimIndent(),
+                ),
+        )
+        server.start()
+
+        val client = OpenAiCompatibleClient(OKHTTP, Json { ignoreUnknownKeys = true })
+        client.streamChat(
+            ChatRequest(
+                baseUrl = server.url("/v1").toString(),
+                apiKey = "secret-key",
+                model = "gpt-5.5",
+                messages = listOf(OutgoingChatMessage(role = "user", text = "hello")),
+                customHeaders = mapOf(
+                    "X-Provider-Feature" to "beta",
+                    "Authorization" to "Bearer wrong",
+                    "Content-Type" to "text/plain",
+                ),
+                customBodyJson = """{"metadata":{"source":"local-override"},"temperature":0.7}""",
+            ),
+        ).toList()
+
+        val recorded = server.takeRequest()
+        assertEquals("Bearer secret-key", recorded.getHeader("Authorization"))
+        assertEquals("beta", recorded.getHeader("X-Provider-Feature"))
+        assertTrue(recorded.getHeader("Content-Type").orEmpty().startsWith("application/json"))
+        val body = Json.parseToJsonElement(recorded.body.readUtf8()).jsonObject
+        assertEquals("local-override", body["metadata"]?.jsonObject?.get("source")?.jsonPrimitive?.contentOrNull)
+        assertEquals("0.7", body["temperature"]?.jsonPrimitive?.contentOrNull)
+        server.shutdown()
+    }
+
+    @Test
+    fun streamChatUsesRequestReadTimeout() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeadersDelay(500, TimeUnit.MILLISECONDS)
+                .setBody(
+                    """
+                    data: {"choices":[{"delta":{"content":"slow"}}]}
+                    data: [DONE]
+                    """.trimIndent(),
+                ),
+        )
+        server.start()
+        val client = OpenAiCompatibleClient(OKHTTP, Json { ignoreUnknownKeys = true })
+
+        val error = runCatching {
+            client.streamChat(
+                ChatRequest(
+                    baseUrl = server.url("/v1").toString(),
+                    apiKey = "secret-key",
+                    model = "gpt-5.5",
+                    messages = listOf(OutgoingChatMessage(role = "user", text = "hello")),
+                    readTimeoutMillis = 50L,
+                ),
+            ).toList()
+        }.exceptionOrNull()
+
+        assertTrue(error is InterruptedIOException)
         server.shutdown()
     }
 

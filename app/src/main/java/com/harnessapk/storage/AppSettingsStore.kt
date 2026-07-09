@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -21,6 +22,14 @@ private val Context.appSettingsDataStore by preferencesDataStore("app_settings")
 data class DefaultModelPreference(
     val providerId: String? = null,
     val model: String? = null,
+)
+
+data class ProviderCapabilityCatalogSnapshot(
+    val rawJson: String? = null,
+    val catalogVersion: String? = null,
+    val sha256: String? = null,
+    val fetchedAt: Long = 0L,
+    val errorMessage: String? = null,
 )
 
 class AppSettingsStore(private val context: Context) {
@@ -60,6 +69,17 @@ class AppSettingsStore(private val context: Context) {
             ttsSpeechRate = (it[VOICE_TTS_SPEECH_RATE] ?: 1.0f).coerceIn(0.6f, 1.4f),
         )
     }
+
+    val providerCapabilityCatalogSnapshot: Flow<ProviderCapabilityCatalogSnapshot> =
+        context.appSettingsDataStore.data.map {
+            ProviderCapabilityCatalogSnapshot(
+                rawJson = it[PROVIDER_CATALOG_RAW_JSON]?.takeIf(String::isNotBlank),
+                catalogVersion = it[PROVIDER_CATALOG_VERSION]?.takeIf(String::isNotBlank),
+                sha256 = it[PROVIDER_CATALOG_SHA256]?.takeIf(String::isNotBlank),
+                fetchedAt = it[PROVIDER_CATALOG_FETCHED_AT] ?: 0L,
+                errorMessage = it[PROVIDER_CATALOG_ERROR]?.takeIf(String::isNotBlank),
+            )
+        }
 
     suspend fun setHasSeenImagePrivacyNotice(value: Boolean) {
         context.appSettingsDataStore.edit {
@@ -142,6 +162,27 @@ class AppSettingsStore(private val context: Context) {
         context.appSettingsDataStore.edit { it[VOICE_TTS_SPEECH_RATE] = value.coerceIn(0.6f, 1.4f) }
     }
 
+    suspend fun setProviderCapabilityCatalog(
+        rawJson: String,
+        catalogVersion: String,
+        sha256: String,
+        fetchedAt: Long,
+    ) {
+        context.appSettingsDataStore.edit {
+            it[PROVIDER_CATALOG_RAW_JSON] = rawJson
+            it[PROVIDER_CATALOG_VERSION] = catalogVersion
+            it[PROVIDER_CATALOG_SHA256] = sha256
+            it[PROVIDER_CATALOG_FETCHED_AT] = fetchedAt
+            it.remove(PROVIDER_CATALOG_ERROR)
+        }
+    }
+
+    suspend fun setProviderCapabilityCatalogError(errorMessage: String) {
+        context.appSettingsDataStore.edit {
+            it[PROVIDER_CATALOG_ERROR] = errorMessage.trim().take(300)
+        }
+    }
+
     companion object {
         private val HAS_SEEN_IMAGE_PRIVACY_NOTICE = booleanPreferencesKey("has_seen_image_privacy_notice")
         private val DEFAULT_PROVIDER_ID = stringPreferencesKey("default_provider_id")
@@ -157,5 +198,10 @@ class AppSettingsStore(private val context: Context) {
         private val VOICE_SAVE_ORIGINAL_AUDIO = booleanPreferencesKey("voice_save_original_audio")
         private val VOICE_TTS_ENABLED = booleanPreferencesKey("voice_tts_enabled")
         private val VOICE_TTS_SPEECH_RATE = floatPreferencesKey("voice_tts_speech_rate")
+        private val PROVIDER_CATALOG_RAW_JSON = stringPreferencesKey("provider_catalog_raw_json")
+        private val PROVIDER_CATALOG_VERSION = stringPreferencesKey("provider_catalog_version")
+        private val PROVIDER_CATALOG_SHA256 = stringPreferencesKey("provider_catalog_sha256")
+        private val PROVIDER_CATALOG_FETCHED_AT = longPreferencesKey("provider_catalog_fetched_at")
+        private val PROVIDER_CATALOG_ERROR = stringPreferencesKey("provider_catalog_error")
     }
 }

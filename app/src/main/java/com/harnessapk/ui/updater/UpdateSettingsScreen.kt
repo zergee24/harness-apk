@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.InstallMobile
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -24,12 +25,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.material3.Icon
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -44,14 +44,16 @@ import kotlinx.coroutines.withContext
 fun UpdateSettingsScreen(
     container: AppContainer,
     contentPadding: PaddingValues,
+    initialResult: UpdateCheckResult? = null,
+    initialDownloaded: ApkDownloadResult? = null,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var status by remember { mutableStateOf<String?>(null) }
     var statusIsError by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf<UpdateCheckResult?>(null) }
-    var downloaded by remember { mutableStateOf<ApkDownloadResult?>(null) }
+    var result by remember { mutableStateOf(initialResult) }
+    var downloaded by remember { mutableStateOf(initialDownloaded) }
     var launchedInstallForSha by remember { mutableStateOf<String?>(null) }
 
     fun openInstallerOrPermissionSettings(apk: ApkDownloadResult) {
@@ -69,24 +71,38 @@ fun UpdateSettingsScreen(
     }
 
     LaunchedEffect(Unit) {
-        checking = true
-        statusIsError = false
-        status = "正在检查更新..."
-        result = withContext(Dispatchers.IO) {
-            runCatching { container.updateRepository.fetchManifest() }
-        }.onFailure {
-            statusIsError = true
-            status = it.message
-        }.getOrNull()
-        checking = false
+        if (initialDownloaded != null) {
+            statusIsError = false
+            status = "下载完成，正在打开系统安装器..."
+            return@LaunchedEffect
+        }
+
+        if (initialResult != null) {
+            result = initialResult
+            if (!shouldAutoDownload(initialResult)) {
+                statusIsError = false
+                status = "当前已是最新版本"
+                return@LaunchedEffect
+            }
+        } else {
+            checking = true
+            statusIsError = false
+            status = "正在检查更新..."
+            result = withContext(Dispatchers.IO) {
+                runCatching { container.updateRepository.fetchManifest() }
+            }.onFailure {
+                statusIsError = true
+                status = it.message
+            }.getOrNull()
+            checking = false
+        }
+
+        if (downloaded != null) return@LaunchedEffect
         if (result?.let(::shouldAutoDownload) == true) {
             checking = true
             statusIsError = false
             status = "发现新版本，正在下载..."
-            val manifest = result?.manifest
-            downloaded = if (manifest == null) {
-                null
-            } else {
+            downloaded = result?.manifest?.let { manifest ->
                 withContext(Dispatchers.IO) {
                     runCatching { container.updateRepository.downloadApk(manifest) }
                 }.onFailure {
@@ -103,6 +119,17 @@ fun UpdateSettingsScreen(
             statusIsError = false
             status = "当前已是最新版本"
         }
+    }
+
+    LaunchedEffect(initialResult) {
+        if (initialResult != null) result = initialResult
+    }
+
+    LaunchedEffect(initialDownloaded?.sha256) {
+        val apk = initialDownloaded ?: return@LaunchedEffect
+        downloaded = apk
+        statusIsError = false
+        status = "下载完成，正在打开系统安装器..."
     }
 
     LaunchedEffect(downloaded?.sha256) {

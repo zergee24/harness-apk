@@ -5,6 +5,7 @@ enum class NativeWebSearchMode {
     OPENAI_WEB_SEARCH_OPTIONS,
     ENABLE_SEARCH_BOOLEAN,
     GLM_WEB_SEARCH_TOOL,
+    EXTERNAL_BING,
 }
 
 data class ProviderProfile(
@@ -19,6 +20,8 @@ data class ProviderProfile(
     val hasApiKey: Boolean,
     val availableModels: List<String> = emptyList(),
     val modelConfigs: List<ModelConfig> = emptyList(),
+    val customHeaders: Map<String, String> = emptyMap(),
+    val customBodyJson: String = "",
 )
 
 data class ProviderDraft(
@@ -31,13 +34,22 @@ data class ProviderDraft(
     val nativeWebSearchMode: NativeWebSearchMode = NativeWebSearchMode.DISABLED,
     val availableModels: List<String> = emptyList(),
     val modelConfigs: List<ModelConfig> = emptyList(),
+    val customHeaders: Map<String, String> = emptyMap(),
+    val customBodyJson: String = "",
 )
 
 data class ModelConfig(
     val id: String,
     val contextWindowTokens: Int = DEFAULT_CONTEXT_WINDOW_TOKENS,
     val compressionThresholdPercent: Int = DEFAULT_COMPRESSION_THRESHOLD_PERCENT,
-    val supportsReasoningEffort: Boolean = false,
+    val maxOutputTokens: Int? = null,
+    val inputModalities: List<String>? = null,
+    val outputModalities: List<String>? = null,
+    val reasoningEffortOptions: List<String>? = null,
+    val defaultReasoningEffort: String? = null,
+    val webSearchMode: NativeWebSearchMode? = null,
+    val supportsToolCalling: Boolean? = null,
+    val readTimeoutMillis: Long? = null,
 )
 
 const val DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
