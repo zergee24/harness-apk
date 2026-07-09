@@ -224,6 +224,31 @@ class MarkdownMessageParserTest {
         assertEquals(listOf(10, 10, 5), chunks.map { it.source.length })
     }
 
+    @Test
+    fun parsesMarkdownRegressionCorpus() {
+        val samples = listOf(
+            "nested_lists.md" to MarkdownBlock.BulletList::class,
+            "code_fences.md" to MarkdownBlock.Code::class,
+            "math_chemistry.md" to MarkdownBlock.Math::class,
+            "mermaid_blocks.md" to MarkdownBlock.Mermaid::class,
+            "tables_wide.md" to MarkdownBlock.Table::class,
+            "long_git_usage.md" to MarkdownBlock.Code::class,
+        )
+
+        samples.forEach { (fileName, expectedBlockType) ->
+            val blocks = parseMarkdownBlocks(markdownResource(fileName))
+            assertTrue("$fileName parsed no blocks", blocks.isNotEmpty())
+            assertTrue(
+                "$fileName did not contain ${expectedBlockType.simpleName}: ${blocks.debugText()}",
+                blocks.any { expectedBlockType.isInstance(it) },
+            )
+        }
+    }
+
+    private fun markdownResource(fileName: String): String =
+        requireNotNull(javaClass.getResource("/markdown/$fileName")) { "Missing markdown sample $fileName" }
+            .readText()
+
     private fun List<MarkdownBlock>.debugText(): String =
         joinToString("\n") { block ->
             when (block) {

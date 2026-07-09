@@ -2,6 +2,7 @@ package com.harnessapk.ui.chat
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import com.harnessapk.ui.markdown.MarkdownMessage
@@ -35,5 +36,23 @@ class MarkdownMessageTest {
         composeRule.onNodeWithText("Pressurized Glands（压力腺体）").assertIsDisplayed()
         composeRule.onNodeWithText("##一、主流天赋加点###1. Q技能（共生体/帽子） 主输出流").assertDoesNotExist()
         composeRule.onNodeWithText("|---|---|---|").assertDoesNotExist()
+    }
+
+    @Test
+    fun rendersCodeBlockLanguageAndCopyAction() {
+        composeRule.setContent {
+            MaterialTheme {
+                MarkdownMessage(
+                    markdown = """
+                    ```kotlin
+                    val x = 1
+                    ```
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("kotlin").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("复制代码").assertIsDisplayed()
     }
 }
