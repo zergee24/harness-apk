@@ -480,6 +480,23 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun autoScrollModeFollowsStreamingPartUpdatesWhenLegacyContentLengthIsUnchanged() {
+        val firstKey = AutoScrollKey(
+            messageCount = 1,
+            lastMessageId = "assistant-1",
+            lastMessageStatus = MessageStatus.STREAMING,
+            lastMessageContentLength = 0,
+            lastMessageUpdatedAt = 100L,
+        )
+        val nextKey = firstKey.copy(lastMessageUpdatedAt = 400L)
+
+        assertEquals(
+            ChatAutoScrollMode.STREAM_TO_BOTTOM,
+            chatAutoScrollMode(previous = firstKey, current = nextKey, canFollowStreaming = true),
+        )
+    }
+
+    @Test
     fun autoScrollModeDoesNotFollowStreamingContentGrowthWhenUserScrolledAway() {
         val firstKey = autoScrollKey(
             listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你")),

@@ -1205,7 +1205,10 @@ internal fun chatAutoScrollMode(
     current.lastMessageId != previous.lastMessageId -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
     canFollowStreaming &&
         current.lastMessageStatus == MessageStatus.STREAMING &&
-        current.lastMessageContentLength > previous.lastMessageContentLength -> ChatAutoScrollMode.STREAM_TO_BOTTOM
+        (
+            current.lastMessageContentLength > previous.lastMessageContentLength ||
+                current.lastMessageUpdatedAt > previous.lastMessageUpdatedAt
+            ) -> ChatAutoScrollMode.STREAM_TO_BOTTOM
     else -> ChatAutoScrollMode.NONE
 }
 
