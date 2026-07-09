@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -67,6 +68,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -99,6 +101,8 @@ import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.PendingImageAttachment
 import com.harnessapk.chat.ReasoningEffort
+import com.harnessapk.chat.UiMessagePartDraft
+import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.chat.defaultReasoningEffort
 import com.harnessapk.chat.supportsReasoningEffort
 import com.harnessapk.common.AppContainer
@@ -963,13 +967,18 @@ fun ChatScreen(
                     }
                 }
                 items(messages, key = { it.id }) { message ->
+                    val persistedParts by container.chatRepository
+                        .observeMessageParts(message.id)
+                        .collectAsState(initial = emptyList())
                     ChatContentRail(contentMaxWidth = contentMaxWidth) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             if (message.role == MessageRole.SYSTEM) {
                                 ContextEventLine(message.content)
                             } else {
+                                val displayParts = messageDisplayParts(message, persistedParts)
                                 MessageBubble(
                                     message = message,
+                                    parts = displayParts,
                                     maxBubbleWidth = bubbleMaxWidth,
                                     canWriteBack = message.role == MessageRole.ASSISTANT &&
                                         message.status == MessageStatus.SUCCEEDED &&
@@ -978,7 +987,7 @@ fun ChatScreen(
                                     onCopy = {
                                         clipboard.setText(
                                             AnnotatedString(
-                                                message.errorMessage?.let(::errorCopyText) ?: message.content,
+                                                messageSelectionCopyText(message, displayParts),
                                             ),
                                         )
                                     },
@@ -1223,6 +1232,23 @@ internal fun assistantMessageDisplayText(message: ChatMessage): String = when {
     else -> ""
 }
 
+internal fun messageDisplayParts(
+    message: ChatMessage,
+    persistedParts: List<UiMessagePartDraft>,
+): List<UiMessagePartDraft> {
+    if (persistedParts.isNotEmpty()) return persistedParts
+    val fallbackText = assistantMessageDisplayText(message).takeIf { it.isNotBlank() } ?: return emptyList()
+    return listOf(
+        UiMessagePartDraft(
+            index = 0,
+            type = UiMessagePartType.TEXT,
+            content = fallbackText,
+            metadata = emptyMap(),
+            stable = message.status != MessageStatus.PENDING && message.status != MessageStatus.STREAMING,
+        ),
+    )
+}
+
 internal fun modelPickerButtonText(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
@@ -1246,9 +1272,17 @@ internal fun errorDisplayText(errorText: String): String = errorText
 
 internal fun errorCopyText(errorText: String): String = errorText
 
-internal fun messageSelectionCopyText(message: ChatMessage): String =
+internal fun messageSelectionCopyText(
+    message: ChatMessage,
+    parts: List<UiMessagePartDraft> = emptyList(),
+): String =
     message.errorMessage?.let(::errorCopyText)
+        ?: parts.visibleText().takeIf { it.isNotBlank() }
         ?: assistantMessageDisplayText(message)
+
+private fun List<UiMessagePartDraft>.visibleText(): String =
+    filter { it.type == UiMessagePartType.TEXT }
+        .joinToString(separator = "") { it.content }
 
 internal fun handleSendIntent(
     hasSelectedImage: Boolean,
@@ -1935,8 +1969,116 @@ private fun ChatContentRail(
 }
 
 @Composable
+private fun MessagePartsColumn(
+    parts: List<UiMessagePartDraft>,
+    textColor: androidx.compose.ui.graphics.Color,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        parts.forEach { part ->
+            key(part.index, part.type) {
+                MessagePartView(part = part, textColor = textColor)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessagePartView(
+    part: UiMessagePartDraft,
+    textColor: androidx.compose.ui.graphics.Color,
+) {
+    when (part.type) {
+        UiMessagePartType.TEXT -> MarkdownMessage(markdown = part.content, textColor = textColor)
+        UiMessagePartType.REASONING -> ReasoningPart(part)
+        UiMessagePartType.SEARCH_RESULT -> SearchResultPart(part)
+        UiMessagePartType.TOOL_CALL -> MetadataPart(label = "工具调用", content = part.content)
+        UiMessagePartType.TOOL_RESULT -> MetadataPart(label = "工具结果", content = part.content)
+        UiMessagePartType.ERROR_DETAIL -> MetadataPart(label = "错误详情", content = part.content)
+        UiMessagePartType.FILE_CHANGE -> MetadataPart(label = "文件变更", content = part.content)
+        UiMessagePartType.IMAGE -> MetadataPart(label = "图片", content = part.content.ifBlank { "图片附件" })
+        UiMessagePartType.DOCUMENT -> MetadataPart(label = "文档", content = part.content.ifBlank { "文档附件" })
+        UiMessagePartType.SYSTEM_EVENT -> MetadataPart(label = "系统事件", content = part.content)
+    }
+}
+
+@Composable
+private fun ReasoningPart(part: UiMessagePartDraft) {
+    var expanded by remember(part.index) { mutableStateOf(false) }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = if (expanded) "收起思考过程" else "思考过程",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (expanded) {
+                Text(
+                    text = part.content,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchResultPart(part: UiMessagePartDraft) {
+    val title = part.metadata["title"].orEmpty().ifBlank { "搜索结果" }
+    val url = part.metadata["url"].orEmpty()
+    MetadataPart(
+        label = title,
+        content = listOf(url, part.content)
+            .filter { it.isNotBlank() }
+            .joinToString("\n"),
+    )
+}
+
+@Composable
+private fun MetadataPart(
+    label: String,
+    content: String,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (content.isNotBlank()) {
+                Text(
+                    text = content,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun MessageBubble(
     message: ChatMessage,
+    parts: List<UiMessagePartDraft>,
     maxBubbleWidth: Dp,
     canWriteBack: Boolean,
     onWriteBack: () -> Unit,
@@ -1946,7 +2088,7 @@ private fun MessageBubble(
     onSpeak: () -> Unit,
 ) {
     val isUser = message.role == MessageRole.USER
-    val selectionCopyText = messageSelectionCopyText(message)
+    val selectionCopyText = messageSelectionCopyText(message, parts)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = when (messageBubbleSide(message.role)) {
@@ -1985,7 +2127,7 @@ private fun MessageBubble(
                     )
                     if (selectionCopyText.isNotBlank()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (message.role == MessageRole.ASSISTANT && message.content.isNotBlank()) {
+                            if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank()) {
                                 IconButton(
                                     modifier = Modifier.size(32.dp),
                                     onClick = onSpeak,
@@ -2007,7 +2149,7 @@ private fun MessageBubble(
                                     modifier = Modifier.size(17.dp),
                                 )
                             }
-                            if (message.role == MessageRole.ASSISTANT && (message.content.isNotBlank() || message.errorMessage != null)) {
+                            if (message.role == MessageRole.ASSISTANT && (selectionCopyText.isNotBlank() || message.errorMessage != null)) {
                                 IconButton(
                                     modifier = Modifier.size(32.dp),
                                     onClick = onCopy,
@@ -2022,15 +2164,17 @@ private fun MessageBubble(
                         }
                     }
                 }
-                SelectionContainer {
-                    MarkdownMessage(
-                        markdown = assistantMessageDisplayText(message),
-                        textColor = if (isUser) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
+                if (parts.isNotEmpty()) {
+                    SelectionContainer {
+                        MessagePartsColumn(
+                            parts = parts,
+                            textColor = if (isUser) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                        )
+                    }
                 }
                 assistantMessageStatusText(message)?.let {
                     Text(

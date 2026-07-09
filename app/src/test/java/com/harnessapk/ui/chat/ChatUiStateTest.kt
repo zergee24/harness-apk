@@ -4,6 +4,8 @@ import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.ReasoningEffort
+import com.harnessapk.chat.UiMessagePartDraft
+import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.provider.ProviderProfile
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeStatus
@@ -195,6 +197,69 @@ class ChatUiStateTest {
         )
 
         assertEquals("第一段 **重点**\n第二段", messageSelectionCopyText(message))
+    }
+
+    @Test
+    fun messageDisplayPartsUsesPersistedPartsWhenAvailable() {
+        val message = assistantMessage(
+            status = MessageStatus.SUCCEEDED,
+            content = "旧 content 缓存",
+        )
+        val parts = listOf(
+            UiMessagePartDraft(
+                index = 0,
+                type = UiMessagePartType.TEXT,
+                content = "稳定块",
+                stable = true,
+            ),
+            UiMessagePartDraft(
+                index = 1,
+                type = UiMessagePartType.TEXT,
+                content = "尾块",
+                stable = false,
+            ),
+        )
+
+        assertEquals(parts, messageDisplayParts(message, parts))
+    }
+
+    @Test
+    fun messageDisplayPartsBackfillsLegacyContentWhenPartsAreMissing() {
+        val message = assistantMessage(
+            status = MessageStatus.SUCCEEDED,
+            content = "旧 content 缓存",
+        )
+
+        val parts = messageDisplayParts(message, emptyList())
+
+        assertEquals(1, parts.size)
+        assertEquals(UiMessagePartType.TEXT, parts.single().type)
+        assertEquals("旧 content 缓存", parts.single().content)
+        assertTrue(parts.single().stable)
+    }
+
+    @Test
+    fun messageSelectionCopyTextPrefersPersistedTextParts() {
+        val message = assistantMessage(
+            status = MessageStatus.SUCCEEDED,
+            content = "旧 content 缓存",
+        )
+        val parts = listOf(
+            UiMessagePartDraft(
+                index = 0,
+                type = UiMessagePartType.REASONING,
+                content = "内部推理",
+                stable = true,
+            ),
+            UiMessagePartDraft(
+                index = 1,
+                type = UiMessagePartType.TEXT,
+                content = "可见正文",
+                stable = true,
+            ),
+        )
+
+        assertEquals("可见正文", messageSelectionCopyText(message, parts))
     }
 
     @Test

@@ -96,7 +96,10 @@ class SendMessageUseCase(
             assistantId = nextAssistantId
             val streamClock = TimeSource.Monotonic.markNow()
             val accumulator = StreamingMessageAccumulator()
-            var persistedLegacyText = ""
+            var latestSnapshot = StreamingMessageSnapshot(
+                status = MessageStatus.PENDING,
+                parts = emptyList(),
+            )
 
             client.streamChatEvents(
                 ChatRequest(
@@ -110,16 +113,13 @@ class SendMessageUseCase(
                 ),
             ).collect { event ->
                 accumulator.onEvent(event, streamClock.elapsedNow().inWholeMilliseconds)?.let { flush ->
-                    val nextLegacyText = flush.snapshot.legacyVisibleText()
-                    val delta = flush.snapshot.legacyVisibleDelta(persistedLegacyText)
-                    if (delta.isNotEmpty() && nextLegacyText.startsWith(persistedLegacyText)) {
-                        chatRepository.appendAssistantText(nextAssistantId, delta)
-                        persistedLegacyText = nextLegacyText
-                    }
+                    latestSnapshot = flush.snapshot
+                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
                 }
             }
             webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
-                chatRepository.appendAssistantText(nextAssistantId, it)
+                latestSnapshot = appendVisibleTextPart(latestSnapshot, it)
+                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
             }
             chatRepository.markAssistantSucceeded(nextAssistantId)
         } catch (cancelled: CancellationException) {
@@ -195,6 +195,22 @@ class SendMessageUseCase(
     companion object {
         private const val MAX_IMAGE_BYTES = 8 * 1024 * 1024
     }
+}
+
+internal fun appendVisibleTextPart(
+    snapshot: StreamingMessageSnapshot,
+    text: String,
+): StreamingMessageSnapshot {
+    if (text.isBlank()) return snapshot
+    return snapshot.copy(
+        parts = snapshot.parts + UiMessagePartDraft(
+            index = snapshot.parts.size,
+            type = UiMessagePartType.TEXT,
+            content = text,
+            metadata = emptyMap(),
+            stable = snapshot.status != MessageStatus.PENDING && snapshot.status != MessageStatus.STREAMING,
+        ),
+    )
 }
 
 internal fun buildChatErrorLog(

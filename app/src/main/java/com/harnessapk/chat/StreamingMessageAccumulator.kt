@@ -48,7 +48,7 @@ data class StreamingMessageSnapshot(
 fun StreamingMessageSnapshot.legacyVisibleText(): String =
     parts
         .filter { it.type == UiMessagePartType.TEXT }
-        .joinToString(separator = "\n\n") { it.content }
+        .joinToString(separator = "") { it.content }
 
 fun StreamingMessageSnapshot.legacyVisibleDelta(previousVisibleText: String): String {
     val next = legacyVisibleText()
@@ -77,6 +77,7 @@ enum class StreamingFlushReason {
 class StreamingMessageAccumulator(
     private val flushIntervalMillis: Long = DEFAULT_FLUSH_INTERVAL_MILLIS,
     private val maxBufferedChars: Int = DEFAULT_MAX_BUFFERED_CHARS,
+    private val maxTailChars: Int = DEFAULT_MAX_TAIL_CHARS,
 ) {
     private val parts = mutableListOf<MutablePart>()
     private var status = MessageStatus.PENDING
@@ -168,9 +169,10 @@ class StreamingMessageAccumulator(
         val structureChanged = ensureActivePart(type, metadata)
         val active = parts.last()
         active.content.append(content)
+        val activePartSplit = splitActivePartIfNeeded()
         val reason = flushReason(
-            active = active,
-            structureChanged = structureChanged || forceStructureFlush,
+            active = parts.last(),
+            structureChanged = structureChanged || forceStructureFlush || activePartSplit,
             nowMillis = nowMillis,
         ) ?: return null
         return flush(reason, nowMillis)
@@ -187,6 +189,29 @@ class StreamingMessageAccumulator(
             nextSizeFlushAt = maxBufferedChars.coerceAtLeast(1),
         )
         return active != null
+    }
+
+    private fun splitActivePartIfNeeded(): Boolean {
+        var changed = false
+        while (true) {
+            val active = parts.lastOrNull() ?: return changed
+            if (!active.type.canSplitTail() || active.content.length <= maxTailChars.coerceAtLeast(1)) return changed
+            val text = active.content.toString()
+            val splitAt = splitPoint(text, maxTailChars.coerceAtLeast(1))
+            if (splitAt <= 0 || splitAt >= text.length) return changed
+            val stablePrefix = text.take(splitAt)
+            val tail = text.drop(splitAt)
+            active.content.clear()
+            active.content.append(stablePrefix)
+            active.stable = true
+            parts += MutablePart(
+                index = parts.size,
+                type = active.type,
+                metadata = active.metadata,
+                nextSizeFlushAt = maxBufferedChars.coerceAtLeast(1),
+            ).also { it.content.append(tail) }
+            changed = true
+        }
     }
 
     private fun flushReason(
@@ -249,5 +274,25 @@ class StreamingMessageAccumulator(
     private companion object {
         const val DEFAULT_FLUSH_INTERVAL_MILLIS = 300L
         const val DEFAULT_MAX_BUFFERED_CHARS = 320
+        const val DEFAULT_MAX_TAIL_CHARS = 1_200
     }
+}
+
+private fun UiMessagePartType.canSplitTail(): Boolean =
+    this == UiMessagePartType.TEXT || this == UiMessagePartType.REASONING
+
+private fun splitPoint(text: String, maxPrefixChars: Int): Int {
+    val maxSplit = maxPrefixChars.coerceIn(1, text.length - 1)
+    text.lastIndexOf("\n\n", startIndex = (maxSplit - 1).coerceAtLeast(0)).takeIf { it >= 0 }?.let {
+        return it + 2
+    }
+    text.lastIndexOf('\n', startIndex = (maxSplit - 1).coerceAtLeast(0)).takeIf { it >= 0 }?.let {
+        return it + 1
+    }
+    val punctuationSplit = listOf('。', '！', '？', '.', '!', '?')
+        .map { punctuation -> text.lastIndexOf(punctuation, startIndex = (maxSplit - 1).coerceAtLeast(0)) }
+        .filter { it >= 0 }
+        .maxOrNull()
+    if (punctuationSplit != null) return punctuationSplit + 1
+    return maxSplit
 }

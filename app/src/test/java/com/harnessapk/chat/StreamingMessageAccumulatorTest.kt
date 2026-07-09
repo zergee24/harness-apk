@@ -57,6 +57,28 @@ class StreamingMessageAccumulatorTest {
     }
 
     @Test
+    fun longTextSplitsIntoStableBlocksAndSmallTail() {
+        val accumulator = StreamingMessageAccumulator(
+            flushIntervalMillis = 1_000L,
+            maxBufferedChars = 200,
+            maxTailChars = 12,
+        )
+
+        val flush = accumulator.onEvent(
+            StreamEvent.TextDelta("第一段内容。\n\n第二段内容继续生成。"),
+            nowMillis = 0L,
+        )
+
+        val parts = flush!!.snapshot.parts
+        assertEquals(2, parts.size)
+        assertEquals("第一段内容。\n\n", parts[0].content)
+        assertEquals("第二段内容继续生成。", parts[1].content)
+        assertTrue(parts[0].stable)
+        assertFalse(parts[1].stable)
+        assertTrue(parts[1].content.length <= 12)
+    }
+
+    @Test
     fun switchingFromReasoningToTextClosesReasoningPart() {
         val accumulator = StreamingMessageAccumulator()
 
@@ -141,6 +163,66 @@ class StreamingMessageAccumulatorTest {
         )
 
         assertEquals("可见答案", accumulator.snapshot().legacyVisibleText())
+    }
+
+    @Test
+    fun legacyVisibleTextConcatsSplitTextPartsWithoutExtraBlankLines() {
+        val snapshot = StreamingMessageSnapshot(
+            status = MessageStatus.STREAMING,
+            parts = listOf(
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.TEXT,
+                    content = "第一段\n\n",
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 1,
+                    type = UiMessagePartType.TEXT,
+                    content = "第二段",
+                    stable = false,
+                ),
+            ),
+        )
+
+        assertEquals("第一段\n\n第二段", snapshot.legacyVisibleText())
+    }
+
+    @Test
+    fun longMarkdownStreamPreservesTextAndKeepsTailBounded() {
+        val markdown = (1..220).joinToString("\n\n") { index ->
+            """
+            ## Git 章节 $index
+
+            - 初始化仓库
+              - 配置用户名
+              - 配置邮箱
+            - 提交代码
+
+            ```bash
+            git add .
+            git commit -m "提交 $index"
+            ```
+            """.trimIndent()
+        }
+        val accumulator = StreamingMessageAccumulator(
+            flushIntervalMillis = 300L,
+            maxBufferedChars = 320,
+            maxTailChars = 1_200,
+        )
+        var now = 0L
+
+        markdown.chunked(37).forEach { chunk ->
+            now += 80L
+            accumulator.onEvent(StreamEvent.TextDelta(chunk), nowMillis = now)?.let { flush ->
+                assertTrue(flush.snapshot.parts.last().content.length <= 1_200)
+            }
+        }
+        val finished = accumulator.onEvent(StreamEvent.Finished("stop"), nowMillis = now + 80L)!!
+
+        assertEquals(markdown, finished.snapshot.legacyVisibleText())
+        assertTrue(finished.snapshot.parts.size > 1)
+        assertTrue(finished.snapshot.parts.all { it.stable })
     }
 
     @Test

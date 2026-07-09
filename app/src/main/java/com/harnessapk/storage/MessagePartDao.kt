@@ -5,9 +5,13 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface MessagePartDao {
+    @Query("SELECT * FROM message_parts WHERE messageId = :messageId ORDER BY partIndex ASC")
+    fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>>
+
     @Query("SELECT * FROM message_parts WHERE messageId = :messageId ORDER BY partIndex ASC")
     suspend fun listForMessage(messageId: String): List<MessagePartEntity>
 

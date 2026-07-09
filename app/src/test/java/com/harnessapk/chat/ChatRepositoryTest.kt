@@ -299,6 +299,9 @@ class ChatRepositoryTest {
 private class FakeMessagePartDao : MessagePartDao {
     private val rows = linkedMapOf<String, MessagePartEntity>()
 
+    override fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>> =
+        MutableStateFlow(rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex })
+
     override suspend fun listForMessage(messageId: String): List<MessagePartEntity> =
         rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex }
 
