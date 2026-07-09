@@ -43,4 +43,11 @@ class SettingsDestinationsTest {
 
         assertEquals("配置 Gitee 认证和默认提交身份。", git.description)
     }
+
+    @Test
+    fun updateDestinationCarriesBadgeWhenUpdateIsAvailable() {
+        val updates = settingsDestinations(showUpdateBadge = true).first { it.id == "updates" }
+
+        assertEquals(true, updates.showBadge)
+    }
 }

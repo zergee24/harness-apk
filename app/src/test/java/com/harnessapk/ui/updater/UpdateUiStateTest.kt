@@ -24,6 +24,22 @@ class UpdateUiStateTest {
     }
 
     @Test
+    fun startupUpdateActionDownloadsSilentlyWhenUpdateIsAvailable() {
+        assertEquals(
+            StartupUpdateAction.DOWNLOAD_APK,
+            startupUpdateAction(updateResult(updateAvailable = true, forceUpdate = false)),
+        )
+    }
+
+    @Test
+    fun startupUpdateActionDoesNotDownloadWhenAlreadyLatest() {
+        assertEquals(
+            StartupUpdateAction.NONE,
+            startupUpdateAction(updateResult(updateAvailable = false, forceUpdate = false)),
+        )
+    }
+
+    @Test
     fun installerLaunchesDirectlyWhenPermissionExists() {
         assertEquals(InstallLaunchTarget.INSTALLER, installLaunchTarget(canRequestPackageInstalls = true))
     }

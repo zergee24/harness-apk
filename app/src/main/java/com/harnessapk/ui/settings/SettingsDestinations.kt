@@ -4,9 +4,12 @@ data class SettingsDestination(
     val id: String,
     val title: String,
     val description: String,
+    val showBadge: Boolean = false,
 )
 
-fun settingsDestinations(): List<SettingsDestination> = listOf(
+fun settingsDestinations(
+    showUpdateBadge: Boolean = false,
+): List<SettingsDestination> = listOf(
     SettingsDestination(
         id = "models",
         title = "模型配置",
@@ -36,5 +39,6 @@ fun settingsDestinations(): List<SettingsDestination> = listOf(
         id = "updates",
         title = "检查更新",
         description = "查看新版本并安装 APK 更新。",
+        showBadge = showUpdateBadge,
     ),
 )
