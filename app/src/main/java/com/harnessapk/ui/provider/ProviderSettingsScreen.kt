@@ -574,7 +574,7 @@ private fun ModelConfigListEditor(
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("可选模型", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                 Text(
-                    text = "每个模型独立维护上下文和自动压缩比例",
+                    text = "每个模型独立维护上下文、自动压缩和推理参数",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -658,6 +658,27 @@ private fun ModelConfigEditorRow(
                 },
                 valueRange = 1f..95f,
             )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text("推理强度", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = "开启后请求会携带 reasoning_effort",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = config.supportsReasoningEffort,
+                    onCheckedChange = { onChange(config.copy(supportsReasoningEffort = it)) },
+                )
+            }
         }
     }
 }
@@ -710,6 +731,12 @@ private fun ProviderRow(
                 )
                 Text(
                     text = "上下文：${provider.modelConfigs.joinToString("、") { "${it.id} ${it.contextWindowTokens.toCompactTokenText()}" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "推理强度：${provider.modelConfigs.filter { it.supportsReasoningEffort }.map { it.id }.ifEmpty { listOf("关闭") }.joinToString("、")}",
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,

@@ -37,6 +37,7 @@ data class ModelConfig(
     val id: String,
     val contextWindowTokens: Int = DEFAULT_CONTEXT_WINDOW_TOKENS,
     val compressionThresholdPercent: Int = DEFAULT_COMPRESSION_THRESHOLD_PERCENT,
+    val supportsReasoningEffort: Boolean = false,
 )
 
 const val DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000

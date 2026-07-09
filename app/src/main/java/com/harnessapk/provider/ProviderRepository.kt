@@ -142,31 +142,28 @@ data class ProviderWithKey(
     val apiKey: String,
 )
 
-private fun ProviderProfileEntity.toDomain(): ProviderProfile = ProviderProfile(
-    id = id,
-    name = name,
-    baseUrl = baseUrl,
-    defaultModel = defaultModel,
-    defaultVisionModel = defaultVisionModel,
-    supportsVision = supportsVision,
-    nativeWebSearchMode = nativeWebSearchMode.decodeNativeWebSearchMode(),
-    enabled = enabled,
-    hasApiKey = encryptedApiKey != null && apiKeyIv != null,
-    availableModels = normalizeAvailableModels(
+private fun ProviderProfileEntity.toDomain(): ProviderProfile {
+    val storedConfigs = availableModels.decodeStoredModelConfigs()
+    val normalizedConfigs = normalizeStoredAvailableModels(
         defaultModel = defaultModel,
         defaultVisionModel = defaultVisionModel,
-        models = availableModels.decodeModelConfigs().map { it.id },
-        modelConfigs = availableModels.decodeModelConfigs(),
+        storedConfigs = storedConfigs,
         providerName = name,
-    ).map { it.id },
-    modelConfigs = normalizeAvailableModels(
+    )
+    return ProviderProfile(
+        id = id,
+        name = name,
+        baseUrl = baseUrl,
         defaultModel = defaultModel,
         defaultVisionModel = defaultVisionModel,
-        models = availableModels.decodeModelConfigs().map { it.id },
-        modelConfigs = availableModels.decodeModelConfigs(),
-        providerName = name,
-    ),
-)
+        supportsVision = supportsVision,
+        nativeWebSearchMode = nativeWebSearchMode.decodeNativeWebSearchMode(),
+        enabled = enabled,
+        hasApiKey = encryptedApiKey != null && apiKeyIv != null,
+        availableModels = normalizedConfigs.map { it.id },
+        modelConfigs = normalizedConfigs,
+    )
+}
 
 private fun normalizeAvailableModels(
     defaultModel: String,
@@ -191,6 +188,36 @@ private fun normalizeAvailableModels(
                         ?: fallback.contextWindowTokens,
                     compressionThresholdPercent = explicit.compressionThresholdPercent.takeIf { it > 0 }
                         ?: fallback.compressionThresholdPercent,
+                    supportsReasoningEffort = explicit.supportsReasoningEffort,
+                ).normalized()
+            } ?: fallback
+        }
+}
+
+private fun normalizeStoredAvailableModels(
+    defaultModel: String,
+    defaultVisionModel: String?,
+    storedConfigs: List<StoredModelConfig>,
+    providerName: String,
+): List<ModelConfig> {
+    val explicitConfigs = storedConfigs
+        .filter { it.id.isNotBlank() }
+        .associateBy { it.id.trim() }
+    return (listOf(defaultModel) + storedConfigs.map { it.id } + listOfNotNull(defaultVisionModel))
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .map { modelId ->
+            val fallback = defaultModelConfig(providerName, modelId)
+            explicitConfigs[modelId]?.let { explicit ->
+                ModelConfig(
+                    id = modelId,
+                    contextWindowTokens = explicit.contextWindowTokens?.takeIf { it > 0 }
+                        ?: fallback.contextWindowTokens,
+                    compressionThresholdPercent = explicit.compressionThresholdPercent?.takeIf { it > 0 }
+                        ?: fallback.compressionThresholdPercent,
+                    supportsReasoningEffort = explicit.supportsReasoningEffort
+                        ?: fallback.supportsReasoningEffort,
                 ).normalized()
             } ?: fallback
         }
@@ -203,18 +230,26 @@ private fun ModelConfig.normalized(): ModelConfig = copy(
 )
 
 private fun List<ModelConfig>.encodeModelConfigs(): String = joinToString("\n") {
-    "${it.id}|${it.contextWindowTokens}|${it.compressionThresholdPercent}"
+    "${it.id}|${it.contextWindowTokens}|${it.compressionThresholdPercent}|${it.supportsReasoningEffort}"
 }
 
-private fun String.decodeModelConfigs(): List<ModelConfig> = lines()
+private data class StoredModelConfig(
+    val id: String,
+    val contextWindowTokens: Int?,
+    val compressionThresholdPercent: Int?,
+    val supportsReasoningEffort: Boolean?,
+)
+
+private fun String.decodeStoredModelConfigs(): List<StoredModelConfig> = lines()
     .map { it.trim() }
     .filter { it.isNotBlank() }
     .map { line ->
         val parts = line.split("|").map { it.trim() }
-        ModelConfig(
+        StoredModelConfig(
             id = parts.first(),
-            contextWindowTokens = parts.getOrNull(1)?.toIntOrNull() ?: -1,
-            compressionThresholdPercent = parts.getOrNull(2)?.toIntOrNull() ?: -1,
+            contextWindowTokens = parts.getOrNull(1)?.toIntOrNull(),
+            compressionThresholdPercent = parts.getOrNull(2)?.toIntOrNull(),
+            supportsReasoningEffort = parts.getOrNull(3)?.toBooleanStrictOrNull(),
         )
     }
 
@@ -244,5 +279,6 @@ fun defaultModelConfig(providerName: String, modelId: String): ModelConfig {
         id = modelId.trim(),
         contextWindowTokens = contextWindow,
         compressionThresholdPercent = DEFAULT_COMPRESSION_THRESHOLD_PERCENT,
+        supportsReasoningEffort = "openai" in normalizedProvider || normalizedModel.startsWith("gpt-"),
     )
 }

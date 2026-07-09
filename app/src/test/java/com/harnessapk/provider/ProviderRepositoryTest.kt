@@ -66,7 +66,7 @@ class ProviderRepositoryTest {
         assertEquals(listOf("gpt-5.5", "gpt-5.5-pro", "gpt-5.5-vision"), profile.availableModels)
         assertEquals(200_000, profile.modelConfigs.first { it.id == "gpt-5.5" }.contextWindowTokens)
         assertEquals(
-            "gpt-5.5|200000|70\ngpt-5.5-pro|200000|70\ngpt-5.5-vision|200000|70",
+            "gpt-5.5|200000|70|true\ngpt-5.5-pro|200000|70|true\ngpt-5.5-vision|200000|70|true",
             stored.availableModels,
         )
     }
@@ -102,7 +102,44 @@ class ProviderRepositoryTest {
 
         assertEquals(listOf("gpt-5.5", "custom-local"), profile.availableModels)
         assertEquals(200_000, profile.modelConfigs.first { it.id == "gpt-5.5" }.contextWindowTokens)
+        assertEquals(true, profile.modelConfigs.first { it.id == "gpt-5.5" }.supportsReasoningEffort)
         assertEquals(200_000, profile.modelConfigs.first { it.id == "custom-local" }.contextWindowTokens)
+        assertEquals(true, profile.modelConfigs.first { it.id == "custom-local" }.supportsReasoningEffort)
+    }
+
+    @Test
+    fun saveProviderPersistsModelCapabilitySwitches() = runTest {
+        val dao = FakeProviderProfileDao()
+        val repository = ProviderRepository(
+            dao = dao,
+            cipher = ReversingCipher,
+            timeProvider = TimeProvider { 10L },
+        )
+
+        val id = repository.saveProvider(
+            ProviderDraft(
+                name = "OpenAI",
+                baseUrl = "https://happycode.vip/v1",
+                apiKey = "secret-key",
+                defaultModel = "gpt-5.5",
+                defaultVisionModel = null,
+                supportsVision = true,
+                availableModels = listOf("gpt-5.5", "custom-model"),
+                modelConfigs = listOf(
+                    ModelConfig("gpt-5.5", supportsReasoningEffort = true),
+                    ModelConfig("custom-model", supportsReasoningEffort = false),
+                ),
+            ),
+        )
+
+        val profile = repository.findById(id)!!
+        val stored = dao.findById(id)!!
+        assertEquals(true, profile.modelConfigs.first { it.id == "gpt-5.5" }.supportsReasoningEffort)
+        assertEquals(false, profile.modelConfigs.first { it.id == "custom-model" }.supportsReasoningEffort)
+        assertEquals(
+            "gpt-5.5|200000|70|true\ncustom-model|200000|70|false",
+            stored.availableModels,
+        )
     }
 
     @Test

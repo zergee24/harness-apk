@@ -54,4 +54,20 @@ class ProviderSettingsUiStateTest {
             appendModelConfig(configs, providerName = "OpenAI").map { it.id },
         )
     }
+
+    @Test
+    fun modelConfigListMaintainsReasoningSwitchIndependently() {
+        val configs = listOf(
+            ModelConfig("gpt-5.5", supportsReasoningEffort = true),
+            ModelConfig("gpt-5.5-mini", supportsReasoningEffort = false),
+        )
+
+        assertEquals(
+            listOf(
+                ModelConfig("gpt-5.5", supportsReasoningEffort = false),
+                ModelConfig("gpt-5.5-mini", supportsReasoningEffort = false),
+            ),
+            updateModelConfigAt(configs, index = 0) { it.copy(supportsReasoningEffort = false) },
+        )
+    }
 }

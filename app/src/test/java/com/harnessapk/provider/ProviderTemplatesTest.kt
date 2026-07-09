@@ -80,4 +80,22 @@ class ProviderTemplatesTest {
             assertEquals(70, config.compressionThresholdPercent)
         }
     }
+
+    @Test
+    fun eachTemplateModelInitializesReasoningSwitch() {
+        val reasoningByModel = ProviderTemplates.defaults.associate { template ->
+            template.name to template.modelConfigs.associate { it.id to it.supportsReasoningEffort }
+        }
+
+        assertEquals(false, reasoningByModel.getValue("Kimi").getValue("kimi-k2.7-code"))
+        assertEquals(false, reasoningByModel.getValue("Kimi").getValue("kimi-k2.7-code-highspeed"))
+        assertEquals(false, reasoningByModel.getValue("Kimi").getValue("kimi-k2.6"))
+        assertEquals(false, reasoningByModel.getValue("DeepSeek").getValue("deepseek-v4-pro"))
+        assertEquals(false, reasoningByModel.getValue("DeepSeek").getValue("deepseek-v4-flash"))
+        assertEquals(true, reasoningByModel.getValue("OpenAI").getValue("gpt-5.5"))
+        assertEquals(false, reasoningByModel.getValue("GLM").getValue("glm-5.2"))
+        assertEquals(false, reasoningByModel.getValue("GLM").getValue("glm-5-turbo"))
+        assertEquals(false, reasoningByModel.getValue("GLM").getValue("glm-4.7"))
+        assertEquals(false, reasoningByModel.getValue("GLM").getValue("glm-5v-turbo"))
+    }
 }

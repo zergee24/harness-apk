@@ -1,6 +1,7 @@
 package com.harnessapk.chat
 
 import com.harnessapk.provider.ProviderProfile
+import com.harnessapk.provider.modelConfigForProvider
 
 enum class ReasoningEffort(
     val wireValue: String,
@@ -22,7 +23,5 @@ fun reasoningEffortForRequest(
     if (supportsReasoningEffort(provider, model)) selectedEffort.wireValue else null
 
 fun supportsReasoningEffort(provider: ProviderProfile, model: String): Boolean {
-    val providerName = provider.name.trim().lowercase()
-    val normalizedModel = model.trim().lowercase()
-    return "openai" in providerName || normalizedModel.startsWith("gpt-")
+    return modelConfigForProvider(provider, model).supportsReasoningEffort
 }
