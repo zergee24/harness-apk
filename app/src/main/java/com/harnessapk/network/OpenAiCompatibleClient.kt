@@ -39,10 +39,18 @@ class OpenAiCompatibleClient(
     }
 
     fun streamChatEvents(request: ChatRequest): Flow<StreamEvent> = flow {
-        val httpRequest = Request.Builder()
+        val httpRequestBuilder = Request.Builder()
             .url(chatCompletionsUrl(request.baseUrl))
             .addHeader("Authorization", "Bearer ${request.apiKey}")
             .addHeader("Content-Type", "application/json")
+
+        request.customHeaders.normalizedCustomHeaders().forEach { (key, value) ->
+            if (!key.isProtectedHeader()) {
+                httpRequestBuilder.addHeader(key, value)
+            }
+        }
+
+        val httpRequest = httpRequestBuilder
             .post(buildBody(request).toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
@@ -87,17 +95,32 @@ class OpenAiCompatibleClient(
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun buildBody(request: ChatRequest): JsonObject = buildJsonObject {
-        put("model", JsonPrimitive(request.model))
-        put("stream", JsonPrimitive(true))
-        put("temperature", JsonPrimitive(request.temperature))
-        request.reasoningEffort?.let { put("reasoning_effort", JsonPrimitive(it)) }
-        addNativeWebSearch(request.nativeWebSearchMode)
-        put("messages", buildJsonArray {
-            request.messages.forEach { message ->
-                add(buildMessage(message))
-            }
-        })
+    private fun buildBody(request: ChatRequest): JsonObject {
+        val baseBody = buildJsonObject {
+            put("model", JsonPrimitive(request.model))
+            put("stream", JsonPrimitive(true))
+            put("temperature", JsonPrimitive(request.temperature))
+            request.reasoningEffort?.let { put("reasoning_effort", JsonPrimitive(it)) }
+            addNativeWebSearch(request.nativeWebSearchMode)
+            put("messages", buildJsonArray {
+                request.messages.forEach { message ->
+                    add(buildMessage(message))
+                }
+            })
+        }
+        val customBody = parseCustomBody(request.customBodyJson) ?: return baseBody
+        return buildJsonObject {
+            baseBody.forEach { (key, value) -> put(key, value) }
+            customBody.forEach { (key, value) -> put(key, value) }
+        }
+    }
+
+    private fun parseCustomBody(customBodyJson: String): JsonObject? {
+        val trimmed = customBodyJson.trim()
+        if (trimmed.isBlank()) return null
+        return runCatching { json.parseToJsonElement(trimmed).jsonObject }.getOrElse {
+            throw ChatHttpException("自定义请求体不是合法 JSON 对象")
+        }
     }
 
     private fun JsonObjectBuilder.addNativeWebSearch(mode: NativeWebSearchMode?) {
@@ -247,6 +270,21 @@ class OpenAiCompatibleClient(
         private const val MAX_ERROR_DETAIL_LENGTH = 240
     }
 }
+
+private fun Map<String, String>.normalizedCustomHeaders(): Map<String, String> {
+    val normalized = linkedMapOf<String, String>()
+    forEach { (rawKey, rawValue) ->
+        val key = rawKey.trim()
+        val value = rawValue.trim()
+        if (key.isNotBlank() && value.isNotBlank()) {
+            normalized[key] = value
+        }
+    }
+    return normalized
+}
+
+private fun String.isProtectedHeader(): Boolean =
+    equals("Authorization", ignoreCase = true) || equals("Content-Type", ignoreCase = true)
 
 private fun OkHttpClient.forRequest(request: ChatRequest): OkHttpClient {
     val readTimeoutMillis = request.readTimeoutMillis?.takeIf { it > 0 } ?: return this

@@ -52,6 +52,8 @@ class ModelAwareRequestBuilder {
                 reasoningEffort = reasoningEffort,
                 nativeWebSearchMode = nativeWebSearchMode,
                 readTimeoutMillis = capability.readTimeoutMillis,
+                customHeaders = provider.customHeaders,
+                customBodyJson = provider.customBodyJson,
             ),
             diagnostics = ModelAwareRequestDiagnostics(
                 capabilitySource = capability.source,

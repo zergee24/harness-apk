@@ -8,6 +8,13 @@ import com.harnessapk.storage.ProviderProfileDao
 import com.harnessapk.storage.ProviderProfileEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 
 class ProviderRepository(
@@ -53,6 +60,8 @@ class ProviderRepository(
                 enabled = true,
                 createdAt = now,
                 updatedAt = now,
+                customHeadersJson = draft.customHeaders.encodeCustomHeadersJson(),
+                customBodyJson = draft.customBodyJson.trim(),
             ),
         )
         return id
@@ -88,6 +97,8 @@ class ProviderRepository(
                 nativeWebSearchMode = draft.nativeWebSearchMode.name,
                 enabled = true,
                 updatedAt = now,
+                customHeadersJson = draft.customHeaders.encodeCustomHeadersJson(),
+                customBodyJson = draft.customBodyJson.trim(),
             ),
         )
     }
@@ -134,6 +145,7 @@ class ProviderRepository(
     private fun requireProviderFields(draft: ProviderDraft) {
         require(draft.name.isNotBlank()) { "Provider 名称不能为空" }
         require(draft.defaultModel.isNotBlank()) { "模型不能为空" }
+        requireValidCustomBodyJson(draft.customBodyJson)
     }
 }
 
@@ -166,6 +178,8 @@ private fun ProviderProfileEntity.toDomain(): ProviderProfile = ProviderProfile(
         modelConfigs = availableModels.decodeModelConfigs(),
         providerName = name,
     ),
+    customHeaders = customHeadersJson.decodeCustomHeadersJson(),
+    customBodyJson = customBodyJson.trim(),
 )
 
 private fun normalizeAvailableModels(
@@ -298,6 +312,53 @@ private fun List<String>?.sanitizedReasoningOptions(): List<String>? =
 
 private fun String.decodeNativeWebSearchMode(): NativeWebSearchMode =
     runCatching { NativeWebSearchMode.valueOf(this) }.getOrDefault(NativeWebSearchMode.DISABLED)
+
+private val PROVIDER_JSON = Json { ignoreUnknownKeys = true }
+
+private fun Map<String, String>.encodeCustomHeadersJson(): String {
+    val normalized = normalizedCustomHeaders()
+    if (normalized.isEmpty()) return ""
+    return buildJsonObject {
+        normalized.forEach { (key, value) ->
+            put(key, JsonPrimitive(value))
+        }
+    }.toString()
+}
+
+private fun String.decodeCustomHeadersJson(): Map<String, String> {
+    val trimmed = trim()
+    if (trimmed.isBlank()) return emptyMap()
+    return runCatching {
+        val root = PROVIDER_JSON.parseToJsonElement(trimmed)
+        if (root !is JsonObject) return@runCatching emptyMap()
+        root.mapNotNull { (key, value) ->
+            val headerValue = value.jsonPrimitive.contentOrNull ?: return@mapNotNull null
+            key to headerValue
+        }.toMap().normalizedCustomHeaders()
+    }.getOrDefault(emptyMap())
+}
+
+private fun Map<String, String>.normalizedCustomHeaders(): Map<String, String> {
+    val normalized = linkedMapOf<String, String>()
+    forEach { (rawKey, rawValue) ->
+        val key = rawKey.trim()
+        val value = rawValue.trim()
+        if (key.isNotBlank() && value.isNotBlank()) {
+            normalized[key] = value
+        }
+    }
+    return normalized
+}
+
+private fun requireValidCustomBodyJson(customBodyJson: String) {
+    val trimmed = customBodyJson.trim()
+    if (trimmed.isBlank()) return
+    require(
+        runCatching { PROVIDER_JSON.parseToJsonElement(trimmed).jsonObject }.isSuccess,
+    ) {
+        "自定义请求体必须是 JSON 对象"
+    }
+}
 
 fun defaultModelConfig(providerName: String, modelId: String): ModelConfig {
     val normalizedProvider = providerName.lowercase()

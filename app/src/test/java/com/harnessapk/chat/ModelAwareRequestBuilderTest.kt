@@ -43,7 +43,11 @@ class ModelAwareRequestBuilderTest {
     @Test
     fun buildUsesResolvedCapabilityForReasoningSearchAndTimeout() {
         val result = ModelAwareRequestBuilder().build(
-            provider = providerProfile("OpenAI"),
+            provider = providerProfile(
+                name = "OpenAI",
+                customHeaders = mapOf("X-Provider-Feature" to "beta"),
+                customBodyJson = """{"metadata":{"source":"local-override"}}""",
+            ),
             apiKey = "secret",
             capability = resolvedCapability(
                 modelId = "gpt-5.5",
@@ -69,6 +73,8 @@ class ModelAwareRequestBuilderTest {
         assertEquals("xhigh", result.request.reasoningEffort)
         assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, result.request.nativeWebSearchMode)
         assertEquals(240_000L, result.request.readTimeoutMillis)
+        assertEquals(mapOf("X-Provider-Feature" to "beta"), result.request.customHeaders)
+        assertEquals("""{"metadata":{"source":"local-override"}}""", result.request.customBodyJson)
         assertEquals(CapabilitySource.LOCAL_OVERRIDE, result.diagnostics.capabilitySource)
         assertTrue(result.diagnostics.droppedOptions.isEmpty())
     }
@@ -99,7 +105,11 @@ class ModelAwareRequestBuilderTest {
         assertEquals("当前供应商未开启图片输入，请切换支持图片的模型或移除图片。", error.message)
     }
 
-    private fun providerProfile(name: String): ProviderProfile = ProviderProfile(
+    private fun providerProfile(
+        name: String,
+        customHeaders: Map<String, String> = emptyMap(),
+        customBodyJson: String = "",
+    ): ProviderProfile = ProviderProfile(
         id = name.lowercase(),
         name = name,
         baseUrl = "https://example.com/v1",
@@ -108,6 +118,8 @@ class ModelAwareRequestBuilderTest {
         supportsVision = false,
         enabled = true,
         hasApiKey = true,
+        customHeaders = customHeaders,
+        customBodyJson = customBodyJson,
     )
 
     private fun resolvedCapability(

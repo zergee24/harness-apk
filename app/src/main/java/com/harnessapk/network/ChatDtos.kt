@@ -11,6 +11,8 @@ data class ChatRequest(
     val reasoningEffort: String? = null,
     val nativeWebSearchMode: NativeWebSearchMode? = null,
     val readTimeoutMillis: Long? = null,
+    val customHeaders: Map<String, String> = emptyMap(),
+    val customBodyJson: String = "",
 )
 
 data class OutgoingChatMessage(

@@ -20,6 +20,8 @@ data class ProviderProfile(
     val hasApiKey: Boolean,
     val availableModels: List<String> = emptyList(),
     val modelConfigs: List<ModelConfig> = emptyList(),
+    val customHeaders: Map<String, String> = emptyMap(),
+    val customBodyJson: String = "",
 )
 
 data class ProviderDraft(
@@ -32,6 +34,8 @@ data class ProviderDraft(
     val nativeWebSearchMode: NativeWebSearchMode = NativeWebSearchMode.DISABLED,
     val availableModels: List<String> = emptyList(),
     val modelConfigs: List<ModelConfig> = emptyList(),
+    val customHeaders: Map<String, String> = emptyMap(),
+    val customBodyJson: String = "",
 )
 
 data class ModelConfig(

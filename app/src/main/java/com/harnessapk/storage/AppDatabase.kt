@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProviderProfileEntity::class,
         ConversationMemoryEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -100,6 +100,17 @@ abstract class AppDatabase : RoomDatabase() {
                     CREATE UNIQUE INDEX IF NOT EXISTS index_message_parts_messageId_partIndex
                     ON message_parts(messageId, partIndex)
                     """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_7_8: Migration = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE provider_profiles ADD COLUMN customHeadersJson TEXT NOT NULL DEFAULT ''",
+                )
+                db.execSQL(
+                    "ALTER TABLE provider_profiles ADD COLUMN customBodyJson TEXT NOT NULL DEFAULT ''",
                 )
             }
         }

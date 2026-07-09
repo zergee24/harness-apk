@@ -217,6 +217,47 @@ class OpenAiCompatibleClientTest {
     }
 
     @Test
+    fun streamChatMergesCustomHeadersAndBodyWithoutOverwritingAuthorization() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    data: {"choices":[{"delta":{"content":"ok"}}]}
+                    data: [DONE]
+                    """.trimIndent(),
+                ),
+        )
+        server.start()
+
+        val client = OpenAiCompatibleClient(OKHTTP, Json { ignoreUnknownKeys = true })
+        client.streamChat(
+            ChatRequest(
+                baseUrl = server.url("/v1").toString(),
+                apiKey = "secret-key",
+                model = "gpt-5.5",
+                messages = listOf(OutgoingChatMessage(role = "user", text = "hello")),
+                customHeaders = mapOf(
+                    "X-Provider-Feature" to "beta",
+                    "Authorization" to "Bearer wrong",
+                    "Content-Type" to "text/plain",
+                ),
+                customBodyJson = """{"metadata":{"source":"local-override"},"temperature":0.7}""",
+            ),
+        ).toList()
+
+        val recorded = server.takeRequest()
+        assertEquals("Bearer secret-key", recorded.getHeader("Authorization"))
+        assertEquals("beta", recorded.getHeader("X-Provider-Feature"))
+        assertTrue(recorded.getHeader("Content-Type").orEmpty().startsWith("application/json"))
+        val body = Json.parseToJsonElement(recorded.body.readUtf8()).jsonObject
+        assertEquals("local-override", body["metadata"]?.jsonObject?.get("source")?.jsonPrimitive?.contentOrNull)
+        assertEquals("0.7", body["temperature"]?.jsonPrimitive?.contentOrNull)
+        server.shutdown()
+    }
+
+    @Test
     fun streamChatUsesRequestReadTimeout() = runTest {
         val server = MockWebServer()
         server.enqueue(

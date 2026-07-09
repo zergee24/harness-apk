@@ -179,6 +179,39 @@ class ProviderRepositoryTest {
     }
 
     @Test
+    fun saveProviderPersistsCustomRequestOverrides() = runTest {
+        val dao = FakeProviderProfileDao()
+        val repository = ProviderRepository(
+            dao = dao,
+            cipher = ReversingCipher,
+            timeProvider = TimeProvider { 10L },
+        )
+
+        val id = repository.saveProvider(
+            ProviderDraft(
+                name = "OpenAI",
+                baseUrl = "https://happycode.vip/v1",
+                apiKey = "secret-key",
+                defaultModel = "gpt-5.5",
+                defaultVisionModel = null,
+                supportsVision = false,
+                customHeaders = mapOf(
+                    " X-Provider-Feature " to " beta ",
+                    "Blank" to " ",
+                ),
+                customBodyJson = """ { "metadata": { "source": "local-override" } } """,
+            ),
+        )
+
+        val profile = repository.findById(id)!!
+        val stored = dao.findById(id)!!
+        assertEquals(mapOf("X-Provider-Feature" to "beta"), profile.customHeaders)
+        assertEquals("""{ "metadata": { "source": "local-override" } }""", profile.customBodyJson)
+        assertEquals("""{"X-Provider-Feature":"beta"}""", stored.customHeadersJson)
+        assertEquals("""{ "metadata": { "source": "local-override" } }""", stored.customBodyJson)
+    }
+
+    @Test
     fun updateProviderPersistsAvailableModelsAndIncludesDefaultWhenMissing() = runTest {
         val dao = FakeProviderProfileDao()
         val repository = ProviderRepository(
