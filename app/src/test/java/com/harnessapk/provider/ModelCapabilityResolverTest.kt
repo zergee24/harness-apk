@@ -82,6 +82,65 @@ class ModelCapabilityResolverTest {
     }
 
     @Test
+    fun providerProfileModelConfigCanOverrideAdvancedCapabilities() {
+        val resolver = ModelCapabilityResolver(
+            bundledCatalog = catalog(
+                "bundled",
+                providerTemplate(
+                    modelCapability(
+                        id = "gpt-5.5",
+                        contextWindowTokens = 128_000,
+                        inputModalities = listOf("text"),
+                        webSearchMode = NativeWebSearchMode.DISABLED,
+                    ),
+                ),
+            ),
+            remoteCatalog = catalog(
+                "remote",
+                providerTemplate(
+                    modelCapability(
+                        id = "gpt-5.5",
+                        contextWindowTokens = 200_000,
+                        inputModalities = listOf("text"),
+                        webSearchMode = NativeWebSearchMode.DISABLED,
+                    ),
+                ),
+            ),
+        )
+        val provider = providerProfile(
+            name = "OpenAI",
+            id = "openai-profile",
+            modelConfigs = listOf(
+                ModelConfig(
+                    id = "gpt-5.5",
+                    contextWindowTokens = 300_000,
+                    compressionThresholdPercent = 62,
+                    maxOutputTokens = 32_000,
+                    inputModalities = listOf("text", "image", "audio"),
+                    outputModalities = listOf("text", "audio"),
+                    reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
+                    defaultReasoningEffort = "high",
+                    webSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
+                    supportsToolCalling = true,
+                    readTimeoutMillis = 240_000L,
+                ),
+            ),
+        )
+
+        val resolved = resolver.resolve(provider, "gpt-5.5")
+
+        assertEquals(32_000, resolved.maxOutputTokens)
+        assertEquals(listOf("text", "image", "audio"), resolved.inputModalities)
+        assertEquals(listOf("text", "audio"), resolved.outputModalities)
+        assertEquals(listOf("low", "medium", "high", "xhigh"), resolved.reasoningEffortOptions)
+        assertEquals("high", resolved.defaultReasoningEffort)
+        assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, resolved.webSearchMode)
+        assertEquals(true, resolved.supportsToolCalling)
+        assertEquals(240_000L, resolved.readTimeoutMillis)
+        assertEquals(CapabilitySource.LOCAL_OVERRIDE, resolved.source)
+    }
+
+    @Test
     fun providerProfileModelConfigBackfillsUnknownCatalogModel() {
         val provider = providerProfile(
             name = "Custom",
@@ -177,6 +236,7 @@ class ModelCapabilityResolverTest {
     private fun modelCapability(
         id: String,
         contextWindowTokens: Int,
+        inputModalities: List<String> = listOf("text"),
         reasoningEffortOptions: List<String> = emptyList(),
         defaultReasoningEffort: String? = null,
         webSearchMode: NativeWebSearchMode = NativeWebSearchMode.DISABLED,
@@ -184,6 +244,7 @@ class ModelCapabilityResolverTest {
         id = id,
         contextWindowTokens = contextWindowTokens,
         compressionThresholdPercent = 70,
+        inputModalities = inputModalities,
         reasoningEffortOptions = reasoningEffortOptions,
         defaultReasoningEffort = defaultReasoningEffort,
         webSearchMode = webSearchMode,

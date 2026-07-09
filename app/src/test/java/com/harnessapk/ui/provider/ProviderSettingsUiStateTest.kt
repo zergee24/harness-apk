@@ -76,6 +76,11 @@ class ProviderSettingsUiStateTest {
                             id = "gpt-5.5",
                             contextWindowTokens = 200_000,
                             compressionThresholdPercent = 70,
+                            inputModalities = listOf("text", "image"),
+                            reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
+                            defaultReasoningEffort = "high",
+                            webSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
+                            readTimeoutMillis = 240_000L,
                         ),
                         ModelCapability(
                             id = "gpt-5.5-mini",
@@ -87,13 +92,15 @@ class ProviderSettingsUiStateTest {
             ),
         )
 
-        assertEquals(
-            listOf(
-                ModelConfig("gpt-5.5", contextWindowTokens = 200_000, compressionThresholdPercent = 70),
-                ModelConfig("gpt-5.5-mini", contextWindowTokens = 128_000, compressionThresholdPercent = 65),
-            ),
-            modelConfigsForTemplate(template, catalog),
-        )
+        val configs = modelConfigsForTemplate(template, catalog)
+
+        assertEquals(listOf("gpt-5.5", "gpt-5.5-mini"), configs.map { it.id })
+        assertEquals(200_000, configs.first().contextWindowTokens)
+        assertEquals(listOf("text", "image"), configs.first().inputModalities)
+        assertEquals(listOf("low", "medium", "high", "xhigh"), configs.first().reasoningEffortOptions)
+        assertEquals("high", configs.first().defaultReasoningEffort)
+        assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, configs.first().webSearchMode)
+        assertEquals(240_000L, configs.first().readTimeoutMillis)
     }
 
     @Test
@@ -124,6 +131,27 @@ class ProviderSettingsUiStateTest {
         assertEquals(1f, modelConfigDataBarProgress(value = 2_000_000, maxValue = 1_000_000), 0.001f)
         assertEquals(0f, modelConfigDataBarProgress(value = -1, maxValue = 1_000_000), 0.001f)
         assertEquals(0f, modelConfigDataBarProgress(value = 100, maxValue = 0), 0.001f)
+    }
+
+    @Test
+    fun modelCapabilityHelpersUpdateOneModelConfig() {
+        val config = ModelConfig("gpt-5.5")
+        val withImage = updateInputModality(config, modality = "image", enabled = true)
+        val withReasoning = updateReasoningCapability(withImage, enabled = true)
+        val withSearch = updateModelWebSearchMode(withReasoning, providerName = "OpenAI", enabled = true)
+        val withTool = withSearch.copy(supportsToolCalling = true)
+        val withTimeout = updateReadTimeoutSeconds(withTool, seconds = 240)
+
+        assertEquals(listOf("text", "image"), withImage.inputModalities)
+        assertEquals(listOf("low", "medium", "high", "xhigh"), withReasoning.reasoningEffortOptions)
+        assertEquals("high", withReasoning.defaultReasoningEffort)
+        assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, withSearch.webSearchMode)
+        assertEquals(true, withTool.supportsToolCalling)
+        assertEquals(240_000L, withTimeout.readTimeoutMillis)
+        assertEquals(
+            listOf("text"),
+            updateInputModality(withTimeout, modality = "image", enabled = false).inputModalities,
+        )
     }
 
     private fun resolvedCapability(

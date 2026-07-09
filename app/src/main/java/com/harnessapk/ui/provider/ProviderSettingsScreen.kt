@@ -672,6 +672,7 @@ private fun ModelConfigListEditor(
         modelConfigs.forEachIndexed { index, config ->
             ModelConfigEditorRow(
                 config = config,
+                providerName = providerName,
                 canDelete = modelConfigs.size > 1,
                 onChange = { next ->
                     onModelConfigsChange(updateModelConfigAt(modelConfigs, index) { next })
@@ -687,6 +688,7 @@ private fun ModelConfigListEditor(
 @Composable
 private fun ModelConfigEditorRow(
     config: ModelConfig,
+    providerName: String,
     canDelete: Boolean,
     onChange: (ModelConfig) -> Unit,
     onDelete: () -> Unit,
@@ -746,7 +748,76 @@ private fun ModelConfigEditorRow(
                 },
                 valueRange = 1f..95f,
             )
+            Text("模型能力", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            ModelCapabilitySwitchRow(
+                label = "图片输入",
+                checked = config.inputModalities.orEmpty().contains("image"),
+                onCheckedChange = { enabled ->
+                    onChange(updateInputModality(config, modality = "image", enabled = enabled))
+                },
+            )
+            ModelCapabilitySwitchRow(
+                label = "音频输入",
+                checked = config.inputModalities.orEmpty().contains("audio"),
+                onCheckedChange = { enabled ->
+                    onChange(updateInputModality(config, modality = "audio", enabled = enabled))
+                },
+            )
+            ModelCapabilitySwitchRow(
+                label = "推理强度",
+                checked = !config.reasoningEffortOptions.isNullOrEmpty(),
+                onCheckedChange = { enabled ->
+                    onChange(updateReasoningCapability(config, enabled))
+                },
+            )
+            ModelCapabilitySwitchRow(
+                label = "模型内搜索",
+                checked = config.webSearchMode != null && config.webSearchMode != NativeWebSearchMode.DISABLED,
+                onCheckedChange = { enabled ->
+                    onChange(updateModelWebSearchMode(config, providerName, enabled))
+                },
+            )
+            ModelCapabilitySwitchRow(
+                label = "工具调用",
+                checked = config.supportsToolCalling == true,
+                onCheckedChange = { enabled ->
+                    onChange(config.copy(supportsToolCalling = enabled))
+                },
+            )
+            ModelConfigDataBar(
+                label = "读超时",
+                valueText = "${((config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) / 1000L).toInt()}秒",
+                progress = modelConfigDataBarProgress(
+                    value = ((config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) / 1000L).toInt(),
+                    maxValue = MAX_READ_TIMEOUT_SECONDS,
+                ),
+            )
+            Slider(
+                value = ((config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) / 1000L)
+                    .toFloat()
+                    .coerceIn(MIN_READ_TIMEOUT_SECONDS.toFloat(), MAX_READ_TIMEOUT_SECONDS.toFloat()),
+                onValueChange = {
+                    onChange(updateReadTimeoutSeconds(config, it.toInt()))
+                },
+                valueRange = MIN_READ_TIMEOUT_SECONDS.toFloat()..MAX_READ_TIMEOUT_SECONDS.toFloat(),
+            )
         }
+    }
+}
+
+@Composable
+private fun ModelCapabilitySwitchRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
@@ -844,6 +915,9 @@ private fun ProviderRow(
 
 private const val MIN_CONTEXT_WINDOW_TOKENS = 32_000
 private const val MAX_CONTEXT_WINDOW_TOKENS = 1_000_000
+private const val MIN_READ_TIMEOUT_SECONDS = 30
+private const val MAX_READ_TIMEOUT_SECONDS = 300
+private const val DEFAULT_READ_TIMEOUT_MILLIS = 180_000L
 
 internal fun modelConfigDataBarProgress(value: Int, maxValue: Int): Float {
     if (maxValue <= 0) return 0f
@@ -873,6 +947,49 @@ internal fun appendModelConfig(configs: List<ModelConfig>, providerName: String)
     return configs + defaultModelConfig(providerName, nextId)
 }
 
+internal fun updateInputModality(
+    config: ModelConfig,
+    modality: String,
+    enabled: Boolean,
+): ModelConfig {
+    val normalized = modality.trim().lowercase()
+    val current = (config.inputModalities ?: listOf("text"))
+        .map { it.trim().lowercase() }
+        .filter { it.isNotBlank() }
+        .toMutableList()
+    if ("text" !in current) current.add(0, "text")
+    if (enabled && normalized !in current) current.add(normalized)
+    if (!enabled) current.remove(normalized)
+    return config.copy(inputModalities = current.distinct())
+}
+
+internal fun updateReasoningCapability(config: ModelConfig, enabled: Boolean): ModelConfig =
+    if (enabled) {
+        config.copy(
+            reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
+            defaultReasoningEffort = "high",
+        )
+    } else {
+        config.copy(reasoningEffortOptions = null, defaultReasoningEffort = null)
+    }
+
+internal fun updateModelWebSearchMode(
+    config: ModelConfig,
+    providerName: String,
+    enabled: Boolean,
+): ModelConfig = config.copy(
+    webSearchMode = if (enabled) {
+        nativeWebSearchModeForSwitch(providerName, enabled = true)
+    } else {
+        NativeWebSearchMode.DISABLED
+    },
+)
+
+internal fun updateReadTimeoutSeconds(config: ModelConfig, seconds: Int): ModelConfig =
+    config.copy(
+        readTimeoutMillis = seconds.coerceIn(MIN_READ_TIMEOUT_SECONDS, MAX_READ_TIMEOUT_SECONDS) * 1000L,
+    )
+
 internal fun isNativeWebSearchEnabled(mode: NativeWebSearchMode): Boolean =
     mode != NativeWebSearchMode.DISABLED
 
@@ -899,6 +1016,14 @@ internal fun modelConfigsForTemplate(
             id = it.id,
             contextWindowTokens = it.contextWindowTokens,
             compressionThresholdPercent = it.compressionThresholdPercent,
+            maxOutputTokens = it.maxOutputTokens,
+            inputModalities = it.inputModalities,
+            outputModalities = it.outputModalities,
+            reasoningEffortOptions = it.reasoningEffortOptions,
+            defaultReasoningEffort = it.defaultReasoningEffort,
+            webSearchMode = it.webSearchMode,
+            supportsToolCalling = it.supportsToolCalling,
+            readTimeoutMillis = it.readTimeoutMillis,
         )
     }.ifEmpty { template.modelConfigs }
 }
@@ -918,6 +1043,12 @@ private fun ModelConfig.normalizedModelConfig(): ModelConfig = copy(
     id = id.trim(),
     contextWindowTokens = contextWindowTokens.coerceIn(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS),
     compressionThresholdPercent = compressionThresholdPercent.coerceIn(1, 95),
+    maxOutputTokens = maxOutputTokens?.coerceAtLeast(1),
+    inputModalities = inputModalities?.map { it.trim().lowercase() }?.filter { it.isNotBlank() }?.distinct(),
+    outputModalities = outputModalities?.map { it.trim().lowercase() }?.filter { it.isNotBlank() }?.distinct(),
+    reasoningEffortOptions = reasoningEffortOptions?.map { it.trim().lowercase() }?.filter { it.isNotBlank() }?.distinct(),
+    defaultReasoningEffort = defaultReasoningEffort?.trim()?.takeIf { it.isNotBlank() },
+    readTimeoutMillis = readTimeoutMillis?.coerceIn(MIN_READ_TIMEOUT_SECONDS * 1000L, MAX_READ_TIMEOUT_SECONDS * 1000L),
 )
 
 private fun Int.toCompactTokenText(): String =

@@ -38,6 +38,14 @@ data class ModelConfig(
     val id: String,
     val contextWindowTokens: Int = DEFAULT_CONTEXT_WINDOW_TOKENS,
     val compressionThresholdPercent: Int = DEFAULT_COMPRESSION_THRESHOLD_PERCENT,
+    val maxOutputTokens: Int? = null,
+    val inputModalities: List<String>? = null,
+    val outputModalities: List<String>? = null,
+    val reasoningEffortOptions: List<String>? = null,
+    val defaultReasoningEffort: String? = null,
+    val webSearchMode: NativeWebSearchMode? = null,
+    val supportsToolCalling: Boolean? = null,
+    val readTimeoutMillis: Long? = null,
 )
 
 const val DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000

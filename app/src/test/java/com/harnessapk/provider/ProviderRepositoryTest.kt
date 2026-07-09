@@ -72,6 +72,52 @@ class ProviderRepositoryTest {
     }
 
     @Test
+    fun saveProviderPersistsPerModelCapabilityOverrides() = runTest {
+        val dao = FakeProviderProfileDao()
+        val repository = ProviderRepository(
+            dao = dao,
+            cipher = ReversingCipher,
+            timeProvider = TimeProvider { 10L },
+        )
+
+        val id = repository.saveProvider(
+            ProviderDraft(
+                name = "OpenAI",
+                baseUrl = "https://happycode.vip/v1",
+                apiKey = "secret-key",
+                defaultModel = "gpt-5.5",
+                defaultVisionModel = null,
+                supportsVision = true,
+                modelConfigs = listOf(
+                    ModelConfig(
+                        id = "gpt-5.5",
+                        contextWindowTokens = 200_000,
+                        compressionThresholdPercent = 68,
+                        maxOutputTokens = 32_000,
+                        inputModalities = listOf("text", "image", "audio"),
+                        outputModalities = listOf("text", "audio"),
+                        reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
+                        defaultReasoningEffort = "high",
+                        webSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
+                        supportsToolCalling = true,
+                        readTimeoutMillis = 240_000L,
+                    ),
+                ),
+            ),
+        )
+
+        val config = repository.findById(id)!!.modelConfigs.single()
+        assertEquals(32_000, config.maxOutputTokens)
+        assertEquals(listOf("text", "image", "audio"), config.inputModalities)
+        assertEquals(listOf("text", "audio"), config.outputModalities)
+        assertEquals(listOf("low", "medium", "high", "xhigh"), config.reasoningEffortOptions)
+        assertEquals("high", config.defaultReasoningEffort)
+        assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, config.webSearchMode)
+        assertEquals(true, config.supportsToolCalling)
+        assertEquals(240_000L, config.readTimeoutMillis)
+    }
+
+    @Test
     fun readProviderBackfillsModelConfigsFromLegacyModelNames() = runTest {
         val dao = FakeProviderProfileDao()
         val repository = ProviderRepository(

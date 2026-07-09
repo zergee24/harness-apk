@@ -191,6 +191,14 @@ private fun normalizeAvailableModels(
                         ?: fallback.contextWindowTokens,
                     compressionThresholdPercent = explicit.compressionThresholdPercent.takeIf { it > 0 }
                         ?: fallback.compressionThresholdPercent,
+                    maxOutputTokens = explicit.maxOutputTokens?.takeIf { it > 0 },
+                    inputModalities = explicit.inputModalities.sanitizedModalities(),
+                    outputModalities = explicit.outputModalities.sanitizedModalities(),
+                    reasoningEffortOptions = explicit.reasoningEffortOptions.sanitizedReasoningOptions(),
+                    defaultReasoningEffort = explicit.defaultReasoningEffort?.trim()?.takeIf { it.isNotBlank() },
+                    webSearchMode = explicit.webSearchMode,
+                    supportsToolCalling = explicit.supportsToolCalling,
+                    readTimeoutMillis = explicit.readTimeoutMillis?.takeIf { it > 0 },
                 ).normalized()
             } ?: fallback
         }
@@ -200,10 +208,32 @@ private fun ModelConfig.normalized(): ModelConfig = copy(
     id = id.trim(),
     contextWindowTokens = contextWindowTokens.coerceAtLeast(1),
     compressionThresholdPercent = compressionThresholdPercent.coerceIn(1, 95),
+    maxOutputTokens = maxOutputTokens?.coerceAtLeast(1),
+    inputModalities = inputModalities.sanitizedModalities(),
+    outputModalities = outputModalities.sanitizedModalities(),
+    reasoningEffortOptions = reasoningEffortOptions.sanitizedReasoningOptions(),
+    defaultReasoningEffort = defaultReasoningEffort?.trim()?.takeIf { it.isNotBlank() },
+    readTimeoutMillis = readTimeoutMillis?.coerceAtLeast(1L),
 )
 
 private fun List<ModelConfig>.encodeModelConfigs(): String = joinToString("\n") {
-    "${it.id}|${it.contextWindowTokens}|${it.compressionThresholdPercent}"
+    if (!it.hasAdvancedCapabilityOverrides()) {
+        "${it.id}|${it.contextWindowTokens}|${it.compressionThresholdPercent}"
+    } else {
+        listOf(
+            it.id,
+            it.contextWindowTokens.toString(),
+            it.compressionThresholdPercent.toString(),
+            it.maxOutputTokens.orEmptyField(),
+            it.inputModalities.encodeStringListField(),
+            it.outputModalities.encodeStringListField(),
+            it.reasoningEffortOptions.encodeStringListField(),
+            it.defaultReasoningEffort.orEmpty(),
+            it.webSearchMode?.name.orEmpty(),
+            it.supportsToolCalling?.toString().orEmpty(),
+            it.readTimeoutMillis?.toString().orEmpty(),
+        ).joinToString("|")
+    }
 }
 
 private fun String.decodeModelConfigs(): List<ModelConfig> = lines()
@@ -215,8 +245,56 @@ private fun String.decodeModelConfigs(): List<ModelConfig> = lines()
             id = parts.first(),
             contextWindowTokens = parts.getOrNull(1)?.toIntOrNull() ?: -1,
             compressionThresholdPercent = parts.getOrNull(2)?.toIntOrNull() ?: -1,
+            maxOutputTokens = parts.getOrNull(3)?.toIntOrNull(),
+            inputModalities = parts.getOrNull(4).decodeStringListField(),
+            outputModalities = parts.getOrNull(5).decodeStringListField(),
+            reasoningEffortOptions = parts.getOrNull(6).decodeStringListField(),
+            defaultReasoningEffort = parts.getOrNull(7)?.takeIf { it.isNotBlank() },
+            webSearchMode = parts.getOrNull(8)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { NativeWebSearchMode.valueOf(it) }.getOrNull() },
+            supportsToolCalling = parts.getOrNull(9)?.toBooleanStrictOrNull(),
+            readTimeoutMillis = parts.getOrNull(10)?.toLongOrNull(),
         )
     }
+
+private fun ModelConfig.hasAdvancedCapabilityOverrides(): Boolean =
+    maxOutputTokens != null ||
+        !inputModalities.isNullOrEmpty() ||
+        !outputModalities.isNullOrEmpty() ||
+        !reasoningEffortOptions.isNullOrEmpty() ||
+        !defaultReasoningEffort.isNullOrBlank() ||
+        webSearchMode != null ||
+        supportsToolCalling != null ||
+        readTimeoutMillis != null
+
+private fun Int?.orEmptyField(): String = this?.toString().orEmpty()
+
+private fun List<String>?.encodeStringListField(): String =
+    this.orEmpty()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .joinToString(",")
+
+private fun String?.decodeStringListField(): List<String>? =
+    this?.split(",")
+        ?.map { it.trim() }
+        ?.filter { it.isNotBlank() }
+        ?.distinct()
+        ?.takeIf { it.isNotEmpty() }
+
+private fun List<String>?.sanitizedModalities(): List<String>? =
+    this?.map { it.trim().lowercase() }
+        ?.filter { it.isNotBlank() }
+        ?.distinct()
+        ?.takeIf { it.isNotEmpty() }
+
+private fun List<String>?.sanitizedReasoningOptions(): List<String>? =
+    this?.map { it.trim().lowercase() }
+        ?.filter { it.isNotBlank() }
+        ?.distinct()
+        ?.takeIf { it.isNotEmpty() }
 
 private fun String.decodeNativeWebSearchMode(): NativeWebSearchMode =
     runCatching { NativeWebSearchMode.valueOf(this) }.getOrDefault(NativeWebSearchMode.DISABLED)
