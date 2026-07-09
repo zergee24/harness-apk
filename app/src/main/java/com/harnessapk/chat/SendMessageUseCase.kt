@@ -23,6 +23,7 @@ import com.harnessapk.websearch.toVisibleSourcesMarkdown
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
+import java.util.UUID
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
@@ -78,6 +79,10 @@ class SendMessageUseCase(
         var requestDiagnostics: ModelAwareRequestDiagnostics? = null
         var accumulator: StreamingMessageAccumulator? = null
         var streamClock: TimeMark? = null
+        val traceId = UUID.randomUUID().toString()
+        val startedAtMillis = System.currentTimeMillis()
+        var flushCount = 0
+        var receivedChars = 0
 
         try {
             val imageDataUrls = attachments.map { it.toDataUrl() }
@@ -128,10 +133,12 @@ class SendMessageUseCase(
 
             client.streamChatEvents(modelAwareRequest.request).collect { event ->
                 outputTransformerPipeline.transform(event).forEach { transformedEvent ->
+                    receivedChars += transformedEvent.visiblePayloadLength()
                     activeAccumulator.onEvent(
                         transformedEvent,
                         activeStreamClock.elapsedNow().inWholeMilliseconds,
                     )?.let { flush ->
+                        flushCount += 1
                         latestSnapshot = flush.snapshot
                         chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
                     }
@@ -171,6 +178,13 @@ class SendMessageUseCase(
                     nowMillis = System.currentTimeMillis(),
                     sensitiveTerms = listOf(provider.apiKey, text),
                     requestDiagnostics = requestDiagnostics,
+                    runtimeDiagnostics = ChatRuntimeDiagnostics(
+                        traceId = traceId,
+                        startedAtMillis = startedAtMillis,
+                        failedAtMillis = System.currentTimeMillis(),
+                        flushCount = flushCount,
+                        receivedChars = receivedChars,
+                    ),
                 ),
             )
         }
@@ -250,6 +264,16 @@ internal fun cancelStreamingSnapshot(
 ): StreamingMessageSnapshot? =
     accumulator?.cancel(nowMillis)?.snapshot
 
+data class ChatRuntimeDiagnostics(
+    val traceId: String,
+    val startedAtMillis: Long,
+    val failedAtMillis: Long,
+    val flushCount: Int,
+    val receivedChars: Int,
+) {
+    val elapsedMillis: Long = (failedAtMillis - startedAtMillis).coerceAtLeast(0L)
+}
+
 internal fun buildChatErrorLog(
     provider: ProviderProfile,
     requestModel: String,
@@ -258,6 +282,7 @@ internal fun buildChatErrorLog(
     nowMillis: Long,
     sensitiveTerms: List<String> = emptyList(),
     requestDiagnostics: ModelAwareRequestDiagnostics? = null,
+    runtimeDiagnostics: ChatRuntimeDiagnostics? = null,
 ): String {
     val userMessage = error.toUserMessage().asLlmFailureMessage()
     val details = (
@@ -272,14 +297,37 @@ internal fun buildChatErrorLog(
             "Conversation: $conversationId",
             "Exception: ${error::class.java.name}",
             "Message: ${error.message.orEmpty().ifBlank { "(empty)" }}",
-        ) + requestDiagnostics.toLogLinesOrEmpty()
+        ) + runtimeDiagnostics.toLogLinesOrEmpty() + requestDiagnostics.toLogLinesOrEmpty()
     ).joinToString("\n")
 
     return details.hideSensitiveTerms(sensitiveTerms)
 }
 
+private fun ChatRuntimeDiagnostics?.toLogLinesOrEmpty(): List<String> =
+    this?.let {
+        listOf(
+            "Trace ID: ${it.traceId}",
+            "Started At: ${it.startedAtMillis}",
+            "Failed At: ${it.failedAtMillis}",
+            "Elapsed Ms: ${it.elapsedMillis}",
+            "Flush Count: ${it.flushCount}",
+            "Received Chars: ${it.receivedChars}",
+        )
+    }.orEmpty()
+
 private fun ModelAwareRequestDiagnostics?.toLogLinesOrEmpty(): List<String> =
     this?.toLogLines().orEmpty()
+
+private fun StreamEvent.visiblePayloadLength(): Int = when (this) {
+    is StreamEvent.TextDelta -> text.length
+    is StreamEvent.ReasoningDelta -> text.length
+    is StreamEvent.ToolCallDelta -> argumentsDelta.length
+    is StreamEvent.ToolResult -> content.length
+    is StreamEvent.SearchResult -> snippet.length
+    is StreamEvent.Finished,
+    is StreamEvent.RawProviderEvent,
+    is StreamEvent.Usage -> 0
+}
 
 private fun com.harnessapk.provider.ResolvedModelCapability.supportsImageInput(): Boolean =
     inputModalities.any { it.equals("image", ignoreCase = true) }

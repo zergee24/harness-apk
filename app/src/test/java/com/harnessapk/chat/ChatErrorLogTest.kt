@@ -64,6 +64,31 @@ class ChatErrorLogTest {
         assertTrue(log.contains("Dropped Options: web_search"))
     }
 
+    @Test
+    fun buildChatErrorLogIncludesRuntimeDiagnosticsForStreamingFailures() {
+        val log = buildChatErrorLog(
+            provider = providerProfile(),
+            requestModel = "gpt-5.5",
+            conversationId = "conversation-1",
+            error = SocketTimeoutException("timeout"),
+            nowMillis = 1_300L,
+            runtimeDiagnostics = ChatRuntimeDiagnostics(
+                traceId = "trace-1",
+                startedAtMillis = 1_000L,
+                failedAtMillis = 1_300L,
+                flushCount = 4,
+                receivedChars = 2048,
+            ),
+        )
+
+        assertTrue(log.contains("Trace ID: trace-1"))
+        assertTrue(log.contains("Started At: 1000"))
+        assertTrue(log.contains("Failed At: 1300"))
+        assertTrue(log.contains("Elapsed Ms: 300"))
+        assertTrue(log.contains("Flush Count: 4"))
+        assertTrue(log.contains("Received Chars: 2048"))
+    }
+
     private fun providerProfile(): ProviderProfile = ProviderProfile(
         id = "provider-1",
         name = "OpenAI",
