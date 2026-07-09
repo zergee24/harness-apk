@@ -35,6 +35,9 @@ class SendMessageUseCase(
     private val imageCompressionPolicy: ImageCompressionPolicy = ImageCompressionPolicy(),
     private val requestBuilder: ModelAwareRequestBuilder = ModelAwareRequestBuilder(),
     private val remoteCapabilityCatalog: suspend () -> ProviderCapabilityCatalog? = { null },
+    private val outputTransformerPipelineFactory: () -> StreamEventTransformerPipeline = {
+        StreamEventTransformerPipeline(listOf(ThinkTagStreamTransformer()))
+    },
 ) {
     suspend fun send(
         conversationId: String,
@@ -106,6 +109,7 @@ class SendMessageUseCase(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
             )
+            val outputTransformerPipeline = outputTransformerPipelineFactory()
             val modelAwareRequest = requestBuilder.build(
                 provider = provider.profile,
                 apiKey = provider.apiKey,
@@ -118,9 +122,11 @@ class SendMessageUseCase(
             requestDiagnostics = modelAwareRequest.diagnostics
 
             client.streamChatEvents(modelAwareRequest.request).collect { event ->
-                accumulator.onEvent(event, streamClock.elapsedNow().inWholeMilliseconds)?.let { flush ->
-                    latestSnapshot = flush.snapshot
-                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+                outputTransformerPipeline.transform(event).forEach { transformedEvent ->
+                    accumulator.onEvent(transformedEvent, streamClock.elapsedNow().inWholeMilliseconds)?.let { flush ->
+                        latestSnapshot = flush.snapshot
+                        chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+                    }
                 }
             }
             webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
