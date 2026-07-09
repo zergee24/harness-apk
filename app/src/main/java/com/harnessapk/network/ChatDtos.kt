@@ -10,6 +10,7 @@ data class ChatRequest(
     val temperature: Double = 0.2,
     val reasoningEffort: String? = null,
     val nativeWebSearchMode: NativeWebSearchMode? = null,
+    val readTimeoutMillis: Long? = null,
 )
 
 data class OutgoingChatMessage(

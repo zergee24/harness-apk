@@ -13,6 +13,7 @@ import com.harnessapk.project.FileProjectRepository
 import com.harnessapk.project.ProjectWorkspaceGatewayAdapter
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderCapabilityCatalogClient
+import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.security.ApiKeyCipher
 import com.harnessapk.session.PromptOptimizerUseCase
 import com.harnessapk.storage.AppDatabase
@@ -20,6 +21,7 @@ import com.harnessapk.storage.AppSettingsStore
 import com.harnessapk.updater.ApkInstaller
 import com.harnessapk.updater.UpdateRepository
 import com.harnessapk.websearch.JinaWebSearchClient
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 
 class AppContainer(context: Context) {
@@ -85,6 +87,10 @@ class AppContainer(context: Context) {
         providerRepository = providerRepository,
         client = openAiClient,
         dispatchers = dispatchers,
+        remoteCapabilityCatalog = {
+            settingsStore.providerCapabilityCatalogSnapshot.first().rawJson
+                ?.let { rawJson -> runCatching { parseProviderCapabilityCatalogJson(rawJson, json) }.getOrNull() }
+        },
     )
     val updateRepository = UpdateRepository(
         okHttpClient = updateHttpClient,

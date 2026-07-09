@@ -25,6 +25,7 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -723,6 +724,7 @@ private fun ModelConfigEditorRow(
             ModelConfigDataBar(
                 label = "上下文",
                 valueText = config.contextWindowTokens.toCompactTokenText(),
+                progress = modelConfigDataBarProgress(config.contextWindowTokens, MAX_CONTEXT_WINDOW_TOKENS),
             )
             Slider(
                 value = config.contextWindowTokens.coerceIn(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS)
@@ -735,6 +737,7 @@ private fun ModelConfigEditorRow(
             ModelConfigDataBar(
                 label = "自动压缩",
                 valueText = "${config.compressionThresholdPercent.coerceIn(1, 95)}%",
+                progress = modelConfigDataBarProgress(config.compressionThresholdPercent, 95),
             )
             Slider(
                 value = config.compressionThresholdPercent.coerceIn(1, 95).toFloat(),
@@ -751,14 +754,21 @@ private fun ModelConfigEditorRow(
 private fun ModelConfigDataBar(
     label: String,
     valueText: String,
+    progress: Float,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(valueText, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(valueText, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+        }
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
@@ -834,6 +844,11 @@ private fun ProviderRow(
 
 private const val MIN_CONTEXT_WINDOW_TOKENS = 32_000
 private const val MAX_CONTEXT_WINDOW_TOKENS = 1_000_000
+
+internal fun modelConfigDataBarProgress(value: Int, maxValue: Int): Float {
+    if (maxValue <= 0) return 0f
+    return (value.toFloat() / maxValue.toFloat()).coerceIn(0f, 1f)
+}
 
 internal fun updateModelConfigAt(
     configs: List<ModelConfig>,

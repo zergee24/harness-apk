@@ -26,6 +26,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
 
 class OpenAiCompatibleClient(
     private val okHttpClient: OkHttpClient,
@@ -45,7 +46,7 @@ class OpenAiCompatibleClient(
             .post(buildBody(request).toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
-        val call = okHttpClient.newCall(httpRequest)
+        val call = okHttpClient.forRequest(request).newCall(httpRequest)
         val cancellation = currentCoroutineContext().job.invokeOnCompletion {
             if (it != null) call.cancel()
         }
@@ -123,7 +124,9 @@ class OpenAiCompatibleClient(
                     )
                 })
             }
-            NativeWebSearchMode.DISABLED, null -> Unit
+            NativeWebSearchMode.EXTERNAL_BING,
+            NativeWebSearchMode.DISABLED,
+            null -> Unit
         }
     }
 
@@ -243,6 +246,14 @@ class OpenAiCompatibleClient(
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val MAX_ERROR_DETAIL_LENGTH = 240
     }
+}
+
+private fun OkHttpClient.forRequest(request: ChatRequest): OkHttpClient {
+    val readTimeoutMillis = request.readTimeoutMillis?.takeIf { it > 0 } ?: return this
+    return newBuilder()
+        .readTimeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
+        .callTimeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
+        .build()
 }
 
 fun chatCompletionsUrl(baseUrl: String): String {

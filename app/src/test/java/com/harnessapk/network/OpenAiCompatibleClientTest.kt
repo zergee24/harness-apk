@@ -10,6 +10,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import java.io.InterruptedIOException
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -211,6 +213,39 @@ class OpenAiCompatibleClientTest {
 
         val body = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
         assertEquals("web_search", body["tools"]!!.jsonArray.first().jsonObject["type"]!!.jsonPrimitive.contentOrNull)
+        server.shutdown()
+    }
+
+    @Test
+    fun streamChatUsesRequestReadTimeout() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeadersDelay(500, TimeUnit.MILLISECONDS)
+                .setBody(
+                    """
+                    data: {"choices":[{"delta":{"content":"slow"}}]}
+                    data: [DONE]
+                    """.trimIndent(),
+                ),
+        )
+        server.start()
+        val client = OpenAiCompatibleClient(OKHTTP, Json { ignoreUnknownKeys = true })
+
+        val error = runCatching {
+            client.streamChat(
+                ChatRequest(
+                    baseUrl = server.url("/v1").toString(),
+                    apiKey = "secret-key",
+                    model = "gpt-5.5",
+                    messages = listOf(OutgoingChatMessage(role = "user", text = "hello")),
+                    readTimeoutMillis = 50L,
+                ),
+            ).toList()
+        }.exceptionOrNull()
+
+        assertTrue(error is InterruptedIOException)
         server.shutdown()
     }
 

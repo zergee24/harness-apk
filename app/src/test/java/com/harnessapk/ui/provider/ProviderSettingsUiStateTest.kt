@@ -118,6 +118,14 @@ class ProviderSettingsUiStateTest {
         )
     }
 
+    @Test
+    fun modelConfigDataBarProgressIsBounded() {
+        assertEquals(0.2f, modelConfigDataBarProgress(value = 200_000, maxValue = 1_000_000), 0.001f)
+        assertEquals(1f, modelConfigDataBarProgress(value = 2_000_000, maxValue = 1_000_000), 0.001f)
+        assertEquals(0f, modelConfigDataBarProgress(value = -1, maxValue = 1_000_000), 0.001f)
+        assertEquals(0f, modelConfigDataBarProgress(value = 100, maxValue = 0), 0.001f)
+    }
+
     private fun resolvedCapability(
         source: CapabilitySource,
         catalogVersion: String?,
@@ -133,6 +141,7 @@ class ProviderSettingsUiStateTest {
         reasoningEffortOptions = emptyList(),
         defaultReasoningEffort = null,
         webSearchMode = NativeWebSearchMode.DISABLED,
+        supportsToolCalling = false,
         readTimeoutMillis = 180_000L,
         source = source,
         catalogVersion = catalogVersion,

@@ -1,6 +1,7 @@
 package com.harnessapk.chat
 
 import com.harnessapk.provider.ProviderProfile
+import com.harnessapk.provider.CapabilitySource
 import java.net.SocketTimeoutException
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -39,6 +40,28 @@ class ChatErrorLogTest {
         assertFalse(log.contains("sk-secret"))
         assertFalse(log.contains("user prompt"))
         assertTrue(log.contains("[已隐藏]"))
+    }
+
+    @Test
+    fun buildChatErrorLogIncludesCapabilityDiagnostics() {
+        val log = buildChatErrorLog(
+            provider = providerProfile(),
+            requestModel = "gpt-5.5",
+            conversationId = "conversation-1",
+            error = SocketTimeoutException("timeout"),
+            nowMillis = 1234L,
+            requestDiagnostics = ModelAwareRequestDiagnostics(
+                capabilitySource = CapabilitySource.REMOTE,
+                catalogVersion = "2026.07.09.1",
+                readTimeoutMillis = 180_000L,
+                droppedOptions = listOf("web_search"),
+            ),
+        )
+
+        assertTrue(log.contains("Capability Source: REMOTE"))
+        assertTrue(log.contains("Catalog Version: 2026.07.09.1"))
+        assertTrue(log.contains("Read Timeout Ms: 180000"))
+        assertTrue(log.contains("Dropped Options: web_search"))
     }
 
     private fun providerProfile(): ProviderProfile = ProviderProfile(

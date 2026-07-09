@@ -5,6 +5,7 @@ enum class NativeWebSearchMode {
     OPENAI_WEB_SEARCH_OPTIONS,
     ENABLE_SEARCH_BOOLEAN,
     GLM_WEB_SEARCH_TOOL,
+    EXTERNAL_BING,
 }
 
 data class ProviderProfile(

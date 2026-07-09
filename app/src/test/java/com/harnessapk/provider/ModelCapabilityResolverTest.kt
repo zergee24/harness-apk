@@ -40,6 +40,10 @@ class ModelCapabilityResolverTest {
                     modelId = "gpt-5.5",
                     contextWindowTokens = 300_000,
                     compressionThresholdPercent = 60,
+                    inputModalities = listOf("text", "audio"),
+                    outputModalities = listOf("text", "audio"),
+                    supportsToolCalling = true,
+                    readTimeoutMillis = 240_000L,
                     hidden = false,
                 ),
             ),
@@ -49,6 +53,10 @@ class ModelCapabilityResolverTest {
 
         assertEquals(300_000, resolved.contextWindowTokens)
         assertEquals(60, resolved.compressionThresholdPercent)
+        assertEquals(listOf("text", "audio"), resolved.inputModalities)
+        assertEquals(listOf("text", "audio"), resolved.outputModalities)
+        assertEquals(true, resolved.supportsToolCalling)
+        assertEquals(240_000L, resolved.readTimeoutMillis)
         assertEquals(CapabilitySource.LOCAL_OVERRIDE, resolved.source)
     }
 

@@ -12,7 +12,7 @@ fun nativeWebSearchModeForRequest(
     if (!enabledForSession || !settings.enabled || !shouldUseWebSearch(query)) return null
     return provider
         ?.nativeWebSearchMode
-        ?.takeIf { it != NativeWebSearchMode.DISABLED }
+        ?.takeIf { it != NativeWebSearchMode.DISABLED && it != NativeWebSearchMode.EXTERNAL_BING }
 }
 
 fun shouldUseExternalWebSearch(
@@ -22,5 +22,5 @@ fun shouldUseExternalWebSearch(
     nativeWebSearchMode: NativeWebSearchMode?,
 ): Boolean = enabledForSession &&
     settings.enabled &&
-    nativeWebSearchMode == null &&
+    (nativeWebSearchMode == null || nativeWebSearchMode == NativeWebSearchMode.EXTERNAL_BING) &&
     shouldUseWebSearch(query)

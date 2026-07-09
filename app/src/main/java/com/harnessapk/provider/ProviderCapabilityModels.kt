@@ -22,6 +22,7 @@ data class ModelCapability(
     val reasoningEffortOptions: List<String> = emptyList(),
     val defaultReasoningEffort: String? = null,
     val webSearchMode: NativeWebSearchMode = NativeWebSearchMode.DISABLED,
+    val supportsToolCalling: Boolean = false,
     val readTimeoutMillis: Long = DEFAULT_READ_TIMEOUT_MILLIS,
 ) {
     val supportsReasoningEffort: Boolean = reasoningEffortOptions.isNotEmpty()
@@ -38,6 +39,7 @@ data class ModelCapabilityOverride(
     val reasoningEffortOptions: List<String>? = null,
     val defaultReasoningEffort: String? = null,
     val webSearchMode: NativeWebSearchMode? = null,
+    val supportsToolCalling: Boolean? = null,
     val readTimeoutMillis: Long? = null,
     val hidden: Boolean = false,
 )
@@ -54,6 +56,7 @@ data class ResolvedModelCapability(
     val reasoningEffortOptions: List<String>,
     val defaultReasoningEffort: String?,
     val webSearchMode: NativeWebSearchMode,
+    val supportsToolCalling: Boolean,
     val readTimeoutMillis: Long,
     val source: CapabilitySource,
     val catalogVersion: String?,
@@ -185,6 +188,7 @@ class ModelCapabilityResolver(
             reasoningEffortOptions = override?.reasoningEffortOptions ?: capability.reasoningEffortOptions,
             defaultReasoningEffort = override?.defaultReasoningEffort ?: capability.defaultReasoningEffort,
             webSearchMode = override?.webSearchMode ?: capability.webSearchMode,
+            supportsToolCalling = override?.supportsToolCalling ?: capability.supportsToolCalling,
             readTimeoutMillis = override?.readTimeoutMillis ?: capability.readTimeoutMillis,
             source = nextSource,
             catalogVersion = catalogVersion,

@@ -22,12 +22,13 @@ class ProviderCapabilityCatalogJsonTest {
                       "contextWindowTokens": 200000,
                       "maxOutputTokens": 32000,
                       "defaultCompressionThresholdPercent": 70,
-                      "inputModalities": ["text", "image"],
-                      "outputModalities": ["text"],
+                      "inputModalities": ["text", "image", "audio"],
+                      "outputModalities": ["text", "audio"],
                       "supportsReasoningEffort": true,
                       "reasoningEffortOptions": ["low", "medium", "high", "xhigh"],
                       "defaultReasoningEffort": "high",
                       "webSearch": {"mode": "openai_web_search_options"},
+                      "toolCalling": {"supported": true},
                       "timeouts": {"readMs": 180000}
                     }
                   ]
@@ -45,7 +46,9 @@ class ProviderCapabilityCatalogJsonTest {
         assertEquals("gpt-5.5", provider.defaultModelId)
         assertEquals(200_000, model.contextWindowTokens)
         assertEquals(32_000, model.maxOutputTokens)
-        assertEquals(listOf("text", "image"), model.inputModalities)
+        assertEquals(listOf("text", "image", "audio"), model.inputModalities)
+        assertEquals(listOf("text", "audio"), model.outputModalities)
+        assertEquals(true, model.supportsToolCalling)
         assertEquals(listOf("low", "medium", "high", "xhigh"), model.reasoningEffortOptions)
         assertEquals("high", model.defaultReasoningEffort)
         assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, model.webSearchMode)
@@ -63,5 +66,33 @@ class ProviderCapabilityCatalogJsonTest {
             }
             """.trimIndent(),
         )
+    }
+
+    @Test
+    fun parsesExternalBingWebSearchMode() {
+        val catalog = parseProviderCapabilityCatalogJson(
+            """
+            {
+              "schemaVersion": 1,
+              "catalogVersion": "external-search",
+              "providers": [
+                {
+                  "providerId": "custom",
+                  "displayName": "Custom",
+                  "defaultModelId": "model",
+                  "models": [
+                    {
+                      "modelId": "model",
+                      "contextWindowTokens": 200000,
+                      "webSearch": {"mode": "external_bing"}
+                    }
+                  ]
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(NativeWebSearchMode.EXTERNAL_BING, catalog.providers.single().models.single().webSearchMode)
     }
 }

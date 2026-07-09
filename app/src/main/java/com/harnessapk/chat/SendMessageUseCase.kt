@@ -8,13 +8,14 @@ import android.util.Base64
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.AppError
 import com.harnessapk.common.toUserMessage
-import com.harnessapk.network.ChatRequest
 import com.harnessapk.network.OpenAiCompatibleClient
 import com.harnessapk.network.OutgoingChatMessage
+import com.harnessapk.provider.ModelCapabilityResolver
+import com.harnessapk.provider.ModelConfig
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.ProviderCapabilityCatalog
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderProfile
-import com.harnessapk.provider.modelConfigForProvider
 import com.harnessapk.session.SessionRequestContext
 import com.harnessapk.session.buildSessionOutgoingMessages
 import com.harnessapk.websearch.WebSearchContext
@@ -32,6 +33,8 @@ class SendMessageUseCase(
     private val dispatchers: AppDispatchers,
     private val contextCompressor: ContextCompressor = ContextCompressor(),
     private val imageCompressionPolicy: ImageCompressionPolicy = ImageCompressionPolicy(),
+    private val requestBuilder: ModelAwareRequestBuilder = ModelAwareRequestBuilder(),
+    private val remoteCapabilityCatalog: suspend () -> ProviderCapabilityCatalog? = { null },
 ) {
     suspend fun send(
         conversationId: String,
@@ -53,8 +56,10 @@ class SendMessageUseCase(
                 provider.profile.defaultModel
             }
         val requestModel = modelForRequest(selectedModel)
-        val selectedModelConfig = modelConfigForProvider(provider.profile, selectedModel)
-        if (attachments.isNotEmpty() && !provider.profile.supportsVision) {
+        val resolvedCapability = ModelCapabilityResolver(
+            remoteCatalog = remoteCapabilityCatalog(),
+        ).resolve(provider.profile, requestModel)
+        if (attachments.isNotEmpty() && !resolvedCapability.supportsImageInput()) {
             val assistantId = chatRepository.insertAssistantPending(
                 conversationId,
                 provider.profile.id,
@@ -66,6 +71,7 @@ class SendMessageUseCase(
 
         val userMessageId = chatRepository.insertUserMessage(conversationId, text, attachments)
         var assistantId: String? = null
+        var requestDiagnostics: ModelAwareRequestDiagnostics? = null
 
         try {
             val imageDataUrls = attachments.map { it.toDataUrl() }
@@ -77,7 +83,7 @@ class SendMessageUseCase(
                 currentImageDataUrls = imageDataUrls,
                 existingMemory = existingMemory,
                 nowMillis = System.currentTimeMillis(),
-                policyOverride = compressionPolicyForModel(selectedModelConfig),
+                policyOverride = compressionPolicyForModel(resolvedCapability.toModelConfig()),
             )
             compressed.memoryToSave?.let { memory ->
                 chatRepository.upsertMemory(memory)
@@ -100,18 +106,18 @@ class SendMessageUseCase(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
             )
+            val modelAwareRequest = requestBuilder.build(
+                provider = provider.profile,
+                apiKey = provider.apiKey,
+                capability = resolvedCapability,
+                messages = buildSessionOutgoingMessages(sessionContext, compressed.messages, webSearchContext),
+                temperature = temperatureForModel(requestModel),
+                selectedReasoningEffort = reasoningEffort,
+                webSearchRequested = nativeWebSearchMode != null,
+            )
+            requestDiagnostics = modelAwareRequest.diagnostics
 
-            client.streamChatEvents(
-                ChatRequest(
-                    baseUrl = provider.profile.baseUrl,
-                    apiKey = provider.apiKey,
-                    model = requestModel,
-                    messages = buildSessionOutgoingMessages(sessionContext, compressed.messages, webSearchContext),
-                    temperature = temperatureForModel(requestModel),
-                    reasoningEffort = reasoningEffortForRequest(provider.profile, requestModel, reasoningEffort),
-                    nativeWebSearchMode = nativeWebSearchMode,
-                ),
-            ).collect { event ->
+            client.streamChatEvents(modelAwareRequest.request).collect { event ->
                 accumulator.onEvent(event, streamClock.elapsedNow().inWholeMilliseconds)?.let { flush ->
                     latestSnapshot = flush.snapshot
                     chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
@@ -140,6 +146,7 @@ class SendMessageUseCase(
                     error = error,
                     nowMillis = System.currentTimeMillis(),
                     sensitiveTerms = listOf(provider.apiKey, text),
+                    requestDiagnostics = requestDiagnostics,
                 ),
             )
         }
@@ -220,23 +227,39 @@ internal fun buildChatErrorLog(
     error: Throwable,
     nowMillis: Long,
     sensitiveTerms: List<String> = emptyList(),
+    requestDiagnostics: ModelAwareRequestDiagnostics? = null,
 ): String {
     val userMessage = error.toUserMessage().asLlmFailureMessage()
-    val details = listOf(
-        userMessage,
-        "--- 诊断日志 ---",
-        "Time: $nowMillis",
-        "Provider: ${provider.name}",
-        "Provider ID: ${provider.id}",
-        "Base URL: ${provider.baseUrl}",
-        "Model: $requestModel",
-        "Conversation: $conversationId",
-        "Exception: ${error::class.java.name}",
-        "Message: ${error.message.orEmpty().ifBlank { "(empty)" }}",
+    val details = (
+        listOf(
+            userMessage,
+            "--- 诊断日志 ---",
+            "Time: $nowMillis",
+            "Provider: ${provider.name}",
+            "Provider ID: ${provider.id}",
+            "Base URL: ${provider.baseUrl}",
+            "Model: $requestModel",
+            "Conversation: $conversationId",
+            "Exception: ${error::class.java.name}",
+            "Message: ${error.message.orEmpty().ifBlank { "(empty)" }}",
+        ) + requestDiagnostics.toLogLinesOrEmpty()
     ).joinToString("\n")
 
     return details.hideSensitiveTerms(sensitiveTerms)
 }
+
+private fun ModelAwareRequestDiagnostics?.toLogLinesOrEmpty(): List<String> =
+    this?.toLogLines().orEmpty()
+
+private fun com.harnessapk.provider.ResolvedModelCapability.supportsImageInput(): Boolean =
+    inputModalities.any { it.equals("image", ignoreCase = true) }
+
+private fun com.harnessapk.provider.ResolvedModelCapability.toModelConfig(): ModelConfig =
+    ModelConfig(
+        id = modelId,
+        contextWindowTokens = contextWindowTokens,
+        compressionThresholdPercent = compressionThresholdPercent,
+    )
 
 private fun String.hideSensitiveTerms(sensitiveTerms: List<String>): String {
     return sensitiveTerms

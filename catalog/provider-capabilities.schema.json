@@ -50,6 +50,12 @@
             "defaultEnabled": { "type": "boolean" }
           }
         },
+        "toolCalling": {
+          "type": "object",
+          "properties": {
+            "supported": { "type": "boolean" }
+          }
+        },
         "timeouts": {
           "type": "object",
           "properties": {

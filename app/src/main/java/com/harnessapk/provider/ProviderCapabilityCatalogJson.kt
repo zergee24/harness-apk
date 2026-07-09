@@ -70,6 +70,7 @@ private fun JsonObject.toModelCapability(): ModelCapability? {
             ?.stringValue("mode")
             ?.toNativeWebSearchMode()
             ?: NativeWebSearchMode.DISABLED,
+        supportsToolCalling = jsonObjectValue("toolCalling")?.booleanValue("supported") ?: false,
         readTimeoutMillis = jsonObjectValue("timeouts")?.longValue("readMs") ?: 180_000L,
     )
 }
@@ -79,6 +80,7 @@ private fun String.toNativeWebSearchMode(): NativeWebSearchMode =
         "openai_web_search_options" -> NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS
         "enable_search_boolean" -> NativeWebSearchMode.ENABLE_SEARCH_BOOLEAN
         "glm_web_search_tool" -> NativeWebSearchMode.GLM_WEB_SEARCH_TOOL
+        "external_bing" -> NativeWebSearchMode.EXTERNAL_BING
         else -> NativeWebSearchMode.DISABLED
     }
 
