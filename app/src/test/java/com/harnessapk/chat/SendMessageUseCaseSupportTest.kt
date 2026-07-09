@@ -39,4 +39,20 @@ class SendMessageUseCaseSupportTest {
 
         assertEquals(snapshot, appendVisibleTextPart(snapshot, "   "))
     }
+
+    @Test
+    fun cancelStreamingSnapshotIncludesBufferedUnflushedText() {
+        val accumulator = StreamingMessageAccumulator(
+            flushIntervalMillis = 1_000L,
+            maxBufferedChars = 100,
+        )
+        accumulator.onEvent(StreamEvent.TextDelta("已落库"), nowMillis = 0L)
+        accumulator.onEvent(StreamEvent.TextDelta("未到节流窗口"), nowMillis = 20L)
+
+        val snapshot = cancelStreamingSnapshot(accumulator, nowMillis = 30L)!!
+
+        assertEquals(MessageStatus.CANCELLED, snapshot.status)
+        assertEquals("已落库未到节流窗口", snapshot.legacyVisibleText())
+        assertTrue(snapshot.parts.all { it.stable })
+    }
 }

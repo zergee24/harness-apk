@@ -21,6 +21,9 @@ interface MessagePartDao {
     @Query("DELETE FROM message_parts WHERE messageId = :messageId")
     suspend fun deleteForMessage(messageId: String)
 
+    @Query("UPDATE message_parts SET stable = 1, updatedAt = :updatedAt WHERE messageId = :messageId")
+    suspend fun markStableForMessage(messageId: String, updatedAt: Long)
+
     @Transaction
     suspend fun replaceForMessage(messageId: String, parts: List<MessagePartEntity>) {
         deleteForMessage(messageId)

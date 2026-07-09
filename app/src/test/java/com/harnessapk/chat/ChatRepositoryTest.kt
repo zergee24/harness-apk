@@ -140,6 +140,36 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun markAssistantCancelledStabilizesPersistedStreamingParts() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 40L })
+        val conversationId = repository.createConversation()
+        val assistantId = repository.insertAssistantPending(
+            conversationId = conversationId,
+            providerId = "openai",
+            model = "gpt-5.5",
+        )
+        repository.replaceMessagePartsFromSnapshot(
+            assistantId,
+            StreamingMessageSnapshot(
+                status = MessageStatus.STREAMING,
+                parts = listOf(
+                    UiMessagePartDraft(
+                        index = 0,
+                        type = UiMessagePartType.TEXT,
+                        content = "正在回复",
+                        stable = false,
+                    ),
+                ),
+            ),
+        )
+
+        repository.markAssistantCancelled(assistantId)
+
+        assertEquals(MessageStatus.CANCELLED, repository.listMessages(conversationId).single().status)
+        assertEquals(true, repository.listMessageParts(assistantId).single().stable)
+    }
+
+    @Test
     fun appendAssistantTextDoesNotReviveCancelledMessage() = runTest {
         val repository = repository(FakeConversationDao(), TimeProvider { 41L })
         val conversationId = repository.createConversation()
@@ -316,6 +346,16 @@ private class FakeMessagePartDao : MessagePartDao {
 
     override suspend fun deleteForMessage(messageId: String) {
         rows.entries.removeIf { it.value.messageId == messageId }
+    }
+
+    override suspend fun markStableForMessage(messageId: String, updatedAt: Long) {
+        rows.replaceAll { _, row ->
+            if (row.messageId == messageId) {
+                row.copy(stable = true, updatedAt = updatedAt)
+            } else {
+                row
+            }
+        }
     }
 }
 

@@ -235,6 +235,7 @@ class ChatRepository(
 
     suspend fun markAssistantCancelled(messageId: String) {
         updateMessageStatus(messageId, MessageStatus.CANCELLED, null)
+        messagePartDao.markStableForMessage(messageId, timeProvider.nowMillis())
     }
 
     suspend fun cancelActiveAssistantMessages(conversationId: String): Int {

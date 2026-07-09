@@ -23,6 +23,7 @@ import com.harnessapk.websearch.toVisibleSourcesMarkdown
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
+import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
 class SendMessageUseCase(
@@ -75,6 +76,8 @@ class SendMessageUseCase(
         val userMessageId = chatRepository.insertUserMessage(conversationId, text, attachments)
         var assistantId: String? = null
         var requestDiagnostics: ModelAwareRequestDiagnostics? = null
+        var accumulator: StreamingMessageAccumulator? = null
+        var streamClock: TimeMark? = null
 
         try {
             val imageDataUrls = attachments.map { it.toDataUrl() }
@@ -103,8 +106,10 @@ class SendMessageUseCase(
                 requestModel,
             )
             assistantId = nextAssistantId
-            val streamClock = TimeSource.Monotonic.markNow()
-            val accumulator = StreamingMessageAccumulator()
+            val activeStreamClock = TimeSource.Monotonic.markNow()
+            val activeAccumulator = StreamingMessageAccumulator()
+            streamClock = activeStreamClock
+            accumulator = activeAccumulator
             var latestSnapshot = StreamingMessageSnapshot(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
@@ -123,7 +128,10 @@ class SendMessageUseCase(
 
             client.streamChatEvents(modelAwareRequest.request).collect { event ->
                 outputTransformerPipeline.transform(event).forEach { transformedEvent ->
-                    accumulator.onEvent(transformedEvent, streamClock.elapsedNow().inWholeMilliseconds)?.let { flush ->
+                    activeAccumulator.onEvent(
+                        transformedEvent,
+                        activeStreamClock.elapsedNow().inWholeMilliseconds,
+                    )?.let { flush ->
                         latestSnapshot = flush.snapshot
                         chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
                     }
@@ -135,7 +143,17 @@ class SendMessageUseCase(
             }
             chatRepository.markAssistantSucceeded(nextAssistantId)
         } catch (cancelled: CancellationException) {
-            assistantId?.let { chatRepository.markAssistantCancelled(it) }
+            assistantId?.let { id ->
+                val cancelledSnapshot = cancelStreamingSnapshot(
+                    accumulator = accumulator,
+                    nowMillis = streamClock?.elapsedNow()?.inWholeMilliseconds ?: 0L,
+                )
+                if (cancelledSnapshot == null) {
+                    chatRepository.markAssistantCancelled(id)
+                } else {
+                    chatRepository.replaceMessagePartsFromSnapshot(id, cancelledSnapshot)
+                }
+            }
             throw cancelled
         } catch (error: Throwable) {
             val failedAssistantId = assistantId ?: chatRepository.insertAssistantPending(
@@ -225,6 +243,12 @@ internal fun appendVisibleTextPart(
         ),
     )
 }
+
+internal fun cancelStreamingSnapshot(
+    accumulator: StreamingMessageAccumulator?,
+    nowMillis: Long,
+): StreamingMessageSnapshot? =
+    accumulator?.cancel(nowMillis)?.snapshot
 
 internal fun buildChatErrorLog(
     provider: ProviderProfile,
