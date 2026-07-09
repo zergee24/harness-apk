@@ -283,6 +283,68 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun replaceMessagePartsFromSnapshotPreservesRenderablePartTypesAndMetadata() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 57L })
+        val conversationId = repository.createConversation()
+        val messageId = repository.insertAssistantPending(conversationId, "openai", "gpt-5.5")
+        val snapshot = StreamingMessageSnapshot(
+            status = MessageStatus.SUCCEEDED,
+            parts = listOf(
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.REASONING,
+                    content = "先判断任务",
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 1,
+                    type = UiMessagePartType.TEXT,
+                    content = "这是正文答案。",
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 2,
+                    type = UiMessagePartType.IMAGE,
+                    content = "image://local/1",
+                    metadata = mapOf("mimeType" to "image/png"),
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 3,
+                    type = UiMessagePartType.SEARCH_RESULT,
+                    content = "搜索摘要",
+                    metadata = mapOf("title" to "来源标题", "url" to "https://example.com"),
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 4,
+                    type = UiMessagePartType.FILE_CHANGE,
+                    content = "更新 README.md",
+                    metadata = mapOf("path" to "README.md"),
+                    stable = true,
+                ),
+            ),
+        )
+
+        repository.replaceMessagePartsFromSnapshot(messageId, snapshot)
+
+        val parts = repository.listMessageParts(messageId)
+        assertEquals(
+            listOf(
+                UiMessagePartType.REASONING,
+                UiMessagePartType.TEXT,
+                UiMessagePartType.IMAGE,
+                UiMessagePartType.SEARCH_RESULT,
+                UiMessagePartType.FILE_CHANGE,
+            ),
+            parts.map { it.type },
+        )
+        assertEquals("https://example.com", parts[3].metadata["url"])
+        assertEquals("README.md", parts[4].metadata["path"])
+        assertEquals("这是正文答案。", repository.listMessages(conversationId).single().content)
+    }
+
+    @Test
     fun manualContextCompressionSavesMemoryAndInsertsSystemEvent() = runTest {
         val conversationDao = FakeConversationDao()
         var now = 60L

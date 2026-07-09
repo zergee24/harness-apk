@@ -303,6 +303,7 @@ class MarkdownMessageParserTest {
             "mermaid_blocks.md" to MarkdownBlock.Mermaid::class,
             "tables_wide.md" to MarkdownBlock.Table::class,
             "long_git_usage.md" to MarkdownBlock.Code::class,
+            "chinese_headings_spacing.md" to MarkdownBlock.Heading::class,
         )
 
         samples.forEach { (fileName, expectedBlockType) ->
