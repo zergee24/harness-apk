@@ -54,8 +54,10 @@ internal class IncrementalMarkdownBlockCache(
     }
 
     private fun stableChunkLength(source: String): Int? {
-        val safeBoundary = latestSafeBoundary(source, source.length.coerceAtMost(maxStableChunkChars))
+        val maxLength = source.length.coerceAtMost(maxStableChunkChars)
+        val safeBoundary = latestSafeBoundary(source, maxLength)
         if (safeBoundary != null) return safeBoundary
+        if (source.take(maxLength).hasUnclosedFence()) return null
         return if (source.length > maxStableChunkChars + maxTailChars) maxStableChunkChars else null
     }
 
@@ -77,17 +79,14 @@ internal class IncrementalMarkdownBlockCache(
 
     private fun latestSafeBoundary(source: String, maxLength: Int): Int? {
         val window = source.take(maxLength)
-        val paragraphBreak = window.lastIndexOf("\n\n").takeIf { it >= MIN_SAFE_BOUNDARY_CHARS }?.let { it + 2 }
-        val headingBreak = window.lastHeadingBoundary()?.takeIf { it >= MIN_SAFE_BOUNDARY_CHARS }
-        val listBreak = window.lastListBoundary()?.takeIf { it >= MIN_SAFE_BOUNDARY_CHARS }
-        return listOfNotNull(paragraphBreak, headingBreak, listBreak).maxOrNull()
+        val paragraphBreaks = window.boundaryIndexes("\n\n").map { it + 2 }
+        val headingBreaks = headingBoundary.findAll(window).map { it.range.first }
+        val listBreaks = listBoundary.findAll(window).map { it.range.first }
+        return (paragraphBreaks + headingBreaks + listBreaks)
+            .filter { it >= MIN_SAFE_BOUNDARY_CHARS }
+            .filterNot { source.take(it).hasUnclosedFence() }
+            .maxOrNull()
     }
-
-    private fun String.lastHeadingBoundary(): Int? =
-        headingBoundary.findAll(this).lastOrNull()?.range?.first?.takeIf { it > 0 }
-
-    private fun String.lastListBoundary(): Int? =
-        listBoundary.findAll(this).lastOrNull()?.range?.first?.takeIf { it > 0 }
 
     private companion object {
         const val DEFAULT_MAX_STABLE_CHUNK_CHARS = 2_400
@@ -97,4 +96,29 @@ internal class IncrementalMarkdownBlockCache(
         val headingBoundary = Regex("\n(?=#{1,6}\\s)")
         val listBoundary = Regex("\n(?=(?:[-*+]\\s|\\d+[.)]\\s))")
     }
+}
+
+private fun String.boundaryIndexes(token: String): Sequence<Int> = sequence {
+    var start = indexOf(token)
+    while (start >= 0) {
+        yield(start)
+        start = indexOf(token, startIndex = start + token.length)
+    }
+}
+
+private fun String.hasUnclosedFence(): Boolean {
+    var activeMarker: String? = null
+    lineSequence().forEach { line ->
+        val indent = line.takeWhile { it == ' ' }.length
+        if (indent > 3) return@forEach
+        val trimmed = line.trimStart()
+        val marker = when {
+            trimmed.startsWith("```") -> "```"
+            trimmed.startsWith("~~~") -> "~~~"
+            else -> null
+        } ?: return@forEach
+        if (trimmed.indexOf(marker, startIndex = marker.length) >= 0) return@forEach
+        activeMarker = if (activeMarker == marker) null else activeMarker ?: marker
+    }
+    return activeMarker != null
 }

@@ -225,6 +225,23 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun incrementalParserKeepsUnclosedFenceInTailDuringStreaming() {
+        val cache = IncrementalMarkdownBlockCache(
+            maxStableChunkChars = 24,
+            maxTailChars = 12,
+            parse = { source -> listOf(MarkdownBlock.Paragraph(listOf(MarkdownInline.Text(source)))) },
+        )
+        val source = markdownResource("streaming_unclosed_fence_steps.txt")
+
+        val chunks = cache.chunksFor(source)
+
+        assertEquals(listOf(true, false), chunks.map { it.stable })
+        assertEquals("已经稳定的前言。\n\n", chunks.first().source)
+        assertTrue(chunks.last().source.startsWith("```bash"))
+        assertEquals(source.removePrefix(chunks.first().source), chunks.last().source)
+    }
+
+    @Test
     fun parsesMarkdownRegressionCorpus() {
         val samples = listOf(
             "nested_lists.md" to MarkdownBlock.BulletList::class,
