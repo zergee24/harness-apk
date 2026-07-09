@@ -81,6 +81,8 @@ object Routes {
     }
 }
 
+private val HomeModeSwitcherShape = RoundedCornerShape(16.dp)
+
 internal fun chatRouteQuery(
     projectId: String?,
     focusInput: Boolean,
@@ -275,7 +277,7 @@ private fun ModeSwitcher(
     onModeChange: (MainMode) -> Unit,
 ) {
     Surface(
-        shape = RoundedCornerShape(999.dp),
+        shape = HomeModeSwitcherShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
     ) {
         Row(modifier = Modifier.padding(3.dp)) {
@@ -283,7 +285,7 @@ private fun ModeSwitcher(
                 val selected = item == mode
                 Surface(
                     modifier = Modifier.widthIn(min = 58.dp),
-                    shape = RoundedCornerShape(999.dp),
+                    shape = HomeModeSwitcherShape,
                     color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0f),
                     contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                     onClick = { onModeChange(item) },

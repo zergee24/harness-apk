@@ -35,6 +35,16 @@ class HarnessApkAppStateTest {
         assertFalse(modeSwitcherSource.contains("切换模式"))
     }
 
+    @Test
+    fun homeModeSwitcherUsesFixedMatchingCornerRadius() {
+        val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
+        val modeSwitcherSource = source.substringAfter("private fun ModeSwitcher").substringBefore("@Composable\nprivate fun HomeTopBarActions")
+
+        assertTrue(source.contains("private val HomeModeSwitcherShape = RoundedCornerShape(16.dp)"))
+        assertFalse(modeSwitcherSource.contains("RoundedCornerShape(999.dp)"))
+        assertEquals(2, Regex("shape = HomeModeSwitcherShape").findAll(modeSwitcherSource).count())
+    }
+
     private fun conversation(id: String, title: String): Conversation = Conversation(
         id = id,
         title = title,
