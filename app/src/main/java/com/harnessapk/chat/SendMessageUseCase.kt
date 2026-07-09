@@ -95,9 +95,10 @@ class SendMessageUseCase(
             )
             assistantId = nextAssistantId
             val streamClock = TimeSource.Monotonic.markNow()
-            val streamBuffer = StreamingTextBuffer()
+            val accumulator = StreamingMessageAccumulator()
+            var persistedLegacyText = ""
 
-            client.streamChat(
+            client.streamChatEvents(
                 ChatRequest(
                     baseUrl = provider.profile.baseUrl,
                     apiKey = provider.apiKey,
@@ -107,13 +108,15 @@ class SendMessageUseCase(
                     reasoningEffort = reasoningEffortForRequest(provider.profile, requestModel, reasoningEffort),
                     nativeWebSearchMode = nativeWebSearchMode,
                 ),
-            ).collect { delta ->
-                streamBuffer.append(delta.text, streamClock.elapsedNow().inWholeMilliseconds)?.let {
-                    chatRepository.appendAssistantText(nextAssistantId, it)
+            ).collect { event ->
+                accumulator.onEvent(event, streamClock.elapsedNow().inWholeMilliseconds)?.let { flush ->
+                    val nextLegacyText = flush.snapshot.legacyVisibleText()
+                    val delta = flush.snapshot.legacyVisibleDelta(persistedLegacyText)
+                    if (delta.isNotEmpty() && nextLegacyText.startsWith(persistedLegacyText)) {
+                        chatRepository.appendAssistantText(nextAssistantId, delta)
+                        persistedLegacyText = nextLegacyText
+                    }
                 }
-            }
-            streamBuffer.drain()?.let {
-                chatRepository.appendAssistantText(nextAssistantId, it)
             }
             webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
                 chatRepository.appendAssistantText(nextAssistantId, it)

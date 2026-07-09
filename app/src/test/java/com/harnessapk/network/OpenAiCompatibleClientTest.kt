@@ -1,5 +1,6 @@
 package com.harnessapk.network
 
+import com.harnessapk.chat.StreamEvent
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -15,6 +16,45 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OpenAiCompatibleClientTest {
+    @Test
+    fun streamChatEventsEmitsReasoningTextUsageAndFinishEvents() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    data: {"choices":[{"delta":{"reasoning_content":"先想"}}]}
+                    data: {"choices":[{"delta":{"content":"答案"}}]}
+                    data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}
+                    data: [DONE]
+                    """.trimIndent(),
+                ),
+        )
+        server.start()
+
+        val client = OpenAiCompatibleClient(OKHTTP, Json { ignoreUnknownKeys = true })
+        val result = client.streamChatEvents(
+            ChatRequest(
+                baseUrl = server.url("/v1").toString(),
+                apiKey = "secret-key",
+                model = "test-model",
+                messages = listOf(OutgoingChatMessage(role = "user", text = "hello")),
+            ),
+        ).toList()
+
+        assertEquals(
+            listOf(
+                StreamEvent.ReasoningDelta("先想"),
+                StreamEvent.TextDelta("答案"),
+                StreamEvent.Usage(inputTokens = 5, outputTokens = 7, totalTokens = 12),
+                StreamEvent.Finished("stop"),
+            ),
+            result,
+        )
+        server.shutdown()
+    }
+
     @Test
     fun streamChatPostsToChatCompletionsAndEmitsDeltas() = runTest {
         val server = MockWebServer()

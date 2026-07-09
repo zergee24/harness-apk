@@ -36,6 +36,8 @@ sealed interface MarkdownBlock {
     data class OrderedList(val startNumber: Int, val items: List<MarkdownListItem>) : MarkdownBlock
     data class Quote(val blocks: List<MarkdownBlock>) : MarkdownBlock
     data class Code(val literal: String, val info: String?) : MarkdownBlock
+    data class Math(val literal: String, val display: Boolean) : MarkdownBlock
+    data class Mermaid(val literal: String) : MarkdownBlock
     data class Table(val headers: List<List<MarkdownInline>>, val rows: List<List<List<MarkdownInline>>>) : MarkdownBlock
     data object Divider : MarkdownBlock
 }
@@ -44,6 +46,7 @@ sealed interface MarkdownBlock {
 data class MarkdownListItem(
     val text: List<MarkdownInline>,
     val children: List<MarkdownBlock> = emptyList(),
+    val taskChecked: Boolean? = null,
 )
 
 @Immutable
@@ -52,6 +55,7 @@ sealed interface MarkdownInline {
     data class Strong(val children: List<MarkdownInline>) : MarkdownInline
     data class Emphasis(val children: List<MarkdownInline>) : MarkdownInline
     data class Code(val literal: String) : MarkdownInline
+    data class Math(val literal: String) : MarkdownInline
     data class Link(val destination: String, val children: List<MarkdownInline>) : MarkdownInline
     data object LineBreak : MarkdownInline
 }
@@ -68,6 +72,7 @@ fun List<MarkdownInline>.plainText(): String = buildString {
             is MarkdownInline.Strong -> inline.children.forEach(::appendInline)
             is MarkdownInline.Emphasis -> inline.children.forEach(::appendInline)
             is MarkdownInline.Code -> append(inline.literal)
+            is MarkdownInline.Math -> append(inline.literal)
             is MarkdownInline.Link -> inline.children.forEach(::appendInline)
             MarkdownInline.LineBreak -> append('\n')
         }
@@ -83,6 +88,8 @@ private val headingWithoutSpaceAtStart = Regex("^(\\s{0,3})(#{1,6})(?!#)(?=\\S)"
 private val inlineHeadingMarker = Regex("(?<=[^#\\s])(#{1,6})(?!#)(?=[\\p{L}\\p{N}])")
 private val thematicBreakLine = Regex("^\\s{0,3}([-*_])(?:\\s*\\1){2,}\\s*$")
 private val compactFence = Regex("```([^`]*)```")
+private val inlineDollarMath = Regex("""(?<!\\)\$(?!\s)(.+?)(?<!\\)\$""")
+private val inlineParenMath = Regex("""\\\((.+?)\\\)""")
 private val compactFenceLanguages = listOf(
     "bash",
     "shell",
@@ -103,10 +110,24 @@ private val compactFenceLanguages = listOf(
 
 private fun normalizeModelMarkdown(markdown: String): String {
     var inFence = false
+    var inDisplayMath = false
     return buildList {
         markdown.lineSequence().forEach { rawLine ->
             val trimmed = rawLine.trimStart()
             when {
+                !inFence && trimmed.trim() == "$$" -> {
+                    add(if (inDisplayMath) "```" else "```math")
+                    inDisplayMath = !inDisplayMath
+                }
+                !inFence && trimmed.trim() == "\\[" -> {
+                    add("```math")
+                    inDisplayMath = true
+                }
+                !inFence && trimmed.trim() == "\\]" -> {
+                    add("```")
+                    inDisplayMath = false
+                }
+                inDisplayMath -> add(rawLine)
                 (trimmed.startsWith("```") || trimmed.startsWith("~~~")) && !hasSingleLineFence(rawLine) -> {
                     inFence = !inFence
                     add(rawLine)
@@ -184,11 +205,23 @@ private fun Node.toBlocks(): List<MarkdownBlock> = when (this) {
     is BulletList -> listOf(MarkdownBlock.BulletList(listItems()))
     is OrderedList -> listOf(MarkdownBlock.OrderedList(markerStartNumber ?: 1, listItems()))
     is BlockQuote -> listOf(MarkdownBlock.Quote(children().flatMap { it.toBlocks() }.toList()))
-    is FencedCodeBlock -> listOf(MarkdownBlock.Code(literal.trimEnd(), info))
+    is FencedCodeBlock -> listOf(toCodeLikeBlock())
     is IndentedCodeBlock -> listOf(MarkdownBlock.Code(literal.trimEnd(), null))
     is ThematicBreak -> listOf(MarkdownBlock.Divider)
     is TableBlock -> listOf(toMarkdownTable())
     else -> children().flatMap { it.toBlocks() }.toList()
+}
+
+private fun FencedCodeBlock.toCodeLikeBlock(): MarkdownBlock {
+    val normalizedInfo = info.orEmpty().trim().lowercase()
+    val literal = literal.trimEnd()
+    return when {
+        normalizedInfo == "math" || normalizedInfo == "tex" || normalizedInfo == "latex" ->
+            MarkdownBlock.Math(literal = literal.trim(), display = true)
+        normalizedInfo == "mermaid" ->
+            MarkdownBlock.Mermaid(literal = literal)
+        else -> MarkdownBlock.Code(literal, info)
+    }
 }
 
 private fun TableBlock.toMarkdownTable(): MarkdownBlock.Table {
@@ -227,6 +260,8 @@ private fun ListItem.toListItem(): MarkdownListItem {
                 is MarkdownBlock.Heading -> text.addAll(block.text)
                 is MarkdownBlock.Paragraph -> text.addAll(block.text)
                 is MarkdownBlock.Code,
+                is MarkdownBlock.Math,
+                is MarkdownBlock.Mermaid,
                 is MarkdownBlock.Quote,
                 is MarkdownBlock.BulletList,
                 is MarkdownBlock.OrderedList,
@@ -235,7 +270,8 @@ private fun ListItem.toListItem(): MarkdownListItem {
             }
         }
     }
-    return MarkdownListItem(text = text, children = children)
+    val task = text.extractTaskState()
+    return MarkdownListItem(text = task.text, children = children, taskChecked = task.checked)
 }
 
 private fun MarkdownBlock.toPlainText(): String = when (this) {
@@ -245,6 +281,8 @@ private fun MarkdownBlock.toPlainText(): String = when (this) {
     is MarkdownBlock.OrderedList -> items.joinToString(" ") { it.toPlainText() }
     is MarkdownBlock.Quote -> blocks.joinToString(" ") { it.toPlainText() }
     is MarkdownBlock.Code -> literal
+    is MarkdownBlock.Math -> literal
+    is MarkdownBlock.Mermaid -> literal
     is MarkdownBlock.Table -> (headers + rows.flatten()).joinToString(" ") { it.plainText() }
     MarkdownBlock.Divider -> ""
 }
@@ -257,7 +295,51 @@ private fun MarkdownListItem.toPlainText(): String =
 private fun Node.inlineChildren(): List<MarkdownInline> {
     val collector = InlineCollector()
     accept(collector)
-    return collector.children
+    return collector.children.withInlineMath()
+}
+
+private data class TaskText(
+    val checked: Boolean?,
+    val text: List<MarkdownInline>,
+)
+
+private fun List<MarkdownInline>.extractTaskState(): TaskText {
+    val firstText = firstOrNull() as? MarkdownInline.Text ?: return TaskText(null, this)
+    val literal = firstText.literal
+    val checked = when {
+        literal.startsWith("[x] ", ignoreCase = true) -> true
+        literal.startsWith("[ ] ") -> false
+        else -> null
+    } ?: return TaskText(null, this)
+    val stripped = firstText.copy(literal = literal.drop(4))
+    return TaskText(checked, listOf(stripped).filter { it.literal.isNotEmpty() } + drop(1))
+}
+
+private fun List<MarkdownInline>.withInlineMath(): List<MarkdownInline> =
+    flatMap { inline ->
+        when (inline) {
+            is MarkdownInline.Text -> inline.literal.splitInlineMath()
+            else -> listOf(inline)
+        }
+    }
+
+private fun String.splitInlineMath(): List<MarkdownInline> {
+    val matches = (inlineDollarMath.findAll(this) + inlineParenMath.findAll(this))
+        .sortedBy { it.range.first }
+        .toList()
+    if (matches.isEmpty()) return listOf(MarkdownInline.Text(this))
+    val output = mutableListOf<MarkdownInline>()
+    var cursor = 0
+    matches.forEach { match ->
+        if (match.range.first < cursor) return@forEach
+        if (match.range.first > cursor) {
+            output += MarkdownInline.Text(substring(cursor, match.range.first))
+        }
+        output += MarkdownInline.Math(match.groupValues[1])
+        cursor = match.range.last + 1
+    }
+    if (cursor < length) output += MarkdownInline.Text(substring(cursor))
+    return output.filterNot { it is MarkdownInline.Text && it.literal.isEmpty() }
 }
 
 private fun Node.children(): Sequence<Node> = sequence {

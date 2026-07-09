@@ -131,6 +131,45 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
                 )
             }
         }
+        is MarkdownBlock.Math -> Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+        ) {
+            Text(
+                modifier = Modifier.padding(12.dp),
+                text = block.literal,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = markdownCodeFontSizeSp().sp,
+                    lineHeight = markdownCodeLineHeightSp().sp,
+                ),
+            )
+        }
+        is MarkdownBlock.Mermaid -> Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "mermaid",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = block.literal,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = TextStyle(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = markdownCodeFontSizeSp().sp,
+                        lineHeight = markdownCodeLineHeightSp().sp,
+                    ),
+                )
+            }
+        }
         is MarkdownBlock.Table -> MarkdownTable(table = block, textColor = textColor)
         MarkdownBlock.Divider -> HorizontalDivider(color = textColor.copy(alpha = 0.18f))
     }
@@ -145,7 +184,7 @@ private fun MarkdownList(
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         items.forEachIndexed { index, item ->
             MarkdownListRow(
-                marker = markerForIndex(index),
+                marker = item.taskChecked?.let { if (it) "[x]" else "[ ]" } ?: markerForIndex(index),
                 item = item,
                 textColor = textColor,
             )
@@ -256,6 +295,15 @@ private fun AnnotatedString.Builder.appendInlineList(
                     fontFamily = FontFamily.Monospace,
                     color = textColor,
                     background = textColor.copy(alpha = 0.10f),
+                ),
+            ) {
+                append(inline.literal)
+            }
+            is MarkdownInline.Math -> withStyle(
+                SpanStyle(
+                    fontFamily = FontFamily.Monospace,
+                    color = textColor,
+                    background = textColor.copy(alpha = 0.08f),
                 ),
             ) {
                 append(inline.literal)

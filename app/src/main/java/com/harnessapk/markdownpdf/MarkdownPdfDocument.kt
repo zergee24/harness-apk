@@ -58,6 +58,8 @@ private fun MarkdownBlock.toPdfLines(): List<MarkdownPdfLine> = when (this) {
         }
     }
     is MarkdownBlock.Code -> literal.toTextLines(MarkdownPdfTextStyle.CODE)
+    is MarkdownBlock.Math -> literal.toTextLines(MarkdownPdfTextStyle.CODE)
+    is MarkdownBlock.Mermaid -> literal.toTextLines(MarkdownPdfTextStyle.CODE)
     is MarkdownBlock.Table -> buildList {
         if (headers.isNotEmpty()) add(MarkdownPdfLine(headers.toTableLine(), MarkdownPdfTextStyle.TABLE))
         rows.forEach { row -> add(MarkdownPdfLine(row.toTableLine(), MarkdownPdfTextStyle.TABLE)) }
@@ -66,10 +68,13 @@ private fun MarkdownBlock.toPdfLines(): List<MarkdownPdfLine> = when (this) {
 }
 
 private fun MarkdownListItem.toPdfLines(prefix: String): List<MarkdownPdfLine> =
-    listOf(MarkdownPdfLine("$prefix ${text.plainText()}", MarkdownPdfTextStyle.LIST)) +
+    listOf(MarkdownPdfLine("${taskPrefix(prefix)} ${text.plainText()}", MarkdownPdfTextStyle.LIST)) +
         children.flatMap { child ->
             child.toPdfLines().map { line -> line.copy(text = "  ${line.text}") }
         }
+
+private fun MarkdownListItem.taskPrefix(fallback: String): String =
+    taskChecked?.let { if (it) "[x]" else "[ ]" } ?: fallback
 
 private fun String.toTextLines(style: MarkdownPdfTextStyle): List<MarkdownPdfLine> =
     lineSequence()

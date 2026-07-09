@@ -1,7 +1,9 @@
 package com.harnessapk.network
 
+import com.harnessapk.chat.StreamEvent
 import com.harnessapk.provider.NativeWebSearchMode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +32,12 @@ class OpenAiCompatibleClient(
     private val json: Json,
 ) {
     fun streamChat(request: ChatRequest): Flow<ChatDelta> = flow {
+        streamChatEvents(request).collect { event ->
+            if (event is StreamEvent.TextDelta) emit(ChatDelta(event.text))
+        }
+    }
+
+    fun streamChatEvents(request: ChatRequest): Flow<StreamEvent> = flow {
         val httpRequest = Request.Builder()
             .url(chatCompletionsUrl(request.baseUrl))
             .addHeader("Authorization", "Bearer ${request.apiKey}")
@@ -49,22 +57,27 @@ class OpenAiCompatibleClient(
 
                 val source = response.body.source()
                 var sawStreamData = false
-                var emittedText = false
+                var emittedOutput = false
+                var emittedFinished = false
                 while (!source.exhausted()) {
                     val line = source.readUtf8Line() ?: break
                     if (!line.startsWith("data:")) continue
                     sawStreamData = true
                     val data = line.removePrefix("data:").trim()
-                    if (data == "[DONE]") break
-                    parseDelta(data)?.takeIf { it.isNotBlank() }?.let {
-                        emittedText = true
-                        emit(ChatDelta(it))
+                    if (data == "[DONE]") {
+                        if (!emittedFinished) emit(StreamEvent.Finished(reason = null))
+                        break
+                    }
+                    parseEvents(data).forEach { event ->
+                        if (event.isOutputEvent()) emittedOutput = true
+                        if (event is StreamEvent.Finished) emittedFinished = true
+                        emit(event)
                     }
                 }
                 if (!sawStreamData) {
                     throw ChatHttpException("LLM 返回格式异常：未收到流式数据，请检查 Base URL 是否为 OpenAI-compatible API 地址")
                 }
-                if (!emittedText) {
+                if (!emittedOutput) {
                     throw ChatHttpException("LLM 返回为空：未收到可显示内容")
                 }
             }
@@ -143,12 +156,46 @@ class OpenAiCompatibleClient(
         }
     }
 
-    private fun parseDelta(data: String): String? {
+    private fun parseEvents(data: String): List<StreamEvent> {
         val root = json.parseToJsonElement(data).jsonObject
-        val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return null
+        val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return emptyList()
         val delta = choice["delta"]?.jsonObject
-        return delta?.get("content")?.jsonPrimitive?.contentOrNull
+        val events = mutableListOf<StreamEvent>()
+        delta?.getString("reasoning_content")?.takeIf { it.isNotBlank() }?.let {
+            events += StreamEvent.ReasoningDelta(it)
+        }
+        delta?.getString("reasoning")?.takeIf { it.isNotBlank() }?.let {
+            events += StreamEvent.ReasoningDelta(it)
+        }
+        delta?.getString("content")?.takeIf { it.isNotBlank() }?.let {
+            events += StreamEvent.TextDelta(it)
+        }
+        root["usage"]?.jsonObject?.let { usage ->
+            events += StreamEvent.Usage(
+                inputTokens = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+                outputTokens = usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+                totalTokens = usage["total_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+            )
+        }
+        choice.getString("finish_reason")?.takeIf { it.isNotBlank() }?.let {
+            events += StreamEvent.Finished(it)
+        }
+        return events
     }
+
+    private fun StreamEvent.isOutputEvent(): Boolean = when (this) {
+        is StreamEvent.TextDelta,
+        is StreamEvent.ReasoningDelta,
+        is StreamEvent.ToolCallDelta,
+        is StreamEvent.ToolResult,
+        is StreamEvent.SearchResult -> true
+        is StreamEvent.Finished,
+        is StreamEvent.RawProviderEvent,
+        is StreamEvent.Usage -> false
+    }
+
+    private fun JsonObject.getString(key: String): String? =
+        this[key]?.jsonPrimitive?.contentOrNull
 
     private fun buildErrorMessage(
         statusCode: Int,

@@ -112,6 +112,56 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun parsesTaskListItemsWithCheckedState() {
+        val blocks = parseMarkdownBlocks(
+            """
+            - [x] 已完成
+            - [ ] 待处理
+            """.trimIndent(),
+        )
+
+        val list = blocks.single { it is MarkdownBlock.BulletList } as MarkdownBlock.BulletList
+        assertEquals(true, list.items[0].taskChecked)
+        assertEquals("已完成", list.items[0].text.plainText())
+        assertEquals(false, list.items[1].taskChecked)
+        assertEquals("待处理", list.items[1].text.plainText())
+    }
+
+    @Test
+    fun parsesInlineAndBlockMath() {
+        val blocks = parseMarkdownBlocks(
+            """
+            圆面积是 ${'$'}A=\pi r^2${'$'}。
+
+            $$
+            E = mc^2
+            $$
+            """.trimIndent(),
+        )
+
+        val paragraph = blocks.first() as MarkdownBlock.Paragraph
+        assertTrue(paragraph.text.any { it is MarkdownInline.Math && it.literal == "A=\\pi r^2" })
+        val math = blocks.single { it is MarkdownBlock.Math } as MarkdownBlock.Math
+        assertEquals("E = mc^2", math.literal)
+        assertEquals(true, math.display)
+    }
+
+    @Test
+    fun parsesMermaidFenceAsMermaidBlock() {
+        val blocks = parseMarkdownBlocks(
+            """
+            ```mermaid
+            graph TD
+              A --> B
+            ```
+            """.trimIndent(),
+        )
+
+        val mermaid = blocks.single { it is MarkdownBlock.Mermaid } as MarkdownBlock.Mermaid
+        assertEquals("graph TD\n  A --> B", mermaid.literal)
+    }
+
+    @Test
     fun parsesComplexKimiMarkdownWithoutLeakingRawMarkers() {
         val blocks = parseMarkdownBlocks(
             """
@@ -180,8 +230,10 @@ class MarkdownMessageParserTest {
                 is MarkdownBlock.Heading -> "heading(${block.level}): ${block.text.plainText()}"
                 is MarkdownBlock.Paragraph -> "paragraph: ${block.text.plainText()}"
                 is MarkdownBlock.Table -> "table: ${block.headers.map { it.plainText() }} / ${block.rows.map { row -> row.map { it.plainText() } }}"
+                is MarkdownBlock.Math -> "math: ${block.literal}"
+                is MarkdownBlock.Mermaid -> "mermaid: ${block.literal}"
                 is MarkdownBlock.Divider -> "divider"
-                is MarkdownBlock.BulletList -> "bullet: ${block.items.map { it.text.plainText() }}"
+                is MarkdownBlock.BulletList -> "bullet: ${block.items.map { "${it.taskChecked}:${it.text.plainText()}" }}"
                 is MarkdownBlock.OrderedList -> "ordered: ${block.items.map { it.text.plainText() }}"
                 is MarkdownBlock.Code -> "code: ${block.literal}"
                 is MarkdownBlock.Quote -> "quote: ${block.blocks.debugText()}"
