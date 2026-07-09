@@ -510,7 +510,7 @@ fun ChatScreen(
     }
 
     fun compressContextNow() {
-        if (isCompressingContext) return
+        if (isCompressingContext || !contextWindowCanManualCompress(contextStatus)) return
         scope.launch {
             isCompressingContext = true
             errorText = null
@@ -2300,6 +2300,7 @@ private fun ContextStatusChip(
     onExpandedChange: (Boolean) -> Unit,
     onCompressContext: () -> Unit,
 ) {
+    val canManualCompress = contextWindowCanManualCompress(contextStatus)
     Box {
         FilterChip(
             selected = false,
@@ -2348,13 +2349,19 @@ private fun ContextStatusChip(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 TextButton(
-                    enabled = !isCompressingContext,
+                    enabled = canManualCompress && !isCompressingContext,
                     onClick = {
                         onExpandedChange(false)
                         onCompressContext()
                     },
                 ) {
-                    Text(if (isCompressingContext) "压缩中..." else "手动压缩")
+                    Text(
+                        when {
+                            isCompressingContext -> "压缩中..."
+                            canManualCompress -> "手动压缩"
+                            else -> "暂不需要压缩"
+                        },
+                    )
                 }
             }
         }

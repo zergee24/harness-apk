@@ -66,6 +66,32 @@ class ContextWindowStatusTest {
     }
 
     @Test
+    fun manualCompressionIsAvailableOnlyAtOrAboveThreshold() {
+        assertEquals(
+            false,
+            contextWindowCanManualCompress(
+                ContextWindowStatus(
+                    usedTokens = 69_999,
+                    maxTokens = 100_000,
+                    compressionThresholdPercent = 70,
+                    compressedMessageCount = 0,
+                ),
+            ),
+        )
+        assertEquals(
+            true,
+            contextWindowCanManualCompress(
+                ContextWindowStatus(
+                    usedTokens = 70_000,
+                    maxTokens = 100_000,
+                    compressionThresholdPercent = 70,
+                    compressedMessageCount = 0,
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun contextWindowStatusCountsMemoryAndOnlyNewMessagesAfterCompression() {
         val memory = ConversationMemory(
             conversationId = "c1",

@@ -60,6 +60,12 @@ internal fun contextWindowUsageProgress(status: ContextWindowStatus): Float {
     return (status.usedTokens.toFloat() / status.maxTokens.toFloat()).coerceIn(0f, 1f)
 }
 
+internal fun contextWindowCanManualCompress(status: ContextWindowStatus): Boolean {
+    if (status.maxTokens <= 0) return false
+    val thresholdTokens = status.maxTokens * (status.compressionThresholdPercent.coerceIn(1, 100) / 100.0)
+    return status.usedTokens >= thresholdTokens
+}
+
 private fun Int.toKiloText(): String =
     if (this >= 1_000_000) {
         "%.1fM".format(this / 1_000_000.0)
