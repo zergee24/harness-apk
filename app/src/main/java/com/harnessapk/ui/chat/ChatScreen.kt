@@ -329,14 +329,22 @@ fun ChatScreen(
         )
         previousAutoScrollKey = currentKey
         when (scrollMode) {
-            ChatAutoScrollMode.JUMP_TO_BOTTOM -> listState.scrollToItem(messages.lastIndex)
+            ChatAutoScrollMode.JUMP_TO_BOTTOM -> {
+                chatScrollTarget(scrollMode, messages.lastIndex)?.let {
+                    listState.scrollToItem(it.index, it.scrollOffset)
+                }
+            }
             ChatAutoScrollMode.ANIMATE_TO_BOTTOM -> {
                 streamingAutoScrollEnabled = true
-                listState.animateScrollToItem(messages.lastIndex)
+                chatScrollTarget(scrollMode, messages.lastIndex)?.let {
+                    listState.animateScrollToItem(it.index, it.scrollOffset)
+                }
             }
             ChatAutoScrollMode.STREAM_TO_BOTTOM -> {
                 streamingAutoScrollEnabled = true
-                listState.scrollToItem(messages.lastIndex)
+                chatScrollTarget(scrollMode, messages.lastIndex)?.let {
+                    listState.scrollToItem(it.index, it.scrollOffset)
+                }
             }
             ChatAutoScrollMode.NONE -> Unit
         }
@@ -1136,6 +1144,24 @@ internal enum class ChatAutoScrollMode {
     STREAM_TO_BOTTOM,
 }
 
+internal data class ChatScrollTarget(
+    val index: Int,
+    val scrollOffset: Int,
+)
+
+internal fun chatScrollTarget(mode: ChatAutoScrollMode, lastMessageIndex: Int): ChatScrollTarget? {
+    if (lastMessageIndex < 0) return null
+    return when (mode) {
+        ChatAutoScrollMode.JUMP_TO_BOTTOM,
+        ChatAutoScrollMode.STREAM_TO_BOTTOM -> ChatScrollTarget(
+            index = lastMessageIndex,
+            scrollOffset = CHAT_SCROLL_TO_BOTTOM_OFFSET_PX,
+        )
+        ChatAutoScrollMode.ANIMATE_TO_BOTTOM -> ChatScrollTarget(index = lastMessageIndex, scrollOffset = 0)
+        ChatAutoScrollMode.NONE -> null
+    }
+}
+
 internal fun chatAutoScrollMode(
     previous: AutoScrollKey?,
     current: AutoScrollKey,
@@ -1630,6 +1656,7 @@ private const val MAX_WRITE_BACK_EVENT_PATHS = 3
 private const val MAX_TTS_TEXT_LENGTH = 4_000
 private const val MAX_CHAT_CONTENT_WIDTH_DP = 760
 private const val MAX_MESSAGE_BUBBLE_WIDTH_DP = 700
+internal const val CHAT_SCROLL_TO_BOTTOM_OFFSET_PX = 1_000_000
 private const val STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 640
 private const val MAX_FILE_CHANGE_CARD_ITEMS = 6
 private const val MAX_FILE_CHANGE_CONTEXT_MESSAGES = 10

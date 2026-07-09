@@ -357,6 +357,14 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun initialConversationLoadScrollTargetUsesBottomOffset() {
+        assertEquals(
+            ChatScrollTarget(index = 9, scrollOffset = CHAT_SCROLL_TO_BOTTOM_OFFSET_PX),
+            chatScrollTarget(ChatAutoScrollMode.JUMP_TO_BOTTOM, lastMessageIndex = 9),
+        )
+    }
+
+    @Test
     fun autoScrollModeJumpsToBottomWhenHistoryLoadsAfterEmptyState() {
         val previous = autoScrollKey(emptyList())
         val current = autoScrollKey(
