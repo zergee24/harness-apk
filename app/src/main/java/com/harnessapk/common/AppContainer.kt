@@ -34,6 +34,7 @@ class AppContainer(context: Context) {
         AppDatabase.MIGRATION_3_4,
         AppDatabase.MIGRATION_4_5,
         AppDatabase.MIGRATION_5_6,
+        AppDatabase.MIGRATION_6_7,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -54,6 +55,7 @@ class AppContainer(context: Context) {
     val chatRepository = ChatRepository(
         conversationDao = database.conversationDao(),
         messageDao = database.messageDao(),
+        messagePartDao = database.messagePartDao(),
         attachmentDao = database.messageAttachmentDao(),
         memoryDao = database.conversationMemoryDao(),
         timeProvider = SystemTimeProvider,

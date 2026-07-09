@@ -9,6 +9,8 @@ import com.harnessapk.storage.MessageAttachmentDao
 import com.harnessapk.storage.MessageAttachmentEntity
 import com.harnessapk.storage.MessageDao
 import com.harnessapk.storage.MessageEntity
+import com.harnessapk.storage.MessagePartDao
+import com.harnessapk.storage.MessagePartEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
@@ -16,6 +18,7 @@ import java.util.UUID
 class ChatRepository(
     private val conversationDao: ConversationDao,
     private val messageDao: MessageDao,
+    private val messagePartDao: MessagePartDao,
     private val attachmentDao: MessageAttachmentDao,
     private val memoryDao: ConversationMemoryDao,
     private val timeProvider: TimeProvider,
@@ -243,6 +246,43 @@ class ChatRepository(
     suspend fun listMessages(conversationId: String): List<ChatMessage> =
         messageDao.listForConversation(conversationId).map { it.toDomain() }
 
+    suspend fun listMessageParts(messageId: String): List<UiMessagePartDraft> {
+        val persisted = messagePartDao.listForMessage(messageId)
+        if (persisted.isNotEmpty()) return persisted.map { it.toPartDraft() }
+        val legacyMessage = messageDao.findById(messageId) ?: return emptyList()
+        return legacyMessage.toLegacyParts()
+    }
+
+    suspend fun replaceMessagePartsFromSnapshot(
+        messageId: String,
+        snapshot: StreamingMessageSnapshot,
+    ) {
+        val current = messageDao.findById(messageId) ?: return
+        val now = timeProvider.nowMillis()
+        val parts = snapshot.parts.map { part ->
+            MessagePartEntity(
+                id = "$messageId:${part.index}",
+                messageId = messageId,
+                partIndex = part.index,
+                type = part.type.name,
+                content = part.content,
+                metadataJson = part.metadata.toMetadataString(),
+                stable = part.stable,
+                createdAt = current.createdAt,
+                updatedAt = now,
+            )
+        }
+        messagePartDao.replaceForMessage(messageId, parts)
+        messageDao.update(
+            current.copy(
+                content = snapshot.legacyVisibleText(),
+                status = snapshot.status.name,
+                updatedAt = now,
+            ),
+        )
+        touchConversation(current.conversationId, now)
+    }
+
     suspend fun listAttachments(messageId: String): List<ChatAttachment> =
         attachmentDao.listForMessage(messageId).map { it.toDomain() }
 
@@ -339,6 +379,40 @@ private fun MessageAttachmentEntity.toDomain(): ChatAttachment = ChatAttachment(
     uri = uri,
     mimeType = mimeType,
 )
+
+private fun MessageEntity.toLegacyParts(): List<UiMessagePartDraft> {
+    if (content.isBlank()) return emptyList()
+    return listOf(
+        UiMessagePartDraft(
+            index = 0,
+            type = UiMessagePartType.TEXT,
+            content = content,
+            metadata = emptyMap(),
+            stable = true,
+        ),
+    )
+}
+
+private fun MessagePartEntity.toPartDraft(): UiMessagePartDraft = UiMessagePartDraft(
+    index = partIndex,
+    type = runCatching { UiMessagePartType.valueOf(type) }.getOrDefault(UiMessagePartType.TEXT),
+    content = content,
+    metadata = metadataJson.toMetadataMap(),
+    stable = stable,
+)
+
+private fun Map<String, String>.toMetadataString(): String =
+    entries.joinToString("\n") { "${it.key}=${it.value}" }
+
+private fun String.toMetadataMap(): Map<String, String> {
+    if (isBlank()) return emptyMap()
+    return lineSequence()
+        .mapNotNull { line ->
+            val separator = line.indexOf('=')
+            if (separator <= 0) null else line.take(separator) to line.drop(separator + 1)
+        }
+        .toMap()
+}
 
 private fun ConversationMemoryEntity.toDomain(): ConversationMemory = ConversationMemory(
     conversationId = conversationId,

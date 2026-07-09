@@ -9,6 +9,8 @@ import com.harnessapk.storage.MessageAttachmentDao
 import com.harnessapk.storage.MessageAttachmentEntity
 import com.harnessapk.storage.MessageDao
 import com.harnessapk.storage.MessageEntity
+import com.harnessapk.storage.MessagePartDao
+import com.harnessapk.storage.MessagePartEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -205,6 +207,52 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun listMessagePartsBackfillsLegacyContentAsSingleTextPart() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 55L })
+        val conversationId = repository.createConversation()
+        val messageId = repository.insertUserMessage(conversationId, "旧消息正文", emptyList())
+
+        val parts = repository.listMessageParts(messageId)
+
+        assertEquals(1, parts.size)
+        assertEquals(UiMessagePartType.TEXT, parts.single().type)
+        assertEquals("旧消息正文", parts.single().content)
+        assertEquals(true, parts.single().stable)
+    }
+
+    @Test
+    fun replaceMessagePartsFromSnapshotPersistsPartsAndUpdatesLegacyVisibleContent() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 56L })
+        val conversationId = repository.createConversation()
+        val messageId = repository.insertAssistantPending(conversationId, "openai", "gpt-5.5")
+        val snapshot = StreamingMessageSnapshot(
+            status = MessageStatus.STREAMING,
+            parts = listOf(
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.REASONING,
+                    content = "内部推理",
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 1,
+                    type = UiMessagePartType.TEXT,
+                    content = "可见答案",
+                    stable = false,
+                ),
+            ),
+        )
+
+        repository.replaceMessagePartsFromSnapshot(messageId, snapshot)
+
+        val parts = repository.listMessageParts(messageId)
+        assertEquals(listOf(UiMessagePartType.REASONING, UiMessagePartType.TEXT), parts.map { it.type })
+        assertEquals(listOf("内部推理", "可见答案"), parts.map { it.content })
+        assertEquals("可见答案", repository.listMessages(conversationId).single().content)
+        assertEquals(MessageStatus.STREAMING, repository.listMessages(conversationId).single().status)
+    }
+
+    @Test
     fun manualContextCompressionSavesMemoryAndInsertsSystemEvent() = runTest {
         val conversationDao = FakeConversationDao()
         var now = 60L
@@ -241,10 +289,31 @@ class ChatRepositoryTest {
     ): ChatRepository = ChatRepository(
         conversationDao = conversationDao,
         messageDao = FakeMessageDao(),
+        messagePartDao = FakeMessagePartDao(),
         attachmentDao = FakeMessageAttachmentDao(),
         memoryDao = FakeConversationMemoryDao(),
         timeProvider = timeProvider,
     )
+}
+
+private class FakeMessagePartDao : MessagePartDao {
+    private val rows = linkedMapOf<String, MessagePartEntity>()
+
+    override suspend fun listForMessage(messageId: String): List<MessagePartEntity> =
+        rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex }
+
+    override suspend fun insertAll(parts: List<MessagePartEntity>) {
+        parts.forEach { rows[it.id] = it }
+    }
+
+    override suspend fun replaceForMessage(messageId: String, parts: List<MessagePartEntity>) {
+        rows.entries.removeIf { it.value.messageId == messageId }
+        parts.forEach { rows[it.id] = it }
+    }
+
+    override suspend fun deleteForMessage(messageId: String) {
+        rows.entries.removeIf { it.value.messageId == messageId }
+    }
 }
 
 private class FakeConversationDao : ConversationDao {

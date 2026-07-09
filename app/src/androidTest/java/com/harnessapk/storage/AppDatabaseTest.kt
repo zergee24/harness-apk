@@ -4,6 +4,10 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.chat.MessageRole
+import com.harnessapk.chat.MessageStatus
+import com.harnessapk.chat.UiMessagePartType
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -24,6 +28,10 @@ class AppDatabaseTest {
             defaultProviderId = null,
             defaultModel = null,
             isArchived = false,
+            projectId = null,
+            promptOriginal = "",
+            promptOptimized = "",
+            promptFinal = "",
         )
 
         db.conversationDao().insert(entity)
@@ -45,6 +53,10 @@ class AppDatabaseTest {
                 defaultProviderId = null,
                 defaultModel = null,
                 isArchived = false,
+                projectId = null,
+                promptOriginal = "",
+                promptOptimized = "",
+                promptFinal = "",
             ),
         )
         val memory = ConversationMemoryEntity(
@@ -77,6 +89,7 @@ class AppDatabaseTest {
             availableModels = "gpt-5.5\ngpt-5.5-pro",
             defaultVisionModel = "gpt-5.5",
             supportsVision = true,
+            nativeWebSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS.name,
             enabled = true,
             createdAt = 1L,
             updatedAt = 1L,
@@ -87,6 +100,71 @@ class AppDatabaseTest {
         val stored = db.providerProfileDao().findById("provider")!!
         assertEquals("OpenAI", stored.name)
         assertEquals("gpt-5.5\ngpt-5.5-pro", stored.availableModels)
+        db.close()
+    }
+
+    @Test
+    fun storesMessageParts() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        db.conversationDao().insert(
+            ConversationEntity(
+                id = "conversation-parts",
+                title = "分片测试",
+                createdAt = 1L,
+                updatedAt = 1L,
+                defaultProviderId = null,
+                defaultModel = null,
+                isArchived = false,
+                projectId = null,
+                promptOriginal = "",
+                promptOptimized = "",
+                promptFinal = "",
+            ),
+        )
+        db.messageDao().insert(
+            MessageEntity(
+                id = "message-parts",
+                conversationId = "conversation-parts",
+                role = MessageRole.ASSISTANT.name,
+                content = "可见答案",
+                status = MessageStatus.STREAMING.name,
+                providerId = "openai",
+                model = "gpt-5.5",
+                createdAt = 2L,
+                updatedAt = 2L,
+                errorCode = null,
+                errorMessage = null,
+            ),
+        )
+        val parts = listOf(
+            MessagePartEntity(
+                id = "part-1",
+                messageId = "message-parts",
+                partIndex = 0,
+                type = UiMessagePartType.REASONING.name,
+                content = "内部推理",
+                metadataJson = "",
+                stable = true,
+                createdAt = 2L,
+                updatedAt = 3L,
+            ),
+            MessagePartEntity(
+                id = "part-2",
+                messageId = "message-parts",
+                partIndex = 1,
+                type = UiMessagePartType.TEXT.name,
+                content = "可见答案",
+                metadataJson = "",
+                stable = false,
+                createdAt = 2L,
+                updatedAt = 3L,
+            ),
+        )
+
+        db.messagePartDao().replaceForMessage("message-parts", parts)
+
+        assertEquals(parts, db.messagePartDao().listForMessage("message-parts"))
         db.close()
     }
 }
