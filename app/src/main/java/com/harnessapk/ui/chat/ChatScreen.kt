@@ -42,10 +42,13 @@ import androidx.compose.material.icons.automirrored.outlined.Assignment
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
@@ -112,7 +115,10 @@ import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.provider.modelConfigForProvider
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
+import com.harnessapk.session.MarkdownBatchApplyResult
+import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownFileChangeController
+import com.harnessapk.session.MarkdownFileChangeFailure
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeState
 import com.harnessapk.session.MarkdownFileChangeStatus
@@ -135,6 +141,7 @@ import com.harnessapk.ui.components.InlineStatusMessage
 import com.harnessapk.ui.components.StatusTone
 import com.harnessapk.ui.markdown.MarkdownMessage
 import com.harnessapk.ui.model.resolveModelSelection
+import com.harnessapk.ui.theme.HarnessSpacing
 import com.harnessapk.websearch.WebSearchContext
 import com.harnessapk.websearch.WebSearchRequest
 import com.harnessapk.websearch.WebSearchSettings
@@ -156,6 +163,8 @@ fun ChatScreen(
     autoFocusInput: Boolean = false,
     sessionConfigRequestKey: Int = 0,
     onSessionConfigRequestConsumed: () -> Unit = {},
+    onOpenProjectFiles: (projectId: String, selectedPath: String?) -> Unit = { _, _ -> },
+    onOpenProjectGit: (projectId: String) -> Unit = {},
     contentPadding: PaddingValues,
 ) {
     val messages by container.chatRepository.observeMessages(conversationId).collectAsState(initial = emptyList())
@@ -206,6 +215,7 @@ fun ChatScreen(
     var pendingSelectionCopy by remember { mutableStateOf<ChatMessage?>(null) }
     var pendingMarkdownReview by remember { mutableStateOf<MarkdownUpdateReviewState?>(null) }
     var pendingMarkdownReviewDraftId by remember { mutableStateOf<String?>(null) }
+    var pendingLegacyMarkdownReviewToken by remember { mutableStateOf<LegacyMarkdownReviewToken?>(null) }
     var markdownFileChangeStates by remember(conversationId) { mutableStateOf<List<MarkdownFileChangeState>>(emptyList()) }
     var retainedReviewIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var isPlanningMarkdownUpdates by remember { mutableStateOf(false) }
@@ -238,6 +248,12 @@ fun ChatScreen(
     }
     val markdownFileChangeController = remember {
         MarkdownFileChangeController(timeProvider = { System.currentTimeMillis() })
+    }
+    val markdownDraftApplyController = remember(conversationId) { MarkdownDraftApplyController() }
+    var applyingMarkdownDraftIds by remember(conversationId) { mutableStateOf<Set<String>>(emptySet()) }
+    val legacyMarkdownReviewApplyController = remember(conversationId) { LegacyMarkdownReviewApplyController() }
+    var applyingLegacyMarkdownReviewToken by remember(conversationId) {
+        mutableStateOf<LegacyMarkdownReviewToken?>(null)
     }
 
     val selectedProvider = providers.firstOrNull { it.id == selectedProviderId }
@@ -712,59 +728,104 @@ fun ChatScreen(
 
     fun showMarkdownFileChangeDiff(state: MarkdownFileChangeState) {
         pendingMarkdownReviewDraftId = state.draft.id
+        pendingLegacyMarkdownReviewToken = null
         pendingMarkdownReview = reviewStateForFileChange(state)
         retainedReviewIndexes = state.items.mapIndexedNotNull { index, item ->
             index.takeIf { item.retained }
         }.toSet()
     }
 
+    fun applyMarkdownFileChangeProposals(
+        state: MarkdownFileChangeState,
+        proposals: List<MarkdownUpdateProposal>,
+    ) {
+        if (proposals.isEmpty()) return
+        val currentState = markdownFileChangeStates.firstOrNull { it.draft.id == state.draft.id }
+        if (currentState != state) return
+        val attempt = markdownDraftApplyController.begin(state.draft.id) ?: return
+        applyingMarkdownDraftIds = applyingMarkdownDraftIds + state.draft.id
+        scope.launch {
+            try {
+                val result = container.projectWorkspaceGateway.applyMarkdownUpdates(
+                    projectId = state.draft.projectId,
+                    updates = proposals,
+                )
+                val latestState = markdownFileChangeStates.firstOrNull { it.draft.id == state.draft.id }
+                if (latestState != state || !markdownDraftApplyController.complete(attempt)) return@launch
+
+                finalizeMarkdownWriteBackBeforeRefresh(
+                    finalize = {
+                        applyingMarkdownDraftIds = applyingMarkdownDraftIds - state.draft.id
+                        upsertMarkdownFileChangeState(markdownFileChangeController.markApplyResult(state, result))
+                        if (pendingMarkdownReviewDraftId == state.draft.id) {
+                            pendingMarkdownReview = null
+                            pendingMarkdownReviewDraftId = null
+                            retainedReviewIndexes = emptySet()
+                        }
+                        sessionStatus = markdownWriteBackResultStatus(result)
+                        errorText = markdownWriteBackResultError(result)
+                    },
+                    afterFinalize = {
+                        persistMarkdownWriteBackResultEvent(result) { event ->
+                            container.chatRepository.insertSystemEvent(conversationId, event)
+                        }
+                    },
+                    refreshDeliverables = if (
+                        result.succeeded.isNotEmpty() && selectedProjectId == state.draft.projectId
+                    ) {
+                        {
+                            val refreshed = container.projectWorkspaceGateway.listDeliverables(state.draft.projectId)
+                            if (selectedProjectId == state.draft.projectId) deliverables = refreshed
+                        }
+                    } else {
+                        null
+                    },
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                val feedback = markdownWriteBackFailureFeedback(error)
+                errorText = feedback.errorText
+                sessionStatus = feedback.statusText
+            } finally {
+                markdownDraftApplyController.complete(attempt)
+                if (!markdownDraftApplyController.isApplying(state.draft.id)) {
+                    applyingMarkdownDraftIds = applyingMarkdownDraftIds - state.draft.id
+                }
+            }
+        }
+    }
+
+    fun retryFailedMarkdownFileChanges(state: MarkdownFileChangeState) {
+        val currentState = markdownFileChangeStates.firstOrNull { it.draft.id == state.draft.id } ?: return
+        applyMarkdownFileChangeProposals(
+            state = currentState,
+            proposals = markdownFileChangeController.retryableProposals(currentState),
+        )
+    }
+
     fun applyMarkdownFileChangeState(state: MarkdownFileChangeState, retainedIndexes: Set<Int>) {
         val retained = state.items
             .filterIndexed { index, _ -> index in retainedIndexes }
-            .map {
+            .map { item ->
                 MarkdownUpdateProposal(
-                    operation = it.operation,
-                    path = it.path,
-                    title = it.title,
-                    reason = it.reason,
-                    markdown = it.markdown,
+                    operation = item.operation,
+                    path = item.path,
+                    title = item.title,
+                    reason = item.reason,
+                    markdown = item.markdown,
                 )
             }
         if (retained.isEmpty()) {
-            val dismissed = markdownFileChangeController.dismiss(state)
-            upsertMarkdownFileChangeState(dismissed)
+            markdownDraftApplyController.invalidate(state.draft.id)
+            applyingMarkdownDraftIds = applyingMarkdownDraftIds - state.draft.id
+            upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
             pendingMarkdownReview = null
             pendingMarkdownReviewDraftId = null
             retainedReviewIndexes = emptySet()
             return
         }
-
-        scope.launch {
-            runCatching {
-                val written = container.projectWorkspaceGateway.applyMarkdownUpdates(state.draft.projectId, retained)
-                container.chatRepository.insertSystemEvent(
-                    conversationId = conversationId,
-                    content = markdownWriteBackAppliedEvent(written.map { it.path }),
-                )
-                written
-            }.onSuccess { written ->
-                upsertMarkdownFileChangeState(
-                    markdownFileChangeController.markApplied(state, written.map { it.path }),
-                )
-                if (selectedProjectId == state.draft.projectId) {
-                    deliverables = container.projectWorkspaceGateway.listDeliverables(state.draft.projectId)
-                }
-                pendingMarkdownReview = null
-                pendingMarkdownReviewDraftId = null
-                retainedReviewIndexes = emptySet()
-                sessionStatus = "已写入 ${written.size} 项 Markdown 更新"
-                errorText = null
-            }.onFailure {
-                val feedback = markdownWriteBackFailureFeedback(it)
-                errorText = feedback.errorText
-                sessionStatus = feedback.statusText
-            }
-        }
+        applyMarkdownFileChangeProposals(state, retained)
     }
 
     fun requestMarkdownReview(message: ChatMessage) {
@@ -794,6 +855,7 @@ fun ChatScreen(
                 review
             }.onSuccess { review ->
                 pendingMarkdownReviewDraftId = null
+                pendingLegacyMarkdownReviewToken = legacyMarkdownReviewApplyController.createReviewToken()
                 pendingMarkdownReview = review
                 retainedReviewIndexes = review.proposals.indices.toSet()
             }.onFailure {
@@ -810,6 +872,7 @@ fun ChatScreen(
         review: MarkdownUpdateReviewState,
         retainedIndexes: Set<Int>,
         draftId: String?,
+        legacyReviewToken: LegacyMarkdownReviewToken?,
     ) {
         if (draftId != null) {
             markdownFileChangeStates.firstOrNull { it.draft.id == draftId }?.let { state ->
@@ -817,48 +880,120 @@ fun ChatScreen(
             }
             return
         }
+        val reviewToken = legacyReviewToken ?: return
+        val attempt = legacyMarkdownReviewApplyController.begin(reviewToken) ?: return
+        applyingLegacyMarkdownReviewToken = reviewToken
         val projectId = selectedProjectId
         if (projectId.isNullOrBlank()) {
-            errorText = "请先选择项目"
+            if (
+                pendingLegacyMarkdownReviewToken == reviewToken &&
+                legacyMarkdownReviewApplyController.complete(attempt)
+            ) {
+                applyingLegacyMarkdownReviewToken = null
+                errorText = "请先选择项目"
+            }
             return
         }
         val retained = review.proposals.filterIndexed { index, _ -> index in retainedIndexes }
         if (retained.isEmpty()) {
-            pendingMarkdownReview = null
-            pendingMarkdownReviewDraftId = null
-            retainedReviewIndexes = emptySet()
-            sessionStatus = "已撤回全部 Markdown 更新"
-            errorText = null
+            if (
+                pendingLegacyMarkdownReviewToken == reviewToken &&
+                legacyMarkdownReviewApplyController.complete(attempt)
+            ) {
+                applyingLegacyMarkdownReviewToken = null
+                pendingMarkdownReview = null
+                pendingMarkdownReviewDraftId = null
+                pendingLegacyMarkdownReviewToken = null
+                retainedReviewIndexes = emptySet()
+                sessionStatus = "已撤回全部 Markdown 更新"
+                errorText = null
+            }
             return
         }
         scope.launch {
-            runCatching {
-                val written = container.projectWorkspaceGateway.applyMarkdownUpdates(projectId, retained)
-                container.chatRepository.insertSystemEvent(
-                    conversationId = conversationId,
-                    content = markdownWriteBackAppliedEvent(written.map { it.path }),
+            try {
+                val result = try {
+                    container.projectWorkspaceGateway.applyMarkdownUpdates(projectId, retained)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (
+                        pendingLegacyMarkdownReviewToken == reviewToken &&
+                        legacyMarkdownReviewApplyController.complete(attempt)
+                    ) {
+                        applyingLegacyMarkdownReviewToken = null
+                        val feedback = markdownWriteBackFailureFeedback(error)
+                        errorText = feedback.errorText
+                        sessionStatus = feedback.statusText
+                    }
+                    return@launch
+                }
+                if (
+                    pendingLegacyMarkdownReviewToken != reviewToken ||
+                    !legacyMarkdownReviewApplyController.complete(attempt)
+                ) {
+                    return@launch
+                }
+                finalizeMarkdownWriteBackBeforeRefresh(
+                    finalize = {
+                        applyingLegacyMarkdownReviewToken = null
+                        val retryReview = legacyPartialRetryReviewState(
+                            review = review,
+                            retainedIndexes = retainedIndexes,
+                            result = result,
+                        )
+                        if (retryReview.proposals.isEmpty()) {
+                            pendingMarkdownReview = null
+                            pendingMarkdownReviewDraftId = null
+                            pendingLegacyMarkdownReviewToken = null
+                            retainedReviewIndexes = emptySet()
+                        } else {
+                            pendingMarkdownReview = retryReview
+                            retainedReviewIndexes = retryReview.proposals.indices.toSet()
+                        }
+                        sessionStatus = markdownWriteBackResultStatus(result)
+                        errorText = markdownWriteBackResultError(result)
+                    },
+                    afterFinalize = {
+                        persistMarkdownWriteBackResultEvent(result) { event ->
+                            container.chatRepository.insertSystemEvent(conversationId, event)
+                        }
+                    },
+                    refreshDeliverables = if (result.succeeded.isNotEmpty()) {
+                        {
+                            val refreshed = container.projectWorkspaceGateway.listDeliverables(projectId)
+                            if (selectedProjectId == projectId) deliverables = refreshed
+                        }
+                    } else {
+                        null
+                    },
                 )
-                written
-            }.onSuccess {
-                deliverables = container.projectWorkspaceGateway.listDeliverables(projectId)
-                pendingMarkdownReview = null
-                pendingMarkdownReviewDraftId = null
-                retainedReviewIndexes = emptySet()
-                sessionStatus = "已写入 ${it.size} 项 Markdown 更新"
-                errorText = null
-            }.onFailure {
-                val feedback = markdownWriteBackFailureFeedback(it)
-                errorText = feedback.errorText
-                sessionStatus = feedback.statusText
+            } finally {
+                legacyMarkdownReviewApplyController.complete(attempt)
+                if (
+                    !legacyMarkdownReviewApplyController.isApplying(reviewToken) &&
+                    applyingLegacyMarkdownReviewToken == reviewToken
+                ) {
+                    applyingLegacyMarkdownReviewToken = null
+                }
             }
         }
     }
 
     pendingMarkdownReview?.let { review ->
+        val isApplyingReview = when (val draftId = pendingMarkdownReviewDraftId) {
+            null -> isLegacyMarkdownReviewApplying(
+                pendingToken = pendingLegacyMarkdownReviewToken,
+                activeToken = applyingLegacyMarkdownReviewToken,
+            )
+            else -> draftId in applyingMarkdownDraftIds
+        }
         MarkdownUpdateReviewDialog(
             review = review,
             retainedIndexes = retainedReviewIndexes,
+            isApplying = isApplyingReview,
             onToggleRetained = { index ->
+                if (isApplyingReview) return@MarkdownUpdateReviewDialog
                 retainedReviewIndexes = if (index in retainedReviewIndexes) {
                     retainedReviewIndexes - index
                 } else {
@@ -872,10 +1007,20 @@ fun ChatScreen(
                     }
                 }
             },
-            onConfirm = { applyRetainedMarkdownUpdates(review, retainedReviewIndexes, pendingMarkdownReviewDraftId) },
+            onConfirm = {
+                applyRetainedMarkdownUpdates(
+                    review = review,
+                    retainedIndexes = retainedReviewIndexes,
+                    draftId = pendingMarkdownReviewDraftId,
+                    legacyReviewToken = pendingLegacyMarkdownReviewToken,
+                )
+            },
             onDismiss = {
+                if (isApplyingReview) return@MarkdownUpdateReviewDialog
+                pendingLegacyMarkdownReviewToken?.let(legacyMarkdownReviewApplyController::invalidate)
                 pendingMarkdownReview = null
                 pendingMarkdownReviewDraftId = null
+                pendingLegacyMarkdownReviewToken = null
                 retainedReviewIndexes = emptySet()
             },
         )
@@ -1025,6 +1170,7 @@ fun ChatScreen(
                                 .forEach { state ->
                                     MarkdownFileChangeCard(
                                         state = state,
+                                        isApplying = state.draft.id in applyingMarkdownDraftIds,
                                         onShowDiff = { showMarkdownFileChangeDiff(state) },
                                         onApply = {
                                             applyMarkdownFileChangeState(
@@ -1035,9 +1181,19 @@ fun ChatScreen(
                                             )
                                         },
                                         onRetry = { retryMarkdownFileChange(state) },
+                                        onRetryFailed = { retryFailedMarkdownFileChanges(state) },
                                         onDismiss = {
+                                            markdownDraftApplyController.invalidate(state.draft.id)
+                                            applyingMarkdownDraftIds = applyingMarkdownDraftIds - state.draft.id
                                             upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
                                         },
+                                        onOpenFiles = {
+                                            onOpenProjectFiles(
+                                                state.draft.projectId,
+                                                state.appliedPaths.firstOrNull(),
+                                            )
+                                        },
+                                        onOpenGit = { onOpenProjectGit(state.draft.projectId) },
                                     )
                                 }
                         }
@@ -1432,9 +1588,10 @@ internal fun markdownFileChangeCardTitle(
 ): String = when (status) {
     MarkdownFileChangeStatus.PLANNING -> "正在生成 Markdown 文件变更..."
     MarkdownFileChangeStatus.READY -> "已生成 $itemCount 个 Markdown 文件变更"
-    MarkdownFileChangeStatus.APPLIED -> "已应用 $itemCount 个 Markdown 文件变更"
+    MarkdownFileChangeStatus.APPLIED -> "已写入项目"
+    MarkdownFileChangeStatus.PARTIALLY_APPLIED -> "部分文件已写入"
     MarkdownFileChangeStatus.DISMISSED -> "已撤回 Markdown 文件变更"
-    MarkdownFileChangeStatus.FAILED -> "Markdown 文件变更生成失败"
+    MarkdownFileChangeStatus.FAILED -> "Markdown 文件变更失败"
 }
 
 internal fun visibleMarkdownFileChangeItems(items: List<MarkdownFileChangeItem>): List<MarkdownFileChangeItem> =
@@ -1448,6 +1605,118 @@ internal fun markdownFileChangeOperationLabel(item: MarkdownFileChangeItem): Str
         MarkdownUpdateOperation.CREATE -> "A"
         MarkdownUpdateOperation.UPDATE -> "M"
     }
+
+internal data class MarkdownDraftApplyAttempt(
+    val draftId: String,
+    val generation: Int,
+)
+
+internal class MarkdownDraftApplyController {
+    private var nextGeneration = 0
+    private val activeAttempts = mutableMapOf<String, MarkdownDraftApplyAttempt>()
+
+    fun begin(draftId: String): MarkdownDraftApplyAttempt? {
+        if (draftId in activeAttempts) return null
+        nextGeneration += 1
+        return MarkdownDraftApplyAttempt(draftId, nextGeneration).also { attempt ->
+            activeAttempts[draftId] = attempt
+        }
+    }
+
+    fun complete(attempt: MarkdownDraftApplyAttempt): Boolean {
+        if (activeAttempts[attempt.draftId] != attempt) return false
+        activeAttempts.remove(attempt.draftId)
+        return true
+    }
+
+    fun invalidate(draftId: String) {
+        activeAttempts.remove(draftId)
+    }
+
+    fun isApplying(draftId: String): Boolean = draftId in activeAttempts
+}
+
+internal data class LegacyMarkdownReviewToken(
+    val generation: Int,
+)
+
+internal data class LegacyMarkdownReviewApplyAttempt(
+    val reviewToken: LegacyMarkdownReviewToken,
+    val generation: Int,
+)
+
+internal class LegacyMarkdownReviewApplyController {
+    private var nextGeneration = 0
+    private var activeAttempt: LegacyMarkdownReviewApplyAttempt? = null
+
+    fun createReviewToken(): LegacyMarkdownReviewToken =
+        LegacyMarkdownReviewToken(++nextGeneration)
+
+    fun begin(reviewToken: LegacyMarkdownReviewToken): LegacyMarkdownReviewApplyAttempt? {
+        if (activeAttempt != null) return null
+        return LegacyMarkdownReviewApplyAttempt(reviewToken, ++nextGeneration).also { attempt ->
+            activeAttempt = attempt
+        }
+    }
+
+    fun complete(attempt: LegacyMarkdownReviewApplyAttempt): Boolean {
+        if (activeAttempt != attempt) return false
+        activeAttempt = null
+        return true
+    }
+
+    fun invalidate(reviewToken: LegacyMarkdownReviewToken) {
+        if (activeAttempt?.reviewToken == reviewToken) activeAttempt = null
+    }
+
+    fun isApplying(reviewToken: LegacyMarkdownReviewToken): Boolean =
+        activeAttempt?.reviewToken == reviewToken
+}
+
+internal fun isLegacyMarkdownReviewApplying(
+    pendingToken: LegacyMarkdownReviewToken?,
+    activeToken: LegacyMarkdownReviewToken?,
+): Boolean = pendingToken != null && pendingToken == activeToken
+
+internal suspend fun finalizeMarkdownWriteBackBeforeRefresh(
+    finalize: () -> Unit,
+    afterFinalize: suspend () -> Unit = {},
+    refreshDeliverables: (suspend () -> Unit)?,
+) {
+    finalize()
+    afterFinalize()
+    val refresh = refreshDeliverables ?: return
+    try {
+        refresh()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Throwable) {
+        // The write result is already terminal; project files can be refreshed later.
+    }
+}
+
+internal fun failedRetainedReviewIndexes(
+    retainedIndexes: Set<Int>,
+    result: MarkdownBatchApplyResult,
+): Set<Int> {
+    val orderedRetainedIndexes = retainedIndexes.sorted()
+    return result.results.mapIndexedNotNull { resultIndex, itemResult ->
+        orderedRetainedIndexes.getOrNull(resultIndex)
+            ?.takeIf { itemResult.status == MarkdownFileApplyStatus.FAILED }
+    }.toSet()
+}
+
+internal fun legacyPartialRetryReviewState(
+    review: MarkdownUpdateReviewState,
+    retainedIndexes: Set<Int>,
+    result: MarkdownBatchApplyResult,
+): MarkdownUpdateReviewState {
+    val failedIndexes = failedRetainedReviewIndexes(retainedIndexes, result).sorted()
+    return MarkdownUpdateReviewState(
+        proposals = failedIndexes.map(review.proposals::get),
+        diffs = failedIndexes.map { index -> review.diffs.getOrElse(index) { emptyList() } },
+    )
+}
 
 private fun assistantMessageStatusText(message: ChatMessage): String? = when {
     message.role != MessageRole.ASSISTANT -> null
@@ -1478,7 +1747,7 @@ private fun ContextEventLine(text: String) {
     }
 }
 
-private data class MarkdownUpdateReviewState(
+internal data class MarkdownUpdateReviewState(
     val proposals: List<MarkdownUpdateProposal>,
     val diffs: List<List<MarkdownDiffLine>>,
 )
@@ -1487,12 +1756,13 @@ private data class MarkdownUpdateReviewState(
 private fun MarkdownUpdateReviewDialog(
     review: MarkdownUpdateReviewState,
     retainedIndexes: Set<Int>,
+    isApplying: Boolean,
     onToggleRetained: (Int) -> Unit,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isApplying) onDismiss() },
         title = { Text("Markdown 更新审核") },
         text = {
             Column(
@@ -1512,6 +1782,7 @@ private fun MarkdownUpdateReviewDialog(
                         proposal = proposal,
                         diff = review.diffs.getOrElse(index) { emptyList() },
                         retained = index in retainedIndexes,
+                        enabled = !isApplying,
                         onToggleRetained = onToggleRetained,
                     )
                 }
@@ -1520,10 +1791,11 @@ private fun MarkdownUpdateReviewDialog(
         confirmButton = {
             TextButton(
                 onClick = onConfirm,
+                enabled = !isApplying,
             ) { Text(markdownReviewConfirmText(retainedIndexes)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss, enabled = !isApplying) { Text("取消") }
         },
     )
 }
@@ -1534,6 +1806,7 @@ private fun MarkdownUpdateReviewItem(
     proposal: MarkdownUpdateProposal,
     diff: List<MarkdownDiffLine>,
     retained: Boolean,
+    enabled: Boolean,
     onToggleRetained: (Int) -> Unit,
 ) {
     Surface(
@@ -1560,7 +1833,7 @@ private fun MarkdownUpdateReviewItem(
                         overflow = TextOverflow.MiddleEllipsis,
                     )
                 }
-                TextButton(onClick = { onToggleRetained(index) }) {
+                TextButton(onClick = { onToggleRetained(index) }, enabled = enabled) {
                     Text(if (retained) "撤回" else "保留")
                 }
             }
@@ -1757,15 +2030,43 @@ internal data class MarkdownWriteBackFeedback(
 internal fun markdownWriteBackFailureFeedback(error: Throwable): MarkdownWriteBackFeedback =
     MarkdownWriteBackFeedback(errorText = error.toUserMessage(), statusText = null)
 
-internal fun markdownWriteBackAppliedEvent(paths: List<String>): String {
-    val visiblePaths = paths
+internal suspend fun persistMarkdownWriteBackResultEvent(
+    result: MarkdownBatchApplyResult,
+    insertEvent: suspend (String) -> Unit,
+) {
+    val event = markdownWriteBackResultEvent(result) ?: return
+    try {
+        insertEvent(event)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Throwable) {
+        // The file write result remains authoritative when optional event persistence fails.
+    }
+}
+
+internal fun markdownWriteBackResultEvent(result: MarkdownBatchApplyResult): String? {
+    val succeeded = result.succeeded
+        .mapNotNull { it.writtenDeliverable?.path }
         .filter { it.isNotBlank() }
         .take(MAX_WRITE_BACK_EVENT_PATHS)
-    return if (visiblePaths.isEmpty()) {
-        "已沉淀到项目"
-    } else {
-        "已沉淀到项目：${visiblePaths.joinToString("、")}"
+    if (succeeded.isEmpty()) return null
+    val successText = "已沉淀到项目：${succeeded.joinToString("、")}"
+    val failedText = result.failed.take(MAX_WRITE_BACK_EVENT_PATHS).joinToString("、") { failed ->
+        "${failed.proposal.path}（${failed.errorMessage.orEmpty().ifBlank { "文件写入失败" }}）"
     }
+    return if (failedText.isBlank()) successText else "$successText；写入失败：$failedText"
+}
+
+internal fun markdownWriteBackResultStatus(result: MarkdownBatchApplyResult): String = when {
+    result.failed.isEmpty() -> "已写入 ${result.succeeded.size} 项 Markdown 更新"
+    result.succeeded.isEmpty() -> "${result.failed.size} 项 Markdown 更新写入失败"
+    else -> "已写入 ${result.succeeded.size} 项 Markdown 更新，${result.failed.size} 项失败"
+}
+
+internal fun markdownWriteBackResultError(result: MarkdownBatchApplyResult): String? = when {
+    result.failed.isEmpty() -> null
+    result.succeeded.isEmpty() -> "${result.failed.size} 个文件写入失败，可重试失败项"
+    else -> "${result.failed.size} 个文件写入失败，可仅重试失败项"
 }
 
 @Composable
@@ -1873,12 +2174,16 @@ private fun ModelPickerDialog(
 }
 
 @Composable
-private fun MarkdownFileChangeCard(
+internal fun MarkdownFileChangeCard(
     state: MarkdownFileChangeState,
+    isApplying: Boolean = false,
     onShowDiff: () -> Unit,
     onApply: () -> Unit,
     onRetry: () -> Unit,
+    onRetryFailed: () -> Unit,
     onDismiss: () -> Unit,
+    onOpenFiles: () -> Unit,
+    onOpenGit: () -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1895,13 +2200,22 @@ private fun MarkdownFileChangeCard(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                val cardTitle = markdownFileChangeCardTitle(state.draft.status, state.items.size)
                 Text(
-                    text = state.draft.summary.ifBlank {
-                        markdownFileChangeCardTitle(state.draft.status, state.items.size)
-                    },
+                    text = cardTitle,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                 )
+                if (state.draft.summary.isNotBlank() && state.draft.summary != cardTitle) {
+                    Text(
+                        text = state.draft.summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (isApplying) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
                 when (state.draft.status) {
                     MarkdownFileChangeStatus.PLANNING -> {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -1922,23 +2236,127 @@ private fun MarkdownFileChangeCard(
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = onShowDiff) { Text("查看 diff") }
-                            TextButton(onClick = onApply) {
+                            TextButton(onClick = onApply, enabled = !isApplying) {
                                 Text(if (state.items.all { it.retained }) "应用全部" else "应用保留项")
                             }
-                            TextButton(onClick = onDismiss) { Text("撤回") }
+                            TextButton(onClick = onDismiss, enabled = !isApplying) { Text("撤回") }
+                        }
+                    }
+                    MarkdownFileChangeStatus.APPLIED -> {
+                        AppliedPathList(state.appliedPaths)
+                        Button(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenFiles,
+                        ) {
+                            Icon(Icons.Outlined.Folder, contentDescription = null)
+                            Text("查看文件", modifier = Modifier.padding(start = 8.dp))
+                        }
+                        OutlinedButton(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenGit,
+                        ) {
+                            Icon(Icons.Outlined.AccountTree, contentDescription = null)
+                            Text("查看 Git 变更", modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
+                    MarkdownFileChangeStatus.PARTIALLY_APPLIED -> {
+                        Text(
+                            "已写入",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        AppliedPathList(state.appliedPaths)
+                        Text(
+                            "写入失败",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        FailedPathList(state.applyFailures)
+                        Button(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenFiles,
+                        ) {
+                            Icon(Icons.Outlined.Folder, contentDescription = null)
+                            Text("查看文件", modifier = Modifier.padding(start = 8.dp))
+                        }
+                        OutlinedButton(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenGit,
+                        ) {
+                            Icon(Icons.Outlined.AccountTree, contentDescription = null)
+                            Text("查看 Git 变更", modifier = Modifier.padding(start = 8.dp))
+                        }
+                        OutlinedButton(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onRetryFailed,
+                            enabled = !isApplying,
+                        ) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null)
+                            Text("仅重试失败项", modifier = Modifier.padding(start = 8.dp))
                         }
                     }
                     MarkdownFileChangeStatus.FAILED -> {
+                        if (state.applyFailures.isNotEmpty()) {
+                            FailedPathList(state.applyFailures)
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = onRetry) { Text("重试") }
-                            TextButton(onClick = onDismiss) { Text("撤回") }
+                            TextButton(
+                                onClick = if (state.applyFailures.isEmpty()) onRetry else onRetryFailed,
+                                enabled = !isApplying,
+                            ) {
+                                Text(if (state.applyFailures.isEmpty()) "重试" else "重试失败项")
+                            }
+                            TextButton(onClick = onDismiss, enabled = !isApplying) { Text("撤回") }
                         }
                     }
-                    MarkdownFileChangeStatus.APPLIED,
                     MarkdownFileChangeStatus.DISMISSED,
                     -> Unit
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AppliedPathList(paths: List<String>) {
+    val visible = paths.take(3)
+    visible.forEach { path ->
+        Text(
+            path,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.MiddleEllipsis,
+        )
+    }
+    if (paths.size > visible.size) {
+        Text(
+            "另有 ${paths.size - visible.size} 个文件",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun FailedPathList(failures: List<MarkdownFileChangeFailure>) {
+    failures.take(3).forEach { failure ->
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(failure.proposal.path, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                failure.errorMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
     }
 }

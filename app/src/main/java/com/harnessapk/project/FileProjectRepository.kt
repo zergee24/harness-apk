@@ -157,15 +157,22 @@ class FileProjectRepository(
         file.writeText(markdown)
     }
 
+    fun validateMarkdownFilePath(projectId: String, relativePath: String): String {
+        val project = projectDirectory(projectId)
+        val normalizedPath = relativePath.trim().replace('\\', '/').trim('/')
+        require(normalizedPath.isNotBlank()) { "Markdown 路径不能为空" }
+        require(normalizedPath.endsWith(".md", ignoreCase = true)) { "只能写入 Markdown 文件" }
+        checkedProjectFile(project, normalizedPath)
+        return normalizedPath
+    }
+
     suspend fun writeMarkdownFile(
         projectId: String,
         relativePath: String,
         markdown: String,
     ): ProjectDeliverable {
         val project = projectDirectory(projectId)
-        val normalizedPath = relativePath.trim().replace('\\', '/').trim('/')
-        require(normalizedPath.isNotBlank()) { "Markdown 路径不能为空" }
-        require(normalizedPath.endsWith(".md", ignoreCase = true)) { "只能写入 Markdown 文件" }
+        val normalizedPath = validateMarkdownFilePath(projectId, relativePath)
         val file = checkedProjectFile(project, normalizedPath)
         file.parentFile?.mkdirs()
         file.writeText(markdown)

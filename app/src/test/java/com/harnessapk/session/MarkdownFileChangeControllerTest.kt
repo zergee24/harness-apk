@@ -93,6 +93,49 @@ class MarkdownFileChangeControllerTest {
     }
 
     @Test
+    fun markApplyResultKeepsSuccessesAndExposesOnlyFailedProposalForRetry() {
+        val ready = readyStateWithTwoFiles()
+        val result = MarkdownBatchApplyResult(
+            listOf(
+                successResult(ready.items[0].toProposal(), "requirements/prd.md"),
+                failedResult(ready.items[1].toProposal(), "磁盘空间不足"),
+            ),
+        )
+
+        val partial = controller.markApplyResult(ready, result)
+
+        assertEquals(MarkdownFileChangeStatus.PARTIALLY_APPLIED, partial.draft.status)
+        assertEquals(listOf("requirements/prd.md"), partial.appliedPaths)
+        assertEquals(listOf("reports/review.md"), partial.applyFailures.map { it.proposal.path })
+        assertEquals(listOf("reports/review.md"), controller.retryableProposals(partial).map { it.path })
+    }
+
+    @Test
+    fun retrySuccessMergesWithPreviousPathsAndFinishesApplied() {
+        val ready = readyStateWithTwoFiles()
+        val partial = controller.markApplyResult(
+            ready,
+            MarkdownBatchApplyResult(
+                listOf(
+                    successResult(ready.items[0].toProposal(), "requirements/prd.md"),
+                    failedResult(ready.items[1].toProposal(), "第一次失败"),
+                ),
+            ),
+        )
+
+        val applied = controller.markApplyResult(
+            partial,
+            MarkdownBatchApplyResult(
+                listOf(successResult(ready.items[1].toProposal(), "reports/review.md")),
+            ),
+        )
+
+        assertEquals(MarkdownFileChangeStatus.APPLIED, applied.draft.status)
+        assertEquals(listOf("requirements/prd.md", "reports/review.md"), applied.appliedPaths)
+        assertTrue(applied.applyFailures.isEmpty())
+    }
+
+    @Test
     fun retainedProposalsOnlyReturnsKeptItems() {
         val ready = readyState()
         val withdrawn = controller.toggleRetained(ready, itemIndex = 0)
@@ -112,6 +155,50 @@ class MarkdownFileChangeControllerTest {
                         title = "PRD",
                         reason = "新建项目需求文档",
                         markdown = "# PRD\n\n内容",
+                    ),
+                ),
+            ),
+            snapshots = emptyList(),
+        )
+
+    private fun MarkdownFileChangeItem.toProposal() = MarkdownUpdateProposal(
+        operation = operation,
+        path = path,
+        title = title,
+        reason = reason,
+        markdown = markdown,
+    )
+
+    private fun successResult(proposal: MarkdownUpdateProposal, path: String) = MarkdownFileApplyResult(
+        proposal = proposal,
+        status = MarkdownFileApplyStatus.SUCCEEDED,
+        writtenDeliverable = CreatedDeliverable(path, proposal.title, path),
+    )
+
+    private fun failedResult(proposal: MarkdownUpdateProposal, message: String) = MarkdownFileApplyResult(
+        proposal = proposal,
+        status = MarkdownFileApplyStatus.FAILED,
+        errorMessage = message,
+    )
+
+    private fun readyStateWithTwoFiles(): MarkdownFileChangeState =
+        controller.markReady(
+            state = controller.createPlanningDraft("conversation", "project", "user-1"),
+            plan = MarkdownUpdatePlan(
+                proposals = listOf(
+                    MarkdownUpdateProposal(
+                        operation = MarkdownUpdateOperation.CREATE,
+                        path = "requirements/prd.md",
+                        title = "PRD",
+                        reason = "新建需求文档",
+                        markdown = "# PRD",
+                    ),
+                    MarkdownUpdateProposal(
+                        operation = MarkdownUpdateOperation.CREATE,
+                        path = "reports/review.md",
+                        title = "Review",
+                        reason = "新建复盘文档",
+                        markdown = "# Review",
                     ),
                 ),
             ),

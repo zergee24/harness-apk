@@ -17,6 +17,28 @@ data class CreatedDeliverable(
     val path: String,
 )
 
+enum class MarkdownFileApplyStatus { SUCCEEDED, FAILED }
+
+data class MarkdownFileApplyResult(
+    val proposal: MarkdownUpdateProposal,
+    val status: MarkdownFileApplyStatus,
+    val writtenDeliverable: CreatedDeliverable? = null,
+    val errorMessage: String? = null,
+)
+
+data class MarkdownBatchApplyResult(
+    val results: List<MarkdownFileApplyResult>,
+) {
+    val succeeded: List<MarkdownFileApplyResult>
+        get() = results.filter { it.status == MarkdownFileApplyStatus.SUCCEEDED }
+    val failed: List<MarkdownFileApplyResult>
+        get() = results.filter { it.status == MarkdownFileApplyStatus.FAILED }
+    val isFullyApplied: Boolean
+        get() = results.isNotEmpty() && failed.isEmpty()
+    val isPartiallyApplied: Boolean
+        get() = succeeded.isNotEmpty() && failed.isNotEmpty()
+}
+
 data class SessionSummary(
     val conversationId: String,
     val title: String,
@@ -39,7 +61,7 @@ interface ProjectWorkspaceGateway {
     suspend fun applyMarkdownUpdates(
         projectId: String,
         updates: List<MarkdownUpdateProposal>,
-    ): List<CreatedDeliverable>
+    ): MarkdownBatchApplyResult
 }
 
 class EmptyProjectWorkspaceGateway : ProjectWorkspaceGateway {
@@ -59,7 +81,17 @@ class EmptyProjectWorkspaceGateway : ProjectWorkspaceGateway {
     override suspend fun applyMarkdownUpdates(
         projectId: String,
         updates: List<MarkdownUpdateProposal>,
-    ): List<CreatedDeliverable> = updates.map {
-        CreatedDeliverable(id = it.path, title = it.title, path = it.path)
-    }
+    ): MarkdownBatchApplyResult = MarkdownBatchApplyResult(
+        results = updates.map { proposal ->
+            MarkdownFileApplyResult(
+                proposal = proposal,
+                status = MarkdownFileApplyStatus.SUCCEEDED,
+                writtenDeliverable = CreatedDeliverable(
+                    id = proposal.path,
+                    title = proposal.title,
+                    path = proposal.path,
+                ),
+            )
+        },
+    )
 }

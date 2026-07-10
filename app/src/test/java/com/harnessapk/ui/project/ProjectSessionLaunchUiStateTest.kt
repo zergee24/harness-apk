@@ -4,6 +4,12 @@ import com.harnessapk.chat.Conversation
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.DeliverableTemplate
 import com.harnessapk.project.ProjectDeliverable
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -81,6 +87,175 @@ class ProjectSessionLaunchUiStateTest {
         assertEquals(ProjectWorkbenchTab.CONVERSATIONS, defaultProjectWorkbenchTab())
         assertEquals("会话", ProjectWorkbenchTab.CONVERSATIONS.label)
         assertEquals("文件夹", ProjectWorkbenchTab.FOLDER.label)
+    }
+
+    @Test
+    fun workbenchTargetsMapToFolderAndGitTabs() {
+        assertEquals(ProjectWorkbenchTab.FOLDER, projectWorkbenchTab(ProjectWorkbenchDestination.FILES))
+        assertEquals(ProjectWorkbenchTab.GIT, projectWorkbenchTab(ProjectWorkbenchDestination.GIT))
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun filesRefreshCannotPublishAfterNewerGitTargetForSameProject() = runTest {
+        val refreshController = ProjectDeliverableRefreshController()
+        val repository = DelayedDeliverableRepository()
+        var publishedDeliverables = emptyList<ProjectDeliverable>()
+
+        val filesRefresh = refreshController.acceptWorkbenchTarget(
+            target = target("project-p", ProjectWorkbenchDestination.FILES, "docs/first.md", 1),
+            selectedProjectId = "project-p",
+        )!!
+        val filesJob = launch {
+            val deliverables = repository.listDeliverables("project-p")
+            if (refreshController.canPublish(filesRefresh)) publishedDeliverables = deliverables
+        }
+        runCurrent()
+
+        refreshController.acceptWorkbenchTarget(
+            target = target("project-p", ProjectWorkbenchDestination.GIT, null, 2),
+            selectedProjectId = "project-p",
+        )
+        repository.complete("project-p", listOf(deliverable("docs/first.md", ProjectArtifactType.MARKDOWN)))
+        filesJob.join()
+
+        assertEquals(emptyList<ProjectDeliverable>(), publishedDeliverables)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun crossProjectFilesTargetKeepsPreferredPathOverSelectedProjectOrdinaryRefresh() = runTest {
+        val refreshController = ProjectDeliverableRefreshController()
+        val repository = DelayedDeliverableRepository()
+        var selectedDeliverableId: String? = null
+
+        val targetedRefresh = refreshController.acceptWorkbenchTarget(
+            target = target("project-q", ProjectWorkbenchDestination.FILES, "docs/requested.md", 3),
+            selectedProjectId = "project-p",
+        )!!
+        val targetedJob = async {
+            val deliverables = repository.listDeliverables("project-q")
+            if (refreshController.canPublish(targetedRefresh)) {
+                selectedDeliverableId = selectedDeliverableIdForRefresh(
+                    preferredPath = targetedRefresh.preferredPath,
+                    currentSelectedDeliverableId = selectedDeliverableId,
+                    filteredDeliverables = deliverables,
+                )
+            }
+        }
+        runCurrent()
+
+        assertEquals(
+            null,
+            refreshController.beginOrdinaryFilesRefresh(
+                projectId = "project-q",
+                query = "",
+                filter = ProjectArtifactFilter.ALL,
+            ),
+        )
+        repository.complete(
+            "project-q",
+            listOf(
+                deliverable("README.md", ProjectArtifactType.MARKDOWN),
+                deliverable("docs/requested.md", ProjectArtifactType.MARKDOWN),
+            ),
+        )
+        targetedJob.await()
+
+        assertEquals("docs/requested.md", selectedDeliverableId)
+    }
+
+    @Test
+    fun sameProjectFilesTargetSuppressesTargetResetRefreshAndKeepsLaterSearchRefresh() {
+        val refreshController = ProjectDeliverableRefreshController()
+
+        refreshController.acceptWorkbenchTarget(
+            target = target("project-p", ProjectWorkbenchDestination.FILES, "docs/requested.md", 4),
+            selectedProjectId = "project-p",
+            currentSearchQuery = "requested",
+        )
+
+        assertEquals(
+            null,
+            refreshController.beginOrdinaryFilesRefresh(
+                projectId = "project-p",
+                query = "",
+                filter = ProjectArtifactFilter.ALL,
+            ),
+        )
+
+        val searchRefresh = refreshController.beginOrdinaryFilesRefresh(
+            projectId = "project-p",
+            query = "requested",
+            filter = ProjectArtifactFilter.ALL,
+        )
+
+        assertEquals("requested", searchRefresh?.query)
+
+        val filterRefresh = refreshController.beginOrdinaryFilesRefresh(
+            projectId = "project-p",
+            query = "requested",
+            filter = ProjectArtifactFilter.CODE,
+        )
+
+        assertEquals(ProjectArtifactFilter.CODE, filterRefresh?.filter)
+    }
+
+    @Test
+    fun sameProjectFilesTargetWithEmptySearchKeepsFirstNormalSearchRefresh() {
+        val refreshController = ProjectDeliverableRefreshController()
+
+        refreshController.acceptWorkbenchTarget(
+            target = target("project-p", ProjectWorkbenchDestination.FILES, "docs/requested.md", 5),
+            selectedProjectId = "project-p",
+            currentSearchQuery = "",
+        )
+
+        val searchRefresh = refreshController.beginOrdinaryFilesRefresh(
+            projectId = "project-p",
+            query = "requested",
+            filter = ProjectArtifactFilter.ALL,
+        )
+
+        assertEquals("requested", searchRefresh?.query)
+    }
+
+    @Test
+    fun gitRefreshIsOnlyTriggeredBySelectingGitTab() {
+        assertTrue(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.GIT))
+        assertFalse(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.FOLDER))
+        assertFalse(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.CONVERSATIONS))
+    }
+
+    @Test
+    fun gitRefreshPublishesOnlyCurrentProjectGenerationAcrossRapidTargets() {
+        val refreshController = ProjectGitRefreshController()
+
+        val projectP = refreshController.begin("project-p")!!
+        val firstProjectQ = refreshController.begin("project-q")!!
+        val latestProjectQ = refreshController.begin("project-q")!!
+
+        assertFalse(refreshController.canPublish(projectP, selectedProjectId = "project-p"))
+        assertFalse(refreshController.canPublish(firstProjectQ, selectedProjectId = "project-q"))
+        assertFalse(refreshController.canPublish(latestProjectQ, selectedProjectId = "project-p"))
+        assertTrue(refreshController.canPublish(latestProjectQ, selectedProjectId = "project-q"))
+    }
+
+    @Test
+    fun clearingGitTargetInvalidatesPendingRefresh() {
+        val refreshController = ProjectGitRefreshController()
+        val pending = refreshController.begin("project-p")!!
+
+        assertEquals(null, refreshController.begin(null))
+
+        assertFalse(refreshController.canPublish(pending, selectedProjectId = "project-p"))
+    }
+
+    @Test
+    fun projectSelectionRefreshesGitOnlyWhileGitTabIsActive() {
+        assertTrue(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.GIT, "project-q"))
+        assertFalse(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.FOLDER, "project-q"))
+        assertFalse(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.GIT, null))
     }
 
     @Test
@@ -208,4 +383,27 @@ class ProjectSessionLaunchUiStateTest {
         updatedAt = 0L,
         artifactType = artifactType,
     )
+
+    private fun target(
+        projectId: String,
+        destination: ProjectWorkbenchDestination,
+        selectedPath: String?,
+        requestKey: Int,
+    ) = ProjectWorkbenchTarget(
+        projectId = projectId,
+        destination = destination,
+        selectedPath = selectedPath,
+        requestKey = requestKey,
+    )
+
+    private class DelayedDeliverableRepository {
+        private val responses = mutableMapOf<String, CompletableDeferred<List<ProjectDeliverable>>>()
+
+        suspend fun listDeliverables(projectId: String): List<ProjectDeliverable> =
+            responses.getOrPut(projectId) { CompletableDeferred() }.await()
+
+        fun complete(projectId: String, deliverables: List<ProjectDeliverable>) {
+            responses.getOrPut(projectId) { CompletableDeferred() }.complete(deliverables)
+        }
+    }
 }

@@ -92,14 +92,121 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal data class ProjectDeliverableRefresh(
+    val generation: Int,
+    val projectId: String,
+    val preferredPath: String?,
+    val query: String,
+    val filter: ProjectArtifactFilter,
+)
+
+internal class ProjectDeliverableRefreshController {
+    private var currentGeneration = 0
+    private var ordinaryRefreshProjectIdToSkip: String? = null
+
+    fun acceptWorkbenchTarget(
+        target: ProjectWorkbenchTarget,
+        selectedProjectId: String?,
+        currentSearchQuery: String = "",
+    ): ProjectDeliverableRefresh? {
+        currentGeneration += 1
+        ordinaryRefreshProjectIdToSkip = null
+        if (target.destination != ProjectWorkbenchDestination.FILES) return null
+
+        if (selectedProjectId != target.projectId || currentSearchQuery.isNotEmpty()) {
+            ordinaryRefreshProjectIdToSkip = target.projectId
+        }
+        return ProjectDeliverableRefresh(
+            generation = currentGeneration,
+            projectId = target.projectId,
+            preferredPath = target.selectedPath,
+            query = "",
+            filter = ProjectArtifactFilter.ALL,
+        )
+    }
+
+    fun beginFilesRefresh(
+        projectId: String,
+        preferredPath: String?,
+        query: String,
+        filter: ProjectArtifactFilter,
+    ): ProjectDeliverableRefresh {
+        currentGeneration += 1
+        return ProjectDeliverableRefresh(
+            generation = currentGeneration,
+            projectId = projectId,
+            preferredPath = preferredPath,
+            query = query,
+            filter = filter,
+        )
+    }
+
+    fun beginOrdinaryFilesRefresh(
+        projectId: String,
+        query: String,
+        filter: ProjectArtifactFilter,
+    ): ProjectDeliverableRefresh? {
+        if (ordinaryRefreshProjectIdToSkip == projectId) {
+            ordinaryRefreshProjectIdToSkip = null
+            return null
+        }
+        return beginFilesRefresh(
+            projectId = projectId,
+            preferredPath = null,
+            query = query,
+            filter = filter,
+        )
+    }
+
+    fun canPublish(refresh: ProjectDeliverableRefresh): Boolean =
+        refresh.generation == currentGeneration
+}
+
+internal data class ProjectGitRefresh(
+    val generation: Int,
+    val projectId: String,
+)
+
+internal class ProjectGitRefreshController {
+    private var currentGeneration = 0
+
+    fun begin(projectId: String?): ProjectGitRefresh? {
+        currentGeneration += 1
+        return projectId?.let { ProjectGitRefresh(currentGeneration, it) }
+    }
+
+    fun canPublish(refresh: ProjectGitRefresh, selectedProjectId: String?): Boolean =
+        refresh.generation == currentGeneration && refresh.projectId == selectedProjectId
+}
+
+internal fun selectedDeliverableIdForRefresh(
+    preferredPath: String?,
+    currentSelectedDeliverableId: String?,
+    filteredDeliverables: List<ProjectDeliverable>,
+): String? = when {
+    preferredPath != null && filteredDeliverables.any { it.id == preferredPath } -> preferredPath
+    currentSelectedDeliverableId != null && filteredDeliverables.any { it.id == currentSelectedDeliverableId } ->
+        currentSelectedDeliverableId
+    else -> filteredDeliverables.firstOrNull()?.id
+}
+
+internal fun shouldRefreshGitOnTabSelection(tab: ProjectWorkbenchTab): Boolean =
+    tab == ProjectWorkbenchTab.GIT
+
+internal fun shouldRefreshGitForProjectSelection(tab: ProjectWorkbenchTab, projectId: String?): Boolean =
+    shouldRefreshGitOnTabSelection(tab) && projectId != null
+
 @Composable
-fun ProjectScreen(
+internal fun ProjectScreen(
     container: AppContainer,
     contentPadding: PaddingValues,
     onCurrentProjectNameChange: (String?) -> Unit,
+    workbenchTarget: ProjectWorkbenchTarget? = null,
+    onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
     onOpenSession: (String) -> Unit,
 ) {
@@ -108,7 +215,10 @@ fun ProjectScreen(
     val markdownPdfWriter = remember { AndroidMarkdownPdfWriter() }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
+    var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
+    val deliverableRefreshController = remember { ProjectDeliverableRefreshController() }
+    val gitRefreshController = remember { ProjectGitRefreshController() }
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedDeliverableId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(defaultProjectWorkbenchTab()) }
@@ -147,21 +257,45 @@ fun ProjectScreen(
         }
     }
 
-    fun refreshDeliverables() {
-        val projectId = selectedProjectId ?: return
+    fun publishDeliverableRefresh(refresh: ProjectDeliverableRefresh) {
         scope.launch {
-            deliverables = withContext(container.dispatchers.io) {
-                if (searchQuery.isBlank()) {
-                    container.projectRepository.listDeliverables(projectId)
+            val refreshedDeliverables = withContext(container.dispatchers.io) {
+                if (refresh.query.isBlank()) {
+                    container.projectRepository.listDeliverables(refresh.projectId)
                 } else {
-                    container.projectRepository.searchDeliverables(projectId, searchQuery)
+                    container.projectRepository.searchDeliverables(refresh.projectId, refresh.query)
                 }
             }
-            val filteredDeliverables = filterProjectArtifacts(deliverables, artifactFilter)
-            if (selectedDeliverableId == null || filteredDeliverables.none { it.id == selectedDeliverableId }) {
-                selectedDeliverableId = filteredDeliverables.firstOrNull()?.id
+            if (!deliverableRefreshController.canPublish(refresh)) return@launch
+
+            deliverables = refreshedDeliverables
+            val filtered = filterProjectArtifacts(deliverables, refresh.filter)
+            if (refresh.preferredPath != null && filtered.none { it.id == refresh.preferredPath }) {
+                statusText = "文件已写入，请刷新后查看"
             }
+            selectedDeliverableId = selectedDeliverableIdForRefresh(
+                preferredPath = refresh.preferredPath,
+                currentSelectedDeliverableId = selectedDeliverableId,
+                filteredDeliverables = filtered,
+            )
         }
+    }
+
+    fun refreshDeliverables(
+        projectId: String? = selectedProjectId,
+        preferredPath: String? = null,
+        query: String = searchQuery,
+        filter: ProjectArtifactFilter = artifactFilter,
+    ) {
+        val resolvedProjectId = projectId ?: return
+        publishDeliverableRefresh(
+            deliverableRefreshController.beginFilesRefresh(
+                projectId = resolvedProjectId,
+                preferredPath = preferredPath,
+                query = query,
+                filter = filter,
+            ),
+        )
     }
 
     fun loadSelectedArtifactText() {
@@ -264,16 +398,15 @@ fun ProjectScreen(
         }
     }
 
-    fun refreshGitState() {
-        val project = selectedProject
-        if (project == null) {
-            gitStatus = null
-            gitBranches = emptyList()
-            return
-        }
+    fun refreshGitState(project: Project? = selectedProject) {
+        val refresh = gitRefreshController.begin(project?.id)
+        gitStatus = null
+        gitBranches = emptyList()
+        if (project == null || refresh == null) return
+
         scope.launch {
-            runCatching {
-                withContext(container.dispatchers.io) {
+            try {
+                val (status, branches) = withContext(container.dispatchers.io) {
                     if (!container.gitEngine.isRepository(project.rootDirectory)) {
                         null to emptyList<GitBranchSummary>()
                     } else {
@@ -281,13 +414,14 @@ fun ProjectScreen(
                             container.gitEngine.branches(project.rootDirectory)
                     }
                 }
-            }.onSuccess { (status, branches) ->
+                if (!gitRefreshController.canPublish(refresh, selectedProjectId)) return@launch
                 gitStatus = status
                 gitBranches = branches
-            }.onFailure {
-                gitStatus = null
-                gitBranches = emptyList()
-                statusText = it.toUserMessage()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (!gitRefreshController.canPublish(refresh, selectedProjectId)) return@launch
+                statusText = error.toUserMessage()
             }
         }
     }
@@ -450,17 +584,59 @@ fun ProjectScreen(
         projects = withContext(container.dispatchers.io) {
             container.projectRepository.listProjects()
         }
+        projectsLoaded = true
         selectedProjectId = selectedProjectId ?: projects.firstOrNull()?.id
         onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
     }
 
-    LaunchedEffect(selectedProjectId, searchQuery) {
-        onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
-        refreshDeliverables()
+    LaunchedEffect(workbenchTarget?.requestKey, projectsLoaded) {
+        val target = workbenchTarget ?: return@LaunchedEffect
+        if (!projectsLoaded) return@LaunchedEffect
+        val targetedFilesRefresh = deliverableRefreshController.acceptWorkbenchTarget(
+            target = target,
+            selectedProjectId = selectedProjectId,
+            currentSearchQuery = searchQuery,
+        )
+        val project = projects.firstOrNull { it.id == target.projectId }
+        if (project == null) {
+            statusText = "项目不存在或已被删除"
+            onWorkbenchTargetConsumed(target.requestKey)
+            return@LaunchedEffect
+        }
+
+        val targetTab = projectWorkbenchTab(target.destination)
+        val refreshAlreadySelectedGit = shouldRefreshGitForProjectSelection(targetTab, project.id) &&
+            selectedProjectId == project.id && selectedTab == ProjectWorkbenchTab.GIT
+        selectedProjectId = project.id
+        selectedTab = targetTab
+        searchQuery = ""
+        artifactFilter = ProjectArtifactFilter.ALL
+        collapsedDirectoryPaths = emptySet()
+        if (target.destination == ProjectWorkbenchDestination.FILES) {
+            publishDeliverableRefresh(checkNotNull(targetedFilesRefresh))
+        } else if (refreshAlreadySelectedGit) {
+            refreshGitState(project)
+        }
+        onWorkbenchTargetConsumed(target.requestKey)
     }
 
-    LaunchedEffect(selectedProjectId, projects) {
-        refreshGitState()
+    LaunchedEffect(selectedProjectId, searchQuery) {
+        onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
+        val projectId = selectedProjectId ?: return@LaunchedEffect
+        val ordinaryRefresh = deliverableRefreshController.beginOrdinaryFilesRefresh(
+            projectId = projectId,
+            query = searchQuery,
+            filter = artifactFilter,
+        ) ?: return@LaunchedEffect
+        publishDeliverableRefresh(ordinaryRefresh)
+    }
+
+    LaunchedEffect(selectedProject, selectedTab) {
+        if (shouldRefreshGitForProjectSelection(selectedTab, selectedProject?.id)) {
+            refreshGitState(selectedProject)
+        } else if (selectedTab == ProjectWorkbenchTab.GIT) {
+            refreshGitState(null)
+        }
     }
 
     LaunchedEffect(selectedProjectId, selectedDeliverableId, artifactFilter, deliverables) {
@@ -587,7 +763,11 @@ fun ProjectScreen(
             item {
                 ProjectWorkbenchTabs(
                     selectedTab = selectedTab,
-                    onSelectTab = { selectedTab = it },
+                    onSelectTab = { tab ->
+                        val refreshAlreadySelectedGit = shouldRefreshGitOnTabSelection(tab) && tab == selectedTab
+                        selectedTab = tab
+                        if (refreshAlreadySelectedGit) refreshGitState()
+                    },
                 )
             }
 

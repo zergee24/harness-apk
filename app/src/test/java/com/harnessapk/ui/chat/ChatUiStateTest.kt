@@ -7,17 +7,26 @@ import com.harnessapk.chat.ReasoningEffort
 import com.harnessapk.chat.UiMessagePartDraft
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.provider.ProviderProfile
+import com.harnessapk.session.CreatedDeliverable
+import com.harnessapk.session.MarkdownBatchApplyResult
+import com.harnessapk.session.MarkdownDiffLine
+import com.harnessapk.session.MarkdownFileApplyResult
+import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeStatus
 import com.harnessapk.session.MarkdownUpdateOperation
+import com.harnessapk.session.MarkdownUpdateProposal
 import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.ui.model.selectableModelsForProvider
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.websearch.WebSearchSettings
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class ChatUiStateTest {
@@ -581,11 +590,208 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun markdownWriteBackAppliedEventListsWrittenFiles() {
-        assertEquals(
-            "已沉淀到项目：requirements/prd.md、reports/review.md",
-            markdownWriteBackAppliedEvent(listOf("requirements/prd.md", "reports/review.md")),
+    fun markdownWriteBackEventFailureDoesNotFailTheGatewayResult() = runBlocking {
+        persistMarkdownWriteBackResultEvent(
+            result = MarkdownBatchApplyResult(
+                listOf(
+                    MarkdownFileApplyResult(
+                        proposal = proposal("docs/ok.md"),
+                        status = MarkdownFileApplyStatus.SUCCEEDED,
+                        writtenDeliverable = CreatedDeliverable("docs/ok.md", "OK", "docs/ok.md"),
+                    ),
+                ),
+            ),
+            insertEvent = { error("event storage unavailable") },
         )
+    }
+
+    @Test
+    fun markdownWriteBackEventCancellationIsNotSwallowed() = runBlocking {
+        try {
+            persistMarkdownWriteBackResultEvent(
+                result = MarkdownBatchApplyResult(
+                    listOf(
+                        MarkdownFileApplyResult(
+                            proposal = proposal("docs/ok.md"),
+                            status = MarkdownFileApplyStatus.SUCCEEDED,
+                            writtenDeliverable = CreatedDeliverable("docs/ok.md", "OK", "docs/ok.md"),
+                        ),
+                    ),
+                ),
+                insertEvent = { throw CancellationException("cancelled") },
+            )
+            fail("expected cancellation to propagate")
+        } catch (error: CancellationException) {
+            assertEquals("cancelled", error.message)
+        }
+    }
+
+    @Test
+    fun partialWriteBackEventAndFeedbackSeparateSuccessFromFailure() {
+        val result = MarkdownBatchApplyResult(
+            listOf(
+                MarkdownFileApplyResult(
+                    proposal = proposal("docs/ok.md"),
+                    status = MarkdownFileApplyStatus.SUCCEEDED,
+                    writtenDeliverable = CreatedDeliverable("docs/ok.md", "OK", "docs/ok.md"),
+                ),
+                MarkdownFileApplyResult(
+                    proposal = proposal("docs/fail.md"),
+                    status = MarkdownFileApplyStatus.FAILED,
+                    errorMessage = "没有写入权限",
+                ),
+            ),
+        )
+
+        assertEquals(
+            "已沉淀到项目：docs/ok.md；写入失败：docs/fail.md（没有写入权限）",
+            markdownWriteBackResultEvent(result),
+        )
+        assertEquals("已写入 1 项 Markdown 更新，1 项失败", markdownWriteBackResultStatus(result))
+        assertEquals("1 个文件写入失败，可仅重试失败项", markdownWriteBackResultError(result))
+    }
+
+    @Test
+    fun markdownWriteBackFinalizesBeforeBestEffortDeliverableRefresh() = runBlocking {
+        val events = mutableListOf<String>()
+
+        finalizeMarkdownWriteBackBeforeRefresh(
+            finalize = { events += "finalized" },
+            afterFinalize = { events += "event" },
+            refreshDeliverables = {
+                events += "refresh"
+                error("refresh unavailable")
+            },
+        )
+
+        assertEquals(listOf("finalized", "event", "refresh"), events)
+    }
+
+    @Test
+    fun markdownWriteBackDeliverableRefreshStillPropagatesCancellation() = runBlocking {
+        val events = mutableListOf<String>()
+
+        try {
+            finalizeMarkdownWriteBackBeforeRefresh(
+                finalize = { events += "finalized" },
+                refreshDeliverables = {
+                    events += "refresh"
+                    throw CancellationException("cancelled")
+                },
+            )
+            fail("expected cancellation to propagate")
+        } catch (error: CancellationException) {
+            assertEquals("cancelled", error.message)
+        }
+
+        assertEquals(listOf("finalized", "refresh"), events)
+    }
+
+    @Test
+    fun markdownDraftApplyControllerRejectsOverlapAndStaleCompletion() {
+        val controller = MarkdownDraftApplyController()
+        val first = controller.begin("draft")!!
+
+        assertNull(controller.begin("draft"))
+
+        controller.invalidate("draft")
+        val replacement = controller.begin("draft")!!
+
+        assertFalse(controller.complete(first))
+        assertTrue(controller.isApplying("draft"))
+        assertTrue(controller.complete(replacement))
+        assertFalse(controller.isApplying("draft"))
+    }
+
+    @Test
+    fun legacyMarkdownReviewApplyControllerRejectsOverlapAndStaleCompletion() {
+        val controller = LegacyMarkdownReviewApplyController()
+        val reviewToken = controller.createReviewToken()
+        val first = controller.begin(reviewToken)!!
+
+        assertNull(controller.begin(reviewToken))
+        assertTrue(controller.isApplying(reviewToken))
+
+        controller.invalidate(reviewToken)
+        val replacement = controller.begin(reviewToken)!!
+
+        assertFalse(controller.complete(first))
+        assertTrue(controller.isApplying(reviewToken))
+        assertTrue(controller.complete(replacement))
+        assertFalse(controller.isApplying(reviewToken))
+    }
+
+    @Test
+    fun legacyReviewOnlyShowsApplyingForItsActiveToken() {
+        val controller = LegacyMarkdownReviewApplyController()
+        val reviewToken = controller.createReviewToken()
+
+        assertFalse(isLegacyMarkdownReviewApplying(pendingToken = null, activeToken = null))
+        assertFalse(isLegacyMarkdownReviewApplying(pendingToken = reviewToken, activeToken = null))
+
+        controller.begin(reviewToken)
+        assertTrue(isLegacyMarkdownReviewApplying(pendingToken = reviewToken, activeToken = reviewToken))
+    }
+
+    @Test
+    fun failedLegacyReviewIndexesPreserveDuplicatePathResultPositions() {
+        val duplicatePath = proposal("docs/shared.md")
+        val result = MarkdownBatchApplyResult(
+            results = listOf(
+                MarkdownFileApplyResult(
+                    proposal = duplicatePath,
+                    status = MarkdownFileApplyStatus.SUCCEEDED,
+                    writtenDeliverable = CreatedDeliverable("first", "First", duplicatePath.path),
+                ),
+                MarkdownFileApplyResult(
+                    proposal = duplicatePath.copy(markdown = "# Second"),
+                    status = MarkdownFileApplyStatus.FAILED,
+                    errorMessage = "第二项失败",
+                ),
+            ),
+        )
+
+        assertEquals(
+            setOf(4),
+            failedRetainedReviewIndexes(retainedIndexes = setOf(1, 4), result = result),
+        )
+    }
+
+    @Test
+    fun legacyPartialRetryReviewOnlyRetainsFailedProposalsByOriginalPosition() {
+        val duplicatePath = proposal("docs/shared.md")
+        val review = MarkdownUpdateReviewState(
+            proposals = listOf(
+                proposal("docs/withdrawn.md"),
+                duplicatePath,
+                duplicatePath.copy(markdown = "# Second"),
+            ),
+            diffs = listOf(emptyList(), emptyList(), emptyList()),
+        )
+        val result = MarkdownBatchApplyResult(
+            results = listOf(
+                MarkdownFileApplyResult(
+                    proposal = duplicatePath,
+                    status = MarkdownFileApplyStatus.SUCCEEDED,
+                    writtenDeliverable = CreatedDeliverable("first", "First", duplicatePath.path),
+                ),
+                MarkdownFileApplyResult(
+                    proposal = duplicatePath.copy(markdown = "# Second"),
+                    status = MarkdownFileApplyStatus.FAILED,
+                    errorMessage = "第二项失败",
+                ),
+            ),
+        )
+
+        val retry = legacyPartialRetryReviewState(
+            review = review,
+            retainedIndexes = setOf(1, 2),
+            result = result,
+        )
+
+        assertEquals(listOf(duplicatePath.copy(markdown = "# Second")), retry.proposals)
+        assertEquals(listOf(emptyList<MarkdownDiffLine>()), retry.diffs)
+        assertEquals(setOf(0), retry.proposals.indices.toSet())
     }
 
     @Test
@@ -662,6 +868,10 @@ class ChatUiStateTest {
         }
 
         assertEquals("已生成 8 个 Markdown 文件变更", markdownFileChangeCardTitle(MarkdownFileChangeStatus.READY, 8))
+        assertEquals(
+            "部分文件已写入",
+            markdownFileChangeCardTitle(MarkdownFileChangeStatus.PARTIALLY_APPLIED, 2),
+        )
         assertEquals(6, visibleMarkdownFileChangeItems(items).size)
         assertEquals(2, hiddenMarkdownFileChangeItemCount(items))
         assertEquals("A", markdownFileChangeOperationLabel(items.first()))
@@ -695,6 +905,14 @@ class ChatUiStateTest {
         providerId = "provider",
         model = "model",
         errorMessage = errorMessage,
+    )
+
+    private fun proposal(path: String) = MarkdownUpdateProposal(
+        operation = MarkdownUpdateOperation.CREATE,
+        path = path,
+        title = path.substringAfterLast('/').substringBeforeLast('.'),
+        reason = "测试结果反馈",
+        markdown = "# Test",
     )
 
     private fun providerProfile(

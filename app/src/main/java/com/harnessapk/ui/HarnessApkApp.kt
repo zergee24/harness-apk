@@ -42,7 +42,9 @@ import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.components.WarmSegmentedControl
 import com.harnessapk.ui.conversation.ConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
+import com.harnessapk.ui.project.ProjectWorkbenchDestination
 import com.harnessapk.ui.project.ProjectScreen
+import com.harnessapk.ui.project.ProjectWorkbenchTarget
 import com.harnessapk.ui.project.projectSessionTitle
 import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
@@ -91,6 +93,18 @@ internal fun chatRouteQuery(
     return if (query.isEmpty()) "" else "?${query.joinToString("&")}"
 }
 
+internal fun projectWorkbenchTarget(
+    projectId: String,
+    destination: ProjectWorkbenchDestination,
+    selectedPath: String?,
+    requestKey: Int,
+): ProjectWorkbenchTarget = ProjectWorkbenchTarget(
+    projectId = projectId,
+    destination = destination,
+    selectedPath = selectedPath,
+    requestKey = requestKey,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HarnessApkApp() {
@@ -101,6 +115,8 @@ fun HarnessApkApp() {
     var mainMode by rememberSaveable { mutableStateOf(MainMode.SESSION) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
+    var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
+    var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
     val isHomeRoute = route == Routes.Conversations || route == null
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
@@ -148,6 +164,21 @@ fun HarnessApkApp() {
                 ),
             )
         }
+    }
+    fun openWorkbench(
+        projectId: String,
+        destination: ProjectWorkbenchDestination,
+        selectedPath: String? = null,
+    ) {
+        workbenchRequestKey += 1
+        workbenchTarget = projectWorkbenchTarget(
+            projectId = projectId,
+            destination = destination,
+            selectedPath = selectedPath,
+            requestKey = workbenchRequestKey,
+        )
+        mainMode = MainMode.PROJECT
+        navController.popBackStack(Routes.Conversations, inclusive = false)
     }
     Scaffold(
         topBar = {
@@ -203,6 +234,10 @@ fun HarnessApkApp() {
                         container = container,
                         contentPadding = padding,
                         onCurrentProjectNameChange = { currentProjectName = it },
+                        workbenchTarget = workbenchTarget,
+                        onWorkbenchTargetConsumed = { requestKey ->
+                            if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
+                        },
                         onCreateSession = { project ->
                             scope.launch {
                                 val conversationId = container.chatRepository.createConversation(
@@ -246,6 +281,12 @@ fun HarnessApkApp() {
                     autoFocusInput = entry.arguments?.getBoolean("focusInput") == true,
                     sessionConfigRequestKey = chatSessionConfigRequestKey,
                     onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
+                    onOpenProjectFiles = { projectId, path ->
+                        openWorkbench(projectId, ProjectWorkbenchDestination.FILES, path)
+                    },
+                    onOpenProjectGit = { projectId ->
+                        openWorkbench(projectId, ProjectWorkbenchDestination.GIT)
+                    },
                     contentPadding = padding,
                 )
             }

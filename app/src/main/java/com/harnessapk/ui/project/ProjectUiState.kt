@@ -14,6 +14,21 @@ internal enum class ProjectWorkbenchTab(val label: String) {
     GIT("Git"),
 }
 
+internal enum class ProjectWorkbenchDestination { FILES, GIT }
+
+internal data class ProjectWorkbenchTarget(
+    val projectId: String,
+    val destination: ProjectWorkbenchDestination,
+    val selectedPath: String?,
+    val requestKey: Int,
+)
+
+internal fun projectWorkbenchTab(destination: ProjectWorkbenchDestination): ProjectWorkbenchTab =
+    when (destination) {
+        ProjectWorkbenchDestination.FILES -> ProjectWorkbenchTab.FOLDER
+        ProjectWorkbenchDestination.GIT -> ProjectWorkbenchTab.GIT
+    }
+
 internal fun defaultProjectWorkbenchTab(): ProjectWorkbenchTab = ProjectWorkbenchTab.CONVERSATIONS
 
 internal enum class ProjectHeaderAction {

@@ -1,11 +1,18 @@
 package com.harnessapk.project
 
+import com.harnessapk.common.toUserMessage
 import com.harnessapk.session.CreatedDeliverable
+import com.harnessapk.session.MarkdownBatchApplyResult
 import com.harnessapk.session.MarkdownDeliverable
+import com.harnessapk.session.MarkdownFileApplyResult
+import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownUpdateProposal
 import com.harnessapk.session.ProjectWorkspaceGateway
 import com.harnessapk.session.SessionSummary
 import com.harnessapk.session.WorkspaceProject
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 class ProjectWorkspaceGatewayAdapter(
     private val repository: FileProjectRepository,
@@ -67,19 +74,59 @@ class ProjectWorkspaceGatewayAdapter(
     override suspend fun applyMarkdownUpdates(
         projectId: String,
         updates: List<MarkdownUpdateProposal>,
-    ): List<CreatedDeliverable> =
-        updates.map { update ->
-            val deliverable = repository.writeMarkdownFile(
-                projectId = projectId,
-                relativePath = update.path,
-                markdown = update.markdown,
-            )
-            CreatedDeliverable(
-                id = deliverable.id,
-                title = deliverable.title,
-                path = deliverable.relativePath,
-            )
+    ): MarkdownBatchApplyResult {
+        currentCoroutineContext().ensureActive()
+        val validations = updates.map { proposal ->
+            proposal to try {
+                Result.success(proposal.copy(path = repository.validateMarkdownFilePath(projectId, proposal.path)))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Result.failure(error)
+            }
         }
+        return MarkdownBatchApplyResult(
+            results = validations.map { (originalProposal, validation) ->
+                validation.fold(
+                    onSuccess = { validatedProposal ->
+                        try {
+                            currentCoroutineContext().ensureActive()
+                            val deliverable = repository.writeMarkdownFile(
+                                projectId = projectId,
+                                relativePath = validatedProposal.path,
+                                markdown = validatedProposal.markdown,
+                            )
+                            MarkdownFileApplyResult(
+                                proposal = originalProposal,
+                                status = MarkdownFileApplyStatus.SUCCEEDED,
+                                writtenDeliverable = CreatedDeliverable(
+                                    id = deliverable.id,
+                                    title = deliverable.title,
+                                    path = deliverable.relativePath,
+                                ),
+                            )
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            MarkdownFileApplyResult(
+                                proposal = originalProposal,
+                                status = MarkdownFileApplyStatus.FAILED,
+                                errorMessage = error.toUserMessage(),
+                            )
+                        }
+                    },
+                    onFailure = { error ->
+                        MarkdownFileApplyResult(
+                            proposal = originalProposal,
+                            status = MarkdownFileApplyStatus.FAILED,
+                            errorMessage = error.toUserMessage(),
+                        )
+                    },
+                )
+            },
+        )
+    }
+
 }
 
 private fun deliverableTemplateFromGatewayType(templateType: String): DeliverableTemplate =
