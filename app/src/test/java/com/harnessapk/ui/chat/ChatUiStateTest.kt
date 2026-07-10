@@ -9,6 +9,7 @@ import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.provider.ProviderProfile
 import com.harnessapk.session.CreatedDeliverable
 import com.harnessapk.session.MarkdownBatchApplyResult
+import com.harnessapk.session.MarkdownDiffLine
 import com.harnessapk.session.MarkdownFileApplyResult
 import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownFileChangeItem
@@ -754,6 +755,43 @@ class ChatUiStateTest {
             setOf(4),
             failedRetainedReviewIndexes(retainedIndexes = setOf(1, 4), result = result),
         )
+    }
+
+    @Test
+    fun legacyPartialRetryReviewOnlyRetainsFailedProposalsByOriginalPosition() {
+        val duplicatePath = proposal("docs/shared.md")
+        val review = MarkdownUpdateReviewState(
+            proposals = listOf(
+                proposal("docs/withdrawn.md"),
+                duplicatePath,
+                duplicatePath.copy(markdown = "# Second"),
+            ),
+            diffs = listOf(emptyList(), emptyList(), emptyList()),
+        )
+        val result = MarkdownBatchApplyResult(
+            results = listOf(
+                MarkdownFileApplyResult(
+                    proposal = duplicatePath,
+                    status = MarkdownFileApplyStatus.SUCCEEDED,
+                    writtenDeliverable = CreatedDeliverable("first", "First", duplicatePath.path),
+                ),
+                MarkdownFileApplyResult(
+                    proposal = duplicatePath.copy(markdown = "# Second"),
+                    status = MarkdownFileApplyStatus.FAILED,
+                    errorMessage = "第二项失败",
+                ),
+            ),
+        )
+
+        val retry = legacyPartialRetryReviewState(
+            review = review,
+            retainedIndexes = setOf(1, 2),
+            result = result,
+        )
+
+        assertEquals(listOf(duplicatePath.copy(markdown = "# Second")), retry.proposals)
+        assertEquals(listOf(emptyList<MarkdownDiffLine>()), retry.diffs)
+        assertEquals(setOf(0), retry.proposals.indices.toSet())
     }
 
     @Test

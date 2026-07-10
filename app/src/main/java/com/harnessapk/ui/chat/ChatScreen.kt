@@ -937,15 +937,19 @@ fun ChatScreen(
                 finalizeMarkdownWriteBackBeforeRefresh(
                     finalize = {
                         applyingLegacyMarkdownReviewToken = null
-                        val failedIndexes = failedRetainedReviewIndexes(retainedIndexes, result)
-                        if (failedIndexes.isEmpty()) {
+                        val retryReview = legacyPartialRetryReviewState(
+                            review = review,
+                            retainedIndexes = retainedIndexes,
+                            result = result,
+                        )
+                        if (retryReview.proposals.isEmpty()) {
                             pendingMarkdownReview = null
                             pendingMarkdownReviewDraftId = null
                             pendingLegacyMarkdownReviewToken = null
                             retainedReviewIndexes = emptySet()
                         } else {
-                            pendingMarkdownReview = review
-                            retainedReviewIndexes = failedIndexes
+                            pendingMarkdownReview = retryReview
+                            retainedReviewIndexes = retryReview.proposals.indices.toSet()
                         }
                         sessionStatus = markdownWriteBackResultStatus(result)
                         errorText = markdownWriteBackResultError(result)
@@ -1702,6 +1706,18 @@ internal fun failedRetainedReviewIndexes(
     }.toSet()
 }
 
+internal fun legacyPartialRetryReviewState(
+    review: MarkdownUpdateReviewState,
+    retainedIndexes: Set<Int>,
+    result: MarkdownBatchApplyResult,
+): MarkdownUpdateReviewState {
+    val failedIndexes = failedRetainedReviewIndexes(retainedIndexes, result).sorted()
+    return MarkdownUpdateReviewState(
+        proposals = failedIndexes.map(review.proposals::get),
+        diffs = failedIndexes.map { index -> review.diffs.getOrElse(index) { emptyList() } },
+    )
+}
+
 private fun assistantMessageStatusText(message: ChatMessage): String? = when {
     message.role != MessageRole.ASSISTANT -> null
     message.status == MessageStatus.PENDING -> "正在连接模型..."
@@ -1731,7 +1747,7 @@ private fun ContextEventLine(text: String) {
     }
 }
 
-private data class MarkdownUpdateReviewState(
+internal data class MarkdownUpdateReviewState(
     val proposals: List<MarkdownUpdateProposal>,
     val diffs: List<List<MarkdownDiffLine>>,
 )
