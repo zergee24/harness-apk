@@ -172,6 +172,7 @@ class ProjectSessionLaunchUiStateTest {
         refreshController.acceptWorkbenchTarget(
             target = target("project-p", ProjectWorkbenchDestination.FILES, "docs/requested.md", 4),
             selectedProjectId = "project-p",
+            currentSearchQuery = "requested",
         )
 
         assertEquals(
@@ -198,6 +199,25 @@ class ProjectSessionLaunchUiStateTest {
         )
 
         assertEquals(ProjectArtifactFilter.CODE, filterRefresh?.filter)
+    }
+
+    @Test
+    fun sameProjectFilesTargetWithEmptySearchKeepsFirstNormalSearchRefresh() {
+        val refreshController = ProjectDeliverableRefreshController()
+
+        refreshController.acceptWorkbenchTarget(
+            target = target("project-p", ProjectWorkbenchDestination.FILES, "docs/requested.md", 5),
+            selectedProjectId = "project-p",
+            currentSearchQuery = "",
+        )
+
+        val searchRefresh = refreshController.beginOrdinaryFilesRefresh(
+            projectId = "project-p",
+            query = "requested",
+            filter = ProjectArtifactFilter.ALL,
+        )
+
+        assertEquals("requested", searchRefresh?.query)
     }
 
     @Test

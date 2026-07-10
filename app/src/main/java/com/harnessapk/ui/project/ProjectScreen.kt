@@ -110,12 +110,15 @@ internal class ProjectDeliverableRefreshController {
     fun acceptWorkbenchTarget(
         target: ProjectWorkbenchTarget,
         selectedProjectId: String?,
+        currentSearchQuery: String = "",
     ): ProjectDeliverableRefresh? {
         currentGeneration += 1
         ordinaryRefreshProjectIdToSkip = null
         if (target.destination != ProjectWorkbenchDestination.FILES) return null
 
-        ordinaryRefreshProjectIdToSkip = target.projectId
+        if (selectedProjectId != target.projectId || currentSearchQuery.isNotEmpty()) {
+            ordinaryRefreshProjectIdToSkip = target.projectId
+        }
         return ProjectDeliverableRefresh(
             generation = currentGeneration,
             projectId = target.projectId,
@@ -569,6 +572,7 @@ internal fun ProjectScreen(
         val targetedFilesRefresh = deliverableRefreshController.acceptWorkbenchTarget(
             target = target,
             selectedProjectId = selectedProjectId,
+            currentSearchQuery = searchQuery,
         )
         val project = projects.firstOrNull { it.id == target.projectId }
         if (project == null) {
