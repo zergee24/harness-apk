@@ -11,8 +11,10 @@ class ThemeTest {
     fun lightThemeUsesApprovedWarmAccessibleTokens() {
         val scheme = warmLightColorScheme()
 
-        assertEquals(Color(0xFFA83F39), scheme.primary)
+        assertEquals(Color(0xFF9F5167), scheme.primary)
         assertEquals(Color(0xFFFFF9F7), scheme.onPrimary)
+        assertEquals(Color(0xFFFFD9E2), scheme.primaryContainer)
+        assertEquals(Color(0xFF3F071D), scheme.onPrimaryContainer)
         assertEquals(Color(0xFFFAF7F6), scheme.background)
         assertEquals(Color(0xFFFFFDFC), scheme.surface)
         assertEquals(Color(0xFF211A19), scheme.onBackground)

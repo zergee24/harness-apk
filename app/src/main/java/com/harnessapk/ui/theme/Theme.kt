@@ -15,10 +15,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 internal fun warmLightColorScheme() = lightColorScheme(
-    primary = Color(0xFFA83F39),
+    primary = Color(0xFF9F5167),
     onPrimary = Color(0xFFFFF9F7),
-    primaryContainer = Color(0xFFFFDAD5),
-    onPrimaryContainer = Color(0xFF3D0806),
+    primaryContainer = Color(0xFFFFD9E2),
+    onPrimaryContainer = Color(0xFF3F071D),
     secondary = Color(0xFF6E5E5A),
     onSecondary = Color(0xFFFFFBFA),
     secondaryContainer = Color(0xFFF7DDD8),
