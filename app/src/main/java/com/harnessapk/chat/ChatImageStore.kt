@@ -76,7 +76,11 @@ class ChatImageStore(
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
         }
-        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
         val destination = context.contentResolver.insert(collection, values)
             ?: throw AppError.Network("无法保存图片到相册")
 

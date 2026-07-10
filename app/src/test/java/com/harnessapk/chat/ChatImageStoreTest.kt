@@ -39,4 +39,28 @@ class ChatImageStoreTest {
         assertEquals("image/svg+xml", result.mimeType)
         assertArrayEquals("<svg/>".toByteArray(), result.bytes)
     }
+
+    @Test
+    fun resolveParsesBase64ImageDataUri() {
+        val result = resolveChatImageDisplaySource("data:image/png;base64,aGVsbG8=", null)
+
+        assertTrue(result is ChatImageSource.Data)
+        result as ChatImageSource.Data
+        assertEquals("image/png", result.mimeType)
+        assertArrayEquals("hello".toByteArray(), result.bytes)
+    }
+
+    @Test
+    fun resolveRejectsNonImageDataUri() {
+        val result = resolveChatImageDisplaySource("data:text/plain,not-an-image", null)
+
+        assertTrue(result is ChatImageSource.Invalid)
+    }
+
+    @Test
+    fun resolveRejectsMalformedPercentEncodedImageDataUri() {
+        val result = resolveChatImageDisplaySource("data:image/svg+xml,%invalid", null)
+
+        assertTrue(result is ChatImageSource.Invalid)
+    }
 }
