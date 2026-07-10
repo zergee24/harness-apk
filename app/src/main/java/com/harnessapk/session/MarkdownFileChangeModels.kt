@@ -6,6 +6,7 @@ enum class MarkdownFileChangeStatus {
     PLANNING,
     READY,
     APPLIED,
+    PARTIALLY_APPLIED,
     DISMISSED,
     FAILED,
 }
@@ -33,10 +34,17 @@ data class MarkdownFileChangeItem(
     val retained: Boolean,
 )
 
+data class MarkdownFileChangeFailure(
+    val proposal: MarkdownUpdateProposal,
+    val errorMessage: String,
+)
+
 data class MarkdownFileChangeState(
     val draft: MarkdownFileChangeDraft,
     val items: List<MarkdownFileChangeItem> = emptyList(),
     val diffs: List<List<MarkdownDiffLine>> = emptyList(),
+    val appliedPaths: List<String> = emptyList(),
+    val applyFailures: List<MarkdownFileChangeFailure> = emptyList(),
 )
 
 class MarkdownFileChangeController(
@@ -71,6 +79,8 @@ class MarkdownFileChangeController(
             ),
             items = emptyList(),
             diffs = emptyList(),
+            appliedPaths = emptyList(),
+            applyFailures = emptyList(),
         )
 
     fun markReady(
@@ -112,6 +122,8 @@ class MarkdownFileChangeController(
             ),
             items = items,
             diffs = diffs,
+            appliedPaths = emptyList(),
+            applyFailures = emptyList(),
         )
     }
 
@@ -124,6 +136,8 @@ class MarkdownFileChangeController(
             ),
             items = emptyList(),
             diffs = emptyList(),
+            appliedPaths = emptyList(),
+            applyFailures = emptyList(),
         )
 
     fun toggleRetained(state: MarkdownFileChangeState, itemIndex: Int): MarkdownFileChangeState =
@@ -153,7 +167,44 @@ class MarkdownFileChangeController(
                 summary = "已应用 ${writtenPaths.size} 个 Markdown 文件变更",
                 updatedAt = timeProvider(),
             ),
+            appliedPaths = writtenPaths.distinct(),
+            applyFailures = emptyList(),
         )
+
+    fun markApplyResult(
+        state: MarkdownFileChangeState,
+        result: MarkdownBatchApplyResult,
+    ): MarkdownFileChangeState {
+        val appliedPaths = (
+            state.appliedPaths + result.succeeded.mapNotNull { it.writtenDeliverable?.path }
+        ).distinct()
+        val failures = result.failed.map { failed ->
+            MarkdownFileChangeFailure(
+                proposal = failed.proposal,
+                errorMessage = failed.errorMessage.orEmpty().ifBlank { "文件写入失败" },
+            )
+        }
+        val status = when {
+            failures.isEmpty() && appliedPaths.isNotEmpty() -> MarkdownFileChangeStatus.APPLIED
+            failures.isNotEmpty() && appliedPaths.isNotEmpty() -> MarkdownFileChangeStatus.PARTIALLY_APPLIED
+            else -> MarkdownFileChangeStatus.FAILED
+        }
+        val summary = when (status) {
+            MarkdownFileChangeStatus.APPLIED -> "已写入 ${appliedPaths.size} 个 Markdown 文件"
+            MarkdownFileChangeStatus.PARTIALLY_APPLIED ->
+                "已写入 ${appliedPaths.size} 个，失败 ${failures.size} 个 Markdown 文件"
+            MarkdownFileChangeStatus.FAILED -> "${failures.size} 个 Markdown 文件写入失败"
+            else -> state.draft.summary
+        }
+        return state.copy(
+            draft = state.draft.copy(status = status, summary = summary, updatedAt = timeProvider()),
+            appliedPaths = appliedPaths,
+            applyFailures = failures,
+        )
+    }
+
+    fun retryableProposals(state: MarkdownFileChangeState): List<MarkdownUpdateProposal> =
+        state.applyFailures.map { it.proposal }
 
     fun retainedProposals(state: MarkdownFileChangeState): List<MarkdownUpdateProposal> =
         state.items
