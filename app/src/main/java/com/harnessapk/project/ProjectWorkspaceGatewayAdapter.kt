@@ -90,6 +90,7 @@ class ProjectWorkspaceGatewayAdapter(
                 validation.fold(
                     onSuccess = { validatedProposal ->
                         try {
+                            currentCoroutineContext().ensureActive()
                             val deliverable = repository.writeMarkdownFile(
                                 projectId = projectId,
                                 relativePath = validatedProposal.path,

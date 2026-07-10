@@ -5,9 +5,12 @@ import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownUpdateOperation
 import com.harnessapk.session.MarkdownUpdateProposal
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -75,6 +78,39 @@ class ProjectWorkspaceGatewayAdapterTest {
 
         assertTrue(cancellationObserved)
         assertTrue(!project.rootDirectory.resolve("docs/cancelled.md").exists())
+    }
+
+    @Test
+    fun applyMarkdownUpdatesDoesNotStartLaterWriteAfterCancellation() = runBlocking {
+        val repository = FileProjectRepository(
+            rootDirectory = temporaryFolder.root,
+            timeProvider = TimeProvider { 1L },
+        )
+        val project = repository.createProject("移动端 Harness")
+        val gateway = ProjectWorkspaceGatewayAdapter(repository)
+        val firstPath = project.rootDirectory.resolve("docs/first.md")
+        val secondPath = project.rootDirectory.resolve("docs/second.md")
+
+        val job = launch(Dispatchers.IO) {
+            gateway.applyMarkdownUpdatesWithResults(
+                projectId = project.id,
+                updates = listOf(
+                    proposal("docs/first.md", "# First\n" + "content\n".repeat(2_000_000)),
+                    proposal("docs/second.md", "# Second"),
+                ),
+            )
+        }
+
+        withTimeout(10_000) {
+            while (!firstPath.exists()) {
+                Thread.yield()
+            }
+            job.cancel()
+        }
+        job.join()
+
+        assertTrue(firstPath.isFile)
+        assertTrue(!secondPath.exists())
     }
 
     private fun proposal(path: String, markdown: String) = MarkdownUpdateProposal(
