@@ -1433,6 +1433,7 @@ internal fun markdownFileChangeCardTitle(
     MarkdownFileChangeStatus.PLANNING -> "正在生成 Markdown 文件变更..."
     MarkdownFileChangeStatus.READY -> "已生成 $itemCount 个 Markdown 文件变更"
     MarkdownFileChangeStatus.APPLIED -> "已应用 $itemCount 个 Markdown 文件变更"
+    MarkdownFileChangeStatus.PARTIALLY_APPLIED -> "部分 Markdown 文件变更已应用"
     MarkdownFileChangeStatus.DISMISSED -> "已撤回 Markdown 文件变更"
     MarkdownFileChangeStatus.FAILED -> "Markdown 文件变更生成失败"
 }
@@ -1935,6 +1936,7 @@ private fun MarkdownFileChangeCard(
                         }
                     }
                     MarkdownFileChangeStatus.APPLIED,
+                    MarkdownFileChangeStatus.PARTIALLY_APPLIED,
                     MarkdownFileChangeStatus.DISMISSED,
                     -> Unit
                 }
