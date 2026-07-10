@@ -725,30 +725,31 @@ fun ChatScreen(
     ) {
         if (proposals.isEmpty()) return
         scope.launch {
-            runCatching {
-                val result = container.projectWorkspaceGateway.applyMarkdownUpdates(
+            val result = try {
+                container.projectWorkspaceGateway.applyMarkdownUpdates(
                     projectId = state.draft.projectId,
                     updates = proposals,
                 )
-                markdownWriteBackResultEvent(result)?.let { event ->
-                    container.chatRepository.insertSystemEvent(conversationId, event)
-                }
-                result
-            }.onSuccess { result ->
-                upsertMarkdownFileChangeState(markdownFileChangeController.markApplyResult(state, result))
-                if (result.succeeded.isNotEmpty() && selectedProjectId == state.draft.projectId) {
-                    deliverables = container.projectWorkspaceGateway.listDeliverables(state.draft.projectId)
-                }
-                pendingMarkdownReview = null
-                pendingMarkdownReviewDraftId = null
-                retainedReviewIndexes = emptySet()
-                sessionStatus = markdownWriteBackResultStatus(result)
-                errorText = markdownWriteBackResultError(result)
-            }.onFailure { error ->
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
                 val feedback = markdownWriteBackFailureFeedback(error)
                 errorText = feedback.errorText
                 sessionStatus = feedback.statusText
+                return@launch
             }
+            persistMarkdownWriteBackResultEvent(result) { event ->
+                container.chatRepository.insertSystemEvent(conversationId, event)
+            }
+            upsertMarkdownFileChangeState(markdownFileChangeController.markApplyResult(state, result))
+            if (result.succeeded.isNotEmpty() && selectedProjectId == state.draft.projectId) {
+                deliverables = container.projectWorkspaceGateway.listDeliverables(state.draft.projectId)
+            }
+            pendingMarkdownReview = null
+            pendingMarkdownReviewDraftId = null
+            retainedReviewIndexes = emptySet()
+            sessionStatus = markdownWriteBackResultStatus(result)
+            errorText = markdownWriteBackResultError(result)
         }
     }
 
@@ -846,34 +847,35 @@ fun ChatScreen(
             return
         }
         scope.launch {
-            runCatching {
-                val result = container.projectWorkspaceGateway.applyMarkdownUpdates(projectId, retained)
-                markdownWriteBackResultEvent(result)?.let { event ->
-                    container.chatRepository.insertSystemEvent(conversationId, event)
-                }
-                result
-            }.onSuccess { result ->
-                if (result.succeeded.isNotEmpty()) {
-                    deliverables = container.projectWorkspaceGateway.listDeliverables(projectId)
-                }
-                val failedPaths = result.failed.map { it.proposal.path }.toSet()
-                if (failedPaths.isEmpty()) {
-                    pendingMarkdownReview = null
-                    pendingMarkdownReviewDraftId = null
-                    retainedReviewIndexes = emptySet()
-                } else {
-                    pendingMarkdownReview = review
-                    retainedReviewIndexes = review.proposals.mapIndexedNotNull { index, proposal ->
-                        index.takeIf { proposal.path in failedPaths }
-                    }.toSet()
-                }
-                sessionStatus = markdownWriteBackResultStatus(result)
-                errorText = markdownWriteBackResultError(result)
-            }.onFailure { error ->
+            val result = try {
+                container.projectWorkspaceGateway.applyMarkdownUpdates(projectId, retained)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
                 val feedback = markdownWriteBackFailureFeedback(error)
                 errorText = feedback.errorText
                 sessionStatus = feedback.statusText
+                return@launch
             }
+            persistMarkdownWriteBackResultEvent(result) { event ->
+                container.chatRepository.insertSystemEvent(conversationId, event)
+            }
+            if (result.succeeded.isNotEmpty()) {
+                deliverables = container.projectWorkspaceGateway.listDeliverables(projectId)
+            }
+            val failedPaths = result.failed.map { it.proposal.path }.toSet()
+            if (failedPaths.isEmpty()) {
+                pendingMarkdownReview = null
+                pendingMarkdownReviewDraftId = null
+                retainedReviewIndexes = emptySet()
+            } else {
+                pendingMarkdownReview = review
+                retainedReviewIndexes = review.proposals.mapIndexedNotNull { index, proposal ->
+                    index.takeIf { proposal.path in failedPaths }
+                }.toSet()
+            }
+            sessionStatus = markdownWriteBackResultStatus(result)
+            errorText = markdownWriteBackResultError(result)
         }
     }
 
@@ -1780,6 +1782,20 @@ internal data class MarkdownWriteBackFeedback(
 
 internal fun markdownWriteBackFailureFeedback(error: Throwable): MarkdownWriteBackFeedback =
     MarkdownWriteBackFeedback(errorText = error.toUserMessage(), statusText = null)
+
+internal suspend fun persistMarkdownWriteBackResultEvent(
+    result: MarkdownBatchApplyResult,
+    insertEvent: suspend (String) -> Unit,
+) {
+    val event = markdownWriteBackResultEvent(result) ?: return
+    try {
+        insertEvent(event)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Throwable) {
+        // The file write result remains authoritative when optional event persistence fails.
+    }
+}
 
 internal fun markdownWriteBackResultEvent(result: MarkdownBatchApplyResult): String? {
     val succeeded = result.succeeded

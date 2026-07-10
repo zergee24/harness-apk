@@ -19,10 +19,13 @@ import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.ui.model.selectableModelsForProvider
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.websearch.WebSearchSettings
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class ChatUiStateTest {
@@ -583,6 +586,43 @@ class ChatUiStateTest {
 
         assertEquals("LLM 未返回 Markdown 更新 JSON", feedback.errorText)
         assertNull(feedback.statusText)
+    }
+
+    @Test
+    fun markdownWriteBackEventFailureDoesNotFailTheGatewayResult() = runBlocking {
+        persistMarkdownWriteBackResultEvent(
+            result = MarkdownBatchApplyResult(
+                listOf(
+                    MarkdownFileApplyResult(
+                        proposal = proposal("docs/ok.md"),
+                        status = MarkdownFileApplyStatus.SUCCEEDED,
+                        writtenDeliverable = CreatedDeliverable("docs/ok.md", "OK", "docs/ok.md"),
+                    ),
+                ),
+            ),
+            insertEvent = { error("event storage unavailable") },
+        )
+    }
+
+    @Test
+    fun markdownWriteBackEventCancellationIsNotSwallowed() = runBlocking {
+        try {
+            persistMarkdownWriteBackResultEvent(
+                result = MarkdownBatchApplyResult(
+                    listOf(
+                        MarkdownFileApplyResult(
+                            proposal = proposal("docs/ok.md"),
+                            status = MarkdownFileApplyStatus.SUCCEEDED,
+                            writtenDeliverable = CreatedDeliverable("docs/ok.md", "OK", "docs/ok.md"),
+                        ),
+                    ),
+                ),
+                insertEvent = { throw CancellationException("cancelled") },
+            )
+            fail("expected cancellation to propagate")
+        } catch (error: CancellationException) {
+            assertEquals("cancelled", error.message)
+        }
     }
 
     @Test
