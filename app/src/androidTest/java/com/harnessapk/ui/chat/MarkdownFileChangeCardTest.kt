@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import com.harnessapk.session.MarkdownFileChangeDraft
 import com.harnessapk.session.MarkdownFileChangeFailure
 import com.harnessapk.session.MarkdownFileChangeItem
@@ -14,6 +15,7 @@ import com.harnessapk.session.MarkdownUpdateProposal
 import com.harnessapk.ui.theme.HarnessApkTheme
 import org.junit.Rule
 import org.junit.Test
+import org.junit.Assert.assertEquals
 
 class MarkdownFileChangeCardTest {
     @get:Rule
@@ -21,6 +23,9 @@ class MarkdownFileChangeCardTest {
 
     @Test
     fun appliedCardExposesFilesAndGitActions() {
+        var openedFilesCount = 0
+        var openedGitCount = 0
+
         composeRule.setContent {
             HarnessApkTheme {
                 MarkdownFileChangeCard(
@@ -33,19 +38,26 @@ class MarkdownFileChangeCardTest {
                     onRetry = {},
                     onRetryFailed = {},
                     onDismiss = {},
-                    onOpenFiles = {},
-                    onOpenGit = {},
+                    onOpenFiles = { openedFilesCount++ },
+                    onOpenGit = { openedGitCount++ },
                 )
             }
         }
 
         composeRule.onNodeWithText("requirements/prd.md").assertIsDisplayed()
-        composeRule.onNodeWithText("查看文件").assertIsDisplayed().assertHasClickAction()
-        composeRule.onNodeWithText("查看 Git 变更").assertIsDisplayed().assertHasClickAction()
+        composeRule.onNodeWithText("查看文件").assertIsDisplayed().assertHasClickAction().performClick()
+        composeRule.onNodeWithText("查看 Git 变更").assertIsDisplayed().assertHasClickAction().performClick()
+
+        assertEquals(1, openedFilesCount)
+        assertEquals(1, openedGitCount)
     }
 
     @Test
     fun partialCardShowsFailureAndRetriesOnlyFailedItems() {
+        var openedFilesCount = 0
+        var openedGitCount = 0
+        var retriedFailedCount = 0
+
         composeRule.setContent {
             HarnessApkTheme {
                 MarkdownFileChangeCard(
@@ -62,10 +74,10 @@ class MarkdownFileChangeCardTest {
                     onShowDiff = {},
                     onApply = {},
                     onRetry = {},
-                    onRetryFailed = {},
+                    onRetryFailed = { retriedFailedCount++ },
                     onDismiss = {},
-                    onOpenFiles = {},
-                    onOpenGit = {},
+                    onOpenFiles = { openedFilesCount++ },
+                    onOpenGit = { openedGitCount++ },
                 )
             }
         }
@@ -73,7 +85,14 @@ class MarkdownFileChangeCardTest {
         composeRule.onNodeWithText("部分文件已写入").assertIsDisplayed()
         composeRule.onNodeWithText("reports/review.md").assertIsDisplayed()
         composeRule.onNodeWithText("没有写入权限").assertIsDisplayed()
+        composeRule.onNodeWithText("查看文件").assertIsDisplayed().assertHasClickAction().performClick()
+        composeRule.onNodeWithText("查看 Git 变更").assertIsDisplayed().assertHasClickAction().performClick()
         composeRule.onNodeWithText("仅重试失败项").assertIsDisplayed().assertHasClickAction()
+            .performClick()
+
+        assertEquals(1, openedFilesCount)
+        assertEquals(1, openedGitCount)
+        assertEquals(1, retriedFailedCount)
     }
 }
 
