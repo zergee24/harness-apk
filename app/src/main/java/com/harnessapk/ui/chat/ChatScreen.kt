@@ -131,6 +131,8 @@ import com.harnessapk.session.markdownReviewSummary
 import com.harnessapk.session.canWriteBackMarkdown
 import com.harnessapk.storage.DefaultModelPreference
 import com.harnessapk.storage.ProviderCapabilityCatalogSnapshot
+import com.harnessapk.ui.components.InlineStatusMessage
+import com.harnessapk.ui.components.StatusTone
 import com.harnessapk.ui.markdown.MarkdownMessage
 import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.websearch.WebSearchContext
@@ -1228,6 +1230,20 @@ internal enum class ChatBubbleSide {
 internal fun messageBubbleSide(role: MessageRole): ChatBubbleSide =
     if (role == MessageRole.USER) ChatBubbleSide.END else ChatBubbleSide.START
 
+internal enum class ChatBubblePresentation {
+    UNFRAMED,
+    WARM_USER,
+    NEUTRAL_EVENT,
+}
+
+internal fun chatBubblePresentation(role: MessageRole): ChatBubblePresentation = when (role) {
+    MessageRole.ASSISTANT -> ChatBubblePresentation.UNFRAMED
+    MessageRole.USER -> ChatBubblePresentation.WARM_USER
+    MessageRole.SYSTEM,
+    MessageRole.ERROR,
+    -> ChatBubblePresentation.NEUTRAL_EVENT
+}
+
 internal fun chatContentMaxWidthDp(availableWidthDp: Int): Int =
     availableWidthDp.coerceAtMost(MAX_CHAT_CONTENT_WIDTH_DP).coerceAtLeast(0)
 
@@ -2114,7 +2130,19 @@ private fun MessageBubble(
     onSpeak: () -> Unit,
 ) {
     val isUser = message.role == MessageRole.USER
+    val presentation = chatBubblePresentation(message.role)
     val selectionCopyText = messageSelectionCopyText(message, parts)
+    val containerColor = when (presentation) {
+        ChatBubblePresentation.UNFRAMED -> MaterialTheme.colorScheme.surface.copy(alpha = 0f)
+        ChatBubblePresentation.WARM_USER -> MaterialTheme.colorScheme.primaryContainer
+        ChatBubblePresentation.NEUTRAL_EVENT -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    val contentColor = when (presentation) {
+        ChatBubblePresentation.WARM_USER -> MaterialTheme.colorScheme.onPrimaryContainer
+        ChatBubblePresentation.UNFRAMED,
+        ChatBubblePresentation.NEUTRAL_EVENT,
+        -> MaterialTheme.colorScheme.onSurface
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = when (messageBubbleSide(message.role)) {
@@ -2130,60 +2158,68 @@ private fun MessageBubble(
                 bottomStart = if (isUser) 18.dp else 6.dp,
                 bottomEnd = if (isUser) 6.dp else 18.dp,
             ),
-            color = if (isUser) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surface
-            },
-            tonalElevation = if (isUser) 0.dp else 1.dp,
-            shadowElevation = if (isUser) 0.dp else 1.dp,
+            color = containerColor,
+            contentColor = contentColor,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
         ) {
             Column(
-                modifier = Modifier.padding(12.dp),
+                modifier = Modifier.padding(
+                    horizontal = if (presentation == ChatBubblePresentation.UNFRAMED) 2.dp else 14.dp,
+                    vertical = if (presentation == ChatBubblePresentation.UNFRAMED) 6.dp else 12.dp,
+                ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
+                        modifier = Modifier.weight(1f),
                         text = if (isUser) "你" else message.model ?: "助手",
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (isUser) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     if (selectionCopyText.isNotBlank()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank()) {
                                 IconButton(
-                                    modifier = Modifier.size(32.dp),
+                                    modifier = Modifier.size(48.dp),
                                     onClick = onSpeak,
                                 ) {
                                     Icon(
                                         imageVector = if (isSpeaking) Icons.Filled.Stop else Icons.AutoMirrored.Outlined.VolumeUp,
                                         contentDescription = if (isSpeaking) "停止朗读" else "朗读回复",
-                                        modifier = Modifier.size(17.dp),
+                                        modifier = Modifier.size(20.dp),
                                     )
                                 }
                             }
                             IconButton(
-                                modifier = Modifier.size(32.dp),
+                                modifier = Modifier.size(48.dp),
                                 onClick = onSelectCopy,
                             ) {
                                 Icon(
                                     imageVector = Icons.Outlined.TextFields,
                                     contentDescription = "选择复制",
-                                    modifier = Modifier.size(17.dp),
+                                    modifier = Modifier.size(20.dp),
                                 )
                             }
                             if (message.role == MessageRole.ASSISTANT && (selectionCopyText.isNotBlank() || message.errorMessage != null)) {
                                 IconButton(
-                                    modifier = Modifier.size(32.dp),
+                                    modifier = Modifier.size(48.dp),
                                     onClick = onCopy,
                                 ) {
                                     Icon(
                                         imageVector = Icons.Outlined.ContentCopy,
                                         contentDescription = "复制",
-                                        modifier = Modifier.size(17.dp),
+                                        modifier = Modifier.size(20.dp),
                                     )
                                 }
                             }
@@ -2194,11 +2230,7 @@ private fun MessageBubble(
                     SelectionContainer {
                         MessagePartsColumn(
                             parts = parts,
-                            textColor = if (isUser) {
-                                MaterialTheme.colorScheme.onPrimaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.onSurface
-                            },
+                            textColor = contentColor,
                         )
                     }
                 }
@@ -2299,13 +2331,16 @@ private fun ChatInputBar(
     )
 
     Surface(
-        modifier = Modifier.imePadding(),
-        tonalElevation = 3.dp,
-        shadowElevation = 4.dp,
-        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier
+            .fillMaxWidth()
+            .imePadding(),
+        shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
+        tonalElevation = 2.dp,
+        shadowElevation = 3.dp,
+        color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
         Column(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             selectedImage?.let {
@@ -2320,6 +2355,7 @@ private fun ChatInputBar(
             ) {
                 if (showWebSearch) {
                     FilterChip(
+                        modifier = Modifier.heightIn(min = 48.dp),
                         selected = webSearchEnabled,
                         onClick = { onToggleWebSearch(!webSearchEnabled) },
                         leadingIcon = {
@@ -2334,6 +2370,7 @@ private fun ChatInputBar(
                 }
                 if (showVoiceInput) {
                     FilterChip(
+                        modifier = Modifier.heightIn(min = 48.dp),
                         selected = false,
                         onClick = onStartVoiceTranscription,
                         leadingIcon = {
@@ -2362,6 +2399,7 @@ private fun ChatInputBar(
                 )
                 if (showFileChangeSuggestion) {
                     FilterChip(
+                        modifier = Modifier.heightIn(min = 48.dp),
                         selected = false,
                         enabled = canSendFileChange,
                         onClick = onSendFileChange,
@@ -2391,6 +2429,7 @@ private fun ChatInputBar(
                 OutlinedTextField(
                     modifier = Modifier
                         .weight(1f)
+                        .heightIn(min = 56.dp)
                         .focusRequester(inputFocusRequester),
                     value = text,
                     onValueChange = onTextChange,
@@ -2399,10 +2438,14 @@ private fun ChatInputBar(
                     maxLines = 5,
                 )
                 when (trailingAction) {
-                    ChatInputTrailingAction.ATTACHMENT -> IconButton(onClick = onPickImage) {
+                    ChatInputTrailingAction.ATTACHMENT -> IconButton(
+                        modifier = Modifier.size(56.dp),
+                        onClick = onPickImage,
+                    ) {
                         Icon(Icons.Outlined.Add, contentDescription = "选择图片")
                     }
                     ChatInputTrailingAction.SEND -> FilledIconButton(
+                        modifier = Modifier.size(56.dp),
                         enabled = isBusy || canSend,
                         onClick = onSend,
                     ) {
@@ -2426,6 +2469,7 @@ private fun ModelStatusChip(
     onOpenModelPicker: () -> Unit,
 ) {
     FilterChip(
+        modifier = Modifier.heightIn(min = 48.dp),
         selected = false,
         enabled = providers.isNotEmpty(),
         onClick = onOpenModelPicker,
@@ -2450,6 +2494,7 @@ private fun ContextStatusChip(
     val canManualCompress = contextWindowCanManualCompress(contextStatus)
     Box {
         FilterChip(
+            modifier = Modifier.heightIn(min = 48.dp),
             selected = false,
             onClick = { onExpandedChange(true) },
             leadingIcon = {
@@ -2612,38 +2657,24 @@ private fun AssistantActivityIndicator(text: String) {
 
 @Composable
 private fun InlineError(text: String) {
-    Surface(
+    InlineStatusMessage(
+        text = text,
+        tone = StatusTone.ERROR,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.errorContainer,
-    ) {
-        Text(
-            modifier = Modifier.padding(12.dp),
-            text = text,
-            color = MaterialTheme.colorScheme.onErrorContainer,
-            style = MaterialTheme.typography.bodyMedium,
-        )
-    }
+    )
 }
 
 @Composable
 private fun InlineStatus(text: String) {
-    Surface(
+    InlineStatusMessage(
+        text = text,
+        tone = StatusTone.INFO,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.primaryContainer,
-    ) {
-        Text(
-            modifier = Modifier.padding(12.dp),
-            text = text,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
-            style = MaterialTheme.typography.bodyMedium,
-        )
-    }
+    )
 }
 
 @Composable

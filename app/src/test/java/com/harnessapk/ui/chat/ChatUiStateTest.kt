@@ -22,6 +22,14 @@ import org.junit.Test
 
 class ChatUiStateTest {
     @Test
+    fun assistantMessagesAreUnframedWhileUserMessagesStayWarm() {
+        assertEquals(ChatBubblePresentation.UNFRAMED, chatBubblePresentation(MessageRole.ASSISTANT))
+        assertEquals(ChatBubblePresentation.WARM_USER, chatBubblePresentation(MessageRole.USER))
+        assertEquals(ChatBubblePresentation.NEUTRAL_EVENT, chatBubblePresentation(MessageRole.SYSTEM))
+        assertEquals(ChatBubblePresentation.NEUTRAL_EVENT, chatBubblePresentation(MessageRole.ERROR))
+    }
+
+    @Test
     fun assistantActivityLabelShowsThinkingForPendingAssistant() {
         val messages = listOf(assistantMessage(status = MessageStatus.PENDING))
 
