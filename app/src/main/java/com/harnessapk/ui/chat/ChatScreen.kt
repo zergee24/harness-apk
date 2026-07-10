@@ -157,6 +157,8 @@ fun ChatScreen(
     autoFocusInput: Boolean = false,
     sessionConfigRequestKey: Int = 0,
     onSessionConfigRequestConsumed: () -> Unit = {},
+    onOpenProjectFiles: (projectId: String, selectedPath: String?) -> Unit = { _, _ -> },
+    onOpenProjectGit: (projectId: String) -> Unit = {},
     contentPadding: PaddingValues,
 ) {
     val messages by container.chatRepository.observeMessages(conversationId).collectAsState(initial = emptyList())
@@ -1060,9 +1062,17 @@ fun ChatScreen(
                                             )
                                         },
                                         onRetry = { retryMarkdownFileChange(state) },
+                                        onRetryFailed = { retryFailedMarkdownFileChanges(state) },
                                         onDismiss = {
                                             upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
                                         },
+                                        onOpenFiles = {
+                                            onOpenProjectFiles(
+                                                state.draft.projectId,
+                                                state.appliedPaths.firstOrNull(),
+                                            )
+                                        },
+                                        onOpenGit = { onOpenProjectGit(state.draft.projectId) },
                                     )
                                 }
                         }
@@ -1927,12 +1937,15 @@ private fun ModelPickerDialog(
 }
 
 @Composable
-private fun MarkdownFileChangeCard(
+internal fun MarkdownFileChangeCard(
     state: MarkdownFileChangeState,
     onShowDiff: () -> Unit,
     onApply: () -> Unit,
     onRetry: () -> Unit,
+    onRetryFailed: () -> Unit,
     onDismiss: () -> Unit,
+    onOpenFiles: () -> Unit,
+    onOpenGit: () -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),

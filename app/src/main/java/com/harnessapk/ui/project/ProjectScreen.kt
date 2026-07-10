@@ -96,10 +96,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-fun ProjectScreen(
+internal fun ProjectScreen(
     container: AppContainer,
     contentPadding: PaddingValues,
     onCurrentProjectNameChange: (String?) -> Unit,
+    workbenchTarget: ProjectWorkbenchTarget? = null,
+    onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
     onOpenSession: (String) -> Unit,
 ) {
@@ -108,6 +110,7 @@ fun ProjectScreen(
     val markdownPdfWriter = remember { AndroidMarkdownPdfWriter() }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
+    var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedDeliverableId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -147,19 +150,30 @@ fun ProjectScreen(
         }
     }
 
-    fun refreshDeliverables() {
-        val projectId = selectedProjectId ?: return
+    fun refreshDeliverables(
+        projectId: String? = selectedProjectId,
+        preferredPath: String? = null,
+        query: String = searchQuery,
+        filter: ProjectArtifactFilter = artifactFilter,
+    ) {
+        val resolvedProjectId = projectId ?: return
         scope.launch {
             deliverables = withContext(container.dispatchers.io) {
-                if (searchQuery.isBlank()) {
-                    container.projectRepository.listDeliverables(projectId)
+                if (query.isBlank()) {
+                    container.projectRepository.listDeliverables(resolvedProjectId)
                 } else {
-                    container.projectRepository.searchDeliverables(projectId, searchQuery)
+                    container.projectRepository.searchDeliverables(resolvedProjectId, query)
                 }
             }
-            val filteredDeliverables = filterProjectArtifacts(deliverables, artifactFilter)
-            if (selectedDeliverableId == null || filteredDeliverables.none { it.id == selectedDeliverableId }) {
-                selectedDeliverableId = filteredDeliverables.firstOrNull()?.id
+            val filtered = filterProjectArtifacts(deliverables, filter)
+            selectedDeliverableId = when {
+                preferredPath != null && filtered.any { it.id == preferredPath } -> preferredPath
+                preferredPath != null -> {
+                    statusText = "文件已写入，请刷新后查看"
+                    filtered.firstOrNull()?.id
+                }
+                selectedDeliverableId != null && filtered.any { it.id == selectedDeliverableId } -> selectedDeliverableId
+                else -> filtered.firstOrNull()?.id
             }
         }
     }
@@ -264,8 +278,7 @@ fun ProjectScreen(
         }
     }
 
-    fun refreshGitState() {
-        val project = selectedProject
+    fun refreshGitState(project: Project? = selectedProject) {
         if (project == null) {
             gitStatus = null
             gitBranches = emptyList()
@@ -450,8 +463,37 @@ fun ProjectScreen(
         projects = withContext(container.dispatchers.io) {
             container.projectRepository.listProjects()
         }
+        projectsLoaded = true
         selectedProjectId = selectedProjectId ?: projects.firstOrNull()?.id
         onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
+    }
+
+    LaunchedEffect(workbenchTarget?.requestKey, projectsLoaded) {
+        val target = workbenchTarget ?: return@LaunchedEffect
+        if (!projectsLoaded) return@LaunchedEffect
+        val project = projects.firstOrNull { it.id == target.projectId }
+        if (project == null) {
+            statusText = "项目不存在或已被删除"
+            onWorkbenchTargetConsumed(target.requestKey)
+            return@LaunchedEffect
+        }
+
+        selectedProjectId = project.id
+        selectedTab = projectWorkbenchTab(target.destination)
+        searchQuery = ""
+        artifactFilter = ProjectArtifactFilter.ALL
+        collapsedDirectoryPaths = emptySet()
+        if (target.destination == ProjectWorkbenchDestination.FILES) {
+            refreshDeliverables(
+                projectId = project.id,
+                preferredPath = target.selectedPath,
+                query = "",
+                filter = ProjectArtifactFilter.ALL,
+            )
+        } else {
+            refreshGitState(project)
+        }
+        onWorkbenchTargetConsumed(target.requestKey)
     }
 
     LaunchedEffect(selectedProjectId, searchQuery) {

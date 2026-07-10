@@ -84,6 +84,12 @@ class ProjectSessionLaunchUiStateTest {
     }
 
     @Test
+    fun workbenchTargetsMapToFolderAndGitTabs() {
+        assertEquals(ProjectWorkbenchTab.FOLDER, projectWorkbenchTab(ProjectWorkbenchDestination.FILES))
+        assertEquals(ProjectWorkbenchTab.GIT, projectWorkbenchTab(ProjectWorkbenchDestination.GIT))
+    }
+
+    @Test
     fun projectFolderDefaultsToAllArtifactTypes() {
         assertEquals(ProjectArtifactFilter.ALL, defaultProjectArtifactFilter())
         assertEquals(

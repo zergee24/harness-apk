@@ -1,6 +1,7 @@
 package com.harnessapk.ui
 
 import com.harnessapk.chat.Conversation
+import com.harnessapk.ui.project.ProjectWorkbenchDestination
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -21,6 +22,21 @@ class HarnessApkAppStateTest {
     @Test
     fun chatTopBarTitleFallsBackWhenConversationIsMissing() {
         assertEquals("对话", chatTopBarTitle(emptyList(), "missing"))
+    }
+
+    @Test
+    fun workbenchTargetCarriesProjectPathAndRequestKey() {
+        val target = projectWorkbenchTarget(
+            projectId = "project-1",
+            destination = ProjectWorkbenchDestination.FILES,
+            selectedPath = "requirements/prd.md",
+            requestKey = 7,
+        )
+
+        assertEquals("project-1", target.projectId)
+        assertEquals(ProjectWorkbenchDestination.FILES, target.destination)
+        assertEquals("requirements/prd.md", target.selectedPath)
+        assertEquals(7, target.requestKey)
     }
 
     @Test
