@@ -2,6 +2,7 @@ package com.harnessapk.ui.conversation
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -10,23 +11,23 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -45,6 +46,9 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.Conversation
 import com.harnessapk.common.AppContainer
 import com.harnessapk.session.WorkspaceProject
+import com.harnessapk.ui.components.ActionableEmptyState
+import com.harnessapk.ui.components.ComfortListRow
+import com.harnessapk.ui.theme.HarnessSpacing
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -55,6 +59,7 @@ fun ConversationListScreen(
     container: AppContainer,
     contentPadding: PaddingValues,
     onOpenChat: (String) -> Unit,
+    onCreateConversation: () -> Unit,
 ) {
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
@@ -126,11 +131,14 @@ fun ConversationListScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        contentPadding = PaddingValues(
+            horizontal = HarnessSpacing.pageHorizontal,
+            vertical = 16.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(HarnessSpacing.item),
     ) {
         if (conversations.isEmpty()) {
-            item { EmptyConversationState() }
+            item { EmptyConversationState(onCreateConversation) }
         } else {
             if (groupedState.canGroupByProject) {
                 item {
@@ -303,11 +311,21 @@ private fun ProjectConversationGroupHeader(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = "${if (group.isCollapsed) ">" else "v"} ${group.projectName}",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = if (group.isCollapsed) {
+                        Icons.AutoMirrored.Outlined.KeyboardArrowRight
+                    } else {
+                        Icons.Outlined.KeyboardArrowDown
+                    },
+                    contentDescription = if (group.isCollapsed) "展开项目会话" else "折叠项目会话",
+                )
+                Text(
+                    text = group.projectName,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
             Text(
                 text = "${group.conversations.size} 个会话",
                 style = MaterialTheme.typography.labelMedium,
@@ -332,11 +350,21 @@ private fun ProjectSessionsToggleRow(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = if (collapsed) "> 项目会话已折叠" else "v 项目会话",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = if (collapsed) {
+                        Icons.AutoMirrored.Outlined.KeyboardArrowRight
+                    } else {
+                        Icons.Outlined.KeyboardArrowDown
+                    },
+                    contentDescription = if (collapsed) "展开全部项目会话" else "折叠全部项目会话",
+                )
+                Text(
+                    text = if (collapsed) "项目会话已折叠" else "项目会话",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
             Text(
                 text = "$count 个会话",
                 style = MaterialTheme.typography.labelMedium,
@@ -355,92 +383,60 @@ private fun ConversationRow(
     onDelete: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onOpen,
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(18.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    text = conversation.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Medium,
-                )
-                Text(
-                    text = "更新于 ${conversation.updatedAt.toDisplayTime()}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (projectName != null) {
-                    Text(
-                        text = projectName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+    Column(modifier = Modifier.fillMaxWidth()) {
+        ComfortListRow(
+            title = conversation.title,
+            supportingText = "更新于 ${conversation.updatedAt.toDisplayTime()}",
+            metadata = projectName,
+            onClick = onOpen,
+            trailingContent = {
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("改名") },
+                            leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onEdit()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Outlined.Delete,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            },
+                        )
+                    }
                 }
-            }
-            IconButton(onClick = { menuExpanded = true }) {
-                Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
-            }
-            DropdownMenu(
-                expanded = menuExpanded,
-                onDismissRequest = { menuExpanded = false },
-            ) {
-                DropdownMenuItem(
-                    text = { Text("改名") },
-                    leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
-                    onClick = {
-                        menuExpanded = false
-                        onEdit()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("删除") },
-                    leadingIcon = { Icon(Icons.Outlined.Delete, contentDescription = null) },
-                    onClick = {
-                        menuExpanded = false
-                        onDelete()
-                    },
-                )
-            }
-        }
+            },
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
     }
 }
 
 @Composable
-private fun EmptyConversationState() {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-    ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(
-                text = "还没有会话",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = "新建对话后，历史会保存在本机。长会话会自动生成本地记忆摘要。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
+private fun EmptyConversationState(onCreateConversation: () -> Unit) {
+    ActionableEmptyState(
+        title = "还没有会话",
+        message = "新建会话后，内容会保存在本机，并在长会话中自动整理记忆摘要。",
+        actionLabel = "新建会话",
+        onAction = onCreateConversation,
+        icon = Icons.AutoMirrored.Outlined.Chat,
+    )
 }
 
 @Composable

@@ -30,6 +30,17 @@ class ThemeTest {
     }
 
     @Test
+    fun supportingContainersStayInsideTheWarmNeutralPalette() {
+        val light = warmLightColorScheme()
+        val dark = warmDarkColorScheme()
+
+        assertEquals(Color(0xFFF7DDD8), light.secondaryContainer)
+        assertEquals(Color(0xFFDCE5DF), light.tertiaryContainer)
+        assertEquals(Color(0xFF59413D), dark.secondaryContainer)
+        assertEquals(Color(0xFF3C4841), dark.tertiaryContainer)
+    }
+
+    @Test
     fun typeAndSpacingKeepReadableComfortableDefaults() {
         assertEquals(17.sp, HarnessTypography.bodyLarge.fontSize)
         assertEquals(14.sp, HarnessTypography.bodySmall.fontSize)

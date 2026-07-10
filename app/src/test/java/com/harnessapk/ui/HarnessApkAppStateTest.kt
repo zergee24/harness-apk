@@ -24,25 +24,25 @@ class HarnessApkAppStateTest {
     }
 
     @Test
-    fun homeModeSwitcherUsesSegmentedPillInsteadOfDropdown() {
+    fun homeModeSwitcherUsesSharedSegmentedControlInsteadOfDropdown() {
         val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
         val modeSwitcherSource = source.substringAfter("private fun ModeSwitcher").substringBefore("@Composable\nprivate fun HomeTopBarActions")
 
-        assertTrue(modeSwitcherSource.contains("MainMode.entries.forEach"))
-        assertTrue(modeSwitcherSource.contains("Surface("))
+        assertTrue(modeSwitcherSource.contains("WarmSegmentedControl("))
+        assertTrue(modeSwitcherSource.contains("MainMode.entries.map { it.label }"))
         assertFalse(modeSwitcherSource.contains("DropdownMenu"))
         assertFalse(modeSwitcherSource.contains("KeyboardArrowDown"))
         assertFalse(modeSwitcherSource.contains("切换模式"))
     }
 
     @Test
-    fun homeModeSwitcherUsesFixedMatchingCornerRadius() {
-        val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
-        val modeSwitcherSource = source.substringAfter("private fun ModeSwitcher").substringBefore("@Composable\nprivate fun HomeTopBarActions")
+    fun sharedModeSwitcherUsesConsistentThemeShapes() {
+        val source = File("src/main/java/com/harnessapk/ui/components/WarmComponents.kt").readText()
+        val segmentedSource = source.substringAfter("fun WarmSegmentedControl").substringBefore("@Composable\nfun ActionableEmptyState")
 
-        assertTrue(source.contains("private val HomeModeSwitcherShape = RoundedCornerShape(16.dp)"))
-        assertFalse(modeSwitcherSource.contains("RoundedCornerShape(999.dp)"))
-        assertEquals(2, Regex("shape = HomeModeSwitcherShape").findAll(modeSwitcherSource).count())
+        assertTrue(segmentedSource.contains("shape = MaterialTheme.shapes.large"))
+        assertTrue(segmentedSource.contains("shape = MaterialTheme.shapes.medium"))
+        assertFalse(segmentedSource.contains("RoundedCornerShape(999.dp)"))
     }
 
     private fun conversation(id: String, title: String): Conversation = Conversation(

@@ -3,12 +3,8 @@ package com.harnessapk.ui
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -19,7 +15,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -44,6 +39,7 @@ import androidx.navigation.navArgument
 import com.harnessapk.HarnessApkApplication
 import com.harnessapk.chat.Conversation
 import com.harnessapk.ui.chat.ChatScreen
+import com.harnessapk.ui.components.WarmSegmentedControl
 import com.harnessapk.ui.conversation.ConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
 import com.harnessapk.ui.project.ProjectScreen
@@ -82,8 +78,6 @@ object Routes {
         append(chatRouteQuery(projectId = projectId, focusInput = focusInput, encode = Uri::encode))
     }
 }
-
-private val HomeModeSwitcherShape = RoundedCornerShape(16.dp)
 
 internal fun chatRouteQuery(
     projectId: String?,
@@ -145,6 +139,16 @@ fun HarnessApkApp() {
         else -> topLevelTitle(mainMode, currentProjectName)
     }
     val scope = rememberCoroutineScope()
+    val onCreateConversation: () -> Unit = {
+        scope.launch {
+            navController.navigate(
+                Routes.chat(
+                    conversationId = container.chatRepository.createConversation(),
+                    focusInput = true,
+                ),
+            )
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -170,16 +174,7 @@ fun HarnessApkApp() {
                         HomeTopBarActions(
                             showCreate = mainMode == MainMode.SESSION,
                             showUpdateBadge = showUpdateBadge,
-                            onCreate = {
-                                scope.launch {
-                                    navController.navigate(
-                                        Routes.chat(
-                                            conversationId = container.chatRepository.createConversation(),
-                                            focusInput = true,
-                                        ),
-                                    )
-                                }
-                            },
+                            onCreate = onCreateConversation,
                             onOpenSettings = { navController.navigate(Routes.Settings) },
                         )
                     } else if (route == Routes.ChatPattern) {
@@ -201,6 +196,7 @@ fun HarnessApkApp() {
                         container = container,
                         contentPadding = padding,
                         onOpenChat = { navController.navigate(Routes.chat(it)) },
+                        onCreateConversation = onCreateConversation,
                     )
                 } else {
                     ProjectScreen(
@@ -306,29 +302,11 @@ private fun ModeSwitcher(
     mode: MainMode,
     onModeChange: (MainMode) -> Unit,
 ) {
-    Surface(
-        shape = HomeModeSwitcherShape,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
-    ) {
-        Row(modifier = Modifier.padding(3.dp)) {
-            MainMode.entries.forEach { item ->
-                val selected = item == mode
-                Surface(
-                    modifier = Modifier.widthIn(min = 58.dp),
-                    shape = HomeModeSwitcherShape,
-                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0f),
-                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    onClick = { onModeChange(item) },
-                ) {
-                    Text(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                        text = item.label,
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                }
-            }
-        }
-    }
+    WarmSegmentedControl(
+        options = MainMode.entries.map { it.label },
+        selectedIndex = MainMode.entries.indexOf(mode),
+        onSelected = { index -> onModeChange(MainMode.entries[index]) },
+    )
 }
 
 @Composable
