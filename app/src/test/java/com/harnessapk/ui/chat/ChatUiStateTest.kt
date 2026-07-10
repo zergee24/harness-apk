@@ -724,6 +724,10 @@ class ChatUiStateTest {
         }
 
         assertEquals("已生成 8 个 Markdown 文件变更", markdownFileChangeCardTitle(MarkdownFileChangeStatus.READY, 8))
+        assertEquals(
+            "部分文件已写入",
+            markdownFileChangeCardTitle(MarkdownFileChangeStatus.PARTIALLY_APPLIED, 2),
+        )
         assertEquals(6, visibleMarkdownFileChangeItems(items).size)
         assertEquals(2, hiddenMarkdownFileChangeItemCount(items))
         assertEquals("A", markdownFileChangeOperationLabel(items.first()))

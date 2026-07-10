@@ -42,10 +42,13 @@ import androidx.compose.material.icons.automirrored.outlined.Assignment
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
@@ -114,6 +117,7 @@ import com.harnessapk.provider.modelConfigForProvider
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.session.MarkdownBatchApplyResult
 import com.harnessapk.session.MarkdownFileChangeController
+import com.harnessapk.session.MarkdownFileChangeFailure
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeState
 import com.harnessapk.session.MarkdownFileChangeStatus
@@ -136,6 +140,7 @@ import com.harnessapk.ui.components.InlineStatusMessage
 import com.harnessapk.ui.components.StatusTone
 import com.harnessapk.ui.markdown.MarkdownMessage
 import com.harnessapk.ui.model.resolveModelSelection
+import com.harnessapk.ui.theme.HarnessSpacing
 import com.harnessapk.websearch.WebSearchContext
 import com.harnessapk.websearch.WebSearchRequest
 import com.harnessapk.websearch.WebSearchSettings
@@ -1467,10 +1472,10 @@ internal fun markdownFileChangeCardTitle(
 ): String = when (status) {
     MarkdownFileChangeStatus.PLANNING -> "正在生成 Markdown 文件变更..."
     MarkdownFileChangeStatus.READY -> "已生成 $itemCount 个 Markdown 文件变更"
-    MarkdownFileChangeStatus.APPLIED -> "已应用 $itemCount 个 Markdown 文件变更"
-    MarkdownFileChangeStatus.PARTIALLY_APPLIED -> "部分 Markdown 文件变更已应用"
+    MarkdownFileChangeStatus.APPLIED -> "已写入项目"
+    MarkdownFileChangeStatus.PARTIALLY_APPLIED -> "部分文件已写入"
     MarkdownFileChangeStatus.DISMISSED -> "已撤回 Markdown 文件变更"
-    MarkdownFileChangeStatus.FAILED -> "Markdown 文件变更生成失败"
+    MarkdownFileChangeStatus.FAILED -> "Markdown 文件变更失败"
 }
 
 internal fun visibleMarkdownFileChangeItems(items: List<MarkdownFileChangeItem>): List<MarkdownFileChangeItem> =
@@ -1962,13 +1967,19 @@ internal fun MarkdownFileChangeCard(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                val cardTitle = markdownFileChangeCardTitle(state.draft.status, state.items.size)
                 Text(
-                    text = state.draft.summary.ifBlank {
-                        markdownFileChangeCardTitle(state.draft.status, state.items.size)
-                    },
+                    text = cardTitle,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                 )
+                if (state.draft.summary.isNotBlank() && state.draft.summary != cardTitle) {
+                    Text(
+                        text = state.draft.summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 when (state.draft.status) {
                     MarkdownFileChangeStatus.PLANNING -> {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -1995,18 +2006,117 @@ internal fun MarkdownFileChangeCard(
                             TextButton(onClick = onDismiss) { Text("撤回") }
                         }
                     }
+                    MarkdownFileChangeStatus.APPLIED -> {
+                        AppliedPathList(state.appliedPaths)
+                        Button(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenFiles,
+                        ) {
+                            Icon(Icons.Outlined.Folder, contentDescription = null)
+                            Text("查看文件", modifier = Modifier.padding(start = 8.dp))
+                        }
+                        OutlinedButton(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenGit,
+                        ) {
+                            Icon(Icons.Outlined.AccountTree, contentDescription = null)
+                            Text("查看 Git 变更", modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
+                    MarkdownFileChangeStatus.PARTIALLY_APPLIED -> {
+                        Text(
+                            "已写入",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        AppliedPathList(state.appliedPaths)
+                        Text(
+                            "写入失败",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        FailedPathList(state.applyFailures)
+                        Button(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenFiles,
+                        ) {
+                            Icon(Icons.Outlined.Folder, contentDescription = null)
+                            Text("查看文件", modifier = Modifier.padding(start = 8.dp))
+                        }
+                        OutlinedButton(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenGit,
+                        ) {
+                            Icon(Icons.Outlined.AccountTree, contentDescription = null)
+                            Text("查看 Git 变更", modifier = Modifier.padding(start = 8.dp))
+                        }
+                        OutlinedButton(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onRetryFailed,
+                        ) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null)
+                            Text("仅重试失败项", modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
                     MarkdownFileChangeStatus.FAILED -> {
+                        if (state.applyFailures.isNotEmpty()) {
+                            FailedPathList(state.applyFailures)
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = onRetry) { Text("重试") }
+                            TextButton(onClick = if (state.applyFailures.isEmpty()) onRetry else onRetryFailed) {
+                                Text(if (state.applyFailures.isEmpty()) "重试" else "重试失败项")
+                            }
                             TextButton(onClick = onDismiss) { Text("撤回") }
                         }
                     }
-                    MarkdownFileChangeStatus.APPLIED,
-                    MarkdownFileChangeStatus.PARTIALLY_APPLIED,
                     MarkdownFileChangeStatus.DISMISSED,
                     -> Unit
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AppliedPathList(paths: List<String>) {
+    val visible = paths.take(3)
+    visible.forEach { path ->
+        Text(
+            path,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.MiddleEllipsis,
+        )
+    }
+    if (paths.size > visible.size) {
+        Text(
+            "另有 ${paths.size - visible.size} 个文件",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun FailedPathList(failures: List<MarkdownFileChangeFailure>) {
+    failures.take(3).forEach { failure ->
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(failure.proposal.path, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                failure.errorMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
     }
 }
