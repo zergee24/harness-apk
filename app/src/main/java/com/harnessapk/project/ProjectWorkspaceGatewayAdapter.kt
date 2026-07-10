@@ -10,6 +10,9 @@ import com.harnessapk.session.MarkdownUpdateProposal
 import com.harnessapk.session.ProjectWorkspaceGateway
 import com.harnessapk.session.SessionSummary
 import com.harnessapk.session.WorkspaceProject
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 class ProjectWorkspaceGatewayAdapter(
     private val repository: FileProjectRepository,
@@ -72,16 +75,21 @@ class ProjectWorkspaceGatewayAdapter(
         projectId: String,
         updates: List<MarkdownUpdateProposal>,
     ): MarkdownBatchApplyResult {
+        currentCoroutineContext().ensureActive()
         val validations = updates.map { proposal ->
-            proposal to runCatching {
-                proposal.copy(path = repository.validateMarkdownFilePath(projectId, proposal.path))
+            proposal to try {
+                Result.success(proposal.copy(path = repository.validateMarkdownFilePath(projectId, proposal.path)))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Result.failure(error)
             }
         }
         return MarkdownBatchApplyResult(
             results = validations.map { (originalProposal, validation) ->
                 validation.fold(
                     onSuccess = { validatedProposal ->
-                        runCatching {
+                        try {
                             val deliverable = repository.writeMarkdownFile(
                                 projectId = projectId,
                                 relativePath = validatedProposal.path,
@@ -96,7 +104,9 @@ class ProjectWorkspaceGatewayAdapter(
                                     path = deliverable.relativePath,
                                 ),
                             )
-                        }.getOrElse { error ->
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
                             MarkdownFileApplyResult(
                                 proposal = originalProposal,
                                 status = MarkdownFileApplyStatus.FAILED,
