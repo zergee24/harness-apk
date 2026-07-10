@@ -215,6 +215,7 @@ fun ChatScreen(
     var pendingSelectionCopy by remember { mutableStateOf<ChatMessage?>(null) }
     var pendingMarkdownReview by remember { mutableStateOf<MarkdownUpdateReviewState?>(null) }
     var pendingMarkdownReviewDraftId by remember { mutableStateOf<String?>(null) }
+    var pendingLegacyMarkdownReviewToken by remember { mutableStateOf<LegacyMarkdownReviewToken?>(null) }
     var markdownFileChangeStates by remember(conversationId) { mutableStateOf<List<MarkdownFileChangeState>>(emptyList()) }
     var retainedReviewIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var isPlanningMarkdownUpdates by remember { mutableStateOf(false) }
@@ -250,6 +251,10 @@ fun ChatScreen(
     }
     val markdownDraftApplyController = remember(conversationId) { MarkdownDraftApplyController() }
     var applyingMarkdownDraftIds by remember(conversationId) { mutableStateOf<Set<String>>(emptySet()) }
+    val legacyMarkdownReviewApplyController = remember(conversationId) { LegacyMarkdownReviewApplyController() }
+    var applyingLegacyMarkdownReviewToken by remember(conversationId) {
+        mutableStateOf<LegacyMarkdownReviewToken?>(null)
+    }
 
     val selectedProvider = providers.firstOrNull { it.id == selectedProviderId }
     val selectedModelConfig = modelConfigForProvider(selectedProvider, selectedModel)
@@ -723,6 +728,7 @@ fun ChatScreen(
 
     fun showMarkdownFileChangeDiff(state: MarkdownFileChangeState) {
         pendingMarkdownReviewDraftId = state.draft.id
+        pendingLegacyMarkdownReviewToken = null
         pendingMarkdownReview = reviewStateForFileChange(state)
         retainedReviewIndexes = state.items.mapIndexedNotNull { index, item ->
             index.takeIf { item.retained }
@@ -849,6 +855,7 @@ fun ChatScreen(
                 review
             }.onSuccess { review ->
                 pendingMarkdownReviewDraftId = null
+                pendingLegacyMarkdownReviewToken = legacyMarkdownReviewApplyController.createReviewToken()
                 pendingMarkdownReview = review
                 retainedReviewIndexes = review.proposals.indices.toSet()
             }.onFailure {
@@ -865,6 +872,7 @@ fun ChatScreen(
         review: MarkdownUpdateReviewState,
         retainedIndexes: Set<Int>,
         draftId: String?,
+        legacyReviewToken: LegacyMarkdownReviewToken?,
     ) {
         if (draftId != null) {
             markdownFileChangeStates.firstOrNull { it.draft.id == draftId }?.let { state ->
@@ -872,69 +880,116 @@ fun ChatScreen(
             }
             return
         }
+        val reviewToken = legacyReviewToken ?: return
+        val attempt = legacyMarkdownReviewApplyController.begin(reviewToken) ?: return
+        applyingLegacyMarkdownReviewToken = reviewToken
         val projectId = selectedProjectId
         if (projectId.isNullOrBlank()) {
-            errorText = "请先选择项目"
+            if (
+                pendingLegacyMarkdownReviewToken == reviewToken &&
+                legacyMarkdownReviewApplyController.complete(attempt)
+            ) {
+                applyingLegacyMarkdownReviewToken = null
+                errorText = "请先选择项目"
+            }
             return
         }
         val retained = review.proposals.filterIndexed { index, _ -> index in retainedIndexes }
         if (retained.isEmpty()) {
-            pendingMarkdownReview = null
-            pendingMarkdownReviewDraftId = null
-            retainedReviewIndexes = emptySet()
-            sessionStatus = "已撤回全部 Markdown 更新"
-            errorText = null
+            if (
+                pendingLegacyMarkdownReviewToken == reviewToken &&
+                legacyMarkdownReviewApplyController.complete(attempt)
+            ) {
+                applyingLegacyMarkdownReviewToken = null
+                pendingMarkdownReview = null
+                pendingMarkdownReviewDraftId = null
+                pendingLegacyMarkdownReviewToken = null
+                retainedReviewIndexes = emptySet()
+                sessionStatus = "已撤回全部 Markdown 更新"
+                errorText = null
+            }
             return
         }
         scope.launch {
-            val result = try {
-                container.projectWorkspaceGateway.applyMarkdownUpdates(projectId, retained)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                val feedback = markdownWriteBackFailureFeedback(error)
-                errorText = feedback.errorText
-                sessionStatus = feedback.statusText
-                return@launch
-            }
-            finalizeMarkdownWriteBackBeforeRefresh(
-                finalize = {
-                    val failedIndexes = failedRetainedReviewIndexes(retainedIndexes, result)
-                    if (failedIndexes.isEmpty()) {
-                        pendingMarkdownReview = null
-                        pendingMarkdownReviewDraftId = null
-                        retainedReviewIndexes = emptySet()
+            try {
+                val result = try {
+                    container.projectWorkspaceGateway.applyMarkdownUpdates(projectId, retained)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (
+                        pendingLegacyMarkdownReviewToken == reviewToken &&
+                        legacyMarkdownReviewApplyController.complete(attempt)
+                    ) {
+                        applyingLegacyMarkdownReviewToken = null
+                        val feedback = markdownWriteBackFailureFeedback(error)
+                        errorText = feedback.errorText
+                        sessionStatus = feedback.statusText
+                    }
+                    return@launch
+                }
+                if (
+                    pendingLegacyMarkdownReviewToken != reviewToken ||
+                    !legacyMarkdownReviewApplyController.complete(attempt)
+                ) {
+                    return@launch
+                }
+                finalizeMarkdownWriteBackBeforeRefresh(
+                    finalize = {
+                        applyingLegacyMarkdownReviewToken = null
+                        val failedIndexes = failedRetainedReviewIndexes(retainedIndexes, result)
+                        if (failedIndexes.isEmpty()) {
+                            pendingMarkdownReview = null
+                            pendingMarkdownReviewDraftId = null
+                            pendingLegacyMarkdownReviewToken = null
+                            retainedReviewIndexes = emptySet()
+                        } else {
+                            pendingMarkdownReview = review
+                            retainedReviewIndexes = failedIndexes
+                        }
+                        sessionStatus = markdownWriteBackResultStatus(result)
+                        errorText = markdownWriteBackResultError(result)
+                    },
+                    afterFinalize = {
+                        persistMarkdownWriteBackResultEvent(result) { event ->
+                            container.chatRepository.insertSystemEvent(conversationId, event)
+                        }
+                    },
+                    refreshDeliverables = if (result.succeeded.isNotEmpty()) {
+                        {
+                            val refreshed = container.projectWorkspaceGateway.listDeliverables(projectId)
+                            if (selectedProjectId == projectId) deliverables = refreshed
+                        }
                     } else {
-                        pendingMarkdownReview = review
-                        retainedReviewIndexes = failedIndexes
-                    }
-                    sessionStatus = markdownWriteBackResultStatus(result)
-                    errorText = markdownWriteBackResultError(result)
-                },
-                afterFinalize = {
-                    persistMarkdownWriteBackResultEvent(result) { event ->
-                        container.chatRepository.insertSystemEvent(conversationId, event)
-                    }
-                },
-                refreshDeliverables = if (result.succeeded.isNotEmpty()) {
-                    {
-                        val refreshed = container.projectWorkspaceGateway.listDeliverables(projectId)
-                        if (selectedProjectId == projectId) deliverables = refreshed
-                    }
-                } else {
-                    null
-                },
-            )
+                        null
+                    },
+                )
+            } finally {
+                legacyMarkdownReviewApplyController.complete(attempt)
+                if (
+                    !legacyMarkdownReviewApplyController.isApplying(reviewToken) &&
+                    applyingLegacyMarkdownReviewToken == reviewToken
+                ) {
+                    applyingLegacyMarkdownReviewToken = null
+                }
+            }
         }
     }
 
     pendingMarkdownReview?.let { review ->
-        val isApplyingReview = pendingMarkdownReviewDraftId in applyingMarkdownDraftIds
+        val isApplyingReview = when (val draftId = pendingMarkdownReviewDraftId) {
+            null -> isLegacyMarkdownReviewApplying(
+                pendingToken = pendingLegacyMarkdownReviewToken,
+                activeToken = applyingLegacyMarkdownReviewToken,
+            )
+            else -> draftId in applyingMarkdownDraftIds
+        }
         MarkdownUpdateReviewDialog(
             review = review,
             retainedIndexes = retainedReviewIndexes,
             isApplying = isApplyingReview,
             onToggleRetained = { index ->
+                if (isApplyingReview) return@MarkdownUpdateReviewDialog
                 retainedReviewIndexes = if (index in retainedReviewIndexes) {
                     retainedReviewIndexes - index
                 } else {
@@ -948,11 +1003,20 @@ fun ChatScreen(
                     }
                 }
             },
-            onConfirm = { applyRetainedMarkdownUpdates(review, retainedReviewIndexes, pendingMarkdownReviewDraftId) },
+            onConfirm = {
+                applyRetainedMarkdownUpdates(
+                    review = review,
+                    retainedIndexes = retainedReviewIndexes,
+                    draftId = pendingMarkdownReviewDraftId,
+                    legacyReviewToken = pendingLegacyMarkdownReviewToken,
+                )
+            },
             onDismiss = {
                 if (isApplyingReview) return@MarkdownUpdateReviewDialog
+                pendingLegacyMarkdownReviewToken?.let(legacyMarkdownReviewApplyController::invalidate)
                 pendingMarkdownReview = null
                 pendingMarkdownReviewDraftId = null
+                pendingLegacyMarkdownReviewToken = null
                 retainedReviewIndexes = emptySet()
             },
         )
@@ -1567,6 +1631,48 @@ internal class MarkdownDraftApplyController {
 
     fun isApplying(draftId: String): Boolean = draftId in activeAttempts
 }
+
+internal data class LegacyMarkdownReviewToken(
+    val generation: Int,
+)
+
+internal data class LegacyMarkdownReviewApplyAttempt(
+    val reviewToken: LegacyMarkdownReviewToken,
+    val generation: Int,
+)
+
+internal class LegacyMarkdownReviewApplyController {
+    private var nextGeneration = 0
+    private var activeAttempt: LegacyMarkdownReviewApplyAttempt? = null
+
+    fun createReviewToken(): LegacyMarkdownReviewToken =
+        LegacyMarkdownReviewToken(++nextGeneration)
+
+    fun begin(reviewToken: LegacyMarkdownReviewToken): LegacyMarkdownReviewApplyAttempt? {
+        if (activeAttempt != null) return null
+        return LegacyMarkdownReviewApplyAttempt(reviewToken, ++nextGeneration).also { attempt ->
+            activeAttempt = attempt
+        }
+    }
+
+    fun complete(attempt: LegacyMarkdownReviewApplyAttempt): Boolean {
+        if (activeAttempt != attempt) return false
+        activeAttempt = null
+        return true
+    }
+
+    fun invalidate(reviewToken: LegacyMarkdownReviewToken) {
+        if (activeAttempt?.reviewToken == reviewToken) activeAttempt = null
+    }
+
+    fun isApplying(reviewToken: LegacyMarkdownReviewToken): Boolean =
+        activeAttempt?.reviewToken == reviewToken
+}
+
+internal fun isLegacyMarkdownReviewApplying(
+    pendingToken: LegacyMarkdownReviewToken?,
+    activeToken: LegacyMarkdownReviewToken?,
+): Boolean = pendingToken != null && pendingToken == activeToken
 
 internal suspend fun finalizeMarkdownWriteBackBeforeRefresh(
     finalize: () -> Unit,

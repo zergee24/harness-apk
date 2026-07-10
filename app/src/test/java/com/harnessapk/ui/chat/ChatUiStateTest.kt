@@ -703,6 +703,36 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun legacyMarkdownReviewApplyControllerRejectsOverlapAndStaleCompletion() {
+        val controller = LegacyMarkdownReviewApplyController()
+        val reviewToken = controller.createReviewToken()
+        val first = controller.begin(reviewToken)!!
+
+        assertNull(controller.begin(reviewToken))
+        assertTrue(controller.isApplying(reviewToken))
+
+        controller.invalidate(reviewToken)
+        val replacement = controller.begin(reviewToken)!!
+
+        assertFalse(controller.complete(first))
+        assertTrue(controller.isApplying(reviewToken))
+        assertTrue(controller.complete(replacement))
+        assertFalse(controller.isApplying(reviewToken))
+    }
+
+    @Test
+    fun legacyReviewOnlyShowsApplyingForItsActiveToken() {
+        val controller = LegacyMarkdownReviewApplyController()
+        val reviewToken = controller.createReviewToken()
+
+        assertFalse(isLegacyMarkdownReviewApplying(pendingToken = null, activeToken = null))
+        assertFalse(isLegacyMarkdownReviewApplying(pendingToken = reviewToken, activeToken = null))
+
+        controller.begin(reviewToken)
+        assertTrue(isLegacyMarkdownReviewApplying(pendingToken = reviewToken, activeToken = reviewToken))
+    }
+
+    @Test
     fun failedLegacyReviewIndexesPreserveDuplicatePathResultPositions() {
         val duplicatePath = proposal("docs/shared.md")
         val result = MarkdownBatchApplyResult(
