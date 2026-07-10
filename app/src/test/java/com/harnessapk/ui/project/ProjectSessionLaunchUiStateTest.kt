@@ -1,6 +1,7 @@
 package com.harnessapk.ui.project
 
 import com.harnessapk.chat.Conversation
+import com.harnessapk.git.GitStatusSummary
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.DeliverableTemplate
 import com.harnessapk.project.ProjectDeliverable
@@ -17,6 +18,22 @@ import org.junit.Test
 import java.io.File
 
 class ProjectSessionLaunchUiStateTest {
+    @Test
+    fun workbenchOverviewUsesLoadedGitStateWithoutRequestingRefresh() {
+        val overview = projectWorkbenchOverview(2, 3, gitStatus("test", false, 1))
+
+        assertEquals("2 个会话", overview.conversationLabel)
+        assertEquals("3 个文件", overview.deliverableLabel)
+        assertEquals("test · 1 项变更", overview.gitLabel)
+    }
+
+    @Test
+    fun workbenchTabGuidanceExplainsEachExistingTab() {
+        assertEquals("在当前项目内开始或继续工作", projectWorkbenchTabGuidance(ProjectWorkbenchTab.CONVERSATIONS))
+        assertEquals("查看会话沉淀和已写入文件", projectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER))
+        assertEquals("查看当前分支和工作区变更", projectWorkbenchTabGuidance(ProjectWorkbenchTab.GIT))
+    }
+
     @Test
     fun projectHeaderKeepsFrequentActionsDirectAndMovesLowFrequencyActionsToOverflow() {
         val layout = projectHeaderActionLayout(hasProject = true)
@@ -394,6 +411,26 @@ class ProjectSessionLaunchUiStateTest {
         destination = destination,
         selectedPath = selectedPath,
         requestKey = requestKey,
+    )
+
+    private fun gitStatus(
+        currentBranch: String,
+        isClean: Boolean,
+        changeCount: Int,
+    ) = GitStatusSummary(
+        currentBranch = currentBranch,
+        isClean = isClean,
+        stagedCount = 0,
+        unstagedCount = changeCount,
+        untrackedCount = 0,
+        aheadCount = 0,
+        behindCount = 0,
+        files = List(changeCount) { index ->
+            com.harnessapk.git.GitFileChange(
+                path = "change-$index",
+                type = com.harnessapk.git.GitChangeType.MODIFIED,
+            )
+        },
     )
 
     private class DelayedDeliverableRepository {
