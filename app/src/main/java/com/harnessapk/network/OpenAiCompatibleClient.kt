@@ -193,9 +193,8 @@ class OpenAiCompatibleClient(
         delta?.getString("reasoning")?.takeIf { it.isNotBlank() }?.let {
             events += StreamEvent.ReasoningDelta(it)
         }
-        delta?.getString("content")?.takeIf { it.isNotBlank() }?.let {
-            events += StreamEvent.TextDelta(it)
-        }
+        delta?.get("content")?.let { content -> events += content.toStreamEvents() }
+        delta?.imageStreamEvent()?.let { events += it }
         root["usage"]?.jsonObject?.let { usage ->
             events += StreamEvent.Usage(
                 inputTokens = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
@@ -222,7 +221,54 @@ class OpenAiCompatibleClient(
     }
 
     private fun JsonObject.getString(key: String): String? =
-        this[key]?.jsonPrimitive?.contentOrNull
+        (this[key] as? JsonPrimitive)?.contentOrNull
+
+    private fun JsonElement.toStreamEvents(): List<StreamEvent> = when (this) {
+        is JsonPrimitive -> contentOrNull?.takeIf { it.isNotBlank() }?.let(::listOf).orEmpty()
+            .map(StreamEvent::TextDelta)
+        is JsonArray -> flatMap { it.toContentPartEvents() }
+        else -> emptyList()
+    }
+
+    private fun JsonElement.toContentPartEvents(): List<StreamEvent> {
+        val part = this as? JsonObject ?: return emptyList()
+        return when (part.getString("type")?.lowercase()) {
+            "text", "input_text", "output_text" -> part.getString("text")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { listOf(StreamEvent.TextDelta(it)) }
+                .orEmpty()
+            "image_url", "image", "output_image" -> part.imageStreamEvent()
+                ?.let(::listOf)
+                .orEmpty()
+            else -> emptyList()
+        }
+    }
+
+    private fun JsonObject.imageStreamEvent(): StreamEvent.ImageDelta? {
+        val imageUrl = this["image_url"]
+        val image = this["image"]
+        val source = imageUrl.imageUrlValue()
+            ?: image.imageUrlValue()
+            ?: getString("url")?.takeIf { getString("type")?.lowercase() in IMAGE_PART_TYPES }
+            ?: return null
+        return StreamEvent.ImageDelta(
+            source = source,
+            mimeType = source.dataImageMimeType(),
+            altText = getString("alt_text") ?: getString("alt"),
+        )
+    }
+
+    private fun JsonElement?.imageUrlValue(): String? = when (this) {
+        is JsonPrimitive -> contentOrNull
+        is JsonObject -> getString("url") ?: getString("source")
+        else -> null
+    }?.takeIf { it.isNotBlank() }
+
+    private fun String.dataImageMimeType(): String? =
+        takeIf { startsWith("data:image/", ignoreCase = true) }
+            ?.substringAfter("data:")
+            ?.substringBefore(';')
+            ?.lowercase()
 
     private fun buildErrorMessage(
         statusCode: Int,
@@ -267,10 +313,12 @@ class OpenAiCompatibleClient(
     }
 
     companion object {
-        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val MAX_ERROR_DETAIL_LENGTH = 240
     }
 }
+
+private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+private val IMAGE_PART_TYPES = setOf("image_url", "image", "output_image")
 
 private fun Map<String, String>.normalizedCustomHeaders(): Map<String, String> {
     val normalized = linkedMapOf<String, String>()

@@ -19,6 +19,44 @@ import org.junit.Test
 
 class OpenAiCompatibleClientTest {
     @Test
+    fun streamChatEventsParsesNativeImageContentPartsAndTreatsImageOnlyOutputAsVisible() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    data: {"choices":[{"delta":{"content":[{"type":"image_url","image_url":{"url":"https://cdn.example.com/reply.png","detail":"high"}},{"type":"image","url":"data:image/webp;base64,aGVsbG8=","alt_text":"内嵌图"}]}}]}
+                    data: {"choices":[{"delta":{"image_url":{"url":"https://cdn.example.com/direct.png"}}}]}
+                    data: [DONE]
+                    """.trimIndent(),
+                ),
+        )
+        server.start()
+
+        val client = OpenAiCompatibleClient(OKHTTP, Json { ignoreUnknownKeys = true })
+        val result = client.streamChatEvents(
+            ChatRequest(
+                baseUrl = server.url("/v1").toString(),
+                apiKey = "secret-key",
+                model = "test-model",
+                messages = listOf(OutgoingChatMessage(role = "user", text = "hello")),
+            ),
+        ).toList()
+
+        assertEquals(
+            listOf(
+                StreamEvent.ImageDelta("https://cdn.example.com/reply.png"),
+                StreamEvent.ImageDelta("data:image/webp;base64,aGVsbG8=", "image/webp", "内嵌图"),
+                StreamEvent.ImageDelta("https://cdn.example.com/direct.png"),
+                StreamEvent.Finished(null),
+            ),
+            result,
+        )
+        server.shutdown()
+    }
+
+    @Test
     fun streamChatEventsEmitsReasoningTextUsageAndFinishEvents() = runTest {
         val server = MockWebServer()
         server.enqueue(

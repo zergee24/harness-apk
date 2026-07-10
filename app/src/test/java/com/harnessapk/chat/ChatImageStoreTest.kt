@@ -73,6 +73,7 @@ class ChatImageStoreTest {
                 DownloadedChatImage(
                     statusCode = 200,
                     contentType = "image/jpeg",
+                    finalUrl = "https://example.com/reply.jpg",
                     readBody = { "remote-image".toByteArray() },
                 ),
             )
@@ -84,9 +85,71 @@ class ChatImageStoreTest {
 
         assertEquals("remote-image", first.readText())
         assertEquals("remote-image", second.readText())
-        assertEquals(2, fixture.persistedFiles.listFiles()!!.size)
-        assertTrue(fixture.persistedFiles.listFiles()!!.all { it.readText() == "remote-image" })
+        assertEquals(first, second)
+        assertEquals(1, File(fixture.persistedFiles, "model").listFiles()!!.size)
+        assertEquals("remote-image", File(fixture.persistedFiles, "model").listFiles()!!.single().readText())
         assertEquals(1, requestCount)
+    }
+
+    @Test
+    fun materializeRemoteImageRejectsHttpsToHttpRedirectBeforeReadingOrCachingBody() = runBlocking {
+        var bodyReadCount = 0
+        val fixture = remoteMaterializeFixture { _, consume ->
+            consume(
+                DownloadedChatImage(
+                    statusCode = 200,
+                    contentType = "image/jpeg",
+                    finalUrl = "http://cdn.example.com/reply.jpg",
+                    readBody = {
+                        bodyReadCount++
+                        throw AssertionError("HTTPS 降级响应不应读取 body")
+                    },
+                ),
+            )
+        }
+
+        assertSuspendNetworkFailure {
+            fixture.store.materialize(ChatImageSource.Remote("https://example.com/reply.jpg", null))
+        }
+
+        assertEquals(0, bodyReadCount)
+        assertTrue(!File(fixture.cacheDir, "chat-image-cache").exists())
+    }
+
+    @Test
+    fun materializeRemoteImageReusesOneHistoricalManagedUriForTheSameSource() = runBlocking {
+        var requestCount = 0
+        val fixture = stableMaterializeFixture { _, consume ->
+            requestCount++
+            consume(
+                DownloadedChatImage(
+                    statusCode = 200,
+                    contentType = "image/jpeg",
+                    finalUrl = "https://example.com/reply.jpg",
+                    readBody = { "remote-image".toByteArray() },
+                ),
+            )
+        }
+        val source = ChatImageSource.Remote("https://example.com/reply.jpg", null)
+
+        val first = materializedFile(fixture.store, source)
+        val second = materializedFile(fixture.store, source)
+
+        assertEquals(first, second)
+        assertEquals(1, File(fixture.filesDir, "chat-images/model").listFiles()!!.size)
+        assertEquals(1, requestCount)
+    }
+
+    @Test
+    fun materializeDataImageReusesOneHistoricalManagedUriForTheSameContent() = runBlocking {
+        val fixture = stableMaterializeFixture { _, _ -> throw AssertionError("data 图片不应下载") }
+        val source = ChatImageSource.Data("model-image".toByteArray(), "image/png")
+
+        val first = materializedFile(fixture.store, source)
+        val second = materializedFile(fixture.store, source)
+
+        assertEquals(first, second)
+        assertEquals(1, File(fixture.filesDir, "chat-images/model").listFiles()!!.size)
     }
 
     @Test
@@ -98,6 +161,7 @@ class ChatImageStoreTest {
                 DownloadedChatImage(
                     statusCode = 200,
                     contentType = if (requestCount == 1) "text/html; charset=utf-8" else "image/jpeg",
+                    finalUrl = "https://example.com/reply.jpg",
                     readBody = { if (requestCount == 1) "<html>not an image</html>".toByteArray() else "recovered-image".toByteArray() },
                 ),
             )
@@ -107,7 +171,7 @@ class ChatImageStoreTest {
         assertSuspendNetworkFailure { fixture.store.materialize(source) }
         val recovered = materializedFile(fixture.store, source)
 
-        assertEquals("recovered-image", fixture.persistedFiles.listFiles()!!.single().readText())
+        assertEquals("recovered-image", File(fixture.persistedFiles, "model").listFiles()!!.single().readText())
         assertEquals("recovered-image", recovered.readText())
         assertEquals(2, requestCount)
     }
@@ -152,6 +216,7 @@ class ChatImageStoreTest {
                 DownloadedChatImage(
                     statusCode = 404,
                     contentType = "image/jpeg",
+                    finalUrl = "https://example.com/reply.jpg",
                     readBody = {
                         bodyReadCount++
                         throw AssertionError("非 2xx 响应不应读取 body")
@@ -176,6 +241,7 @@ class ChatImageStoreTest {
                     DownloadedChatImage(
                         statusCode = 200,
                         contentType = "text/html; charset=utf-8",
+                        finalUrl = "https://example.com/reply.jpg",
                         readBody = {
                             bodyReadCount++
                             throw AssertionError("非图片响应不应读取 body")
@@ -203,6 +269,7 @@ class ChatImageStoreTest {
                     DownloadedChatImage(
                         statusCode = 200,
                         contentType = "image/jpeg",
+                        finalUrl = "https://example.com/reply.jpg",
                         readBody = {
                             bodyReadCount++
                             "remote-image".toByteArray()
@@ -283,6 +350,24 @@ class ChatImageStoreTest {
         )
     }
 
+    private fun stableMaterializeFixture(
+        httpGet: (String, (DownloadedChatImage) -> Unit) -> Unit,
+    ): StableMaterializeFixture {
+        val filesDir = temporaryFolder.newFolder("stable-files")
+        return StableMaterializeFixture(
+            store = ChatImageStore(
+                context = ContextWrapper(null),
+                httpClient = null,
+                dispatchers = AppDispatchers(io = Dispatchers.Unconfined),
+                uriForFile = { file -> throw MaterializedImage(file) },
+                filesDir = filesDir,
+                cacheDir = temporaryFolder.newFolder("stable-cache"),
+                httpGet = httpGet,
+            ),
+            filesDir = filesDir,
+        )
+    }
+
     private fun assertNetworkFailure(block: () -> Unit) {
         try {
             block()
@@ -303,7 +388,7 @@ class ChatImageStoreTest {
 
     private suspend fun materializedFile(
         store: ChatImageStore,
-        source: ChatImageSource.Remote,
+        source: ChatImageSource,
     ): File = try {
         store.materialize(source)
         error("Expected controlled URI sink to receive the managed file")
@@ -315,6 +400,11 @@ class ChatImageStoreTest {
         val store: ChatImageStore,
         val persistedFiles: File,
         val cacheDir: File,
+    )
+
+    private data class StableMaterializeFixture(
+        val store: ChatImageStore,
+        val filesDir: File,
     )
 
     private class MaterializedImage(val file: File) : RuntimeException()

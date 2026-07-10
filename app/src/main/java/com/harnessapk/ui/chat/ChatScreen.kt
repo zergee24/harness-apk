@@ -1660,14 +1660,14 @@ internal enum class ChatInputTrailingAction {
 internal fun shouldShowCollapsedAttachmentEntry(
     text: String,
     hasSelectedImage: Boolean,
-): Boolean = text.isBlank() && !hasSelectedImage
+): Boolean = !hasSelectedImage
 
 internal fun chatInputTrailingAction(
     text: String,
     hasSelectedImage: Boolean,
     isBusy: Boolean,
 ): ChatInputTrailingAction =
-    if (shouldShowCollapsedAttachmentEntry(text, hasSelectedImage) && !isBusy) {
+    if (text.isBlank() && shouldShowCollapsedAttachmentEntry(text, hasSelectedImage) && !isBusy) {
         ChatInputTrailingAction.ATTACHMENT
     } else {
         ChatInputTrailingAction.SEND
@@ -3097,12 +3097,14 @@ private fun ChatInputBar(
                     minLines = 1,
                     maxLines = 5,
                 )
-                when (trailingAction) {
-                    ChatInputTrailingAction.ATTACHMENT -> ChatImageSourceEntryMenu(
+                if (shouldShowCollapsedAttachmentEntry(text, selectedImage != null) && !isBusy) {
+                    ChatImageSourceEntryMenu(
                         onTakePhoto = onTakePhoto,
                         onPickFromAlbum = onPickFromAlbum,
                     )
-                    ChatInputTrailingAction.SEND -> FilledIconButton(
+                }
+                if (trailingAction == ChatInputTrailingAction.SEND) {
+                    FilledIconButton(
                         modifier = Modifier.size(56.dp),
                         enabled = isBusy || canSend,
                         onClick = onSend,

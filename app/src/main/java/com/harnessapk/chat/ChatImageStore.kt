@@ -31,6 +31,7 @@ data class PersistedChatImage(
 data class DownloadedChatImage(
     val statusCode: Int,
     val contentType: String?,
+    val finalUrl: String? = null,
     val readBody: () -> ByteArray,
 )
 
@@ -60,6 +61,7 @@ class ChatImageStore(
                     DownloadedChatImage(
                         statusCode = response.code,
                         contentType = response.header("Content-Type"),
+                        finalUrl = response.request.url.toString(),
                         readBody = { response.body.bytes() },
                     ),
                 )
@@ -87,7 +89,7 @@ class ChatImageStore(
     suspend fun materialize(source: ChatImageSource): PersistedChatImage = withContext(dispatchers.io) {
         when (source) {
             is ChatImageSource.Local -> persist(source.uri, source.mimeType)
-            is ChatImageSource.Data -> persistBytes(source.bytes, normalizedImageMimeType(source.mimeType))
+            is ChatImageSource.Data -> persistHistoricalBytes(source.bytes, normalizedImageMimeType(source.mimeType))
             is ChatImageSource.Remote -> downloadImage(source)
             is ChatImageSource.Invalid -> throw AppError.Network(source.reason)
         }
@@ -139,7 +141,7 @@ class ChatImageStore(
 
     suspend fun deleteIfManaged(uri: Uri) = withContext(dispatchers.io) {
         if (uri.scheme != "content" || uri.authority != "${context.packageName}.fileprovider") return@withContext
-        if (uri.pathSegments.firstOrNull() != "chat_images") return@withContext
+        if (uri.pathSegments.firstOrNull() != "chat_images" || uri.pathSegments.size != 2) return@withContext
         val name = uri.lastPathSegment ?: return@withContext
         managedFiles.delete(name)
     }
@@ -152,6 +154,10 @@ class ChatImageStore(
             remoteImageCache.getOrPut(url.toString()) {
                 var downloadedImage: Pair<ByteArray, String>? = null
                 httpGet(url.toString()) { response ->
+                    response.finalUrl
+                        ?.toHttpUrlOrNull()
+                        ?.takeIf { it.scheme == "https" }
+                        ?: throw AppError.Network("图片下载失败：重定向地址不安全")
                     if (response.statusCode !in 200..299) {
                         throw AppError.Network("图片下载失败：HTTP ${response.statusCode}")
                     }
@@ -174,11 +180,15 @@ class ChatImageStore(
         } catch (_: Throwable) {
             throw AppError.Network("图片下载失败，请检查网络后重试")
         }
-        return persistInput(cachedImage.file.inputStream(), cachedImage.mimeType)
+        return persistHistoricalInput(
+            input = cachedImage.file.inputStream(),
+            mimeType = cachedImage.mimeType,
+            key = remoteChatImageCacheKey(source.httpsUrl),
+        )
     }
 
-    private fun persistBytes(bytes: ByteArray, mimeType: String): PersistedChatImage {
-        val file = managedFiles.write(bytes, mimeType)
+    private fun persistHistoricalBytes(bytes: ByteArray, mimeType: String): PersistedChatImage {
+        val file = historicalFiles.write(bytes, mimeType, sha256(bytes))
         return PersistedChatImage(uriForFile(file), mimeType)
     }
 
@@ -187,8 +197,17 @@ class ChatImageStore(
         return PersistedChatImage(uriForFile(file), mimeType)
     }
 
+    private fun persistHistoricalInput(input: InputStream, mimeType: String, key: String): PersistedChatImage {
+        val file = input.use { historicalFiles.copy(it, mimeType, key) }
+        return PersistedChatImage(uriForFile(file), mimeType)
+    }
+
     private val managedFiles: ManagedChatImageFiles by lazy {
         ManagedChatImageFiles(filesDir)
+    }
+
+    private val historicalFiles: HistoricalChatImageFiles by lazy {
+        HistoricalChatImageFiles(filesDir)
     }
 
     private val remoteImageCache: RemoteChatImageCache by lazy {
@@ -305,6 +324,44 @@ internal class ManagedChatImageFiles(
 
 }
 
+internal class HistoricalChatImageFiles(
+    filesDir: File,
+) {
+    private val directory = File(File(filesDir, CHAT_IMAGES_DIRECTORY), MODEL_CHAT_IMAGES_DIRECTORY)
+
+    fun copy(input: InputStream, mimeType: String, key: String): File {
+        val file = stableFile(mimeType, key)
+        if (file.isFile && file.length() > 0L) return file
+        val temp = File(directory(), ".${file.name}.${UUID.randomUUID()}.tmp")
+        try {
+            temp.outputStream().use { output -> input.copyTo(output) }
+            if (temp.length() == 0L) throw AppError.Network("无法保存图片")
+            if (file.isFile && file.length() > 0L) return file
+            if (file.exists() && !file.delete()) throw AppError.Network("无法保存图片")
+            if (!temp.renameTo(file)) {
+                if (file.isFile && file.length() > 0L) return file
+                throw AppError.Network("无法保存图片")
+            }
+            return file
+        } catch (error: AppError.Network) {
+            throw error
+        } catch (_: Throwable) {
+            throw AppError.Network("无法保存图片")
+        } finally {
+            temp.delete()
+        }
+    }
+
+    fun write(bytes: ByteArray, mimeType: String, key: String): File = copy(bytes.inputStream(), mimeType, key)
+
+    private fun stableFile(mimeType: String, key: String): File =
+        File(directory(), "$key.${imageExtensionFor(mimeType)}")
+
+    private fun directory(): File = directory.apply {
+        if (!exists() && !mkdirs()) throw AppError.Network("无法创建图片目录")
+    }
+}
+
 internal data class CachedRemoteChatImage(
     val file: File,
     val mimeType: String,
@@ -378,7 +435,13 @@ internal fun remoteChatImageCacheKey(url: String): String = MessageDigest
     .digest(url.toByteArray(Charsets.UTF_8))
     .joinToString(separator = "") { byte -> "%02x".format(byte) }
 
+private fun sha256(bytes: ByteArray): String = MessageDigest
+    .getInstance("SHA-256")
+    .digest(bytes)
+    .joinToString(separator = "") { byte -> "%02x".format(byte) }
+
 private const val CHAT_IMAGES_DIRECTORY = "chat-images"
+private const val MODEL_CHAT_IMAGES_DIRECTORY = "model"
 private const val REMOTE_IMAGE_CACHE_DIRECTORY = "chat-image-cache"
 
 private fun imageExtensionFor(mimeType: String): String = when (mimeType.lowercase()) {

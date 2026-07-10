@@ -445,11 +445,11 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun chatInputUsesAttachmentAsTrailingActionBeforeComposing() {
+    fun chatInputKeepsAttachmentEntryAvailableWhileComposing() {
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = false))
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "   ", hasSelectedImage = false))
 
-        assertFalse(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
+        assertTrue(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
         assertFalse(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = true))
 
         assertEquals(ChatInputTrailingAction.ATTACHMENT, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false))

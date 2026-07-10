@@ -119,6 +119,7 @@ class StreamingMessageAccumulatorTest {
         assertEquals("image/png", part.metadata["mimeType"])
         assertEquals("示例图", part.metadata["altText"])
         assertTrue(part.stable)
+        assertEquals(MessageStatus.STREAMING, accumulator.snapshot().status)
     }
 
     @Test
