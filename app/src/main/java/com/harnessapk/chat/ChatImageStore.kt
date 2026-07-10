@@ -1,7 +1,9 @@
 package com.harnessapk.chat
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -67,6 +69,13 @@ class ChatImageStore(
     }
 
     suspend fun saveToMediaStore(source: Uri, mimeType: String): String = withContext(dispatchers.io) {
+        if (
+            Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Build.VERSION_CODES.P &&
+            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            throw AppError.Network("保存图片需要存储权限，请允许后重试")
+        }
+
         val normalizedMimeType = normalizedImageMimeType(mimeType)
         val displayName = "chat-image-${UUID.randomUUID()}.${imageExtensionFor(normalizedMimeType)}"
         val values = ContentValues().apply {
