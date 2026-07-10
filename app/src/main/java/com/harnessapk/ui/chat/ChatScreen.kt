@@ -168,7 +168,18 @@ internal fun cameraAction(permissionGranted: Boolean): ChatImageSourceAction =
     if (permissionGranted) ChatImageSourceAction.LAUNCH_CAMERA
     else ChatImageSourceAction.REQUEST_CAMERA_PERMISSION
 
-internal fun cameraCancelledText(currentText: String): String = currentText
+internal data class CameraCancelledFeedback(
+    val text: String,
+    val errorText: String?,
+)
+
+internal fun cameraCancelledFeedback(
+    currentText: String,
+    @Suppress("UNUSED_PARAMETER") currentErrorText: String?,
+): CameraCancelledFeedback = CameraCancelledFeedback(
+    text = currentText,
+    errorText = null,
+)
 
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
@@ -480,19 +491,40 @@ fun ChatScreen(
         }
     }
 
+    fun replaceSelectedImage(uri: Uri, mimeType: String) {
+        val previousUri = selectedImage
+        selectedImage = uri
+        selectedMimeType = mimeType
+        previousUri?.let { replacedUri ->
+            scope.launch {
+                container.chatImageStore.deleteIfManaged(replacedUri)
+            }
+        }
+    }
+
+    fun removeSelectedImage() {
+        val uri = selectedImage ?: return
+        selectedImage = null
+        selectedMimeType = "image/png"
+        scope.launch {
+            container.chatImageStore.deleteIfManaged(uri)
+        }
+    }
+
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val uri = pendingCameraUri
         pendingCameraUri = null
         if (success && uri != null) {
-            selectedImage = uri
-            selectedMimeType = "image/jpeg"
+            replaceSelectedImage(uri, "image/jpeg")
         } else {
             uri?.let { cancelledUri ->
                 scope.launch {
                     container.chatImageStore.deleteIfManaged(cancelledUri)
                 }
             }
-            text = cameraCancelledText(text)
+            val feedback = cameraCancelledFeedback(text, errorText)
+            text = feedback.text
+            errorText = feedback.errorText
         }
     }
 
@@ -513,14 +545,15 @@ fun ChatScreen(
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            selectedImage = uri
-            selectedMimeType = context.contentResolver.getType(uri) ?: "image/png"
+            replaceSelectedImage(uri, context.contentResolver.getType(uri) ?: "image/png")
         }
     }
 
     fun sendNow() {
         val body = text.trim()
         if (isAssistantBusy || body.isEmpty() && selectedImage == null) return
+        val imageToSend = selectedImage
+        val imageMimeTypeToSend = selectedMimeType
         val nativeWebSearchMode = nativeWebSearchModeForRequest(
             query = body,
             enabledForSession = webSearchEnabled,
@@ -554,8 +587,8 @@ fun ChatScreen(
                 container.sendMessageUseCase.send(
                     conversationId = conversationId,
                     text = body.ifEmpty { "请看这张截图" },
-                    attachments = selectedImage?.let {
-                        listOf(PendingImageAttachment(it, selectedMimeType))
+                    attachments = imageToSend?.let {
+                        listOf(PendingImageAttachment(it, imageMimeTypeToSend))
                     } ?: emptyList(),
                     providerId = selectedProviderId,
                     modelOverride = selectedModel,
@@ -565,7 +598,13 @@ fun ChatScreen(
                     nativeWebSearchMode = nativeWebSearchMode,
                 )
                 text = ""
-                selectedImage = null
+                if (selectedImage == imageToSend) {
+                    selectedImage = null
+                    selectedMimeType = "image/png"
+                }
+                imageToSend?.let { sentUri ->
+                    container.chatImageStore.deleteIfManaged(sentUri)
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -1274,7 +1313,7 @@ fun ChatScreen(
                 onPickFromAlbum = {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
-                onRemoveImage = { selectedImage = null },
+                onRemoveImage = ::removeSelectedImage,
                 showWebSearch = shouldShowWebSearchButton(webSearchSettings),
                 webSearchEnabled = webSearchEnabled,
                 onToggleWebSearch = { enabled ->

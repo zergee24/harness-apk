@@ -37,8 +37,14 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun cancelledCameraKeepsTypedDraft() {
-        assertEquals("待发送文字", cameraCancelledText("待发送文字"))
+    fun cancelledCameraKeepsTypedDraftAndClearsPreviousError() {
+        val result = cameraCancelledFeedback(
+            currentText = "待发送文字",
+            currentErrorText = "未获得相机权限，可从相册选择图片",
+        )
+
+        assertEquals("待发送文字", result.text)
+        assertNull(result.errorText)
     }
 
     @Test
