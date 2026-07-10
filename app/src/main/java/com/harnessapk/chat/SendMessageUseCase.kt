@@ -27,6 +27,11 @@ import java.util.UUID
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
+sealed interface SendMessageResult {
+    data object Success : SendMessageResult
+    data object Failure : SendMessageResult
+}
+
 class SendMessageUseCase(
     private val context: Context,
     private val chatRepository: ChatRepository,
@@ -52,7 +57,7 @@ class SendMessageUseCase(
         sessionContext: SessionRequestContext? = null,
         webSearchContext: WebSearchContext? = null,
         nativeWebSearchMode: NativeWebSearchMode? = null,
-    ) = withContext(dispatchers.io) {
+    ): SendMessageResult = withContext(dispatchers.io) {
         val provider = providerId?.let { providerRepository.providerWithKey(it) }
             ?: providerRepository.defaultProviderForText()
         val selectedModel = modelOverride?.trim()?.takeIf { it.isNotBlank() }
@@ -72,14 +77,9 @@ class SendMessageUseCase(
                 requestModel,
             )
             chatRepository.markAssistantFailed(assistantId, AppError.VisionUnsupported().toUserMessage())
-            return@withContext
+            return@withContext SendMessageResult.Failure
         }
 
-        val persistedAttachments = attachments.map { attachment ->
-            chatImageStore.persist(attachment.uri, attachment.mimeType)
-                .let { PendingImageAttachment(it.uri, it.mimeType) }
-        }
-        val userMessageId = chatRepository.insertUserMessage(conversationId, text, persistedAttachments)
         var assistantId: String? = null
         var requestDiagnostics: ModelAwareRequestDiagnostics? = null
         var accumulator: StreamingMessageAccumulator? = null
@@ -90,6 +90,11 @@ class SendMessageUseCase(
         var receivedChars = 0
 
         try {
+            val persistedAttachments = attachments.map { attachment ->
+                chatImageStore.persist(attachment.uri, attachment.mimeType)
+                    .let { PendingImageAttachment(it.uri, it.mimeType) }
+            }
+            val userMessageId = chatRepository.insertUserMessage(conversationId, text, persistedAttachments)
             val imageDataUrls = persistedAttachments.map { it.toDataUrl() }
             val existingMemory = chatRepository.memoryForConversation(conversationId)
             val compressed = contextCompressor.prepare(
@@ -154,6 +159,7 @@ class SendMessageUseCase(
                 chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
             }
             chatRepository.markAssistantSucceeded(nextAssistantId)
+            SendMessageResult.Success
         } catch (cancelled: CancellationException) {
             assistantId?.let { id ->
                 val cancelledSnapshot = cancelStreamingSnapshot(
@@ -192,6 +198,7 @@ class SendMessageUseCase(
                     ),
                 ),
             )
+            SendMessageResult.Failure
         }
     }
 

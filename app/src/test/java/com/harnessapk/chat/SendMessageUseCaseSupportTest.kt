@@ -55,4 +55,11 @@ class SendMessageUseCaseSupportTest {
         assertEquals("已落库未到节流窗口", snapshot.legacyVisibleText())
         assertTrue(snapshot.parts.all { it.stable })
     }
+
+    @Test
+    fun sendMessageResultKeepsFailureDistinctFromSuccess() {
+        assertEquals(SendMessageResult.Success, SendMessageResult.Success)
+        assertEquals(SendMessageResult.Failure, SendMessageResult.Failure)
+        assertTrue(SendMessageResult.Success != SendMessageResult.Failure)
+    }
 }

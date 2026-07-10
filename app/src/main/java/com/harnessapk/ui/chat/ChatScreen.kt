@@ -79,6 +79,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -109,6 +110,7 @@ import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.PendingImageAttachment
 import com.harnessapk.chat.ReasoningEffort
+import com.harnessapk.chat.SendMessageResult
 import com.harnessapk.chat.UiMessagePartDraft
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.chat.defaultReasoningEffort
@@ -181,6 +183,17 @@ internal fun cameraCancelledFeedback(
     errorText = null,
 )
 
+internal data class PendingCameraUriState(
+    val savedUri: String? = null,
+) {
+    fun start(uri: String): PendingCameraUriState = copy(savedUri = uri)
+
+    fun clear(): PendingCameraUriState = copy(savedUri = null)
+}
+
+internal fun shouldClearChatComposerAfterSend(result: SendMessageResult): Boolean =
+    result == SendMessageResult.Success
+
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
 fun ChatScreen(
@@ -219,7 +232,7 @@ fun ChatScreen(
     var text by remember { mutableStateOf("") }
     var selectedImage by remember { mutableStateOf<Uri?>(null) }
     var selectedMimeType by remember { mutableStateOf("image/png") }
-    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
     var showModelPicker by remember { mutableStateOf(false) }
     var selectedProviderId by remember { mutableStateOf<String?>(null) }
@@ -484,8 +497,9 @@ fun ChatScreen(
     }
 
     fun discardPendingCameraImage() {
-        val uri = pendingCameraUri ?: return
-        pendingCameraUri = null
+        val pendingState = PendingCameraUriState(pendingCameraUriString)
+        val uri = pendingState.savedUri?.let(Uri::parse) ?: return
+        pendingCameraUriString = pendingState.clear().savedUri
         scope.launch {
             container.chatImageStore.deleteIfManaged(uri)
         }
@@ -512,8 +526,9 @@ fun ChatScreen(
     }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val uri = pendingCameraUri
-        pendingCameraUri = null
+        val pendingState = PendingCameraUriState(pendingCameraUriString)
+        val uri = pendingState.savedUri?.let(Uri::parse)
+        pendingCameraUriString = pendingState.clear().savedUri
         if (success && uri != null) {
             replaceSelectedImage(uri, "image/jpeg")
         } else {
@@ -531,7 +546,7 @@ fun ChatScreen(
     fun launchCamera() {
         discardPendingCameraImage()
         val uri = container.chatImageStore.createCameraUri()
-        pendingCameraUri = uri
+        pendingCameraUriString = PendingCameraUriState().start(uri.toString()).savedUri
         cameraLauncher.launch(uri)
     }
 
@@ -584,7 +599,7 @@ fun ChatScreen(
                         errorText = "联网搜索失败：${it.toUserMessage()}，已继续发送给模型"
                     },
                 )
-                container.sendMessageUseCase.send(
+                val result = container.sendMessageUseCase.send(
                     conversationId = conversationId,
                     text = body.ifEmpty { "请看这张截图" },
                     attachments = imageToSend?.let {
@@ -597,13 +612,15 @@ fun ChatScreen(
                     webSearchContext = webSearchContext,
                     nativeWebSearchMode = nativeWebSearchMode,
                 )
-                text = ""
-                if (selectedImage == imageToSend) {
-                    selectedImage = null
-                    selectedMimeType = "image/png"
-                }
-                imageToSend?.let { sentUri ->
-                    container.chatImageStore.deleteIfManaged(sentUri)
+                if (shouldClearChatComposerAfterSend(result)) {
+                    text = ""
+                    if (selectedImage == imageToSend) {
+                        selectedImage = null
+                        selectedMimeType = "image/png"
+                    }
+                    imageToSend?.let { sentUri ->
+                        container.chatImageStore.deleteIfManaged(sentUri)
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

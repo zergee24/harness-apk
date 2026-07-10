@@ -4,6 +4,7 @@ import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.ReasoningEffort
+import com.harnessapk.chat.SendMessageResult
 import com.harnessapk.chat.UiMessagePartDraft
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.provider.ProviderProfile
@@ -45,6 +46,21 @@ class ChatUiStateTest {
 
         assertEquals("待发送文字", result.text)
         assertNull(result.errorText)
+    }
+
+    @Test
+    fun failedSendKeepsDraftAndSelectedImageForRetry() {
+        assertFalse(shouldClearChatComposerAfterSend(SendMessageResult.Failure))
+        assertTrue(shouldClearChatComposerAfterSend(SendMessageResult.Success))
+    }
+
+    @Test
+    fun pendingCameraUriStateRestoresAcrossRecreationAndClearsAfterResult() {
+        val captured = PendingCameraUriState().start("content://com.harnessapk.fileprovider/chat-images/camera.jpg")
+        val restored = PendingCameraUriState(captured.savedUri)
+
+        assertEquals("content://com.harnessapk.fileprovider/chat-images/camera.jpg", restored.savedUri)
+        assertNull(restored.clear().savedUri)
     }
 
     @Test
