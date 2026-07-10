@@ -92,6 +92,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -165,6 +166,23 @@ internal class ProjectDeliverableRefreshController {
         refresh.generation == currentGeneration
 }
 
+internal data class ProjectGitRefresh(
+    val generation: Int,
+    val projectId: String,
+)
+
+internal class ProjectGitRefreshController {
+    private var currentGeneration = 0
+
+    fun begin(projectId: String?): ProjectGitRefresh? {
+        currentGeneration += 1
+        return projectId?.let { ProjectGitRefresh(currentGeneration, it) }
+    }
+
+    fun canPublish(refresh: ProjectGitRefresh, selectedProjectId: String?): Boolean =
+        refresh.generation == currentGeneration && refresh.projectId == selectedProjectId
+}
+
 internal fun selectedDeliverableIdForRefresh(
     preferredPath: String?,
     currentSelectedDeliverableId: String?,
@@ -178,6 +196,9 @@ internal fun selectedDeliverableIdForRefresh(
 
 internal fun shouldRefreshGitOnTabSelection(tab: ProjectWorkbenchTab): Boolean =
     tab == ProjectWorkbenchTab.GIT
+
+internal fun shouldRefreshGitForProjectSelection(tab: ProjectWorkbenchTab, projectId: String?): Boolean =
+    shouldRefreshGitOnTabSelection(tab) && projectId != null
 
 @Composable
 internal fun ProjectScreen(
@@ -197,6 +218,7 @@ internal fun ProjectScreen(
     var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
     val deliverableRefreshController = remember { ProjectDeliverableRefreshController() }
+    val gitRefreshController = remember { ProjectGitRefreshController() }
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedDeliverableId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(defaultProjectWorkbenchTab()) }
@@ -377,14 +399,14 @@ internal fun ProjectScreen(
     }
 
     fun refreshGitState(project: Project? = selectedProject) {
-        if (project == null) {
-            gitStatus = null
-            gitBranches = emptyList()
-            return
-        }
+        val refresh = gitRefreshController.begin(project?.id)
+        gitStatus = null
+        gitBranches = emptyList()
+        if (project == null || refresh == null) return
+
         scope.launch {
-            runCatching {
-                withContext(container.dispatchers.io) {
+            try {
+                val (status, branches) = withContext(container.dispatchers.io) {
                     if (!container.gitEngine.isRepository(project.rootDirectory)) {
                         null to emptyList<GitBranchSummary>()
                     } else {
@@ -392,13 +414,14 @@ internal fun ProjectScreen(
                             container.gitEngine.branches(project.rootDirectory)
                     }
                 }
-            }.onSuccess { (status, branches) ->
+                if (!gitRefreshController.canPublish(refresh, selectedProjectId)) return@launch
                 gitStatus = status
                 gitBranches = branches
-            }.onFailure {
-                gitStatus = null
-                gitBranches = emptyList()
-                statusText = it.toUserMessage()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (!gitRefreshController.canPublish(refresh, selectedProjectId)) return@launch
+                statusText = error.toUserMessage()
             }
         }
     }
@@ -581,14 +604,17 @@ internal fun ProjectScreen(
             return@LaunchedEffect
         }
 
+        val targetTab = projectWorkbenchTab(target.destination)
+        val refreshAlreadySelectedGit = shouldRefreshGitForProjectSelection(targetTab, project.id) &&
+            selectedProjectId == project.id && selectedTab == ProjectWorkbenchTab.GIT
         selectedProjectId = project.id
-        selectedTab = projectWorkbenchTab(target.destination)
+        selectedTab = targetTab
         searchQuery = ""
         artifactFilter = ProjectArtifactFilter.ALL
         collapsedDirectoryPaths = emptySet()
         if (target.destination == ProjectWorkbenchDestination.FILES) {
             publishDeliverableRefresh(checkNotNull(targetedFilesRefresh))
-        } else {
+        } else if (refreshAlreadySelectedGit) {
             refreshGitState(project)
         }
         onWorkbenchTargetConsumed(target.requestKey)
@@ -603,6 +629,14 @@ internal fun ProjectScreen(
             filter = artifactFilter,
         ) ?: return@LaunchedEffect
         publishDeliverableRefresh(ordinaryRefresh)
+    }
+
+    LaunchedEffect(selectedProject, selectedTab) {
+        if (shouldRefreshGitForProjectSelection(selectedTab, selectedProject?.id)) {
+            refreshGitState(selectedProject)
+        } else if (selectedTab == ProjectWorkbenchTab.GIT) {
+            refreshGitState(null)
+        }
     }
 
     LaunchedEffect(selectedProjectId, selectedDeliverableId, artifactFilter, deliverables) {
@@ -730,8 +764,9 @@ internal fun ProjectScreen(
                 ProjectWorkbenchTabs(
                     selectedTab = selectedTab,
                     onSelectTab = { tab ->
+                        val refreshAlreadySelectedGit = shouldRefreshGitOnTabSelection(tab) && tab == selectedTab
                         selectedTab = tab
-                        if (shouldRefreshGitOnTabSelection(tab)) refreshGitState()
+                        if (refreshAlreadySelectedGit) refreshGitState()
                     },
                 )
             }

@@ -651,6 +651,82 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun markdownWriteBackFinalizesBeforeBestEffortDeliverableRefresh() = runBlocking {
+        val events = mutableListOf<String>()
+
+        finalizeMarkdownWriteBackBeforeRefresh(
+            finalize = { events += "finalized" },
+            afterFinalize = { events += "event" },
+            refreshDeliverables = {
+                events += "refresh"
+                error("refresh unavailable")
+            },
+        )
+
+        assertEquals(listOf("finalized", "event", "refresh"), events)
+    }
+
+    @Test
+    fun markdownWriteBackDeliverableRefreshStillPropagatesCancellation() = runBlocking {
+        val events = mutableListOf<String>()
+
+        try {
+            finalizeMarkdownWriteBackBeforeRefresh(
+                finalize = { events += "finalized" },
+                refreshDeliverables = {
+                    events += "refresh"
+                    throw CancellationException("cancelled")
+                },
+            )
+            fail("expected cancellation to propagate")
+        } catch (error: CancellationException) {
+            assertEquals("cancelled", error.message)
+        }
+
+        assertEquals(listOf("finalized", "refresh"), events)
+    }
+
+    @Test
+    fun markdownDraftApplyControllerRejectsOverlapAndStaleCompletion() {
+        val controller = MarkdownDraftApplyController()
+        val first = controller.begin("draft")!!
+
+        assertNull(controller.begin("draft"))
+
+        controller.invalidate("draft")
+        val replacement = controller.begin("draft")!!
+
+        assertFalse(controller.complete(first))
+        assertTrue(controller.isApplying("draft"))
+        assertTrue(controller.complete(replacement))
+        assertFalse(controller.isApplying("draft"))
+    }
+
+    @Test
+    fun failedLegacyReviewIndexesPreserveDuplicatePathResultPositions() {
+        val duplicatePath = proposal("docs/shared.md")
+        val result = MarkdownBatchApplyResult(
+            results = listOf(
+                MarkdownFileApplyResult(
+                    proposal = duplicatePath,
+                    status = MarkdownFileApplyStatus.SUCCEEDED,
+                    writtenDeliverable = CreatedDeliverable("first", "First", duplicatePath.path),
+                ),
+                MarkdownFileApplyResult(
+                    proposal = duplicatePath.copy(markdown = "# Second"),
+                    status = MarkdownFileApplyStatus.FAILED,
+                    errorMessage = "第二项失败",
+                ),
+            ),
+        )
+
+        assertEquals(
+            setOf(4),
+            failedRetainedReviewIndexes(retainedIndexes = setOf(1, 4), result = result),
+        )
+    }
+
+    @Test
     fun fileChangeSuggestionOnlyRespondsToMarkdownWritingIntent() {
         assertTrue(shouldSuggestFileChangeMode("帮我写 PRD，并生成 md"))
         assertTrue(shouldSuggestFileChangeMode("生成md"))

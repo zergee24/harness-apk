@@ -228,6 +228,37 @@ class ProjectSessionLaunchUiStateTest {
     }
 
     @Test
+    fun gitRefreshPublishesOnlyCurrentProjectGenerationAcrossRapidTargets() {
+        val refreshController = ProjectGitRefreshController()
+
+        val projectP = refreshController.begin("project-p")!!
+        val firstProjectQ = refreshController.begin("project-q")!!
+        val latestProjectQ = refreshController.begin("project-q")!!
+
+        assertFalse(refreshController.canPublish(projectP, selectedProjectId = "project-p"))
+        assertFalse(refreshController.canPublish(firstProjectQ, selectedProjectId = "project-q"))
+        assertFalse(refreshController.canPublish(latestProjectQ, selectedProjectId = "project-p"))
+        assertTrue(refreshController.canPublish(latestProjectQ, selectedProjectId = "project-q"))
+    }
+
+    @Test
+    fun clearingGitTargetInvalidatesPendingRefresh() {
+        val refreshController = ProjectGitRefreshController()
+        val pending = refreshController.begin("project-p")!!
+
+        assertEquals(null, refreshController.begin(null))
+
+        assertFalse(refreshController.canPublish(pending, selectedProjectId = "project-p"))
+    }
+
+    @Test
+    fun projectSelectionRefreshesGitOnlyWhileGitTabIsActive() {
+        assertTrue(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.GIT, "project-q"))
+        assertFalse(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.FOLDER, "project-q"))
+        assertFalse(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.GIT, null))
+    }
+
+    @Test
     fun projectFolderDefaultsToAllArtifactTypes() {
         assertEquals(ProjectArtifactFilter.ALL, defaultProjectArtifactFilter())
         assertEquals(
