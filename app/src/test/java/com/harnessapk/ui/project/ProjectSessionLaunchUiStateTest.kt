@@ -90,6 +90,19 @@ class ProjectSessionLaunchUiStateTest {
     }
 
     @Test
+    fun staleTargetedDeliverableRefreshCannotPublishAfterNewerTarget() {
+        assertTrue(deliverableRefreshCanPublish(refreshGeneration = 4, currentGeneration = 4))
+        assertFalse(deliverableRefreshCanPublish(refreshGeneration = 3, currentGeneration = 4))
+    }
+
+    @Test
+    fun gitRefreshIsOnlyTriggeredBySelectingGitTab() {
+        assertTrue(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.GIT))
+        assertFalse(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.FOLDER))
+        assertFalse(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.CONVERSATIONS))
+    }
+
+    @Test
     fun projectFolderDefaultsToAllArtifactTypes() {
         assertEquals(ProjectArtifactFilter.ALL, defaultProjectArtifactFilter())
         assertEquals(

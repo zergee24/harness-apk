@@ -59,6 +59,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -95,6 +96,14 @@ import java.util.Locale
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal fun deliverableRefreshCanPublish(
+    refreshGeneration: Int,
+    currentGeneration: Int,
+): Boolean = refreshGeneration == currentGeneration
+
+internal fun shouldRefreshGitOnTabSelection(tab: ProjectWorkbenchTab): Boolean =
+    tab == ProjectWorkbenchTab.GIT
+
 @Composable
 internal fun ProjectScreen(
     container: AppContainer,
@@ -112,6 +121,7 @@ internal fun ProjectScreen(
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
     var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
+    var deliverableRefreshGeneration by remember { mutableIntStateOf(0) }
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedDeliverableId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(defaultProjectWorkbenchTab()) }
@@ -157,14 +167,18 @@ internal fun ProjectScreen(
         filter: ProjectArtifactFilter = artifactFilter,
     ) {
         val resolvedProjectId = projectId ?: return
+        val refreshGeneration = ++deliverableRefreshGeneration
         scope.launch {
-            deliverables = withContext(container.dispatchers.io) {
+            val refreshedDeliverables = withContext(container.dispatchers.io) {
                 if (query.isBlank()) {
                     container.projectRepository.listDeliverables(resolvedProjectId)
                 } else {
                     container.projectRepository.searchDeliverables(resolvedProjectId, query)
                 }
             }
+            if (!deliverableRefreshCanPublish(refreshGeneration, deliverableRefreshGeneration)) return@launch
+
+            deliverables = refreshedDeliverables
             val filtered = filterProjectArtifacts(deliverables, filter)
             selectedDeliverableId = when {
                 preferredPath != null && filtered.any { it.id == preferredPath } -> preferredPath
@@ -501,10 +515,6 @@ internal fun ProjectScreen(
         refreshDeliverables()
     }
 
-    LaunchedEffect(selectedProjectId, projects) {
-        refreshGitState()
-    }
-
     LaunchedEffect(selectedProjectId, selectedDeliverableId, artifactFilter, deliverables) {
         if (selectedDeliverableId != null && visibleDeliverables.none { it.id == selectedDeliverableId }) {
             selectedDeliverableId = visibleDeliverables.firstOrNull()?.id
@@ -629,7 +639,10 @@ internal fun ProjectScreen(
             item {
                 ProjectWorkbenchTabs(
                     selectedTab = selectedTab,
-                    onSelectTab = { selectedTab = it },
+                    onSelectTab = { tab ->
+                        selectedTab = tab
+                        if (shouldRefreshGitOnTabSelection(tab)) refreshGitState()
+                    },
                 )
             }
 
