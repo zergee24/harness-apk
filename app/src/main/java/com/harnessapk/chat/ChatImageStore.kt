@@ -31,7 +31,7 @@ data class PersistedChatImage(
 data class DownloadedChatImage(
     val statusCode: Int,
     val contentType: String?,
-    val bytes: ByteArray,
+    val readBody: () -> ByteArray,
 )
 
 sealed interface ChatImageSource {
@@ -50,16 +50,18 @@ class ChatImageStore(
     },
     private val filesDir: File = context.filesDir,
     private val cacheDir: File = context.cacheDir,
-    private val httpGet: (String) -> DownloadedChatImage = { url ->
+    private val httpGet: (String, (DownloadedChatImage) -> Unit) -> Unit = { url, consume ->
         val request = Request.Builder().url(url).get().build()
         requireNotNull(httpClient) { "缺少图片下载客户端" }
             .newCall(request)
             .execute()
             .use { response ->
-                DownloadedChatImage(
-                    statusCode = response.code,
-                    contentType = response.header("Content-Type"),
-                    bytes = response.body.bytes(),
+                consume(
+                    DownloadedChatImage(
+                        statusCode = response.code,
+                        contentType = response.header("Content-Type"),
+                        readBody = { response.body.bytes() },
+                    ),
                 )
             }
     },
@@ -145,17 +147,22 @@ class ChatImageStore(
     private fun downloadImage(source: ChatImageSource.Remote): PersistedChatImage {
         val cachedImage = try {
             remoteImageCache.getOrPut(source.httpsUrl) {
-                val response = httpGet(source.httpsUrl)
-                if (response.statusCode !in 200..299) {
-                    throw AppError.Network("图片下载失败：HTTP ${response.statusCode}")
+                var downloadedImage: Pair<ByteArray, String>? = null
+                httpGet(source.httpsUrl) { response ->
+                    if (response.statusCode !in 200..299) {
+                        throw AppError.Network("图片下载失败：HTTP ${response.statusCode}")
+                    }
+                    val mimeType = response.contentType
+                        ?.substringBefore(';')
+                        ?.trim()
+                        ?.takeIf { it.startsWith("image/", ignoreCase = true) }
+                        ?: throw AppError.Network("图片下载失败：响应不是图片")
+                    val bytes = response.readBody()
+                    if (bytes.isEmpty()) throw AppError.Network("图片下载失败：响应为空")
+                    downloadedImage = bytes to mimeType
                 }
-                val mimeType = response.contentType
-                    ?.substringBefore(';')
-                    ?.trim()
-                    ?.takeIf { it.startsWith("image/", ignoreCase = true) }
-                    ?: throw AppError.Network("图片下载失败：响应不是图片")
-                if (response.bytes.isEmpty()) throw AppError.Network("图片下载失败：响应为空")
-                response.bytes to mimeType
+                downloadedImage
+                    ?: throw AppError.Network("图片下载失败，请检查网络后重试")
             }
         } catch (error: AppError.Network) {
             throw error

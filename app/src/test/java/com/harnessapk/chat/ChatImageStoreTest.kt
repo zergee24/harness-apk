@@ -126,6 +126,61 @@ class ChatImageStoreTest {
     }
 
     @Test
+    fun materializeRemoteImageRejectsNonImageResponseBeforeReadingBody() = runBlocking {
+        var bodyReadCount = 0
+        val fixture = remoteMaterializeFixture(
+            httpGet = { _, consume ->
+                consume(
+                    DownloadedChatImage(
+                        statusCode = 200,
+                        contentType = "text/html; charset=utf-8",
+                        readBody = {
+                            bodyReadCount++
+                            throw AssertionError("非图片响应不应读取 body")
+                        },
+                    ),
+                )
+            },
+        )
+
+        assertSuspendNetworkFailure {
+            fixture.store.materialize(ChatImageSource.Remote("https://example.com/reply.jpg", null))
+        }
+
+        assertEquals(0, bodyReadCount)
+    }
+
+    @Test
+    fun materializeRemoteJpegReadsBodyOnceAndCachesIt() = runBlocking {
+        var requestCount = 0
+        var bodyReadCount = 0
+        val fixture = remoteMaterializeFixture(
+            httpGet = { _, consume ->
+                requestCount++
+                consume(
+                    DownloadedChatImage(
+                        statusCode = 200,
+                        contentType = "image/jpeg",
+                        readBody = {
+                            bodyReadCount++
+                            "remote-image".toByteArray()
+                        },
+                    ),
+                )
+            },
+        )
+        val source = ChatImageSource.Remote("https://example.com/reply.jpg", null)
+
+        val first = materializedFile(fixture.store, source)
+        val second = materializedFile(fixture.store, source)
+
+        assertEquals("remote-image", first.readText())
+        assertEquals("remote-image", second.readText())
+        assertEquals(1, requestCount)
+        assertEquals(1, bodyReadCount)
+    }
+
+    @Test
     fun resolveRejectsHttpImageUrl() {
         val result = resolveChatImageDisplaySource("http://example.com/image.jpg", "image/jpeg")
 
@@ -166,7 +221,9 @@ class ChatImageStoreTest {
         assertTrue(result is ChatImageSource.Invalid)
     }
 
-    private fun remoteMaterializeFixture(): RemoteMaterializeFixture {
+    private fun remoteMaterializeFixture(
+        httpGet: ((String, (DownloadedChatImage) -> Unit) -> Unit)? = null,
+    ): RemoteMaterializeFixture {
         val filesDir = temporaryFolder.newFolder("files")
         return RemoteMaterializeFixture(
             store = ChatImageStore(
@@ -176,14 +233,16 @@ class ChatImageStoreTest {
                 uriForFile = { file -> throw MaterializedImage(file) },
                 filesDir = filesDir,
                 cacheDir = temporaryFolder.newFolder("cache"),
-                httpGet = { url ->
+                httpGet = httpGet ?: { url, consume ->
                     (URL(url).openConnection() as HttpURLConnection).run {
                         try {
                             connect()
-                            DownloadedChatImage(
-                                statusCode = responseCode,
-                                contentType = contentType,
-                                bytes = inputStream.use { it.readBytes() },
+                            consume(
+                                DownloadedChatImage(
+                                    statusCode = responseCode,
+                                    contentType = contentType,
+                                    readBody = { inputStream.use { it.readBytes() } },
+                                ),
                             )
                         } finally {
                             disconnect()
