@@ -31,6 +31,17 @@ import org.junit.Test
 
 class ChatUiStateTest {
     @Test
+    fun cameraActionRequestsPermissionOnlyWhenNotGranted() {
+        assertEquals(ChatImageSourceAction.REQUEST_CAMERA_PERMISSION, cameraAction(permissionGranted = false))
+        assertEquals(ChatImageSourceAction.LAUNCH_CAMERA, cameraAction(permissionGranted = true))
+    }
+
+    @Test
+    fun cancelledCameraKeepsTypedDraft() {
+        assertEquals("待发送文字", cameraCancelledText("待发送文字"))
+    }
+
+    @Test
     fun assistantMessagesAreUnframedWhileUserMessagesStayWarm() {
         assertEquals(ChatBubblePresentation.UNFRAMED, chatBubblePresentation(MessageRole.ASSISTANT))
         assertEquals(ChatBubblePresentation.WARM_USER, chatBubblePresentation(MessageRole.USER))

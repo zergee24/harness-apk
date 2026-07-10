@@ -1,5 +1,7 @@
 package com.harnessapk.ui.chat
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
@@ -54,6 +56,7 @@ import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -61,6 +64,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -99,6 +103,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
@@ -154,6 +159,17 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.util.Locale
 
+internal enum class ChatImageSourceAction {
+    REQUEST_CAMERA_PERMISSION,
+    LAUNCH_CAMERA,
+}
+
+internal fun cameraAction(permissionGranted: Boolean): ChatImageSourceAction =
+    if (permissionGranted) ChatImageSourceAction.LAUNCH_CAMERA
+    else ChatImageSourceAction.REQUEST_CAMERA_PERMISSION
+
+internal fun cameraCancelledText(currentText: String): String = currentText
+
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
 fun ChatScreen(
@@ -192,6 +208,7 @@ fun ChatScreen(
     var text by remember { mutableStateOf("") }
     var selectedImage by remember { mutableStateOf<Uri?>(null) }
     var selectedMimeType by remember { mutableStateOf("image/png") }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
     var showModelPicker by remember { mutableStateOf(false) }
     var selectedProviderId by remember { mutableStateOf<String?>(null) }
@@ -452,6 +469,45 @@ fun ChatScreen(
             }.onFailure {
                 sessionStatus = it.toUserMessage()
             }
+        }
+    }
+
+    fun discardPendingCameraImage() {
+        val uri = pendingCameraUri ?: return
+        pendingCameraUri = null
+        scope.launch {
+            container.chatImageStore.deleteIfManaged(uri)
+        }
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val uri = pendingCameraUri
+        pendingCameraUri = null
+        if (success && uri != null) {
+            selectedImage = uri
+            selectedMimeType = "image/jpeg"
+        } else {
+            uri?.let { cancelledUri ->
+                scope.launch {
+                    container.chatImageStore.deleteIfManaged(cancelledUri)
+                }
+            }
+            text = cameraCancelledText(text)
+        }
+    }
+
+    fun launchCamera() {
+        discardPendingCameraImage()
+        val uri = container.chatImageStore.createCameraUri()
+        pendingCameraUri = uri
+        cameraLauncher.launch(uri)
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            launchCamera()
+        } else {
+            errorText = "未获得相机权限，可从相册选择图片"
         }
     }
 
@@ -1209,7 +1265,13 @@ fun ChatScreen(
                 text = text,
                 onTextChange = { text = it },
                 selectedImage = selectedImage,
-                onPickImage = {
+                onTakePhoto = {
+                    when (cameraAction(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)) {
+                        ChatImageSourceAction.REQUEST_CAMERA_PERMISSION -> cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        ChatImageSourceAction.LAUNCH_CAMERA -> launchCamera()
+                    }
+                },
+                onPickFromAlbum = {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
                 onRemoveImage = { selectedImage = null },
@@ -2718,7 +2780,8 @@ private fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
     selectedImage: Uri?,
-    onPickImage: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onPickFromAlbum: () -> Unit,
     onRemoveImage: () -> Unit,
     showWebSearch: Boolean,
     webSearchEnabled: Boolean,
@@ -2856,12 +2919,10 @@ private fun ChatInputBar(
                     maxLines = 5,
                 )
                 when (trailingAction) {
-                    ChatInputTrailingAction.ATTACHMENT -> IconButton(
-                        modifier = Modifier.size(56.dp),
-                        onClick = onPickImage,
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = "选择图片")
-                    }
+                    ChatInputTrailingAction.ATTACHMENT -> ChatImageSourceEntryMenu(
+                        onTakePhoto = onTakePhoto,
+                        onPickFromAlbum = onPickFromAlbum,
+                    )
                     ChatInputTrailingAction.SEND -> FilledIconButton(
                         modifier = Modifier.size(56.dp),
                         enabled = isBusy || canSend,
@@ -2872,6 +2933,55 @@ private fun ChatInputBar(
                             contentDescription = sendButtonContentDescription(isBusy),
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ChatImageSourceEntryMenu(
+    onTakePhoto: () -> Unit,
+    onPickFromAlbum: () -> Unit,
+) {
+    var showImageSourceSheet by remember { mutableStateOf(false) }
+
+    IconButton(
+        modifier = Modifier.size(56.dp),
+        onClick = { showImageSourceSheet = true },
+    ) {
+        Icon(Icons.Outlined.Add, contentDescription = "添加图片")
+    }
+
+    if (showImageSourceSheet) {
+        ModalBottomSheet(onDismissRequest = { showImageSourceSheet = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 8.dp),
+            ) {
+                TextButton(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp),
+                    onClick = {
+                        showImageSourceSheet = false
+                        onTakePhoto()
+                    },
+                ) {
+                    Text("拍照")
+                }
+                TextButton(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp),
+                    onClick = {
+                        showImageSourceSheet = false
+                        onPickFromAlbum()
+                    },
+                ) {
+                    Text("从相册选择")
                 }
             }
         }
