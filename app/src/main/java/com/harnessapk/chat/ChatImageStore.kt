@@ -28,6 +28,12 @@ data class PersistedChatImage(
     val mimeType: String,
 )
 
+data class DownloadedChatImage(
+    val statusCode: Int,
+    val contentType: String?,
+    val bytes: ByteArray,
+)
+
 sealed interface ChatImageSource {
     data class Local(val uri: Uri, val mimeType: String) : ChatImageSource
     data class Data(val bytes: ByteArray, val mimeType: String) : ChatImageSource
@@ -37,10 +43,25 @@ sealed interface ChatImageSource {
 
 class ChatImageStore(
     private val context: Context,
-    private val httpClient: OkHttpClient,
+    private val httpClient: OkHttpClient?,
     private val dispatchers: AppDispatchers,
     private val uriForFile: (File) -> Uri = { file ->
         FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    },
+    private val filesDir: File = context.filesDir,
+    private val cacheDir: File = context.cacheDir,
+    private val httpGet: (String) -> DownloadedChatImage = { url ->
+        val request = Request.Builder().url(url).get().build()
+        requireNotNull(httpClient) { "缺少图片下载客户端" }
+            .newCall(request)
+            .execute()
+            .use { response ->
+                DownloadedChatImage(
+                    statusCode = response.code,
+                    contentType = response.header("Content-Type"),
+                    bytes = response.body.bytes(),
+                )
+            }
     },
 ) {
     suspend fun persist(source: Uri, mimeType: String): PersistedChatImage = withContext(dispatchers.io) {
@@ -122,22 +143,20 @@ class ChatImageStore(
     }
 
     private fun downloadImage(source: ChatImageSource.Remote): PersistedChatImage {
-        try {
-            val cachedImage = remoteImageCache.getOrPut(source.httpsUrl) {
-                val request = Request.Builder().url(source.httpsUrl).get().build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) throw AppError.Network("图片下载失败：HTTP ${response.code}")
-                    val mimeType = response.header("Content-Type")
-                        ?.substringBefore(';')
-                        ?.trim()
-                        ?.takeIf { it.startsWith("image/", ignoreCase = true) }
-                        ?: throw AppError.Network("图片下载失败：响应不是图片")
-                    val bytes = response.body.bytes()
-                    if (bytes.isEmpty()) throw AppError.Network("图片下载失败：响应为空")
-                    bytes to mimeType
+        val cachedImage = try {
+            remoteImageCache.getOrPut(source.httpsUrl) {
+                val response = httpGet(source.httpsUrl)
+                if (response.statusCode !in 200..299) {
+                    throw AppError.Network("图片下载失败：HTTP ${response.statusCode}")
                 }
+                val mimeType = response.contentType
+                    ?.substringBefore(';')
+                    ?.trim()
+                    ?.takeIf { it.startsWith("image/", ignoreCase = true) }
+                    ?: throw AppError.Network("图片下载失败：响应不是图片")
+                if (response.bytes.isEmpty()) throw AppError.Network("图片下载失败：响应为空")
+                response.bytes to mimeType
             }
-            return persistInput(cachedImage.file.inputStream(), cachedImage.mimeType)
         } catch (error: AppError.Network) {
             throw error
         } catch (error: CancellationException) {
@@ -145,6 +164,7 @@ class ChatImageStore(
         } catch (_: Throwable) {
             throw AppError.Network("图片下载失败，请检查网络后重试")
         }
+        return persistInput(cachedImage.file.inputStream(), cachedImage.mimeType)
     }
 
     private fun persistBytes(bytes: ByteArray, mimeType: String): PersistedChatImage {
@@ -158,11 +178,11 @@ class ChatImageStore(
     }
 
     private val managedFiles: ManagedChatImageFiles by lazy {
-        ManagedChatImageFiles(context.filesDir)
+        ManagedChatImageFiles(filesDir)
     }
 
     private val remoteImageCache: RemoteChatImageCache by lazy {
-        RemoteChatImageCache(context.cacheDir)
+        RemoteChatImageCache(cacheDir)
     }
 
     private fun inputFor(uri: Uri) = when (uri.scheme?.lowercase()) {

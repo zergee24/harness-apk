@@ -1,5 +1,12 @@
 package com.harnessapk.chat
 
+import android.content.ContextWrapper
+import com.harnessapk.common.AppDispatchers
+import com.harnessapk.common.AppError
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.fail
@@ -7,6 +14,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 class ChatImageStoreTest {
     @get:Rule
@@ -59,6 +69,63 @@ class ChatImageStoreTest {
     }
 
     @Test
+    fun materializeRemoteImageCachesSuccessfulHttpImageResponse() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "image/jpeg")
+                .setBody("remote-image"),
+        )
+        server.start()
+
+        try {
+            val fixture = remoteMaterializeFixture()
+            val source = ChatImageSource.Remote(server.url("/reply.jpg").toString(), null)
+
+            val first = materializedFile(fixture.store, source)
+            val second = materializedFile(fixture.store, source)
+
+            assertEquals("remote-image", first.readText())
+            assertEquals("remote-image", second.readText())
+            assertEquals(2, fixture.persistedFiles.listFiles()!!.size)
+            assertTrue(fixture.persistedFiles.listFiles()!!.all { it.readText() == "remote-image" })
+            assertEquals(1, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun materializeRemoteImageRejectsHtmlResponseWithoutCachingIt() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/html; charset=utf-8")
+                .setBody("<html>not an image</html>"),
+        )
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "image/jpeg")
+                .setBody("recovered-image"),
+        )
+        server.start()
+
+        try {
+            val fixture = remoteMaterializeFixture()
+            val source = ChatImageSource.Remote(server.url("/reply.jpg").toString(), null)
+
+            assertSuspendNetworkFailure { fixture.store.materialize(source) }
+            val recovered = materializedFile(fixture.store, source)
+
+            assertEquals("recovered-image", fixture.persistedFiles.listFiles()!!.single().readText())
+            assertEquals("recovered-image", recovered.readText())
+            assertEquals(2, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun resolveRejectsHttpImageUrl() {
         val result = resolveChatImageDisplaySource("http://example.com/image.jpg", "image/jpeg")
 
@@ -99,12 +166,67 @@ class ChatImageStoreTest {
         assertTrue(result is ChatImageSource.Invalid)
     }
 
+    private fun remoteMaterializeFixture(): RemoteMaterializeFixture {
+        val filesDir = temporaryFolder.newFolder("files")
+        return RemoteMaterializeFixture(
+            store = ChatImageStore(
+                context = ContextWrapper(null),
+                httpClient = null,
+                dispatchers = AppDispatchers(io = Dispatchers.Unconfined),
+                uriForFile = { file -> throw MaterializedImage(file) },
+                filesDir = filesDir,
+                cacheDir = temporaryFolder.newFolder("cache"),
+                httpGet = { url ->
+                    (URL(url).openConnection() as HttpURLConnection).run {
+                        try {
+                            connect()
+                            DownloadedChatImage(
+                                statusCode = responseCode,
+                                contentType = contentType,
+                                bytes = inputStream.use { it.readBytes() },
+                            )
+                        } finally {
+                            disconnect()
+                        }
+                    }
+                },
+            ),
+            persistedFiles = File(filesDir, "chat-images"),
+        )
+    }
+
     private fun assertNetworkFailure(block: () -> Unit) {
         try {
             block()
             fail("Expected AppError.Network")
-        } catch (_: com.harnessapk.common.AppError.Network) {
+        } catch (_: AppError.Network) {
             // Expected.
         }
     }
+
+    private suspend fun assertSuspendNetworkFailure(block: suspend () -> Unit) {
+        try {
+            block()
+            fail("Expected AppError.Network")
+        } catch (_: AppError.Network) {
+            // Expected.
+        }
+    }
+
+    private suspend fun materializedFile(
+        store: ChatImageStore,
+        source: ChatImageSource.Remote,
+    ): File = try {
+        store.materialize(source)
+        error("Expected controlled URI sink to receive the managed file")
+    } catch (result: MaterializedImage) {
+        result.file
+    }
+
+    private data class RemoteMaterializeFixture(
+        val store: ChatImageStore,
+        val persistedFiles: File,
+    )
+
+    private class MaterializedImage(val file: File) : RuntimeException()
 }
