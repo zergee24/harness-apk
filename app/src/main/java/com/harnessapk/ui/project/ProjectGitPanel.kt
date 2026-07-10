@@ -4,9 +4,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material3.AssistChip
@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.git.GitBranchSummary
 import com.harnessapk.git.GitFileChange
 import com.harnessapk.git.GitStatusSummary
+import com.harnessapk.ui.theme.HarnessSpacing
 
 @Composable
 internal fun ProjectGitPanel(
@@ -44,9 +45,8 @@ internal fun ProjectGitPanel(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
@@ -88,12 +88,43 @@ internal fun ProjectGitPanel(
             }
 
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                item { Button(enabled = !status.isClean, onClick = onCommit) { Text("提交全部") } }
-                item { OutlinedButton(onClick = onPush) { Text("推送") } }
-                item { OutlinedButton(onClick = onFetch) { Text("Fetch") } }
-                item { OutlinedButton(onClick = onPull) { Text("快进拉取") } }
-                item { OutlinedButton(onClick = onCreateBranch) { Text("新建分支") } }
-                item { OutlinedButton(onClick = onRefresh) { Text("刷新") } }
+                item {
+                    Button(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        enabled = !status.isClean,
+                        onClick = onCommit,
+                    ) { Text("提交全部") }
+                }
+                item {
+                    OutlinedButton(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        onClick = onPush,
+                    ) { Text("推送") }
+                }
+                item {
+                    OutlinedButton(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        onClick = onFetch,
+                    ) { Text("Fetch") }
+                }
+                item {
+                    OutlinedButton(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        onClick = onPull,
+                    ) { Text("快进拉取") }
+                }
+                item {
+                    OutlinedButton(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        onClick = onCreateBranch,
+                    ) { Text("新建分支") }
+                }
+                item {
+                    OutlinedButton(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        onClick = onRefresh,
+                    ) { Text("刷新") }
+                }
             }
 
             if (branches.isNotEmpty()) {

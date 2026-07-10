@@ -12,6 +12,34 @@ import java.io.File
 
 class ProjectSessionLaunchUiStateTest {
     @Test
+    fun projectHeaderKeepsFrequentActionsDirectAndMovesLowFrequencyActionsToOverflow() {
+        val layout = projectHeaderActionLayout(hasProject = true)
+
+        assertEquals(listOf(ProjectHeaderAction.NEW_SESSION), layout.directActions)
+        assertEquals(
+            listOf(
+                ProjectHeaderAction.CLONE,
+                ProjectHeaderAction.IMPORT,
+                ProjectHeaderAction.EXPORT,
+                ProjectHeaderAction.SHARE,
+                ProjectHeaderAction.DELETE,
+            ),
+            layout.overflowActions,
+        )
+    }
+
+    @Test
+    fun projectHeaderWithoutSelectionOnlyOffersAvailableOverflowActions() {
+        val layout = projectHeaderActionLayout(hasProject = false)
+
+        assertEquals(emptyList<ProjectHeaderAction>(), layout.directActions)
+        assertEquals(
+            listOf(ProjectHeaderAction.CLONE, ProjectHeaderAction.IMPORT),
+            layout.overflowActions,
+        )
+    }
+
+    @Test
     fun projectSessionTitleIncludesProjectAndDeliverable() {
         assertEquals(
             "移动端 Harness · 项目模式 PRD",

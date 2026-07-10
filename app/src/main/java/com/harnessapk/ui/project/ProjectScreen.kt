@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -18,12 +19,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
@@ -32,6 +33,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.IosShare
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Save
@@ -40,10 +42,8 @@ import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -81,7 +81,12 @@ import com.harnessapk.markdownpdf.AndroidMarkdownPdfWriter
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.Project
 import com.harnessapk.project.ProjectDeliverable
+import com.harnessapk.ui.components.ActionableEmptyState
+import com.harnessapk.ui.components.ComfortListRow
+import com.harnessapk.ui.components.InlineStatusMessage
+import com.harnessapk.ui.components.StatusTone
 import com.harnessapk.ui.markdown.MarkdownMessage
+import com.harnessapk.ui.theme.HarnessSpacing
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -567,9 +572,10 @@ fun ProjectScreen(
 
         statusText?.let { status ->
             item {
-                AssistChip(
-                    onClick = { statusText = null },
-                    label = { Text(status) },
+                InlineStatusMessage(
+                    text = status,
+                    tone = StatusTone.INFO,
+                    onDismiss = { statusText = null },
                 )
             }
         }
@@ -740,6 +746,9 @@ private fun ProjectWorkbenchTabs(
     ) {
         ProjectWorkbenchTab.entries.forEach { tab ->
             FilterChip(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = HarnessSpacing.minimumTouchTarget),
                 selected = tab == selectedTab,
                 onClick = { onSelectTab(tab) },
                 label = { Text(tab.label) },
@@ -782,14 +791,15 @@ private fun ProjectHeader(
 ) {
     var projectMenuExpanded by remember { mutableStateOf(false) }
     var packageMenuExpanded by remember { mutableStateOf(false) }
-    ElevatedCard(
+    val actionLayout = projectHeaderActionLayout(hasProject = selectedProject != null)
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = MaterialTheme.shapes.large,
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -812,90 +822,134 @@ private fun ProjectHeader(
                         overflow = TextOverflow.MiddleEllipsis,
                     )
                 }
-                OutlinedButton(onClick = { projectMenuExpanded = true }) {
-                    Text("切换")
-                }
-                DropdownMenu(expanded = projectMenuExpanded, onDismissRequest = { projectMenuExpanded = false }) {
-                    projects.forEach { project ->
-                        DropdownMenuItem(
-                            text = { Text(project.name) },
-                            onClick = {
-                                projectMenuExpanded = false
-                                onSelectProject(project)
-                            },
-                        )
+                Column {
+                    OutlinedButton(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        enabled = projects.isNotEmpty(),
+                        onClick = { projectMenuExpanded = true },
+                    ) {
+                        Text("切换")
+                    }
+                    DropdownMenu(
+                        expanded = projectMenuExpanded,
+                        onDismissRequest = { projectMenuExpanded = false },
+                    ) {
+                        projects.forEach { project ->
+                            DropdownMenuItem(
+                                text = { Text(project.name) },
+                                onClick = {
+                                    projectMenuExpanded = false
+                                    onSelectProject(project)
+                                },
+                            )
+                        }
                     }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = onCreateProject) {
-                    Icon(Icons.Outlined.Add, contentDescription = null)
-                    Text("新建项目")
-                }
-                OutlinedButton(
-                    enabled = selectedProject != null,
-                    onClick = onCreateSession,
-                ) {
-                    Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
-                    Text("新建会话")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (selectedProject == null) {
+                    Button(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = HarnessSpacing.primaryControlHeight),
+                        onClick = onCreateProject,
+                    ) {
+                        Icon(Icons.Outlined.Add, contentDescription = null)
+                        Text("新建项目")
+                    }
+                } else {
+                    OutlinedButton(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = HarnessSpacing.primaryControlHeight),
+                        onClick = onCreateProject,
+                    ) {
+                        Icon(Icons.Outlined.Add, contentDescription = null)
+                        Text("新建项目")
+                    }
+                    if (ProjectHeaderAction.NEW_SESSION in actionLayout.directActions) {
+                        Button(
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = HarnessSpacing.primaryControlHeight),
+                            onClick = onCreateSession,
+                        ) {
+                            Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
+                            Text("新建会话")
+                        }
+                    }
                 }
                 Column {
-                    IconButton(onClick = { packageMenuExpanded = true }) {
+                    IconButton(
+                        modifier = Modifier.size(HarnessSpacing.primaryControlHeight),
+                        onClick = { packageMenuExpanded = true },
+                    ) {
                         Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
                     }
                     DropdownMenu(
                         expanded = packageMenuExpanded,
                         onDismissRequest = { packageMenuExpanded = false },
                     ) {
-                        DropdownMenuItem(
-                            text = { Text("克隆仓库") },
-                            leadingIcon = { Icon(Icons.Outlined.AccountTree, contentDescription = null) },
-                            onClick = {
-                                packageMenuExpanded = false
-                                onCloneRepository()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("导入项目包") },
-                            leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
-                            onClick = {
-                                packageMenuExpanded = false
-                                onImportProjectPackage()
-                            },
-                        )
-                        DropdownMenuItem(
-                            enabled = selectedProject != null,
-                            text = { Text("导出项目包") },
-                            leadingIcon = { Icon(Icons.Outlined.Save, contentDescription = null) },
-                            onClick = {
-                                packageMenuExpanded = false
-                                onExportProjectPackage()
-                            },
-                        )
-                        DropdownMenuItem(
-                            enabled = selectedProject != null,
-                            text = { Text("分享项目包") },
-                            leadingIcon = { Icon(Icons.Outlined.IosShare, contentDescription = null) },
-                            onClick = {
-                                packageMenuExpanded = false
-                                onShareProjectPackage()
-                            },
-                        )
-                        DropdownMenuItem(
-                            enabled = selectedProject != null,
-                            text = { Text("删除项目") },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Outlined.Delete,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.error,
-                                )
-                            },
-                            onClick = {
-                                packageMenuExpanded = false
-                                onDeleteProject()
-                            },
-                        )
+                        if (ProjectHeaderAction.CLONE in actionLayout.overflowActions) {
+                            DropdownMenuItem(
+                                text = { Text("克隆仓库") },
+                                leadingIcon = { Icon(Icons.Outlined.AccountTree, contentDescription = null) },
+                                onClick = {
+                                    packageMenuExpanded = false
+                                    onCloneRepository()
+                                },
+                            )
+                        }
+                        if (ProjectHeaderAction.IMPORT in actionLayout.overflowActions) {
+                            DropdownMenuItem(
+                                text = { Text("导入项目包") },
+                                leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
+                                onClick = {
+                                    packageMenuExpanded = false
+                                    onImportProjectPackage()
+                                },
+                            )
+                        }
+                        if (ProjectHeaderAction.EXPORT in actionLayout.overflowActions) {
+                            DropdownMenuItem(
+                                text = { Text("导出项目包") },
+                                leadingIcon = { Icon(Icons.Outlined.Save, contentDescription = null) },
+                                onClick = {
+                                    packageMenuExpanded = false
+                                    onExportProjectPackage()
+                                },
+                            )
+                        }
+                        if (ProjectHeaderAction.SHARE in actionLayout.overflowActions) {
+                            DropdownMenuItem(
+                                text = { Text("分享项目包") },
+                                leadingIcon = { Icon(Icons.Outlined.IosShare, contentDescription = null) },
+                                onClick = {
+                                    packageMenuExpanded = false
+                                    onShareProjectPackage()
+                                },
+                            )
+                        }
+                        if (ProjectHeaderAction.DELETE in actionLayout.overflowActions) {
+                            DropdownMenuItem(
+                                text = { Text("删除项目", color = MaterialTheme.colorScheme.error) },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Outlined.Delete,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
+                                },
+                                onClick = {
+                                    packageMenuExpanded = false
+                                    onDeleteProject()
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -908,31 +962,20 @@ private fun ProjectConversationRow(
     conversation: Conversation,
     onClick: () -> Unit,
 ) {
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onClick,
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(16.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
-            Column(modifier = Modifier.weight(1f)) {
-                Text(conversation.title, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    text = projectConversationSupportingText(conversation),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+    Column(modifier = Modifier.fillMaxWidth()) {
+        ComfortListRow(
+            title = conversation.title,
+            supportingText = projectConversationSupportingText(conversation),
+            onClick = onClick,
+            trailingContent = {
+                Icon(
+                    Icons.AutoMirrored.Outlined.Chat,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
                 )
-            }
-        }
+            },
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
     }
 }
 
@@ -943,19 +986,17 @@ private fun ProjectArtifactTreeRow(
     onClick: () -> Unit,
 ) {
     val deliverable = treeItem.deliverable
-    ElevatedCard(
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = (treeItem.depth * 16).dp),
         onClick = onClick,
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = if (selected && deliverable != null) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surface
-            },
-        ),
-        shape = RoundedCornerShape(16.dp),
+        color = if (selected && deliverable != null) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surface.copy(alpha = 0f)
+        },
+        shape = MaterialTheme.shapes.medium,
     ) {
         Row(
             modifier = Modifier
@@ -965,12 +1006,14 @@ private fun ProjectArtifactTreeRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (treeItem.isDirectory) {
-                Text(
-                    modifier = Modifier.width(16.dp),
-                    text = if (treeItem.isCollapsed) "+" else "-",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Icon(
+                    imageVector = if (treeItem.isCollapsed) {
+                        Icons.AutoMirrored.Outlined.KeyboardArrowRight
+                    } else {
+                        Icons.Outlined.KeyboardArrowDown
+                    },
+                    contentDescription = if (treeItem.isCollapsed) "展开文件夹" else "折叠文件夹",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Icon(Icons.Outlined.Folder, contentDescription = null)
             } else {
@@ -1038,9 +1081,8 @@ private fun ArtifactPreviewPanel(
     val rendersAsMarkdown = deliverable?.artifactType?.rendersAsMarkdown == true
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
@@ -1155,47 +1197,24 @@ private fun binaryArtifactPreviewText(deliverable: ProjectDeliverable): String =
 
 @Composable
 private fun EmptyProjectConversationState(onCreateSession: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-    ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text("还没有项目会话", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(
-                "从会话开始推进项目，后续再把结果沉淀到文件夹。",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Button(onClick = onCreateSession) {
-                Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
-                Text("新建会话")
-            }
-        }
-    }
+    ActionableEmptyState(
+        title = "还没有项目会话",
+        message = "从会话开始推进项目，后续再把结果沉淀到文件夹。",
+        actionLabel = "新建会话",
+        onAction = onCreateSession,
+        icon = Icons.AutoMirrored.Outlined.Chat,
+    )
 }
 
 @Composable
 private fun EmptyProjectState(onCreateProject: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-    ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text("还没有项目", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(
-                "项目用于长期沉淀上下文、会话和交付物。",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Button(onClick = onCreateProject) { Text("新建项目") }
-        }
-    }
+    ActionableEmptyState(
+        title = "还没有项目",
+        message = "项目用于长期沉淀上下文、会话和交付物。",
+        actionLabel = "新建项目",
+        onAction = onCreateProject,
+        icon = Icons.Outlined.Folder,
+    )
 }
 
 @Composable

@@ -16,6 +16,39 @@ internal enum class ProjectWorkbenchTab(val label: String) {
 
 internal fun defaultProjectWorkbenchTab(): ProjectWorkbenchTab = ProjectWorkbenchTab.CONVERSATIONS
 
+internal enum class ProjectHeaderAction {
+    NEW_SESSION,
+    CLONE,
+    IMPORT,
+    EXPORT,
+    SHARE,
+    DELETE,
+}
+
+internal data class ProjectHeaderActionLayout(
+    val directActions: List<ProjectHeaderAction>,
+    val overflowActions: List<ProjectHeaderAction>,
+)
+
+internal fun projectHeaderActionLayout(hasProject: Boolean): ProjectHeaderActionLayout =
+    if (hasProject) {
+        ProjectHeaderActionLayout(
+            directActions = listOf(ProjectHeaderAction.NEW_SESSION),
+            overflowActions = listOf(
+                ProjectHeaderAction.CLONE,
+                ProjectHeaderAction.IMPORT,
+                ProjectHeaderAction.EXPORT,
+                ProjectHeaderAction.SHARE,
+                ProjectHeaderAction.DELETE,
+            ),
+        )
+    } else {
+        ProjectHeaderActionLayout(
+            directActions = emptyList(),
+            overflowActions = listOf(ProjectHeaderAction.CLONE, ProjectHeaderAction.IMPORT),
+        )
+    }
+
 internal enum class ProjectArtifactFilter(val label: String) {
     ALL("全部"),
     MARKDOWN("Markdown"),
