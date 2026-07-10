@@ -145,10 +145,13 @@ class ChatImageStore(
     }
 
     private fun downloadImage(source: ChatImageSource.Remote): PersistedChatImage {
+        val url = source.httpsUrl.toHttpUrlOrNull()
+            ?.takeIf { it.scheme == "https" }
+            ?: throw AppError.Network("图片地址无效")
         val cachedImage = try {
-            remoteImageCache.getOrPut(source.httpsUrl) {
+            remoteImageCache.getOrPut(url.toString()) {
                 var downloadedImage: Pair<ByteArray, String>? = null
-                httpGet(source.httpsUrl) { response ->
+                httpGet(url.toString()) { response ->
                     if (response.statusCode !in 200..299) {
                         throw AppError.Network("图片下载失败：HTTP ${response.statusCode}")
                     }
