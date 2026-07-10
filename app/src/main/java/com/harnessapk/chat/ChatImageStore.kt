@@ -18,8 +18,10 @@ import java.io.File
 import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.io.InputStream
+import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 
 data class PersistedChatImage(
     val uri: Uri,
@@ -120,17 +122,28 @@ class ChatImageStore(
     }
 
     private fun downloadImage(source: ChatImageSource.Remote): PersistedChatImage {
-        val request = Request.Builder().url(source.httpsUrl).get().build()
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw AppError.Network("图片下载失败：HTTP ${response.code}")
-            val mimeType = response.header("Content-Type")
-                ?.substringBefore(';')
-                ?.trim()
-                ?.takeIf { it.startsWith("image/", ignoreCase = true) }
-                ?: throw AppError.Network("图片下载失败：响应不是图片")
-            val bytes = response.body.bytes()
-            if (bytes.isEmpty()) throw AppError.Network("图片下载失败：响应为空")
-            return persistBytes(bytes, normalizedImageMimeType(mimeType))
+        try {
+            val cachedImage = remoteImageCache.getOrPut(source.httpsUrl) {
+                val request = Request.Builder().url(source.httpsUrl).get().build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw AppError.Network("图片下载失败：HTTP ${response.code}")
+                    val mimeType = response.header("Content-Type")
+                        ?.substringBefore(';')
+                        ?.trim()
+                        ?.takeIf { it.startsWith("image/", ignoreCase = true) }
+                        ?: throw AppError.Network("图片下载失败：响应不是图片")
+                    val bytes = response.body.bytes()
+                    if (bytes.isEmpty()) throw AppError.Network("图片下载失败：响应为空")
+                    bytes to mimeType
+                }
+            }
+            return persistInput(cachedImage.file.inputStream(), cachedImage.mimeType)
+        } catch (error: AppError.Network) {
+            throw error
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            throw AppError.Network("图片下载失败，请检查网络后重试")
         }
     }
 
@@ -146,6 +159,10 @@ class ChatImageStore(
 
     private val managedFiles: ManagedChatImageFiles by lazy {
         ManagedChatImageFiles(context.filesDir)
+    }
+
+    private val remoteImageCache: RemoteChatImageCache by lazy {
+        RemoteChatImageCache(context.cacheDir)
     }
 
     private fun inputFor(uri: Uri) = when (uri.scheme?.lowercase()) {
@@ -258,7 +275,81 @@ internal class ManagedChatImageFiles(
 
 }
 
+internal data class CachedRemoteChatImage(
+    val file: File,
+    val mimeType: String,
+)
+
+internal class RemoteChatImageCache(
+    cacheDir: File,
+) {
+    private val directory = File(cacheDir, REMOTE_IMAGE_CACHE_DIRECTORY)
+
+    fun getOrPut(url: String, loader: () -> Pair<ByteArray, String>): CachedRemoteChatImage =
+        load(url) ?: loader().let { (bytes, mimeType) -> store(url, bytes, mimeType) }
+
+    fun store(url: String, bytes: ByteArray, mimeType: String): CachedRemoteChatImage {
+        if (bytes.isEmpty()) throw AppError.Network("图片下载失败：响应为空")
+        val normalizedMimeType = mimeType.substringBefore(';').trim().lowercase()
+            .takeIf { it.startsWith("image/") }
+            ?: throw AppError.Network("图片下载失败：响应不是图片")
+        val key = remoteChatImageCacheKey(url)
+        val dataFile = File(cacheDirectory(), "$key.data")
+        val mimeTypeFile = File(directory, "$key.mime")
+        val dataTemp = File(directory, "$key.${UUID.randomUUID()}.tmp")
+        val mimeTypeTemp = File(directory, "$key.${UUID.randomUUID()}.tmp")
+
+        try {
+            dataTemp.writeBytes(bytes)
+            mimeTypeTemp.writeText(normalizedMimeType)
+            replace(mimeTypeTemp, mimeTypeFile)
+            replace(dataTemp, dataFile)
+            return CachedRemoteChatImage(dataFile, normalizedMimeType)
+        } catch (error: Throwable) {
+            dataTemp.delete()
+            mimeTypeTemp.delete()
+            throw AppError.Network("无法缓存远程图片")
+        }
+    }
+
+    private fun load(url: String): CachedRemoteChatImage? {
+        val key = remoteChatImageCacheKey(url)
+        val dataFile = File(directory, "$key.data")
+        val mimeTypeFile = File(directory, "$key.mime")
+        if (!dataFile.isFile || dataFile.length() == 0L || !mimeTypeFile.isFile) {
+            discard(dataFile, mimeTypeFile)
+            return null
+        }
+        val mimeType = runCatching { mimeTypeFile.readText().trim().lowercase() }.getOrNull()
+            ?.takeIf { it.startsWith("image/") }
+            ?: run {
+                discard(dataFile, mimeTypeFile)
+                return null
+            }
+        return CachedRemoteChatImage(dataFile, mimeType)
+    }
+
+    private fun cacheDirectory(): File = directory.apply {
+        if (!exists() && !mkdirs()) throw AppError.Network("无法创建远程图片缓存")
+    }
+
+    private fun replace(source: File, destination: File) {
+        if (destination.exists() && !destination.delete()) throw AppError.Network("无法更新远程图片缓存")
+        if (!source.renameTo(destination)) throw AppError.Network("无法更新远程图片缓存")
+    }
+
+    private fun discard(vararg files: File) {
+        files.forEach(File::delete)
+    }
+}
+
+internal fun remoteChatImageCacheKey(url: String): String = MessageDigest
+    .getInstance("SHA-256")
+    .digest(url.toByteArray(Charsets.UTF_8))
+    .joinToString(separator = "") { byte -> "%02x".format(byte) }
+
 private const val CHAT_IMAGES_DIRECTORY = "chat-images"
+private const val REMOTE_IMAGE_CACHE_DIRECTORY = "chat-image-cache"
 
 private fun imageExtensionFor(mimeType: String): String = when (mimeType.lowercase()) {
     "image/jpeg", "image/jpg" -> "jpg"
