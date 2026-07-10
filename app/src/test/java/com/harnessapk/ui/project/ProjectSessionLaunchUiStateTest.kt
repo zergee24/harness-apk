@@ -15,6 +15,7 @@ class ProjectSessionLaunchUiStateTest {
     fun projectHeaderKeepsFrequentActionsDirectAndMovesLowFrequencyActionsToOverflow() {
         val layout = projectHeaderActionLayout(hasProject = true)
 
+        assertTrue(layout.showCreateProjectDirectly)
         assertEquals(listOf(ProjectHeaderAction.NEW_SESSION), layout.directActions)
         assertEquals(
             listOf(
@@ -32,6 +33,7 @@ class ProjectSessionLaunchUiStateTest {
     fun projectHeaderWithoutSelectionOnlyOffersAvailableOverflowActions() {
         val layout = projectHeaderActionLayout(hasProject = false)
 
+        assertFalse(layout.showCreateProjectDirectly)
         assertEquals(emptyList<ProjectHeaderAction>(), layout.directActions)
         assertEquals(
             listOf(ProjectHeaderAction.CLONE, ProjectHeaderAction.IMPORT),

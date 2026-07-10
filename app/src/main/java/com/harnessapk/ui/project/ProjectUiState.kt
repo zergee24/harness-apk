@@ -26,6 +26,7 @@ internal enum class ProjectHeaderAction {
 }
 
 internal data class ProjectHeaderActionLayout(
+    val showCreateProjectDirectly: Boolean,
     val directActions: List<ProjectHeaderAction>,
     val overflowActions: List<ProjectHeaderAction>,
 )
@@ -33,6 +34,7 @@ internal data class ProjectHeaderActionLayout(
 internal fun projectHeaderActionLayout(hasProject: Boolean): ProjectHeaderActionLayout =
     if (hasProject) {
         ProjectHeaderActionLayout(
+            showCreateProjectDirectly = true,
             directActions = listOf(ProjectHeaderAction.NEW_SESSION),
             overflowActions = listOf(
                 ProjectHeaderAction.CLONE,
@@ -44,6 +46,7 @@ internal fun projectHeaderActionLayout(hasProject: Boolean): ProjectHeaderAction
         )
     } else {
         ProjectHeaderActionLayout(
+            showCreateProjectDirectly = false,
             directActions = emptyList(),
             overflowActions = listOf(ProjectHeaderAction.CLONE, ProjectHeaderAction.IMPORT),
         )

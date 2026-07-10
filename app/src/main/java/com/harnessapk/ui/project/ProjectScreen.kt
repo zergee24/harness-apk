@@ -11,6 +11,7 @@ import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -792,6 +793,77 @@ private fun ProjectHeader(
     var projectMenuExpanded by remember { mutableStateOf(false) }
     var packageMenuExpanded by remember { mutableStateOf(false) }
     val actionLayout = projectHeaderActionLayout(hasProject = selectedProject != null)
+    val overflowMenu: @Composable () -> Unit = {
+        Box {
+            IconButton(
+                modifier = Modifier.size(HarnessSpacing.primaryControlHeight),
+                onClick = { packageMenuExpanded = true },
+            ) {
+                Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
+            }
+            DropdownMenu(
+                expanded = packageMenuExpanded,
+                onDismissRequest = { packageMenuExpanded = false },
+            ) {
+                if (ProjectHeaderAction.CLONE in actionLayout.overflowActions) {
+                    DropdownMenuItem(
+                        text = { Text("克隆仓库") },
+                        leadingIcon = { Icon(Icons.Outlined.AccountTree, contentDescription = null) },
+                        onClick = {
+                            packageMenuExpanded = false
+                            onCloneRepository()
+                        },
+                    )
+                }
+                if (ProjectHeaderAction.IMPORT in actionLayout.overflowActions) {
+                    DropdownMenuItem(
+                        text = { Text("导入项目包") },
+                        leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
+                        onClick = {
+                            packageMenuExpanded = false
+                            onImportProjectPackage()
+                        },
+                    )
+                }
+                if (ProjectHeaderAction.EXPORT in actionLayout.overflowActions) {
+                    DropdownMenuItem(
+                        text = { Text("导出项目包") },
+                        leadingIcon = { Icon(Icons.Outlined.Save, contentDescription = null) },
+                        onClick = {
+                            packageMenuExpanded = false
+                            onExportProjectPackage()
+                        },
+                    )
+                }
+                if (ProjectHeaderAction.SHARE in actionLayout.overflowActions) {
+                    DropdownMenuItem(
+                        text = { Text("分享项目包") },
+                        leadingIcon = { Icon(Icons.Outlined.IosShare, contentDescription = null) },
+                        onClick = {
+                            packageMenuExpanded = false
+                            onShareProjectPackage()
+                        },
+                    )
+                }
+                if (ProjectHeaderAction.DELETE in actionLayout.overflowActions) {
+                    DropdownMenuItem(
+                        text = { Text("删除项目", color = MaterialTheme.colorScheme.error) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Outlined.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                            )
+                        },
+                        onClick = {
+                            packageMenuExpanded = false
+                            onDeleteProject()
+                        },
+                    )
+                }
+            }
+        }
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -845,23 +917,16 @@ private fun ProjectHeader(
                         }
                     }
                 }
+                if (!actionLayout.showCreateProjectDirectly) {
+                    overflowMenu()
+                }
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (selectedProject == null) {
-                    Button(
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = HarnessSpacing.primaryControlHeight),
-                        onClick = onCreateProject,
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = null)
-                        Text("新建项目")
-                    }
-                } else {
+            if (actionLayout.showCreateProjectDirectly) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     OutlinedButton(
                         modifier = Modifier
                             .weight(1f)
@@ -882,75 +947,7 @@ private fun ProjectHeader(
                             Text("新建会话")
                         }
                     }
-                }
-                Column {
-                    IconButton(
-                        modifier = Modifier.size(HarnessSpacing.primaryControlHeight),
-                        onClick = { packageMenuExpanded = true },
-                    ) {
-                        Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
-                    }
-                    DropdownMenu(
-                        expanded = packageMenuExpanded,
-                        onDismissRequest = { packageMenuExpanded = false },
-                    ) {
-                        if (ProjectHeaderAction.CLONE in actionLayout.overflowActions) {
-                            DropdownMenuItem(
-                                text = { Text("克隆仓库") },
-                                leadingIcon = { Icon(Icons.Outlined.AccountTree, contentDescription = null) },
-                                onClick = {
-                                    packageMenuExpanded = false
-                                    onCloneRepository()
-                                },
-                            )
-                        }
-                        if (ProjectHeaderAction.IMPORT in actionLayout.overflowActions) {
-                            DropdownMenuItem(
-                                text = { Text("导入项目包") },
-                                leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
-                                onClick = {
-                                    packageMenuExpanded = false
-                                    onImportProjectPackage()
-                                },
-                            )
-                        }
-                        if (ProjectHeaderAction.EXPORT in actionLayout.overflowActions) {
-                            DropdownMenuItem(
-                                text = { Text("导出项目包") },
-                                leadingIcon = { Icon(Icons.Outlined.Save, contentDescription = null) },
-                                onClick = {
-                                    packageMenuExpanded = false
-                                    onExportProjectPackage()
-                                },
-                            )
-                        }
-                        if (ProjectHeaderAction.SHARE in actionLayout.overflowActions) {
-                            DropdownMenuItem(
-                                text = { Text("分享项目包") },
-                                leadingIcon = { Icon(Icons.Outlined.IosShare, contentDescription = null) },
-                                onClick = {
-                                    packageMenuExpanded = false
-                                    onShareProjectPackage()
-                                },
-                            )
-                        }
-                        if (ProjectHeaderAction.DELETE in actionLayout.overflowActions) {
-                            DropdownMenuItem(
-                                text = { Text("删除项目", color = MaterialTheme.colorScheme.error) },
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Outlined.Delete,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.error,
-                                    )
-                                },
-                                onClick = {
-                                    packageMenuExpanded = false
-                                    onDeleteProject()
-                                },
-                            )
-                        }
-                    }
+                    overflowMenu()
                 }
             }
         }
