@@ -1,7 +1,11 @@
 package com.harnessapk.project
 
+import com.harnessapk.common.toUserMessage
 import com.harnessapk.session.CreatedDeliverable
+import com.harnessapk.session.MarkdownBatchApplyResult
 import com.harnessapk.session.MarkdownDeliverable
+import com.harnessapk.session.MarkdownFileApplyResult
+import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownUpdateProposal
 import com.harnessapk.session.ProjectWorkspaceGateway
 import com.harnessapk.session.SessionSummary
@@ -64,22 +68,66 @@ class ProjectWorkspaceGatewayAdapter(
         )
     }
 
+    override suspend fun applyMarkdownUpdatesWithResults(
+        projectId: String,
+        updates: List<MarkdownUpdateProposal>,
+    ): MarkdownBatchApplyResult {
+        val validations = updates.map { proposal ->
+            proposal to runCatching {
+                proposal.copy(path = repository.validateMarkdownFilePath(projectId, proposal.path))
+            }
+        }
+        return MarkdownBatchApplyResult(
+            results = validations.map { (originalProposal, validation) ->
+                validation.fold(
+                    onSuccess = { validatedProposal ->
+                        runCatching {
+                            val deliverable = repository.writeMarkdownFile(
+                                projectId = projectId,
+                                relativePath = validatedProposal.path,
+                                markdown = validatedProposal.markdown,
+                            )
+                            MarkdownFileApplyResult(
+                                proposal = originalProposal,
+                                status = MarkdownFileApplyStatus.SUCCEEDED,
+                                writtenDeliverable = CreatedDeliverable(
+                                    id = deliverable.id,
+                                    title = deliverable.title,
+                                    path = deliverable.relativePath,
+                                ),
+                            )
+                        }.getOrElse { error ->
+                            MarkdownFileApplyResult(
+                                proposal = originalProposal,
+                                status = MarkdownFileApplyStatus.FAILED,
+                                errorMessage = error.toUserMessage(),
+                            )
+                        }
+                    },
+                    onFailure = { error ->
+                        MarkdownFileApplyResult(
+                            proposal = originalProposal,
+                            status = MarkdownFileApplyStatus.FAILED,
+                            errorMessage = error.toUserMessage(),
+                        )
+                    },
+                )
+            },
+        )
+    }
+
     override suspend fun applyMarkdownUpdates(
         projectId: String,
         updates: List<MarkdownUpdateProposal>,
-    ): List<CreatedDeliverable> =
-        updates.map { update ->
-            val deliverable = repository.writeMarkdownFile(
-                projectId = projectId,
-                relativePath = update.path,
-                markdown = update.markdown,
-            )
-            CreatedDeliverable(
-                id = deliverable.id,
-                title = deliverable.title,
-                path = deliverable.relativePath,
-            )
+    ): List<CreatedDeliverable> {
+        val result = applyMarkdownUpdatesWithResults(projectId, updates)
+        check(result.failed.isEmpty()) {
+            result.failed.joinToString("；") { failed ->
+                "${failed.proposal.path}：${failed.errorMessage.orEmpty().ifBlank { "文件写入失败" }}"
+            }
         }
+        return result.succeeded.mapNotNull { it.writtenDeliverable }
+    }
 }
 
 private fun deliverableTemplateFromGatewayType(templateType: String): DeliverableTemplate =
