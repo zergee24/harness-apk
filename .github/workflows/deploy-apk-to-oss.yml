@@ -20,7 +20,7 @@ on:
         required: false
         type: string
       version_name:
-        description: "Optional base versionName override, for example 0.1.15. Debug suffix is added automatically for test."
+        description: "Optional base versionName override, for example 0.1.16. Debug suffix is added automatically for test."
         required: false
         type: string
   push:
