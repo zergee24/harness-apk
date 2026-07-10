@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Use `#9F5167` with `#FFF9F7` in light mode and `#FFB3AA` with `#5F1410` in dark mode for primary actions.
+- Use `#D98278` with `#5F1410` in light mode and `#FFB3AA` with `#5F1410` in dark mode for primary actions, keeping one coral hue family across both modes.
 - Use `#FAF7F6` / `#FFFDFC` / `#211A19` for light background, surface, and text.
 - Use `#17181A` / `#202124` / `#F3EDEC` for dark background, surface, and text.
 - Body text defaults to about `17sp`; supporting text must not be smaller than `14sp`.
@@ -48,8 +48,8 @@ class ThemeTest {
     fun lightThemeUsesApprovedWarmAccessibleTokens() {
         val scheme = warmLightColorScheme()
 
-        assertEquals(Color(0xFF9F5167), scheme.primary)
-        assertEquals(Color(0xFFFFF9F7), scheme.onPrimary)
+        assertEquals(Color(0xFFD98278), scheme.primary)
+        assertEquals(Color(0xFF5F1410), scheme.onPrimary)
         assertEquals(Color(0xFFFAF7F6), scheme.background)
         assertEquals(Color(0xFFFFFDFC), scheme.surface)
         assertEquals(Color(0xFF211A19), scheme.onBackground)
@@ -88,10 +88,10 @@ Replace private fixed schemes with internal factory functions and add the shared
 
 ```kotlin
 internal fun warmLightColorScheme() = lightColorScheme(
-    primary = Color(0xFF9F5167),
-    onPrimary = Color(0xFFFFF9F7),
-    primaryContainer = Color(0xFFFFD9E2),
-    onPrimaryContainer = Color(0xFF3F071D),
+    primary = Color(0xFFD98278),
+    onPrimary = Color(0xFF5F1410),
+    primaryContainer = Color(0xFFFFDAD5),
+    onPrimaryContainer = Color(0xFF3F0805),
     secondary = Color(0xFF6E5E5A),
     onSecondary = Color(0xFFFFFBFA),
     background = Color(0xFFFAF7F6),
