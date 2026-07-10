@@ -1,6 +1,7 @@
 package com.harnessapk.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -27,5 +28,15 @@ class ChatImageStoreTest {
         val result = resolveChatImageDisplaySource("http://example.com/image.jpg", "image/jpeg")
 
         assertTrue(result is ChatImageSource.Invalid)
+    }
+
+    @Test
+    fun resolveParsesPercentEncodedImageDataUri() {
+        val result = resolveChatImageDisplaySource("data:image/svg+xml,%3Csvg%2F%3E", null)
+
+        assertTrue(result is ChatImageSource.Data)
+        result as ChatImageSource.Data
+        assertEquals("image/svg+xml", result.mimeType)
+        assertArrayEquals("<svg/>".toByteArray(), result.bytes)
     }
 }

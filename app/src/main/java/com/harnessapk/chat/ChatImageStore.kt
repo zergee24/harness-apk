@@ -13,6 +13,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.io.InputStream
 import java.util.Base64
@@ -172,13 +173,41 @@ private fun parseDataImage(raw: String): ChatImageSource {
     if (separator <= 0) return ChatImageSource.Invalid("图片数据无效")
     val metadata = raw.substring(5, separator)
     val mimeType = metadata.substringBefore(';').lowercase()
-    if (!mimeType.startsWith("image/") || !metadata.contains(";base64", ignoreCase = true)) {
+    if (!mimeType.startsWith("image/")) {
         return ChatImageSource.Invalid("图片数据无效")
     }
-    val bytes = runCatching { Base64.getDecoder().decode(raw.substring(separator + 1)) }.getOrNull()
+    val data = raw.substring(separator + 1)
+    val bytes = if (metadata.contains(";base64", ignoreCase = true)) {
+        runCatching { Base64.getDecoder().decode(data) }.getOrNull()
+    } else {
+        decodePercentEncodedData(data)
+    }
         ?: return ChatImageSource.Invalid("图片数据无效")
     return ChatImageSource.Data(bytes, mimeType)
 }
+
+private fun decodePercentEncodedData(value: String): ByteArray? = runCatching {
+    ByteArrayOutputStream().use { output ->
+        var literalStart = 0
+        var index = 0
+        while (index < value.length) {
+            if (value[index] != '%') {
+                index++
+                continue
+            }
+            output.write(value.substring(literalStart, index).toByteArray())
+            if (index + 2 >= value.length) throw IllegalArgumentException("Invalid percent encoding")
+            val high = value[index + 1].digitToIntOrNull(16)
+            val low = value[index + 2].digitToIntOrNull(16)
+            if (high == null || low == null) throw IllegalArgumentException("Invalid percent encoding")
+            output.write(high * 16 + low)
+            index += 3
+            literalStart = index
+        }
+        output.write(value.substring(literalStart).toByteArray())
+        output.toByteArray()
+    }
+}.getOrNull()
 
 internal class ManagedChatImageFiles(
     filesDir: File,
