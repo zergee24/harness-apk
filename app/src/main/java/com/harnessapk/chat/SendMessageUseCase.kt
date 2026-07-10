@@ -332,6 +332,7 @@ private fun ModelAwareRequestDiagnostics?.toLogLinesOrEmpty(): List<String> =
 
 private fun StreamEvent.visiblePayloadLength(): Int = when (this) {
     is StreamEvent.TextDelta -> text.length
+    is StreamEvent.ImageDelta -> source.length
     is StreamEvent.ReasoningDelta -> text.length
     is StreamEvent.ToolCallDelta -> argumentsDelta.length
     is StreamEvent.ToolResult -> content.length

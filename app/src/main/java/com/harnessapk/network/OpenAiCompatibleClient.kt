@@ -211,6 +211,7 @@ class OpenAiCompatibleClient(
 
     private fun StreamEvent.isOutputEvent(): Boolean = when (this) {
         is StreamEvent.TextDelta,
+        is StreamEvent.ImageDelta,
         is StreamEvent.ReasoningDelta,
         is StreamEvent.ToolCallDelta,
         is StreamEvent.ToolResult,

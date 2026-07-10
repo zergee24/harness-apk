@@ -2,6 +2,11 @@ package com.harnessapk.chat
 
 sealed interface StreamEvent {
     data class TextDelta(val text: String) : StreamEvent
+    data class ImageDelta(
+        val source: String,
+        val mimeType: String? = null,
+        val altText: String? = null,
+    ) : StreamEvent
     data class ReasoningDelta(val text: String) : StreamEvent
     data class ToolCallDelta(
         val id: String,
@@ -88,46 +93,58 @@ class StreamingMessageAccumulator(
     private var lastFlushMillis: Long? = null
     private var hasFlushedDelta = false
     private var terminal = false
+    private val markdownBuffer = StringBuilder()
 
     fun onEvent(event: StreamEvent, nowMillis: Long): StreamingFlush? {
         if (terminal) return null
         return when (event) {
-            is StreamEvent.TextDelta -> appendContent(
-                type = UiMessagePartType.TEXT,
-                content = event.text,
-                metadata = emptyMap(),
-                nowMillis = nowMillis,
-            )
-            is StreamEvent.ReasoningDelta -> appendContent(
-                type = UiMessagePartType.REASONING,
-                content = event.text,
-                metadata = emptyMap(),
-                nowMillis = nowMillis,
-            )
-            is StreamEvent.ToolCallDelta -> appendContent(
-                type = UiMessagePartType.TOOL_CALL,
-                content = event.argumentsDelta,
-                metadata = mapOf(
-                    "id" to event.id,
-                    "name" to event.name.orEmpty(),
-                ),
-                nowMillis = nowMillis,
-                forceStructureFlush = true,
-            )
-            is StreamEvent.ToolResult -> appendContent(
-                type = UiMessagePartType.TOOL_RESULT,
-                content = event.content,
-                metadata = mapOf("toolCallId" to event.toolCallId),
-                nowMillis = nowMillis,
-                forceStructureFlush = true,
-            )
-            is StreamEvent.SearchResult -> appendContent(
-                type = UiMessagePartType.SEARCH_RESULT,
-                content = event.snippet,
-                metadata = mapOf("title" to event.title, "url" to event.url),
-                nowMillis = nowMillis,
-                forceStructureFlush = true,
-            )
+            is StreamEvent.TextDelta -> appendMarkdownText(event.text, nowMillis)
+            is StreamEvent.ImageDelta -> {
+                appendPendingMarkdownText(nowMillis)
+                appendImage(event, nowMillis)
+            }
+            is StreamEvent.ReasoningDelta -> {
+                appendPendingMarkdownText(nowMillis)
+                appendContent(
+                    type = UiMessagePartType.REASONING,
+                    content = event.text,
+                    metadata = emptyMap(),
+                    nowMillis = nowMillis,
+                )
+            }
+            is StreamEvent.ToolCallDelta -> {
+                appendPendingMarkdownText(nowMillis)
+                appendContent(
+                    type = UiMessagePartType.TOOL_CALL,
+                    content = event.argumentsDelta,
+                    metadata = mapOf(
+                        "id" to event.id,
+                        "name" to event.name.orEmpty(),
+                    ),
+                    nowMillis = nowMillis,
+                    forceStructureFlush = true,
+                )
+            }
+            is StreamEvent.ToolResult -> {
+                appendPendingMarkdownText(nowMillis)
+                appendContent(
+                    type = UiMessagePartType.TOOL_RESULT,
+                    content = event.content,
+                    metadata = mapOf("toolCallId" to event.toolCallId),
+                    nowMillis = nowMillis,
+                    forceStructureFlush = true,
+                )
+            }
+            is StreamEvent.SearchResult -> {
+                appendPendingMarkdownText(nowMillis)
+                appendContent(
+                    type = UiMessagePartType.SEARCH_RESULT,
+                    content = event.snippet,
+                    metadata = mapOf("title" to event.title, "url" to event.url),
+                    nowMillis = nowMillis,
+                    forceStructureFlush = true,
+                )
+            }
             is StreamEvent.Usage -> {
                 inputTokens = event.inputTokens
                 outputTokens = event.outputTokens
@@ -141,6 +158,7 @@ class StreamingMessageAccumulator(
 
     fun cancel(nowMillis: Long): StreamingFlush {
         if (!terminal) {
+            appendPendingMarkdownText(nowMillis)
             status = MessageStatus.CANCELLED
             terminal = true
             markAllPartsStable()
@@ -178,9 +196,68 @@ class StreamingMessageAccumulator(
         return flush(reason, nowMillis)
     }
 
+    private fun appendMarkdownText(content: String, nowMillis: Long): StreamingFlush? {
+        if (content.isEmpty()) return null
+        markdownBuffer.append(content)
+        return drainMarkdownBuffer(terminal = false, nowMillis = nowMillis)
+    }
+
+    private fun appendPendingMarkdownText(nowMillis: Long): StreamingFlush? {
+        if (markdownBuffer.isEmpty()) return null
+        return drainMarkdownBuffer(terminal = true, nowMillis = nowMillis)
+    }
+
+    private fun drainMarkdownBuffer(terminal: Boolean, nowMillis: Long): StreamingFlush? {
+        var latestFlush: StreamingFlush? = null
+        markdownBuffer.drainMarkdownImages(
+            terminal = terminal,
+            onText = { text ->
+                appendContent(
+                    type = UiMessagePartType.TEXT,
+                    content = text,
+                    metadata = emptyMap(),
+                    nowMillis = nowMillis,
+                )?.let { latestFlush = it }
+            },
+            onImage = { source, altText ->
+                appendImage(
+                    StreamEvent.ImageDelta(
+                        source = source,
+                        mimeType = source.dataImageMimeType(),
+                        altText = altText,
+                    ),
+                    nowMillis = nowMillis,
+                )?.let { latestFlush = it }
+            },
+        )
+        return latestFlush
+    }
+
+    private fun appendImage(event: StreamEvent.ImageDelta, nowMillis: Long): StreamingFlush? {
+        val source = event.source.trim()
+        if (source.isEmpty()) return null
+        status = MessageStatus.STREAMING
+        ensureActivePart(
+            type = UiMessagePartType.IMAGE,
+            metadata = buildMap {
+                event.mimeType?.takeIf { it.isNotBlank() }?.let { put("mimeType", it) }
+                event.altText?.takeIf { it.isNotBlank() }?.let { put("altText", it) }
+            },
+        )
+        val active = parts.last()
+        active.content.append(source)
+        active.stable = true
+        val reason = flushReason(
+            active = active,
+            structureChanged = true,
+            nowMillis = nowMillis,
+        ) ?: return null
+        return flush(reason, nowMillis)
+    }
+
     private fun ensureActivePart(type: UiMessagePartType, metadata: Map<String, String>): Boolean {
         val active = parts.lastOrNull()
-        if (active != null && active.type == type && active.canMerge(metadata)) return false
+        if (active != null && !active.stable && active.type == type && active.canMerge(metadata)) return false
         active?.stable = true
         parts += MutablePart(
             index = parts.size,
@@ -228,6 +305,7 @@ class StreamingMessageAccumulator(
     }
 
     private fun finish(reason: String?, nowMillis: Long): StreamingFlush {
+        appendPendingMarkdownText(nowMillis)
         status = MessageStatus.SUCCEEDED
         finishReason = reason
         terminal = true
@@ -277,6 +355,58 @@ class StreamingMessageAccumulator(
         const val DEFAULT_MAX_TAIL_CHARS = 1_200
     }
 }
+
+private fun StringBuilder.drainMarkdownImages(
+    terminal: Boolean,
+    onText: (String) -> Unit,
+    onImage: (source: String, altText: String) -> Unit,
+) {
+    while (isNotEmpty()) {
+        val imageStart = indexOf("![")
+        if (imageStart < 0) {
+            val textLength = if (!terminal && endsWith("!")) length - 1 else length
+            if (textLength > 0) onText(substring(0, textLength))
+            delete(0, textLength)
+            return
+        }
+        if (imageStart > 0) {
+            onText(substring(0, imageStart))
+            delete(0, imageStart)
+        }
+        val altEnd = indexOf("](", startIndex = 2)
+        if (altEnd < 0) {
+            if (terminal) {
+                onText(toString())
+                clear()
+            }
+            return
+        }
+        val sourceEnd = indexOf(")", startIndex = altEnd + 2)
+        if (sourceEnd < 0) {
+            if (terminal) {
+                onText(toString())
+                clear()
+            }
+            return
+        }
+        val source = substring(altEnd + 2, sourceEnd).trim()
+        if (source.isSupportedMarkdownImageSource()) {
+            onImage(source, substring(2, altEnd))
+        } else {
+            onText(substring(0, sourceEnd + 1))
+        }
+        delete(0, sourceEnd + 1)
+    }
+}
+
+private fun String.isSupportedMarkdownImageSource(): Boolean =
+    startsWith("https://", ignoreCase = true) || startsWith("data:image/", ignoreCase = true)
+
+private fun String.dataImageMimeType(): String? =
+    takeIf { startsWith("data:image/", ignoreCase = true) }
+        ?.substringAfter("data:")
+        ?.substringBefore(';')
+        ?.takeIf { it.startsWith("image/", ignoreCase = true) }
 
 private fun UiMessagePartType.canSplitTail(): Boolean =
     this == UiMessagePartType.TEXT || this == UiMessagePartType.REASONING
