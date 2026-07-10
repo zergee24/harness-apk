@@ -33,6 +33,7 @@ class SendMessageUseCase(
     private val providerRepository: ProviderRepository,
     private val client: OpenAiCompatibleClient,
     private val dispatchers: AppDispatchers,
+    private val chatImageStore: ChatImageStore,
     private val contextCompressor: ContextCompressor = ContextCompressor(),
     private val imageCompressionPolicy: ImageCompressionPolicy = ImageCompressionPolicy(),
     private val requestBuilder: ModelAwareRequestBuilder = ModelAwareRequestBuilder(),
@@ -74,7 +75,11 @@ class SendMessageUseCase(
             return@withContext
         }
 
-        val userMessageId = chatRepository.insertUserMessage(conversationId, text, attachments)
+        val persistedAttachments = attachments.map { attachment ->
+            chatImageStore.persist(attachment.uri, attachment.mimeType)
+                .let { PendingImageAttachment(it.uri, it.mimeType) }
+        }
+        val userMessageId = chatRepository.insertUserMessage(conversationId, text, persistedAttachments)
         var assistantId: String? = null
         var requestDiagnostics: ModelAwareRequestDiagnostics? = null
         var accumulator: StreamingMessageAccumulator? = null
@@ -85,7 +90,7 @@ class SendMessageUseCase(
         var receivedChars = 0
 
         try {
-            val imageDataUrls = attachments.map { it.toDataUrl() }
+            val imageDataUrls = persistedAttachments.map { it.toDataUrl() }
             val existingMemory = chatRepository.memoryForConversation(conversationId)
             val compressed = contextCompressor.prepare(
                 conversationId = conversationId,

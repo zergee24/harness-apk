@@ -3,6 +3,7 @@ package com.harnessapk.common
 import android.content.Context
 import androidx.room.Room
 import com.harnessapk.BuildConfig
+import com.harnessapk.chat.ChatImageStore
 import com.harnessapk.chat.ChatRepository
 import com.harnessapk.chat.ManualContextCompressionUseCase
 import com.harnessapk.chat.SendMessageUseCase
@@ -67,6 +68,7 @@ class AppContainer(context: Context) {
         timeProvider = SystemTimeProvider,
     )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
+    val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
     val projectRepository = FileProjectRepository(
         rootDirectory = appContext.filesDir,
@@ -88,6 +90,7 @@ class AppContainer(context: Context) {
         providerRepository = providerRepository,
         client = openAiClient,
         dispatchers = dispatchers,
+        chatImageStore = chatImageStore,
         remoteCapabilityCatalog = {
             settingsStore.providerCapabilityCatalogSnapshot.first().rawJson
                 ?.let { rawJson -> runCatching { parseProviderCapabilityCatalogJson(rawJson, json) }.getOrNull() }

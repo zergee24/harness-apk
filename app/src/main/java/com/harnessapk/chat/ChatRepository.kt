@@ -35,6 +35,9 @@ class ChatRepository(
     fun observeMessageParts(messageId: String): Flow<List<UiMessagePartDraft>> =
         messagePartDao.observeForMessage(messageId).map { rows -> rows.map { it.toPartDraft() } }
 
+    fun observeAttachments(messageId: String): Flow<List<ChatAttachment>> =
+        attachmentDao.observeForMessage(messageId).map { rows -> rows.map { it.toDomain() } }
+
     fun observeMemory(conversationId: String): Flow<ConversationMemory?> =
         memoryDao.observeForConversation(conversationId).map { it?.toDomain() }
 
