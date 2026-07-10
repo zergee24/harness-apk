@@ -64,6 +64,19 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun imagePartSourceUsesImageContentBeforeFallbackLabel() {
+        val part = UiMessagePartDraft(
+            index = 1,
+            type = UiMessagePartType.IMAGE,
+            content = "https://example.com/reply.png",
+            metadata = mapOf("mimeType" to "image/png"),
+            stable = true,
+        )
+
+        assertEquals("https://example.com/reply.png", imagePartSource(part))
+    }
+
+    @Test
     fun assistantMessagesAreUnframedWhileUserMessagesStayWarm() {
         assertEquals(ChatBubblePresentation.UNFRAMED, chatBubblePresentation(MessageRole.ASSISTANT))
         assertEquals(ChatBubblePresentation.WARM_USER, chatBubblePresentation(MessageRole.USER))

@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
 import android.net.Uri
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -106,6 +107,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.harnessapk.chat.ChatMessage
+import com.harnessapk.chat.ChatAttachment
+import com.harnessapk.chat.ChatImageSource
+import com.harnessapk.chat.ChatImageStore
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.PendingImageAttachment
@@ -159,6 +163,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.flowOf
 import java.util.Locale
 
 internal enum class ChatImageSourceAction {
@@ -1251,6 +1256,13 @@ fun ChatScreen(
                     val persistedParts by container.chatRepository
                         .observeMessageParts(message.id)
                         .collectAsState(initial = emptyList())
+                    val attachments by remember(message.id, message.role) {
+                        if (message.role == MessageRole.USER) {
+                            container.chatRepository.observeAttachments(message.id)
+                        } else {
+                            flowOf<List<ChatAttachment>>(emptyList())
+                        }
+                    }.collectAsState(initial = emptyList())
                     ChatContentRail(contentMaxWidth = contentMaxWidth) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             if (message.role == MessageRole.SYSTEM) {
@@ -1260,6 +1272,8 @@ fun ChatScreen(
                                 MessageBubble(
                                     message = message,
                                     parts = displayParts,
+                                    attachments = attachments,
+                                    imageStore = container.chatImageStore,
                                     maxBubbleWidth = bubbleMaxWidth,
                                     canWriteBack = message.role == MessageRole.ASSISTANT &&
                                         message.status == MessageStatus.SUCCEEDED &&
@@ -1563,6 +1577,8 @@ internal fun messageDisplayParts(
         ),
     )
 }
+
+internal fun imagePartSource(part: UiMessagePartDraft): String = part.content.trim()
 
 internal fun modelPickerButtonText(
     providers: List<ProviderProfile>,
@@ -2550,11 +2566,12 @@ private fun ChatContentRail(
 private fun MessagePartsColumn(
     parts: List<UiMessagePartDraft>,
     textColor: androidx.compose.ui.graphics.Color,
+    imageStore: ChatImageStore,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { part ->
             key(part.index, part.type) {
-                MessagePartView(part = part, textColor = textColor)
+                MessagePartView(part = part, textColor = textColor, imageStore = imageStore)
             }
         }
     }
@@ -2564,6 +2581,7 @@ private fun MessagePartsColumn(
 private fun MessagePartView(
     part: UiMessagePartDraft,
     textColor: androidx.compose.ui.graphics.Color,
+    imageStore: ChatImageStore,
 ) {
     when (part.type) {
         UiMessagePartType.TEXT -> MarkdownMessage(markdown = part.content, textColor = textColor)
@@ -2573,9 +2591,91 @@ private fun MessagePartView(
         UiMessagePartType.TOOL_RESULT -> MetadataPart(label = "工具结果", content = part.content)
         UiMessagePartType.ERROR_DETAIL -> MetadataPart(label = "错误详情", content = part.content)
         UiMessagePartType.FILE_CHANGE -> MetadataPart(label = "文件变更", content = part.content)
-        UiMessagePartType.IMAGE -> MetadataPart(label = "图片", content = part.content.ifBlank { "图片附件" })
+        UiMessagePartType.IMAGE -> ChatMessageImage(
+            source = imagePartSource(part),
+            mimeType = part.metadata["mimeType"],
+            imageStore = imageStore,
+        )
         UiMessagePartType.DOCUMENT -> MetadataPart(label = "文档", content = part.content.ifBlank { "文档附件" })
         UiMessagePartType.SYSTEM_EVENT -> MetadataPart(label = "系统事件", content = part.content)
+    }
+}
+
+@Composable
+private fun ChatMessageImage(
+    source: String,
+    mimeType: String?,
+    imageStore: ChatImageStore,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var loadAttempt by remember(source, mimeType) { mutableStateOf(0) }
+    var image by remember(source, mimeType) { mutableStateOf<ChatImageDisplay>(ChatImageDisplay.Loading) }
+    var previewOpen by remember(source) { mutableStateOf(false) }
+    var saveStatus by remember(source) { mutableStateOf<String?>(null) }
+
+    fun saveReadyImage() {
+        val readyImage = image as? ChatImageDisplay.Ready ?: return
+        scope.launch {
+            saveStatus = "正在保存图片..."
+            saveStatus = runCatching {
+                imageStore.saveToMediaStore(readyImage.uri, readyImage.mimeType)
+            }.fold(
+                onSuccess = { "已保存图片" },
+                onFailure = { "保存图片失败：${it.toUserMessage()}" },
+            )
+        }
+    }
+
+    val storagePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            saveReadyImage()
+        } else {
+            saveStatus = "未获得存储权限，无法保存图片"
+        }
+    }
+
+    fun requestSave() {
+        val needsStoragePermission = Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Build.VERSION_CODES.P &&
+            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        if (needsStoragePermission) {
+            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            saveReadyImage()
+        }
+    }
+
+    LaunchedEffect(source, mimeType, loadAttempt) {
+        saveStatus = null
+        image = ChatImageDisplay.Loading
+        image = runCatching {
+            when (val displaySource = imageStore.resolveDisplaySource(source, mimeType)) {
+                is ChatImageSource.Local -> ChatImageDisplay.Ready(displaySource.uri, displaySource.mimeType)
+                is ChatImageSource.Data,
+                is ChatImageSource.Remote,
+                -> imageStore.materialize(displaySource).let { persisted ->
+                    ChatImageDisplay.Ready(persisted.uri, persisted.mimeType)
+                }
+                is ChatImageSource.Invalid -> ChatImageDisplay.Failed(displaySource.reason)
+            }
+        }.getOrElse { error ->
+            ChatImageDisplay.Failed(error.toUserMessage())
+        }
+    }
+
+    ChatImageThumbnail(
+        image = image,
+        onOpen = { previewOpen = image is ChatImageDisplay.Ready },
+        onRetry = { loadAttempt++ },
+    )
+    if (previewOpen) {
+        ChatImagePreviewDialog(
+            image = image,
+            onDismiss = { previewOpen = false },
+            onSave = ::requestSave,
+            saveStatus = saveStatus,
+            onRetry = { loadAttempt++ },
+        )
     }
 }
 
@@ -2657,6 +2757,8 @@ private fun MetadataPart(
 private fun MessageBubble(
     message: ChatMessage,
     parts: List<UiMessagePartDraft>,
+    attachments: List<ChatAttachment>,
+    imageStore: ChatImageStore,
     maxBubbleWidth: Dp,
     canWriteBack: Boolean,
     onWriteBack: () -> Unit,
@@ -2767,9 +2869,21 @@ private fun MessageBubble(
                         MessagePartsColumn(
                             parts = parts,
                             textColor = contentColor,
+                            imageStore = imageStore,
                         )
                     }
                 }
+                attachments
+                    .filter { it.type.equals("image", ignoreCase = true) }
+                    .forEach { attachment ->
+                        key(attachment.id) {
+                            ChatMessageImage(
+                                source = attachment.uri,
+                                mimeType = attachment.mimeType,
+                                imageStore = imageStore,
+                            )
+                        }
+                    }
                 assistantMessageStatusText(message)?.let {
                     Text(
                         text = it,
