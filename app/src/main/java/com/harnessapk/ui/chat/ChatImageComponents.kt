@@ -30,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
@@ -57,6 +58,7 @@ internal fun ChatImageThumbnail(
     image: ChatImageDisplay,
     onOpen: () -> Unit,
     onRetry: () -> Unit = {},
+    onDecodeFailed: (Uri, String) -> Unit = { _, _ -> },
 ) {
     val thumbnailModifier = Modifier
         .widthIn(min = 64.dp, max = 260.dp)
@@ -77,6 +79,7 @@ internal fun ChatImageThumbnail(
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
+                    onDecodeFailed = onDecodeFailed,
                 )
             }
         }
@@ -111,6 +114,7 @@ internal fun ChatImagePreviewDialog(
     onSave: () -> Unit,
     saveStatus: String?,
     onRetry: () -> Unit = {},
+    onDecodeFailed: (Uri, String) -> Unit = { _, _ -> },
 ) {
     Dialog(
         onDismissRequest = onDismiss,
@@ -151,6 +155,7 @@ internal fun ChatImagePreviewDialog(
                             contentDescription = null,
                             contentScale = ContentScale.Fit,
                             modifier = Modifier.fillMaxSize(),
+                            onDecodeFailed = onDecodeFailed,
                         )
                         ChatImageDisplay.Loading -> CircularProgressIndicator()
                         is ChatImageDisplay.Failed -> Column(
@@ -199,37 +204,62 @@ private fun ChatImageBitmap(
     contentDescription: String?,
     contentScale: ContentScale,
     modifier: Modifier,
+    onDecodeFailed: (Uri, String) -> Unit,
 ) {
-    val bitmap by decodedImageBitmap(uri)
-    if (bitmap != null) {
-        Image(
-            bitmap = bitmap!!.asImageBitmap(),
-            contentDescription = contentDescription,
-            contentScale = contentScale,
-            modifier = modifier,
-        )
-    } else {
-        Box(
-            modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.Image,
-                contentDescription = contentDescription,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+    val decodedImage by decodedImageBitmap(uri)
+    when (val result = decodedImage) {
+        is DecodedChatImage.Success -> {
+            Image(
+                bitmap = result.bitmap.asImageBitmap(),
+                contentDescription = contentDescription ?: "会话图片缩略图",
+                contentScale = contentScale,
+                modifier = modifier,
             )
         }
+        is DecodedChatImage.Failed -> {
+            LaunchedEffect(uri, result.message) {
+                onDecodeFailed(uri, result.message)
+            }
+            ImageDecodePlaceholder(modifier, contentDescription)
+        }
+        DecodedChatImage.Loading -> ImageDecodePlaceholder(modifier, contentDescription)
     }
 }
 
 @Composable
-private fun decodedImageBitmap(uri: Uri): androidx.compose.runtime.State<Bitmap?> {
+private fun ImageDecodePlaceholder(modifier: Modifier, contentDescription: String?) {
+    Box(
+        modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Image,
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private sealed interface DecodedChatImage {
+    data class Success(val bitmap: Bitmap) : DecodedChatImage
+    data class Failed(val message: String) : DecodedChatImage
+    data object Loading : DecodedChatImage
+}
+
+@Composable
+private fun decodedImageBitmap(uri: Uri): androidx.compose.runtime.State<DecodedChatImage> {
     val context = LocalContext.current
-    return produceState(initialValue = null, uri) {
+    return produceState<DecodedChatImage>(initialValue = DecodedChatImage.Loading, uri) {
         value = withContext(Dispatchers.IO) {
             runCatching {
-                context.contentResolver.openInputStream(uri).use(BitmapFactory::decodeStream)
-            }.getOrNull()
+                val input = requireNotNull(context.contentResolver.openInputStream(uri)) {
+                    "图片来源不可读取"
+                }
+                input.use { BitmapFactory.decodeStream(it) ?: error("图片内容无法解码") }
+            }.fold(
+                onSuccess = DecodedChatImage::Success,
+                onFailure = { DecodedChatImage.Failed("图片内容损坏或格式不支持") },
+            )
         }
     }
 }

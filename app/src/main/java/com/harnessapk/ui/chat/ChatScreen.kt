@@ -2645,6 +2645,13 @@ private fun ChatMessageImage(
         }
     }
 
+    fun markImageDecodeFailed(uri: Uri, message: String) {
+        val readyImage = image as? ChatImageDisplay.Ready ?: return
+        if (readyImage.uri == uri) {
+            image = ChatImageDisplay.Failed(message)
+        }
+    }
+
     LaunchedEffect(source, mimeType, loadAttempt) {
         saveStatus = null
         image = ChatImageDisplay.Loading
@@ -2667,6 +2674,7 @@ private fun ChatMessageImage(
         image = image,
         onOpen = { previewOpen = image is ChatImageDisplay.Ready },
         onRetry = { loadAttempt++ },
+        onDecodeFailed = ::markImageDecodeFailed,
     )
     if (previewOpen) {
         ChatImagePreviewDialog(
@@ -2675,6 +2683,7 @@ private fun ChatMessageImage(
             onSave = ::requestSave,
             saveStatus = saveStatus,
             onRetry = { loadAttempt++ },
+            onDecodeFailed = ::markImageDecodeFailed,
         )
     }
 }
