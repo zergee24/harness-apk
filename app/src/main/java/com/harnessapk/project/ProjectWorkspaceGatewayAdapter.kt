@@ -71,7 +71,7 @@ class ProjectWorkspaceGatewayAdapter(
         )
     }
 
-    override suspend fun applyMarkdownUpdatesWithResults(
+    override suspend fun applyMarkdownUpdates(
         projectId: String,
         updates: List<MarkdownUpdateProposal>,
     ): MarkdownBatchApplyResult {
@@ -127,18 +127,6 @@ class ProjectWorkspaceGatewayAdapter(
         )
     }
 
-    override suspend fun applyMarkdownUpdates(
-        projectId: String,
-        updates: List<MarkdownUpdateProposal>,
-    ): List<CreatedDeliverable> {
-        val result = applyMarkdownUpdatesWithResults(projectId, updates)
-        check(result.failed.isEmpty()) {
-            result.failed.joinToString("；") { failed ->
-                "${failed.proposal.path}：${failed.errorMessage.orEmpty().ifBlank { "文件写入失败" }}"
-            }
-        }
-        return result.succeeded.mapNotNull { it.writtenDeliverable }
-    }
 }
 
 private fun deliverableTemplateFromGatewayType(templateType: String): DeliverableTemplate =

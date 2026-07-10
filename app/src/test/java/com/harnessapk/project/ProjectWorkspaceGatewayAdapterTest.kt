@@ -31,7 +31,7 @@ class ProjectWorkspaceGatewayAdapterTest {
         val project = repository.createProject("移动端 Harness")
         val gateway = ProjectWorkspaceGatewayAdapter(repository)
 
-        val result = gateway.applyMarkdownUpdatesWithResults(
+        val result = gateway.applyMarkdownUpdates(
             projectId = project.id,
             updates = listOf(
                 proposal("docs/first.md", "# First"),
@@ -67,7 +67,7 @@ class ProjectWorkspaceGatewayAdapterTest {
         try {
             runBlocking {
                 currentCoroutineContext().cancel()
-                gateway.applyMarkdownUpdatesWithResults(
+                gateway.applyMarkdownUpdates(
                     projectId = project.id,
                     updates = listOf(proposal("docs/cancelled.md", "# Cancelled")),
                 )
@@ -92,7 +92,7 @@ class ProjectWorkspaceGatewayAdapterTest {
         val secondPath = project.rootDirectory.resolve("docs/second.md")
 
         val job = launch(Dispatchers.IO) {
-            gateway.applyMarkdownUpdatesWithResults(
+            gateway.applyMarkdownUpdates(
                 projectId = project.id,
                 updates = listOf(
                     proposal("docs/first.md", "# First\n" + "content\n".repeat(2_000_000)),

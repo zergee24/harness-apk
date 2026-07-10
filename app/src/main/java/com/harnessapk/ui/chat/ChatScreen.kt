@@ -112,6 +112,7 @@ import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.provider.modelConfigForProvider
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
+import com.harnessapk.session.MarkdownBatchApplyResult
 import com.harnessapk.session.MarkdownFileChangeController
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeState
@@ -718,53 +719,66 @@ fun ChatScreen(
         }.toSet()
     }
 
-    fun applyMarkdownFileChangeState(state: MarkdownFileChangeState, retainedIndexes: Set<Int>) {
-        val retained = state.items
-            .filterIndexed { index, _ -> index in retainedIndexes }
-            .map {
-                MarkdownUpdateProposal(
-                    operation = it.operation,
-                    path = it.path,
-                    title = it.title,
-                    reason = it.reason,
-                    markdown = it.markdown,
-                )
-            }
-        if (retained.isEmpty()) {
-            val dismissed = markdownFileChangeController.dismiss(state)
-            upsertMarkdownFileChangeState(dismissed)
-            pendingMarkdownReview = null
-            pendingMarkdownReviewDraftId = null
-            retainedReviewIndexes = emptySet()
-            return
-        }
-
+    fun applyMarkdownFileChangeProposals(
+        state: MarkdownFileChangeState,
+        proposals: List<MarkdownUpdateProposal>,
+    ) {
+        if (proposals.isEmpty()) return
         scope.launch {
             runCatching {
-                val written = container.projectWorkspaceGateway.applyMarkdownUpdates(state.draft.projectId, retained)
-                container.chatRepository.insertSystemEvent(
-                    conversationId = conversationId,
-                    content = markdownWriteBackAppliedEvent(written.map { it.path }),
+                val result = container.projectWorkspaceGateway.applyMarkdownUpdates(
+                    projectId = state.draft.projectId,
+                    updates = proposals,
                 )
-                written
-            }.onSuccess { written ->
-                upsertMarkdownFileChangeState(
-                    markdownFileChangeController.markApplied(state, written.map { it.path }),
-                )
-                if (selectedProjectId == state.draft.projectId) {
+                markdownWriteBackResultEvent(result)?.let { event ->
+                    container.chatRepository.insertSystemEvent(conversationId, event)
+                }
+                result
+            }.onSuccess { result ->
+                upsertMarkdownFileChangeState(markdownFileChangeController.markApplyResult(state, result))
+                if (result.succeeded.isNotEmpty() && selectedProjectId == state.draft.projectId) {
                     deliverables = container.projectWorkspaceGateway.listDeliverables(state.draft.projectId)
                 }
                 pendingMarkdownReview = null
                 pendingMarkdownReviewDraftId = null
                 retainedReviewIndexes = emptySet()
-                sessionStatus = "已写入 ${written.size} 项 Markdown 更新"
-                errorText = null
-            }.onFailure {
-                val feedback = markdownWriteBackFailureFeedback(it)
+                sessionStatus = markdownWriteBackResultStatus(result)
+                errorText = markdownWriteBackResultError(result)
+            }.onFailure { error ->
+                val feedback = markdownWriteBackFailureFeedback(error)
                 errorText = feedback.errorText
                 sessionStatus = feedback.statusText
             }
         }
+    }
+
+    fun retryFailedMarkdownFileChanges(state: MarkdownFileChangeState) {
+        applyMarkdownFileChangeProposals(
+            state = state,
+            proposals = markdownFileChangeController.retryableProposals(state),
+        )
+    }
+
+    fun applyMarkdownFileChangeState(state: MarkdownFileChangeState, retainedIndexes: Set<Int>) {
+        val retained = state.items
+            .filterIndexed { index, _ -> index in retainedIndexes }
+            .map { item ->
+                MarkdownUpdateProposal(
+                    operation = item.operation,
+                    path = item.path,
+                    title = item.title,
+                    reason = item.reason,
+                    markdown = item.markdown,
+                )
+            }
+        if (retained.isEmpty()) {
+            upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
+            pendingMarkdownReview = null
+            pendingMarkdownReviewDraftId = null
+            retainedReviewIndexes = emptySet()
+            return
+        }
+        applyMarkdownFileChangeProposals(state, retained)
     }
 
     fun requestMarkdownReview(message: ChatMessage) {
@@ -833,21 +847,30 @@ fun ChatScreen(
         }
         scope.launch {
             runCatching {
-                val written = container.projectWorkspaceGateway.applyMarkdownUpdates(projectId, retained)
-                container.chatRepository.insertSystemEvent(
-                    conversationId = conversationId,
-                    content = markdownWriteBackAppliedEvent(written.map { it.path }),
-                )
-                written
-            }.onSuccess {
-                deliverables = container.projectWorkspaceGateway.listDeliverables(projectId)
-                pendingMarkdownReview = null
-                pendingMarkdownReviewDraftId = null
-                retainedReviewIndexes = emptySet()
-                sessionStatus = "已写入 ${it.size} 项 Markdown 更新"
-                errorText = null
-            }.onFailure {
-                val feedback = markdownWriteBackFailureFeedback(it)
+                val result = container.projectWorkspaceGateway.applyMarkdownUpdates(projectId, retained)
+                markdownWriteBackResultEvent(result)?.let { event ->
+                    container.chatRepository.insertSystemEvent(conversationId, event)
+                }
+                result
+            }.onSuccess { result ->
+                if (result.succeeded.isNotEmpty()) {
+                    deliverables = container.projectWorkspaceGateway.listDeliverables(projectId)
+                }
+                val failedPaths = result.failed.map { it.proposal.path }.toSet()
+                if (failedPaths.isEmpty()) {
+                    pendingMarkdownReview = null
+                    pendingMarkdownReviewDraftId = null
+                    retainedReviewIndexes = emptySet()
+                } else {
+                    pendingMarkdownReview = review
+                    retainedReviewIndexes = review.proposals.mapIndexedNotNull { index, proposal ->
+                        index.takeIf { proposal.path in failedPaths }
+                    }.toSet()
+                }
+                sessionStatus = markdownWriteBackResultStatus(result)
+                errorText = markdownWriteBackResultError(result)
+            }.onFailure { error ->
+                val feedback = markdownWriteBackFailureFeedback(error)
                 errorText = feedback.errorText
                 sessionStatus = feedback.statusText
             }
@@ -1758,15 +1781,29 @@ internal data class MarkdownWriteBackFeedback(
 internal fun markdownWriteBackFailureFeedback(error: Throwable): MarkdownWriteBackFeedback =
     MarkdownWriteBackFeedback(errorText = error.toUserMessage(), statusText = null)
 
-internal fun markdownWriteBackAppliedEvent(paths: List<String>): String {
-    val visiblePaths = paths
+internal fun markdownWriteBackResultEvent(result: MarkdownBatchApplyResult): String? {
+    val succeeded = result.succeeded
+        .mapNotNull { it.writtenDeliverable?.path }
         .filter { it.isNotBlank() }
         .take(MAX_WRITE_BACK_EVENT_PATHS)
-    return if (visiblePaths.isEmpty()) {
-        "已沉淀到项目"
-    } else {
-        "已沉淀到项目：${visiblePaths.joinToString("、")}"
+    if (succeeded.isEmpty()) return null
+    val successText = "已沉淀到项目：${succeeded.joinToString("、")}"
+    val failedText = result.failed.take(MAX_WRITE_BACK_EVENT_PATHS).joinToString("、") { failed ->
+        "${failed.proposal.path}（${failed.errorMessage.orEmpty().ifBlank { "文件写入失败" }}）"
     }
+    return if (failedText.isBlank()) successText else "$successText；写入失败：$failedText"
+}
+
+internal fun markdownWriteBackResultStatus(result: MarkdownBatchApplyResult): String = when {
+    result.failed.isEmpty() -> "已写入 ${result.succeeded.size} 项 Markdown 更新"
+    result.succeeded.isEmpty() -> "${result.failed.size} 项 Markdown 更新写入失败"
+    else -> "已写入 ${result.succeeded.size} 项 Markdown 更新，${result.failed.size} 项失败"
+}
+
+internal fun markdownWriteBackResultError(result: MarkdownBatchApplyResult): String? = when {
+    result.failed.isEmpty() -> null
+    result.succeeded.isEmpty() -> "${result.failed.size} 个文件写入失败，可重试失败项"
+    else -> "${result.failed.size} 个文件写入失败，可仅重试失败项"
 }
 
 @Composable

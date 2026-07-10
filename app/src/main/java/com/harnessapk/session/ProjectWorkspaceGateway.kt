@@ -58,14 +58,10 @@ interface ProjectWorkspaceGateway {
         markdown: String,
     ): CreatedDeliverable
     suspend fun saveSessionSummary(projectId: String, sessionSummary: SessionSummary): CreatedDeliverable
-    suspend fun applyMarkdownUpdatesWithResults(
-        projectId: String,
-        updates: List<MarkdownUpdateProposal>,
-    ): MarkdownBatchApplyResult
     suspend fun applyMarkdownUpdates(
         projectId: String,
         updates: List<MarkdownUpdateProposal>,
-    ): List<CreatedDeliverable>
+    ): MarkdownBatchApplyResult
 }
 
 class EmptyProjectWorkspaceGateway : ProjectWorkspaceGateway {
@@ -82,7 +78,7 @@ class EmptyProjectWorkspaceGateway : ProjectWorkspaceGateway {
     ): CreatedDeliverable = CreatedDeliverable(id = "", title = title, path = "")
     override suspend fun saveSessionSummary(projectId: String, sessionSummary: SessionSummary): CreatedDeliverable =
         CreatedDeliverable(id = "", title = sessionSummary.title, path = "")
-    override suspend fun applyMarkdownUpdatesWithResults(
+    override suspend fun applyMarkdownUpdates(
         projectId: String,
         updates: List<MarkdownUpdateProposal>,
     ): MarkdownBatchApplyResult = MarkdownBatchApplyResult(
@@ -98,10 +94,4 @@ class EmptyProjectWorkspaceGateway : ProjectWorkspaceGateway {
             )
         },
     )
-    override suspend fun applyMarkdownUpdates(
-        projectId: String,
-        updates: List<MarkdownUpdateProposal>,
-    ): List<CreatedDeliverable> = updates.map {
-        CreatedDeliverable(id = it.path, title = it.title, path = it.path)
-    }
 }

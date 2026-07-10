@@ -7,9 +7,14 @@ import com.harnessapk.chat.ReasoningEffort
 import com.harnessapk.chat.UiMessagePartDraft
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.provider.ProviderProfile
+import com.harnessapk.session.CreatedDeliverable
+import com.harnessapk.session.MarkdownBatchApplyResult
+import com.harnessapk.session.MarkdownFileApplyResult
+import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangeStatus
 import com.harnessapk.session.MarkdownUpdateOperation
+import com.harnessapk.session.MarkdownUpdateProposal
 import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.ui.model.selectableModelsForProvider
 import com.harnessapk.voice.VoiceSettings
@@ -581,11 +586,28 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun markdownWriteBackAppliedEventListsWrittenFiles() {
-        assertEquals(
-            "已沉淀到项目：requirements/prd.md、reports/review.md",
-            markdownWriteBackAppliedEvent(listOf("requirements/prd.md", "reports/review.md")),
+    fun partialWriteBackEventAndFeedbackSeparateSuccessFromFailure() {
+        val result = MarkdownBatchApplyResult(
+            listOf(
+                MarkdownFileApplyResult(
+                    proposal = proposal("docs/ok.md"),
+                    status = MarkdownFileApplyStatus.SUCCEEDED,
+                    writtenDeliverable = CreatedDeliverable("docs/ok.md", "OK", "docs/ok.md"),
+                ),
+                MarkdownFileApplyResult(
+                    proposal = proposal("docs/fail.md"),
+                    status = MarkdownFileApplyStatus.FAILED,
+                    errorMessage = "没有写入权限",
+                ),
+            ),
         )
+
+        assertEquals(
+            "已沉淀到项目：docs/ok.md；写入失败：docs/fail.md（没有写入权限）",
+            markdownWriteBackResultEvent(result),
+        )
+        assertEquals("已写入 1 项 Markdown 更新，1 项失败", markdownWriteBackResultStatus(result))
+        assertEquals("1 个文件写入失败，可仅重试失败项", markdownWriteBackResultError(result))
     }
 
     @Test
@@ -695,6 +717,14 @@ class ChatUiStateTest {
         providerId = "provider",
         model = "model",
         errorMessage = errorMessage,
+    )
+
+    private fun proposal(path: String) = MarkdownUpdateProposal(
+        operation = MarkdownUpdateOperation.CREATE,
+        path = path,
+        title = path.substringAfterLast('/').substringBeforeLast('.'),
+        reason = "测试结果反馈",
+        markdown = "# Test",
     )
 
     private fun providerProfile(
