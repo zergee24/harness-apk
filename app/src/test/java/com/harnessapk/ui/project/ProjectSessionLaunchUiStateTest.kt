@@ -166,6 +166,41 @@ class ProjectSessionLaunchUiStateTest {
     }
 
     @Test
+    fun sameProjectFilesTargetSuppressesTargetResetRefreshAndKeepsLaterSearchRefresh() {
+        val refreshController = ProjectDeliverableRefreshController()
+
+        refreshController.acceptWorkbenchTarget(
+            target = target("project-p", ProjectWorkbenchDestination.FILES, "docs/requested.md", 4),
+            selectedProjectId = "project-p",
+        )
+
+        assertEquals(
+            null,
+            refreshController.beginOrdinaryFilesRefresh(
+                projectId = "project-p",
+                query = "",
+                filter = ProjectArtifactFilter.ALL,
+            ),
+        )
+
+        val searchRefresh = refreshController.beginOrdinaryFilesRefresh(
+            projectId = "project-p",
+            query = "requested",
+            filter = ProjectArtifactFilter.ALL,
+        )
+
+        assertEquals("requested", searchRefresh?.query)
+
+        val filterRefresh = refreshController.beginOrdinaryFilesRefresh(
+            projectId = "project-p",
+            query = "requested",
+            filter = ProjectArtifactFilter.CODE,
+        )
+
+        assertEquals(ProjectArtifactFilter.CODE, filterRefresh?.filter)
+    }
+
+    @Test
     fun gitRefreshIsOnlyTriggeredBySelectingGitTab() {
         assertTrue(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.GIT))
         assertFalse(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.FOLDER))

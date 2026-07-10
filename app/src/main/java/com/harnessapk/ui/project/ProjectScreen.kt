@@ -115,9 +115,7 @@ internal class ProjectDeliverableRefreshController {
         ordinaryRefreshProjectIdToSkip = null
         if (target.destination != ProjectWorkbenchDestination.FILES) return null
 
-        if (selectedProjectId != target.projectId) {
-            ordinaryRefreshProjectIdToSkip = target.projectId
-        }
+        ordinaryRefreshProjectIdToSkip = target.projectId
         return ProjectDeliverableRefresh(
             generation = currentGeneration,
             projectId = target.projectId,
