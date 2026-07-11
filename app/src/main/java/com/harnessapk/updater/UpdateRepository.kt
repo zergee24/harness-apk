@@ -10,7 +10,16 @@ import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+
+fun interface UpdateArtifactDownloader {
+    fun downloadApk(manifest: UpdateManifest): ApkDownloadResult
+}
 
 class UpdateRepository(
     private val okHttpClient: OkHttpClient,
@@ -18,7 +27,9 @@ class UpdateRepository(
     private val manifestUrl: String,
     private val currentVersionCode: Int,
     private val cacheDir: File,
-) {
+    private val maxAttempts: Int = 3,
+    private val retryDelay: (Long) -> Unit = { Thread.sleep(it) },
+) : UpdateArtifactDownloader {
     fun checkManifest(manifest: UpdateManifest): UpdateCheckResult {
         manifest.downloadUrls().forEach { requireHttps(it) }
         return UpdateCheckResult(
@@ -31,49 +42,60 @@ class UpdateRepository(
     fun fetchManifest(): UpdateCheckResult {
         requireHttps(manifestUrl)
         val request = Request.Builder().url(manifestUrl).get().build()
-        okHttpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw AppError.Update("更新检查失败：HTTP ${response.code}")
+        val body = retrying("更新检查") {
+            okHttpClient.newCall(request).execute().use { response ->
+                response.requireSuccessful("更新检查")
+                response.body.string()
             }
-            val body = response.body.string()
-            return checkManifest(parseManifest(body))
         }
+        return checkManifest(parseManifest(body))
     }
 
-    fun downloadApk(manifest: UpdateManifest): ApkDownloadResult {
+    override fun downloadApk(manifest: UpdateManifest): ApkDownloadResult {
         val downloadUrls = manifest.downloadUrls()
         downloadUrls.forEach { requireHttps(it) }
         val updatesDir = File(cacheDir, "updates").apply { mkdirs() }
-        val output = File(updatesDir, "harness-apk-${manifest.versionName}.apk")
-        output.delete()
+        val output = File(updatesDir, "harness-apk-${manifest.versionCode}.apk")
+        if (output.isFile) {
+            val existingSha = runCatching { sha256(output) }.getOrNull()
+            if (existingSha.equals(manifest.sha256, ignoreCase = true)) {
+                return ApkDownloadResult(file = output, sha256 = checkNotNull(existingSha))
+            }
+        }
+        val temporary = File(updatesDir, "${output.name}.part")
+        temporary.delete()
         try {
-            output.outputStream().use { fileOut ->
+            FileOutputStream(temporary).use { fileOut ->
                 downloadUrls.forEachIndexed { index, url ->
+                    val label = if (downloadUrls.size == 1) {
+                        "安装包下载"
+                    } else {
+                        "安装包分片 ${index + 1}/${downloadUrls.size} 下载"
+                    }
                     val request = Request.Builder().url(url).get().build()
-                    okHttpClient.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) {
-                            val label = if (downloadUrls.size == 1) {
-                                "安装包下载失败"
-                            } else {
-                                "安装包分片 ${index + 1}/${downloadUrls.size} 下载失败"
+                    val startOffset = fileOut.channel.position()
+                    retrying(label) {
+                        fileOut.channel.truncate(startOffset)
+                        fileOut.channel.position(startOffset)
+                        okHttpClient.newCall(request).execute().use { response ->
+                            response.requireSuccessful(label)
+                            response.body.byteStream().use { input ->
+                                input.copyTo(fileOut)
                             }
-                            throw AppError.Update("$label：HTTP ${response.code}")
-                        }
-                        response.body.byteStream().use { input ->
-                            input.copyTo(fileOut)
                         }
                     }
                 }
             }
         } catch (error: Throwable) {
-            output.delete()
+            temporary.delete()
             throw error
         }
-        val actual = sha256(output)
+        val actual = sha256(temporary)
         if (!actual.equals(manifest.sha256, ignoreCase = true)) {
-            output.delete()
+            temporary.delete()
             throw AppError.Update("安装包校验失败")
         }
+        moveReplacing(temporary, output)
         return ApkDownloadResult(file = output, sha256 = actual)
     }
 
@@ -92,6 +114,48 @@ class UpdateRepository(
 
     private fun requireHttps(url: String) {
         require(url.startsWith("https://")) { "更新地址必须使用 HTTPS" }
+    }
+
+    private fun okhttp3.Response.requireSuccessful(label: String) {
+        if (isSuccessful) return
+        if (code == 408 || code == 429 || code >= 500) {
+            throw RetryableUpdateException("HTTP $code")
+        }
+        throw AppError.Update("$label 失败：HTTP $code")
+    }
+
+    private fun <T> retrying(label: String, block: () -> T): T {
+        require(maxAttempts > 0) { "maxAttempts must be positive" }
+        repeat(maxAttempts) { attempt ->
+            try {
+                return block()
+            } catch (error: Throwable) {
+                if (!error.isRetryable() || attempt == maxAttempts - 1) {
+                    if (error is RetryableUpdateException || error is IOException) {
+                        throw AppError.Update("$label 失败：${error.message ?: "网络异常"}")
+                    }
+                    throw error
+                }
+                retryDelay(if (attempt == 0) 300L else 900L)
+            }
+        }
+        error("unreachable")
+    }
+
+    private fun Throwable.isRetryable(): Boolean =
+        this is RetryableUpdateException || this is IOException
+
+    private fun moveReplacing(source: File, target: File) {
+        try {
+            Files.move(
+                source.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 
     private fun UpdateManifest.downloadUrls(): List<String> {
@@ -118,3 +182,5 @@ class UpdateRepository(
         )
     }
 }
+
+private class RetryableUpdateException(message: String) : IOException(message)

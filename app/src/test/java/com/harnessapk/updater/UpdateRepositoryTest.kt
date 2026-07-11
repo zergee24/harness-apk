@@ -16,6 +16,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 
 class UpdateRepositoryTest {
     @get:Rule
@@ -98,7 +99,8 @@ class UpdateRepositoryTest {
             repository.downloadApk(manifest(apkUrl = server.url("/app.apk").toString().replace("http://", "https://")))
         }
 
-        assertFalse(File(temp.root, "updates/harness-apk-0.1.1.apk").exists())
+        assertFalse(File(temp.root, "updates/harness-apk-2.apk").exists())
+        assertFalse(File(temp.root, "updates/harness-apk-2.apk.part").exists())
         server.shutdown()
     }
 
@@ -108,16 +110,150 @@ class UpdateRepositoryTest {
         assertTrue(repository().sha256(file).matches(Regex("[0-9a-f]{64}")))
     }
 
+    @Test
+    fun fetchManifestRetriesTransientServerFailure() {
+        val attempts = AtomicInteger()
+        val repository = repository(
+            okHttpClient = clientResponding { request ->
+                if (attempts.incrementAndGet() == 1) {
+                    response(request, 500, "temporary")
+                } else {
+                    response(request, 200, manifestJson())
+                }
+            },
+        )
+
+        val result = repository.fetchManifest()
+
+        assertTrue(result.updateAvailable)
+        assertEquals(2, attempts.get())
+    }
+
+    @Test
+    fun downloadRetriesTransientChunkFailureWithoutDuplicatingBytes() {
+        val partOneAttempts = AtomicInteger()
+        val repository = repository(
+            okHttpClient = clientResponding { request ->
+                when (request.url.encodedPath) {
+                    "/part-0" -> response(request, 200, "a")
+                    "/part-1" -> if (partOneAttempts.incrementAndGet() == 1) {
+                        response(request, 500, "temporary")
+                    } else {
+                        response(request, 200, "pk")
+                    }
+                    else -> error("Unexpected URL ${request.url}")
+                }
+            },
+        )
+
+        val result = repository.downloadApk(
+            manifest(
+                apkUrl = null,
+                apkChunks = listOf(
+                    "https://download.example.com/part-0",
+                    "https://download.example.com/part-1",
+                ),
+                sha256 = sha256("apk"),
+            ),
+        )
+
+        assertEquals("apk", result.file.readText())
+        assertEquals(2, partOneAttempts.get())
+    }
+
+    @Test
+    fun nonRetryableNotFoundIsRequestedOnce() {
+        val attempts = AtomicInteger()
+        val repository = repository(
+            okHttpClient = clientResponding { request ->
+                attempts.incrementAndGet()
+                response(request, 404, "missing")
+            },
+        )
+
+        runCatching { repository.downloadApk(manifest()) }
+
+        assertEquals(1, attempts.get())
+    }
+
+    @Test
+    fun checksumFailureKeepsPreviousFileAndDeletesTemporaryFile() {
+        val previous = File(temp.root, "updates/harness-apk-0.1.1.apk").apply {
+            parentFile?.mkdirs()
+            writeText("verified")
+        }
+        val repository = repository(okHttpClient = clientReturning("broken"))
+
+        runCatching { repository.downloadApk(manifest(sha256 = sha256("expected"))) }
+
+        assertEquals("verified", previous.readText())
+        assertFalse(File(temp.root, "updates/harness-apk-2.apk.part").exists())
+    }
+
+    @Test
+    fun validVersionCodeFileIsReusedWithoutNetworkCall() {
+        val requests = AtomicInteger()
+        val final = File(temp.root, "updates/harness-apk-2.apk").apply {
+            parentFile?.mkdirs()
+            writeText("apk")
+        }
+        val repository = repository(
+            okHttpClient = clientResponding { request ->
+                requests.incrementAndGet()
+                response(request, 500, "unexpected")
+            },
+        )
+
+        val result = repository.downloadApk(manifest(sha256 = sha256("apk")))
+
+        assertEquals(final, result.file)
+        assertEquals(0, requests.get())
+    }
+
     private fun repository(
         currentVersionCode: Int = 1,
         okHttpClient: OkHttpClient = OkHttpClient.Builder().build(),
+        retryDelay: (Long) -> Unit = {},
     ) = UpdateRepository(
         okHttpClient = okHttpClient,
         json = Json { ignoreUnknownKeys = true },
         manifestUrl = "https://download.example.com/update.json",
         currentVersionCode = currentVersionCode,
         cacheDir = temp.root,
+        retryDelay = retryDelay,
     )
+
+    private fun clientResponding(
+        responder: (okhttp3.Request) -> Response,
+    ): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor { chain -> responder(chain.request()) }
+        .build()
+
+    private fun clientReturning(body: String): OkHttpClient = clientResponding { request ->
+        response(request, 200, body)
+    }
+
+    private fun response(request: okhttp3.Request, code: Int, body: String): Response =
+        Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(code)
+            .message(if (code in 200..299) "OK" else "Error")
+            .body(body.toResponseBody("application/octet-stream".toMediaType()))
+            .build()
+
+    private fun manifestJson(): String = """
+        {
+          "versionCode": 2,
+          "versionName": "0.1.1",
+          "minSupportedVersionCode": 1,
+          "apkUrl": "https://download.example.com/app.apk",
+          "apkChunks": [],
+          "sha256": "${sha256("apk")}",
+          "releaseNotes": ["test"],
+          "publishedAt": "2026-07-05T00:00:00Z"
+        }
+    """.trimIndent()
 
     private fun manifest(
         versionCode: Int = 2,
