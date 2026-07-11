@@ -10,6 +10,7 @@ import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -67,6 +68,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -162,8 +165,15 @@ internal class ProjectDeliverableRefreshController {
         )
     }
 
-    fun canPublish(refresh: ProjectDeliverableRefresh): Boolean =
-        refresh.generation == currentGeneration
+    fun canPublish(
+        refresh: ProjectDeliverableRefresh,
+        selectedProjectId: String?,
+    ): Boolean = refresh.generation == currentGeneration && refresh.projectId == selectedProjectId
+
+    fun invalidate() {
+        currentGeneration += 1
+        ordinaryRefreshProjectIdToSkip = null
+    }
 }
 
 internal data class ProjectGitRefresh(
@@ -200,6 +210,46 @@ internal fun shouldRefreshGitOnTabSelection(tab: ProjectWorkbenchTab): Boolean =
 internal fun shouldRefreshGitForProjectSelection(tab: ProjectWorkbenchTab, projectId: String?): Boolean =
     shouldRefreshGitOnTabSelection(tab) && projectId != null
 
+internal fun shouldShowProjectWorkbenchTabGuidance(
+    tab: ProjectWorkbenchTab,
+    conversationsEmpty: Boolean,
+    deliverablesEmpty: Boolean,
+    selectedProjectId: String? = null,
+    deliverablesRefreshCompletedProjectId: String? = null,
+): Boolean = when (tab) {
+    ProjectWorkbenchTab.CONVERSATIONS -> conversationsEmpty
+    ProjectWorkbenchTab.FOLDER ->
+        deliverablesEmpty && selectedProjectId != null &&
+            deliverablesRefreshCompletedProjectId == selectedProjectId
+    ProjectWorkbenchTab.GIT -> false
+}
+
+internal data class ProjectWorkbenchContent(
+    val deliverables: List<ProjectDeliverable>,
+    val selectedDeliverableId: String?,
+    val artifactText: String,
+    val gitStatus: GitStatusSummary?,
+    val gitBranches: List<GitBranchSummary>,
+)
+
+internal fun clearedProjectWorkbenchContent(): ProjectWorkbenchContent = ProjectWorkbenchContent(
+    deliverables = emptyList(),
+    selectedDeliverableId = null,
+    artifactText = "",
+    gitStatus = null,
+    gitBranches = emptyList(),
+)
+
+internal fun projectWorkbenchContentForProjectSelection(
+    currentProjectId: String?,
+    nextProjectId: String?,
+    currentContent: ProjectWorkbenchContent,
+): ProjectWorkbenchContent = if (currentProjectId == nextProjectId) {
+    currentContent
+} else {
+    clearedProjectWorkbenchContent()
+}
+
 @Composable
 internal fun ProjectScreen(
     container: AppContainer,
@@ -217,6 +267,7 @@ internal fun ProjectScreen(
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
     var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
+    var deliverablesRefreshCompletedProjectId by remember { mutableStateOf<String?>(null) }
     val deliverableRefreshController = remember { ProjectDeliverableRefreshController() }
     val gitRefreshController = remember { ProjectGitRefreshController() }
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -244,6 +295,35 @@ internal fun ProjectScreen(
     }
     val selectedDeliverable = visibleDeliverables.firstOrNull { it.id == selectedDeliverableId }
     val selectedProjectConversations = projectConversations(conversations, selectedProjectId)
+    val workbenchOverview = projectWorkbenchOverview(
+        conversationCount = selectedProjectConversations.size,
+        deliverableCount = deliverables.size,
+        gitStatus = gitStatus,
+    )
+
+    fun selectProject(projectId: String?, invalidateDeliverableRefresh: Boolean = true) {
+        if (selectedProjectId == projectId) return
+        val nextContent = projectWorkbenchContentForProjectSelection(
+            currentProjectId = selectedProjectId,
+            nextProjectId = projectId,
+            currentContent = ProjectWorkbenchContent(
+                deliverables = deliverables,
+                selectedDeliverableId = selectedDeliverableId,
+                artifactText = artifactText,
+                gitStatus = gitStatus,
+                gitBranches = gitBranches,
+            ),
+        )
+        if (invalidateDeliverableRefresh) deliverableRefreshController.invalidate()
+        gitRefreshController.begin(null)
+        deliverables = nextContent.deliverables
+        deliverablesRefreshCompletedProjectId = null
+        selectedDeliverableId = nextContent.selectedDeliverableId
+        artifactText = nextContent.artifactText
+        gitStatus = nextContent.gitStatus
+        gitBranches = nextContent.gitBranches
+        selectedProjectId = projectId
+    }
 
     fun refreshProjects() {
         scope.launch {
@@ -251,13 +331,16 @@ internal fun ProjectScreen(
                 container.projectRepository.listProjects()
             }
             if (selectedProjectId == null || projects.none { it.id == selectedProjectId }) {
-                selectedProjectId = projects.firstOrNull()?.id
+                selectProject(projects.firstOrNull()?.id)
             }
             onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
         }
     }
 
     fun publishDeliverableRefresh(refresh: ProjectDeliverableRefresh) {
+        if (refresh.projectId == selectedProjectId) {
+            deliverablesRefreshCompletedProjectId = null
+        }
         scope.launch {
             val refreshedDeliverables = withContext(container.dispatchers.io) {
                 if (refresh.query.isBlank()) {
@@ -266,9 +349,10 @@ internal fun ProjectScreen(
                     container.projectRepository.searchDeliverables(refresh.projectId, refresh.query)
                 }
             }
-            if (!deliverableRefreshController.canPublish(refresh)) return@launch
+            if (!deliverableRefreshController.canPublish(refresh, selectedProjectId)) return@launch
 
             deliverables = refreshedDeliverables
+            deliverablesRefreshCompletedProjectId = refresh.projectId
             val filtered = filterProjectArtifacts(deliverables, refresh.filter)
             if (refresh.preferredPath != null && filtered.none { it.id == refresh.preferredPath }) {
                 statusText = "文件已写入，请刷新后查看"
@@ -339,8 +423,7 @@ internal fun ProjectScreen(
                     } ?: throw IllegalStateException("无法读取项目包")
                 }
             }.onSuccess { project ->
-                selectedProjectId = project.id
-                selectedDeliverableId = null
+                selectProject(project.id)
                 searchQuery = ""
                 artifactFilter = defaultProjectArtifactFilter()
                 collapsedDirectoryPaths = emptySet()
@@ -382,10 +465,7 @@ internal fun ProjectScreen(
                 }
             }.onSuccess {
                 if (selectedProjectId == project.id) {
-                    selectedProjectId = null
-                    selectedDeliverableId = null
-                    deliverables = emptyList()
-                    artifactText = ""
+                    selectProject(null)
                     searchQuery = ""
                     artifactFilter = defaultProjectArtifactFilter()
                     collapsedDirectoryPaths = emptySet()
@@ -443,15 +523,14 @@ internal fun ProjectScreen(
                     }
                 }
             }.onSuccess { project ->
-                selectedProjectId = project.id
-                selectedDeliverableId = null
+                selectProject(project.id)
                 searchQuery = ""
                 selectedTab = ProjectWorkbenchTab.GIT
                 showCloneRepositoryDialog = false
                 statusText = "已克隆仓库：${project.name}"
                 refreshProjects()
                 refreshDeliverables()
-                refreshGitState()
+                refreshGitState(project)
             }.onFailure {
                 statusText = it.toUserMessage()
             }
@@ -585,7 +664,7 @@ internal fun ProjectScreen(
             container.projectRepository.listProjects()
         }
         projectsLoaded = true
-        selectedProjectId = selectedProjectId ?: projects.firstOrNull()?.id
+        if (selectedProjectId == null) selectProject(projects.firstOrNull()?.id)
         onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
     }
 
@@ -607,7 +686,7 @@ internal fun ProjectScreen(
         val targetTab = projectWorkbenchTab(target.destination)
         val refreshAlreadySelectedGit = shouldRefreshGitForProjectSelection(targetTab, project.id) &&
             selectedProjectId == project.id && selectedTab == ProjectWorkbenchTab.GIT
-        selectedProjectId = project.id
+        selectProject(project.id, invalidateDeliverableRefresh = false)
         selectedTab = targetTab
         searchQuery = ""
         artifactFilter = ProjectArtifactFilter.ALL
@@ -654,7 +733,7 @@ internal fun ProjectScreen(
                     val project = withContext(container.dispatchers.io) {
                         container.projectRepository.createProject(name)
                     }
-                    selectedProjectId = project.id
+                    selectProject(project.id)
                     searchQuery = ""
                     showNewProjectDialog = false
                     statusText = "已创建项目：${project.name}"
@@ -718,9 +797,9 @@ internal fun ProjectScreen(
             ProjectHeader(
                 selectedProject = selectedProject,
                 projects = projects,
+                overview = workbenchOverview,
                 onSelectProject = {
-                    selectedProjectId = it.id
-                    selectedDeliverableId = null
+                    selectProject(it.id)
                     searchQuery = ""
                 },
                 onCreateProject = { showNewProjectDialog = true },
@@ -769,6 +848,24 @@ internal fun ProjectScreen(
                         if (refreshAlreadySelectedGit) refreshGitState()
                     },
                 )
+            }
+
+            if (
+                shouldShowProjectWorkbenchTabGuidance(
+                    tab = selectedTab,
+                    conversationsEmpty = selectedProjectConversations.isEmpty(),
+                    deliverablesEmpty = deliverables.isEmpty(),
+                    selectedProjectId = selectedProjectId,
+                    deliverablesRefreshCompletedProjectId = deliverablesRefreshCompletedProjectId,
+                )
+            ) {
+                item {
+                    Text(
+                        text = projectWorkbenchTabGuidance(selectedTab),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
 
             when (selectedTab) {
@@ -961,6 +1058,7 @@ private fun ProjectArtifactFilterBar(
 private fun ProjectHeader(
     selectedProject: Project?,
     projects: List<Project>,
+    overview: ProjectWorkbenchOverview,
     onSelectProject: (Project) -> Unit,
     onCreateProject: () -> Unit,
     onCloneRepository: () -> Unit,
@@ -1049,87 +1147,141 @@ private fun ProjectHeader(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         shape = MaterialTheme.shapes.large,
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = selectedProject?.name ?: "未选择项目",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        text = selectedProject?.let {
-                            "通过会话沉淀交付物和项目上下文"
-                        } ?: "创建项目后从会话开始长期工作",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.MiddleEllipsis,
-                    )
-                }
-                Column {
-                    OutlinedButton(
-                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
-                        enabled = projects.isNotEmpty(),
-                        onClick = { projectMenuExpanded = true },
+        Box {
+            if (selectedProject == null) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("切换")
-                    }
-                    DropdownMenu(
-                        expanded = projectMenuExpanded,
-                        onDismissRequest = { projectMenuExpanded = false },
-                    ) {
-                        projects.forEach { project ->
-                            DropdownMenuItem(
-                                text = { Text(project.name) },
-                                onClick = {
-                                    projectMenuExpanded = false
-                                    onSelectProject(project)
-                                },
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "未选择项目",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = "创建项目后从会话开始长期工作",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        overflowMenu()
                     }
-                }
-                if (!actionLayout.showCreateProjectDirectly) {
-                    overflowMenu()
-                }
-            }
-            if (actionLayout.showCreateProjectDirectly) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    OutlinedButton(
+                    Button(
                         modifier = Modifier
-                            .weight(1f)
+                            .fillMaxWidth()
                             .heightIn(min = HarnessSpacing.primaryControlHeight),
                         onClick = onCreateProject,
                     ) {
                         Icon(Icons.Outlined.Add, contentDescription = null)
                         Text("新建项目")
                     }
-                    if (ProjectHeaderAction.NEW_SESSION in actionLayout.directActions) {
-                        Button(
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = HarnessSpacing.primaryControlHeight),
-                            onClick = onCreateSession,
-                        ) {
-                            Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
-                            Text("新建会话")
-                        }
-                    }
-                    overflowMenu()
+                }
+            } else {
+                ProjectWorkbenchHeader(
+                    projectName = selectedProject.name,
+                    overview = overview,
+                    onSelectProject = { projectMenuExpanded = true },
+                    onCreateSession = onCreateSession,
+                    overflowContent = overflowMenu,
+                )
+            }
+
+            DropdownMenu(
+                expanded = projectMenuExpanded,
+                onDismissRequest = { projectMenuExpanded = false },
+            ) {
+                projects.forEach { project ->
+                    DropdownMenuItem(
+                        text = { Text(project.name) },
+                        onClick = {
+                            projectMenuExpanded = false
+                            onSelectProject(project)
+                        },
+                    )
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun ProjectWorkbenchHeader(
+    projectName: String,
+    overview: ProjectWorkbenchOverview,
+    onSelectProject: () -> Unit,
+    onCreateSession: () -> Unit,
+    overflowContent: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier.padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = HarnessSpacing.minimumTouchTarget)
+                    .clickable(onClick = onSelectProject)
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = "切换项目"
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    modifier = Modifier.weight(1f),
+                    text = projectName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.MiddleEllipsis,
+                )
+                Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = null)
+            }
+            overflowContent()
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                modifier = Modifier.weight(1f),
+                text = overview.conversationLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                modifier = Modifier.weight(1f),
+                text = overview.deliverableLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                modifier = Modifier.weight(1f),
+                text = overview.gitLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Button(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = HarnessSpacing.primaryControlHeight),
+            onClick = onCreateSession,
+        ) {
+            Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
+            Text("新建项目会话")
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.harnessapk.ui.project
 
 import com.harnessapk.chat.Conversation
+import com.harnessapk.git.GitStatusSummary
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.ProjectDeliverable
 import java.text.SimpleDateFormat
@@ -12,6 +13,32 @@ internal enum class ProjectWorkbenchTab(val label: String) {
     CONVERSATIONS("会话"),
     FOLDER("文件夹"),
     GIT("Git"),
+}
+
+internal data class ProjectWorkbenchOverview(
+    val conversationLabel: String,
+    val deliverableLabel: String,
+    val gitLabel: String,
+)
+
+internal fun projectWorkbenchOverview(
+    conversationCount: Int,
+    deliverableCount: Int,
+    gitStatus: GitStatusSummary?,
+): ProjectWorkbenchOverview = ProjectWorkbenchOverview(
+    conversationLabel = "$conversationCount 个会话",
+    deliverableLabel = "$deliverableCount 个文件",
+    gitLabel = when {
+        gitStatus == null -> "Git 状态未读取"
+        gitStatus.isClean -> "${gitStatus.currentBranch} · 工作区干净"
+        else -> "${gitStatus.currentBranch} · ${gitStatus.files.size} 项变更"
+    },
+)
+
+internal fun projectWorkbenchTabGuidance(tab: ProjectWorkbenchTab): String = when (tab) {
+    ProjectWorkbenchTab.CONVERSATIONS -> "在当前项目内开始或继续工作"
+    ProjectWorkbenchTab.FOLDER -> "查看会话沉淀和已写入文件"
+    ProjectWorkbenchTab.GIT -> "查看当前分支和工作区变更"
 }
 
 internal enum class ProjectWorkbenchDestination { FILES, GIT }

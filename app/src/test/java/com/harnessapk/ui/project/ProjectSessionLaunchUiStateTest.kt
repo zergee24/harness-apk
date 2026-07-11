@@ -1,6 +1,8 @@
 package com.harnessapk.ui.project
 
 import com.harnessapk.chat.Conversation
+import com.harnessapk.git.GitBranchSummary
+import com.harnessapk.git.GitStatusSummary
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.DeliverableTemplate
 import com.harnessapk.project.ProjectDeliverable
@@ -17,6 +19,132 @@ import org.junit.Test
 import java.io.File
 
 class ProjectSessionLaunchUiStateTest {
+    @Test
+    fun workbenchOverviewUsesLoadedGitStateWithoutRequestingRefresh() {
+        val overview = projectWorkbenchOverview(2, 3, gitStatus("test", false, 1))
+
+        assertEquals("2 个会话", overview.conversationLabel)
+        assertEquals("3 个文件", overview.deliverableLabel)
+        assertEquals("test · 1 项变更", overview.gitLabel)
+    }
+
+    @Test
+    fun workbenchTabGuidanceExplainsEachExistingTab() {
+        assertEquals("在当前项目内开始或继续工作", projectWorkbenchTabGuidance(ProjectWorkbenchTab.CONVERSATIONS))
+        assertEquals("查看会话沉淀和已写入文件", projectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER))
+        assertEquals("查看当前分支和工作区变更", projectWorkbenchTabGuidance(ProjectWorkbenchTab.GIT))
+    }
+
+    @Test
+    fun workbenchTabGuidanceUsesProjectDeliverableEmptinessForFolder() {
+        assertTrue(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.CONVERSATIONS,
+                conversationsEmpty = true,
+                deliverablesEmpty = false,
+            ),
+        )
+        assertTrue(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = false,
+                deliverablesEmpty = true,
+                selectedProjectId = "project-current",
+                deliverablesRefreshCompletedProjectId = "project-current",
+            ),
+        )
+        assertFalse(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = true,
+                deliverablesEmpty = false,
+            ),
+        )
+        assertFalse(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.GIT,
+                conversationsEmpty = true,
+                deliverablesEmpty = true,
+            ),
+        )
+    }
+
+    @Test
+    fun folderGuidanceWaitsForCurrentProjectDeliverablesRefreshToComplete() {
+        assertFalse(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = true,
+                deliverablesEmpty = true,
+                selectedProjectId = "project-current",
+                deliverablesRefreshCompletedProjectId = null,
+            ),
+        )
+        assertFalse(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = true,
+                deliverablesEmpty = true,
+                selectedProjectId = "project-current",
+                deliverablesRefreshCompletedProjectId = "project-previous",
+            ),
+        )
+        assertTrue(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = false,
+                deliverablesEmpty = true,
+                selectedProjectId = "project-current",
+                deliverablesRefreshCompletedProjectId = "project-current",
+            ),
+        )
+    }
+
+    @Test
+    fun deliverablesRefreshPublishesOnlyForItsSelectedProject() {
+        val refreshController = ProjectDeliverableRefreshController()
+        val refresh = refreshController.beginFilesRefresh(
+            projectId = "project-current",
+            preferredPath = null,
+            query = "",
+            filter = ProjectArtifactFilter.ALL,
+        )
+
+        assertFalse(refreshController.canPublish(refresh, selectedProjectId = "project-previous"))
+        assertTrue(refreshController.canPublish(refresh, selectedProjectId = "project-current"))
+    }
+
+    @Test
+    fun clearingProjectWorkbenchContentRemovesPreviousProjectSummaryState() {
+        val cleared = clearedProjectWorkbenchContent()
+
+        assertEquals(emptyList<ProjectDeliverable>(), cleared.deliverables)
+        assertEquals(null, cleared.selectedDeliverableId)
+        assertEquals("", cleared.artifactText)
+        assertEquals(null, cleared.gitStatus)
+        assertEquals(emptyList<GitBranchSummary>(), cleared.gitBranches)
+    }
+
+    @Test
+    fun switchingProjectsClearsPreviousProjectWorkbenchSummaryState() {
+        val previous = ProjectWorkbenchContent(
+            deliverables = listOf(deliverable("docs/old.md", ProjectArtifactType.MARKDOWN)),
+            selectedDeliverableId = "docs/old.md",
+            artifactText = "old artifact",
+            gitStatus = gitStatus("old", isClean = false, changeCount = 1),
+            gitBranches = listOf(GitBranchSummary("old", isCurrent = true, isRemote = false)),
+        )
+
+        assertEquals(
+            clearedProjectWorkbenchContent(),
+            projectWorkbenchContentForProjectSelection(
+                currentProjectId = "project-old",
+                nextProjectId = "project-new",
+                currentContent = previous,
+            ),
+        )
+    }
+
     @Test
     fun projectHeaderKeepsFrequentActionsDirectAndMovesLowFrequencyActionsToOverflow() {
         val layout = projectHeaderActionLayout(hasProject = true)
@@ -108,7 +236,9 @@ class ProjectSessionLaunchUiStateTest {
         )!!
         val filesJob = launch {
             val deliverables = repository.listDeliverables("project-p")
-            if (refreshController.canPublish(filesRefresh)) publishedDeliverables = deliverables
+            if (refreshController.canPublish(filesRefresh, selectedProjectId = "project-p")) {
+                publishedDeliverables = deliverables
+            }
         }
         runCurrent()
 
@@ -135,7 +265,7 @@ class ProjectSessionLaunchUiStateTest {
         )!!
         val targetedJob = async {
             val deliverables = repository.listDeliverables("project-q")
-            if (refreshController.canPublish(targetedRefresh)) {
+            if (refreshController.canPublish(targetedRefresh, selectedProjectId = "project-q")) {
                 selectedDeliverableId = selectedDeliverableIdForRefresh(
                     preferredPath = targetedRefresh.preferredPath,
                     currentSelectedDeliverableId = selectedDeliverableId,
@@ -394,6 +524,26 @@ class ProjectSessionLaunchUiStateTest {
         destination = destination,
         selectedPath = selectedPath,
         requestKey = requestKey,
+    )
+
+    private fun gitStatus(
+        currentBranch: String,
+        isClean: Boolean,
+        changeCount: Int,
+    ) = GitStatusSummary(
+        currentBranch = currentBranch,
+        isClean = isClean,
+        stagedCount = 0,
+        unstagedCount = changeCount,
+        untrackedCount = 0,
+        aheadCount = 0,
+        behindCount = 0,
+        files = List(changeCount) { index ->
+            com.harnessapk.git.GitFileChange(
+                path = "change-$index",
+                type = com.harnessapk.git.GitChangeType.MODIFIED,
+            )
+        },
     )
 
     private class DelayedDeliverableRepository {
