@@ -2464,6 +2464,7 @@ private fun MessagePartView(
 @Composable
 private fun ReasoningPart(part: UiMessagePartDraft) {
     var expanded by remember(part.index) { mutableStateOf(false) }
+    val preview = reasoningCollapsedPreviewText(part.content)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -2475,22 +2476,47 @@ private fun ReasoningPart(part: UiMessagePartDraft) {
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text(
-                text = if (expanded) "收起思考过程" else "思考过程",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "思考过程",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "折叠" else "展开")
+                }
+            }
             if (expanded) {
                 Text(
                     text = part.content,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
+            } else if (preview.isNotBlank()) {
+                Text(
+                    text = preview,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
 }
+
+internal fun reasoningCollapsedPreviewText(content: String): String =
+    content
+        .lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .lastOrNull()
+        .orEmpty()
 
 @Composable
 private fun SearchResultPart(part: UiMessagePartDraft) {

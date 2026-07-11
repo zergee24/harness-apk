@@ -299,6 +299,23 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun reasoningCollapsedPreviewTextUsesLatestNonBlankLine() {
+        val content = """
+            第一步：理解用户问题。
+
+            第二步：检查项目现状。
+
+        """.trimIndent()
+
+        assertEquals("第二步：检查项目现状。", reasoningCollapsedPreviewText(content))
+    }
+
+    @Test
+    fun reasoningCollapsedPreviewTextIsBlankWhenContentHasNoVisibleLine() {
+        assertEquals("", reasoningCollapsedPreviewText("\n   \n"))
+    }
+
+    @Test
     fun messageSelectionCopyTextUsesFullErrorLogWhenPresent() {
         val message = assistantMessage(
             status = MessageStatus.FAILED,

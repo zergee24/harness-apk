@@ -73,10 +73,54 @@ class ModelAwareRequestBuilderTest {
         assertEquals("xhigh", result.request.reasoningEffort)
         assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, result.request.nativeWebSearchMode)
         assertEquals(240_000L, result.request.readTimeoutMillis)
+        assertEquals("system", result.request.messages.first().role)
+        assertEquals(DEFAULT_REASONING_LANGUAGE_INSTRUCTION, result.request.messages.first().text)
+        assertEquals("user", result.request.messages[1].role)
         assertEquals(mapOf("X-Provider-Feature" to "beta"), result.request.customHeaders)
         assertEquals("""{"metadata":{"source":"local-override"}}""", result.request.customBodyJson)
         assertEquals(CapabilitySource.LOCAL_OVERRIDE, result.diagnostics.capabilitySource)
         assertTrue(result.diagnostics.droppedOptions.isEmpty())
+    }
+
+    @Test
+    fun buildAppendsDefaultReasoningLanguageToExistingSystemMessage() {
+        val result = ModelAwareRequestBuilder().build(
+            provider = providerProfile("OpenAI"),
+            apiKey = "secret",
+            capability = resolvedCapability(modelId = "gpt-5.5"),
+            messages = listOf(
+                OutgoingChatMessage(role = "system", text = "项目上下文：移动端工作台"),
+                OutgoingChatMessage(role = "user", text = "继续"),
+            ),
+            temperature = 0.2,
+            selectedReasoningEffort = ReasoningEffort.HIGH,
+            webSearchRequested = false,
+        )
+
+        assertEquals(2, result.request.messages.size)
+        assertEquals(
+            "项目上下文：移动端工作台\n\n$DEFAULT_REASONING_LANGUAGE_INSTRUCTION",
+            result.request.messages.first().text,
+        )
+    }
+
+    @Test
+    fun buildDoesNotDuplicateDefaultReasoningLanguageInstruction() {
+        val result = ModelAwareRequestBuilder().build(
+            provider = providerProfile("OpenAI"),
+            apiKey = "secret",
+            capability = resolvedCapability(modelId = "gpt-5.5"),
+            messages = listOf(
+                OutgoingChatMessage(role = "system", text = DEFAULT_REASONING_LANGUAGE_INSTRUCTION),
+                OutgoingChatMessage(role = "user", text = "继续"),
+            ),
+            temperature = 0.2,
+            selectedReasoningEffort = ReasoningEffort.HIGH,
+            webSearchRequested = false,
+        )
+
+        assertEquals(2, result.request.messages.size)
+        assertEquals(DEFAULT_REASONING_LANGUAGE_INSTRUCTION, result.request.messages.first().text)
     }
 
     @Test

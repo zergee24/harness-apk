@@ -47,7 +47,7 @@ class ModelAwareRequestBuilder {
                 baseUrl = provider.baseUrl,
                 apiKey = apiKey,
                 model = capability.modelId,
-                messages = messages,
+                messages = messages.withDefaultReasoningLanguage(),
                 temperature = temperature,
                 reasoningEffort = reasoningEffort,
                 nativeWebSearchMode = nativeWebSearchMode,
@@ -88,3 +88,28 @@ data class ModelAwareRequestDiagnostics(
 
 private fun ResolvedModelCapability.supportsInput(modality: String): Boolean =
     inputModalities.any { it.equals(modality, ignoreCase = true) }
+
+internal const val DEFAULT_REASONING_LANGUAGE_INSTRUCTION =
+    "思考过程默认使用中文；可见回答的语言遵循用户输入，除非用户另有要求。"
+
+internal fun List<OutgoingChatMessage>.withDefaultReasoningLanguage(): List<OutgoingChatMessage> {
+    if (any { it.role.equals("system", ignoreCase = true) && it.text.contains(DEFAULT_REASONING_LANGUAGE_INSTRUCTION) }) {
+        return this
+    }
+    val systemIndex = indexOfFirst { it.role.equals("system", ignoreCase = true) }
+    if (systemIndex >= 0) {
+        return mapIndexed { index, message ->
+            if (index == systemIndex) {
+                message.copy(text = message.text.trimEnd() + "\n\n" + DEFAULT_REASONING_LANGUAGE_INSTRUCTION)
+            } else {
+                message
+            }
+        }
+    }
+    return listOf(
+        OutgoingChatMessage(
+            role = "system",
+            text = DEFAULT_REASONING_LANGUAGE_INSTRUCTION,
+        ),
+    ) + this
+}
