@@ -49,6 +49,8 @@ class ProjectSessionLaunchUiStateTest {
                 tab = ProjectWorkbenchTab.FOLDER,
                 conversationsEmpty = false,
                 deliverablesEmpty = true,
+                selectedProjectId = "project-current",
+                deliverablesRefreshCompletedProjectId = "project-current",
             ),
         )
         assertFalse(
@@ -65,6 +67,51 @@ class ProjectSessionLaunchUiStateTest {
                 deliverablesEmpty = true,
             ),
         )
+    }
+
+    @Test
+    fun folderGuidanceWaitsForCurrentProjectDeliverablesRefreshToComplete() {
+        assertFalse(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = true,
+                deliverablesEmpty = true,
+                selectedProjectId = "project-current",
+                deliverablesRefreshCompletedProjectId = null,
+            ),
+        )
+        assertFalse(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = true,
+                deliverablesEmpty = true,
+                selectedProjectId = "project-current",
+                deliverablesRefreshCompletedProjectId = "project-previous",
+            ),
+        )
+        assertTrue(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = false,
+                deliverablesEmpty = true,
+                selectedProjectId = "project-current",
+                deliverablesRefreshCompletedProjectId = "project-current",
+            ),
+        )
+    }
+
+    @Test
+    fun deliverablesRefreshPublishesOnlyForItsSelectedProject() {
+        val refreshController = ProjectDeliverableRefreshController()
+        val refresh = refreshController.beginFilesRefresh(
+            projectId = "project-current",
+            preferredPath = null,
+            query = "",
+            filter = ProjectArtifactFilter.ALL,
+        )
+
+        assertFalse(refreshController.canPublish(refresh, selectedProjectId = "project-previous"))
+        assertTrue(refreshController.canPublish(refresh, selectedProjectId = "project-current"))
     }
 
     @Test
@@ -189,7 +236,9 @@ class ProjectSessionLaunchUiStateTest {
         )!!
         val filesJob = launch {
             val deliverables = repository.listDeliverables("project-p")
-            if (refreshController.canPublish(filesRefresh)) publishedDeliverables = deliverables
+            if (refreshController.canPublish(filesRefresh, selectedProjectId = "project-p")) {
+                publishedDeliverables = deliverables
+            }
         }
         runCurrent()
 
@@ -216,7 +265,7 @@ class ProjectSessionLaunchUiStateTest {
         )!!
         val targetedJob = async {
             val deliverables = repository.listDeliverables("project-q")
-            if (refreshController.canPublish(targetedRefresh)) {
+            if (refreshController.canPublish(targetedRefresh, selectedProjectId = "project-q")) {
                 selectedDeliverableId = selectedDeliverableIdForRefresh(
                     preferredPath = targetedRefresh.preferredPath,
                     currentSelectedDeliverableId = selectedDeliverableId,

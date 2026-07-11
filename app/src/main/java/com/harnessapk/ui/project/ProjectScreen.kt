@@ -165,8 +165,10 @@ internal class ProjectDeliverableRefreshController {
         )
     }
 
-    fun canPublish(refresh: ProjectDeliverableRefresh): Boolean =
-        refresh.generation == currentGeneration
+    fun canPublish(
+        refresh: ProjectDeliverableRefresh,
+        selectedProjectId: String?,
+    ): Boolean = refresh.generation == currentGeneration && refresh.projectId == selectedProjectId
 
     fun invalidate() {
         currentGeneration += 1
@@ -212,9 +214,13 @@ internal fun shouldShowProjectWorkbenchTabGuidance(
     tab: ProjectWorkbenchTab,
     conversationsEmpty: Boolean,
     deliverablesEmpty: Boolean,
+    selectedProjectId: String? = null,
+    deliverablesRefreshCompletedProjectId: String? = null,
 ): Boolean = when (tab) {
     ProjectWorkbenchTab.CONVERSATIONS -> conversationsEmpty
-    ProjectWorkbenchTab.FOLDER -> deliverablesEmpty
+    ProjectWorkbenchTab.FOLDER ->
+        deliverablesEmpty && selectedProjectId != null &&
+            deliverablesRefreshCompletedProjectId == selectedProjectId
     ProjectWorkbenchTab.GIT -> false
 }
 
@@ -261,6 +267,7 @@ internal fun ProjectScreen(
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
     var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
+    var deliverablesRefreshCompletedProjectId by remember { mutableStateOf<String?>(null) }
     val deliverableRefreshController = remember { ProjectDeliverableRefreshController() }
     val gitRefreshController = remember { ProjectGitRefreshController() }
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -310,6 +317,7 @@ internal fun ProjectScreen(
         if (invalidateDeliverableRefresh) deliverableRefreshController.invalidate()
         gitRefreshController.begin(null)
         deliverables = nextContent.deliverables
+        deliverablesRefreshCompletedProjectId = null
         selectedDeliverableId = nextContent.selectedDeliverableId
         artifactText = nextContent.artifactText
         gitStatus = nextContent.gitStatus
@@ -330,6 +338,9 @@ internal fun ProjectScreen(
     }
 
     fun publishDeliverableRefresh(refresh: ProjectDeliverableRefresh) {
+        if (refresh.projectId == selectedProjectId) {
+            deliverablesRefreshCompletedProjectId = null
+        }
         scope.launch {
             val refreshedDeliverables = withContext(container.dispatchers.io) {
                 if (refresh.query.isBlank()) {
@@ -338,9 +349,10 @@ internal fun ProjectScreen(
                     container.projectRepository.searchDeliverables(refresh.projectId, refresh.query)
                 }
             }
-            if (!deliverableRefreshController.canPublish(refresh)) return@launch
+            if (!deliverableRefreshController.canPublish(refresh, selectedProjectId)) return@launch
 
             deliverables = refreshedDeliverables
+            deliverablesRefreshCompletedProjectId = refresh.projectId
             val filtered = filterProjectArtifacts(deliverables, refresh.filter)
             if (refresh.preferredPath != null && filtered.none { it.id == refresh.preferredPath }) {
                 statusText = "文件已写入，请刷新后查看"
@@ -843,6 +855,8 @@ internal fun ProjectScreen(
                     tab = selectedTab,
                     conversationsEmpty = selectedProjectConversations.isEmpty(),
                     deliverablesEmpty = deliverables.isEmpty(),
+                    selectedProjectId = selectedProjectId,
+                    deliverablesRefreshCompletedProjectId = deliverablesRefreshCompletedProjectId,
                 )
             ) {
                 item {
