@@ -244,6 +244,11 @@ internal fun ProjectScreen(
     }
     val selectedDeliverable = visibleDeliverables.firstOrNull { it.id == selectedDeliverableId }
     val selectedProjectConversations = projectConversations(conversations, selectedProjectId)
+    val workbenchOverview = projectWorkbenchOverview(
+        conversationCount = selectedProjectConversations.size,
+        deliverableCount = deliverables.size,
+        gitStatus = gitStatus,
+    )
 
     fun refreshProjects() {
         scope.launch {
@@ -718,6 +723,7 @@ internal fun ProjectScreen(
             ProjectHeader(
                 selectedProject = selectedProject,
                 projects = projects,
+                overview = workbenchOverview,
                 onSelectProject = {
                     selectedProjectId = it.id
                     selectedDeliverableId = null
@@ -769,6 +775,21 @@ internal fun ProjectScreen(
                         if (refreshAlreadySelectedGit) refreshGitState()
                     },
                 )
+            }
+
+            val isWorkbenchContentEmpty = when (selectedTab) {
+                ProjectWorkbenchTab.CONVERSATIONS -> selectedProjectConversations.isEmpty()
+                ProjectWorkbenchTab.FOLDER -> visibleTreeItems.isEmpty()
+                ProjectWorkbenchTab.GIT -> gitStatus == null
+            }
+            if (isWorkbenchContentEmpty) {
+                item {
+                    Text(
+                        text = projectWorkbenchTabGuidance(selectedTab),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
 
             when (selectedTab) {
@@ -961,6 +982,7 @@ private fun ProjectArtifactFilterBar(
 private fun ProjectHeader(
     selectedProject: Project?,
     projects: List<Project>,
+    overview: ProjectWorkbenchOverview,
     onSelectProject: (Project) -> Unit,
     onCreateProject: () -> Unit,
     onCloneRepository: () -> Unit,
@@ -1049,87 +1071,135 @@ private fun ProjectHeader(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         shape = MaterialTheme.shapes.large,
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = selectedProject?.name ?: "未选择项目",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        text = selectedProject?.let {
-                            "通过会话沉淀交付物和项目上下文"
-                        } ?: "创建项目后从会话开始长期工作",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.MiddleEllipsis,
-                    )
-                }
-                Column {
-                    OutlinedButton(
-                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
-                        enabled = projects.isNotEmpty(),
-                        onClick = { projectMenuExpanded = true },
+        Box {
+            if (selectedProject == null) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("切换")
-                    }
-                    DropdownMenu(
-                        expanded = projectMenuExpanded,
-                        onDismissRequest = { projectMenuExpanded = false },
-                    ) {
-                        projects.forEach { project ->
-                            DropdownMenuItem(
-                                text = { Text(project.name) },
-                                onClick = {
-                                    projectMenuExpanded = false
-                                    onSelectProject(project)
-                                },
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "未选择项目",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = "创建项目后从会话开始长期工作",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        overflowMenu()
                     }
-                }
-                if (!actionLayout.showCreateProjectDirectly) {
-                    overflowMenu()
-                }
-            }
-            if (actionLayout.showCreateProjectDirectly) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    OutlinedButton(
+                    Button(
                         modifier = Modifier
-                            .weight(1f)
+                            .fillMaxWidth()
                             .heightIn(min = HarnessSpacing.primaryControlHeight),
                         onClick = onCreateProject,
                     ) {
                         Icon(Icons.Outlined.Add, contentDescription = null)
                         Text("新建项目")
                     }
-                    if (ProjectHeaderAction.NEW_SESSION in actionLayout.directActions) {
-                        Button(
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = HarnessSpacing.primaryControlHeight),
-                            onClick = onCreateSession,
-                        ) {
-                            Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
-                            Text("新建会话")
-                        }
-                    }
-                    overflowMenu()
+                }
+            } else {
+                ProjectWorkbenchHeader(
+                    projectName = selectedProject.name,
+                    overview = overview,
+                    onSelectProject = { projectMenuExpanded = true },
+                    onCreateSession = onCreateSession,
+                    overflowContent = overflowMenu,
+                )
+            }
+
+            DropdownMenu(
+                expanded = projectMenuExpanded,
+                onDismissRequest = { projectMenuExpanded = false },
+            ) {
+                projects.forEach { project ->
+                    DropdownMenuItem(
+                        text = { Text(project.name) },
+                        onClick = {
+                            projectMenuExpanded = false
+                            onSelectProject(project)
+                        },
+                    )
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun ProjectWorkbenchHeader(
+    projectName: String,
+    overview: ProjectWorkbenchOverview,
+    onSelectProject: () -> Unit,
+    onCreateSession: () -> Unit,
+    overflowContent: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier.padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                modifier = Modifier.weight(1f),
+                text = projectName,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.MiddleEllipsis,
+            )
+            IconButton(
+                modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
+                onClick = onSelectProject,
+            ) {
+                Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "切换项目")
+            }
+            overflowContent()
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                modifier = Modifier.weight(1f),
+                text = overview.conversationLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                modifier = Modifier.weight(1f),
+                text = overview.deliverableLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                modifier = Modifier.weight(1f),
+                text = overview.gitLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Button(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = HarnessSpacing.primaryControlHeight),
+            onClick = onCreateSession,
+        ) {
+            Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
+            Text("新建项目会话")
         }
     }
 }
