@@ -36,11 +36,35 @@ class ProjectSessionLaunchUiStateTest {
     }
 
     @Test
-    fun workbenchTabGuidanceOnlyShowsForEmptyConversationOrFolderContent() {
-        assertTrue(shouldShowProjectWorkbenchTabGuidance(ProjectWorkbenchTab.CONVERSATIONS, isContentEmpty = true))
-        assertTrue(shouldShowProjectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER, isContentEmpty = true))
-        assertFalse(shouldShowProjectWorkbenchTabGuidance(ProjectWorkbenchTab.GIT, isContentEmpty = true))
-        assertFalse(shouldShowProjectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER, isContentEmpty = false))
+    fun workbenchTabGuidanceUsesProjectDeliverableEmptinessForFolder() {
+        assertTrue(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.CONVERSATIONS,
+                conversationsEmpty = true,
+                deliverablesEmpty = false,
+            ),
+        )
+        assertTrue(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = false,
+                deliverablesEmpty = true,
+            ),
+        )
+        assertFalse(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.FOLDER,
+                conversationsEmpty = true,
+                deliverablesEmpty = false,
+            ),
+        )
+        assertFalse(
+            shouldShowProjectWorkbenchTabGuidance(
+                tab = ProjectWorkbenchTab.GIT,
+                conversationsEmpty = true,
+                deliverablesEmpty = true,
+            ),
+        )
     }
 
     @Test
@@ -52,6 +76,26 @@ class ProjectSessionLaunchUiStateTest {
         assertEquals("", cleared.artifactText)
         assertEquals(null, cleared.gitStatus)
         assertEquals(emptyList<GitBranchSummary>(), cleared.gitBranches)
+    }
+
+    @Test
+    fun switchingProjectsClearsPreviousProjectWorkbenchSummaryState() {
+        val previous = ProjectWorkbenchContent(
+            deliverables = listOf(deliverable("docs/old.md", ProjectArtifactType.MARKDOWN)),
+            selectedDeliverableId = "docs/old.md",
+            artifactText = "old artifact",
+            gitStatus = gitStatus("old", isClean = false, changeCount = 1),
+            gitBranches = listOf(GitBranchSummary("old", isCurrent = true, isRemote = false)),
+        )
+
+        assertEquals(
+            clearedProjectWorkbenchContent(),
+            projectWorkbenchContentForProjectSelection(
+                currentProjectId = "project-old",
+                nextProjectId = "project-new",
+                currentContent = previous,
+            ),
+        )
     }
 
     @Test

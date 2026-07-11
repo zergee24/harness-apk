@@ -210,8 +210,13 @@ internal fun shouldRefreshGitForProjectSelection(tab: ProjectWorkbenchTab, proje
 
 internal fun shouldShowProjectWorkbenchTabGuidance(
     tab: ProjectWorkbenchTab,
-    isContentEmpty: Boolean,
-): Boolean = isContentEmpty && tab != ProjectWorkbenchTab.GIT
+    conversationsEmpty: Boolean,
+    deliverablesEmpty: Boolean,
+): Boolean = when (tab) {
+    ProjectWorkbenchTab.CONVERSATIONS -> conversationsEmpty
+    ProjectWorkbenchTab.FOLDER -> deliverablesEmpty
+    ProjectWorkbenchTab.GIT -> false
+}
 
 internal data class ProjectWorkbenchContent(
     val deliverables: List<ProjectDeliverable>,
@@ -228,6 +233,16 @@ internal fun clearedProjectWorkbenchContent(): ProjectWorkbenchContent = Project
     gitStatus = null,
     gitBranches = emptyList(),
 )
+
+internal fun projectWorkbenchContentForProjectSelection(
+    currentProjectId: String?,
+    nextProjectId: String?,
+    currentContent: ProjectWorkbenchContent,
+): ProjectWorkbenchContent = if (currentProjectId == nextProjectId) {
+    currentContent
+} else {
+    clearedProjectWorkbenchContent()
+}
 
 @Composable
 internal fun ProjectScreen(
@@ -279,13 +294,27 @@ internal fun ProjectScreen(
         gitStatus = gitStatus,
     )
 
-    fun clearProjectWorkbenchContent() {
-        val cleared = clearedProjectWorkbenchContent()
-        deliverables = cleared.deliverables
-        selectedDeliverableId = cleared.selectedDeliverableId
-        artifactText = cleared.artifactText
-        gitStatus = cleared.gitStatus
-        gitBranches = cleared.gitBranches
+    fun selectProject(projectId: String?, invalidateDeliverableRefresh: Boolean = true) {
+        if (selectedProjectId == projectId) return
+        val nextContent = projectWorkbenchContentForProjectSelection(
+            currentProjectId = selectedProjectId,
+            nextProjectId = projectId,
+            currentContent = ProjectWorkbenchContent(
+                deliverables = deliverables,
+                selectedDeliverableId = selectedDeliverableId,
+                artifactText = artifactText,
+                gitStatus = gitStatus,
+                gitBranches = gitBranches,
+            ),
+        )
+        if (invalidateDeliverableRefresh) deliverableRefreshController.invalidate()
+        gitRefreshController.begin(null)
+        deliverables = nextContent.deliverables
+        selectedDeliverableId = nextContent.selectedDeliverableId
+        artifactText = nextContent.artifactText
+        gitStatus = nextContent.gitStatus
+        gitBranches = nextContent.gitBranches
+        selectedProjectId = projectId
     }
 
     fun refreshProjects() {
@@ -294,7 +323,7 @@ internal fun ProjectScreen(
                 container.projectRepository.listProjects()
             }
             if (selectedProjectId == null || projects.none { it.id == selectedProjectId }) {
-                selectedProjectId = projects.firstOrNull()?.id
+                selectProject(projects.firstOrNull()?.id)
             }
             onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
         }
@@ -382,8 +411,7 @@ internal fun ProjectScreen(
                     } ?: throw IllegalStateException("无法读取项目包")
                 }
             }.onSuccess { project ->
-                selectedProjectId = project.id
-                selectedDeliverableId = null
+                selectProject(project.id)
                 searchQuery = ""
                 artifactFilter = defaultProjectArtifactFilter()
                 collapsedDirectoryPaths = emptySet()
@@ -425,10 +453,7 @@ internal fun ProjectScreen(
                 }
             }.onSuccess {
                 if (selectedProjectId == project.id) {
-                    selectedProjectId = null
-                    selectedDeliverableId = null
-                    deliverables = emptyList()
-                    artifactText = ""
+                    selectProject(null)
                     searchQuery = ""
                     artifactFilter = defaultProjectArtifactFilter()
                     collapsedDirectoryPaths = emptySet()
@@ -486,15 +511,14 @@ internal fun ProjectScreen(
                     }
                 }
             }.onSuccess { project ->
-                selectedProjectId = project.id
-                selectedDeliverableId = null
+                selectProject(project.id)
                 searchQuery = ""
                 selectedTab = ProjectWorkbenchTab.GIT
                 showCloneRepositoryDialog = false
                 statusText = "已克隆仓库：${project.name}"
                 refreshProjects()
                 refreshDeliverables()
-                refreshGitState()
+                refreshGitState(project)
             }.onFailure {
                 statusText = it.toUserMessage()
             }
@@ -628,7 +652,7 @@ internal fun ProjectScreen(
             container.projectRepository.listProjects()
         }
         projectsLoaded = true
-        selectedProjectId = selectedProjectId ?: projects.firstOrNull()?.id
+        if (selectedProjectId == null) selectProject(projects.firstOrNull()?.id)
         onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
     }
 
@@ -650,11 +674,7 @@ internal fun ProjectScreen(
         val targetTab = projectWorkbenchTab(target.destination)
         val refreshAlreadySelectedGit = shouldRefreshGitForProjectSelection(targetTab, project.id) &&
             selectedProjectId == project.id && selectedTab == ProjectWorkbenchTab.GIT
-        if (selectedProjectId != project.id) {
-            gitRefreshController.begin(null)
-            clearProjectWorkbenchContent()
-        }
-        selectedProjectId = project.id
+        selectProject(project.id, invalidateDeliverableRefresh = false)
         selectedTab = targetTab
         searchQuery = ""
         artifactFilter = ProjectArtifactFilter.ALL
@@ -701,7 +721,7 @@ internal fun ProjectScreen(
                     val project = withContext(container.dispatchers.io) {
                         container.projectRepository.createProject(name)
                     }
-                    selectedProjectId = project.id
+                    selectProject(project.id)
                     searchQuery = ""
                     showNewProjectDialog = false
                     statusText = "已创建项目：${project.name}"
@@ -767,12 +787,7 @@ internal fun ProjectScreen(
                 projects = projects,
                 overview = workbenchOverview,
                 onSelectProject = {
-                    if (selectedProjectId != it.id) {
-                        deliverableRefreshController.invalidate()
-                        gitRefreshController.begin(null)
-                        clearProjectWorkbenchContent()
-                    }
-                    selectedProjectId = it.id
+                    selectProject(it.id)
                     searchQuery = ""
                 },
                 onCreateProject = { showNewProjectDialog = true },
@@ -823,12 +838,13 @@ internal fun ProjectScreen(
                 )
             }
 
-            val isWorkbenchContentEmpty = when (selectedTab) {
-                ProjectWorkbenchTab.CONVERSATIONS -> selectedProjectConversations.isEmpty()
-                ProjectWorkbenchTab.FOLDER -> visibleTreeItems.isEmpty()
-                ProjectWorkbenchTab.GIT -> false
-            }
-            if (shouldShowProjectWorkbenchTabGuidance(selectedTab, isWorkbenchContentEmpty)) {
+            if (
+                shouldShowProjectWorkbenchTabGuidance(
+                    tab = selectedTab,
+                    conversationsEmpty = selectedProjectConversations.isEmpty(),
+                    deliverablesEmpty = deliverables.isEmpty(),
+                )
+            ) {
                 item {
                     Text(
                         text = projectWorkbenchTabGuidance(selectedTab),
