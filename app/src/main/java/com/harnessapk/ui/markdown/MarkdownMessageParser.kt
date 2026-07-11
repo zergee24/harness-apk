@@ -61,7 +61,7 @@ sealed interface MarkdownInline {
 }
 
 fun parseMarkdownBlocks(markdown: String): List<MarkdownBlock> {
-    val document = markdownParser.parse(normalizeModelMarkdown(markdown))
+    val document = markdownParser.parse(normalizeModelMarkdown(unwrapGluedTextFences(markdown)))
     return document.children().flatMap { it.toBlocks() }.toList()
 }
 
@@ -107,6 +107,47 @@ private val compactFenceLanguages = listOf(
     "css",
     "sql",
 )
+
+private fun unwrapGluedTextFences(markdown: String): String {
+    var activeUnwrappedFence: MarkdownFence? = null
+    var activePreservedFence: MarkdownFence? = null
+    return buildList {
+        markdown.lineSequence().forEach { line ->
+            activeUnwrappedFence?.let { fence ->
+                val trailingContent = fence.trailingCloseContent(line)
+                when {
+                    fence.isClosingLine(line) -> activeUnwrappedFence = null
+                    trailingContent != null -> {
+                        add(trailingContent)
+                        activeUnwrappedFence = null
+                    }
+                    else -> add(line)
+                }
+                return@forEach
+            }
+            activePreservedFence?.let { fence ->
+                add(line)
+                if (fence.isClosingLine(line) || fence.trailingCloseContent(line) != null) {
+                    activePreservedFence = null
+                }
+                return@forEach
+            }
+            unwrapSingleLineGluedTextFence(line)?.let { content ->
+                add(content)
+                return@forEach
+            }
+            val openingFence = parseMarkdownFenceOpening(line)
+            val gluedContent = openingFence?.gluedTextContent
+            if (openingFence != null && gluedContent != null) {
+                add(gluedContent)
+                activeUnwrappedFence = openingFence
+            } else {
+                add(line)
+                activePreservedFence = openingFence
+            }
+        }
+    }.joinToString("\n")
+}
 
 private fun normalizeModelMarkdown(markdown: String): String {
     var activeFence: MarkdownFence? = null

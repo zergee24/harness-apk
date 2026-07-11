@@ -3,7 +3,9 @@ package com.harnessapk.ui.chat
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -84,5 +86,33 @@ class MarkdownMessageTest {
         composeRule.onNodeWithText("身体正对主屏").assertIsDisplayed()
         composeRule.onNodeWithText("## 恢复标题").assertDoesNotExist()
         composeRule.onNodeWithText("> **身体正对主屏**").assertDoesNotExist()
+    }
+
+    @Test
+    fun mixedMarkdownOnlyRendersRealCodeFenceAsCode() {
+        composeRule.setContent {
+            MaterialTheme {
+                MarkdownMessage(
+                    modifier = Modifier.width(360.dp),
+                    markdown = """
+                        ```text一级标题
+                        这是普通正文。
+                        ```
+
+                        > **身体正对主屏**
+
+                        ```kotlin
+                        val x = 1
+                        ```
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("一级标题 这是普通正文。").assertIsDisplayed()
+        composeRule.onNodeWithText("身体正对主屏").assertIsDisplayed()
+        composeRule.onNodeWithText("text一级标题").assertDoesNotExist()
+        composeRule.onNodeWithText("kotlin").assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("复制代码").assertCountEquals(1)
     }
 }

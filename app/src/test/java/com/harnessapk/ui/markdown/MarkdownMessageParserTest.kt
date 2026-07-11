@@ -81,8 +81,10 @@ class MarkdownMessageParserTest {
             """.trimIndent(),
         )
 
-        assertEquals(2, blocks.filterIsInstance<MarkdownBlock.Code>().size)
+        assertTrue(blocks.none { it is MarkdownBlock.Code })
         assertTrue(blocks.any { it is MarkdownBlock.Divider })
+        assertTrue(blocks.debugText(), "左侧16:18" in blocks.debugText())
+        assertTrue(blocks.debugText(), "Codex / Terminal" in blocks.debugText())
         assertEquals(
             "人体工学上要注意最重要的一点：",
             blocks.filterIsInstance<MarkdownBlock.Heading>().single().text.plainText(),
@@ -114,6 +116,56 @@ class MarkdownMessageParserTest {
         assertTrue("---" in code.literal)
         assertTrue("# this is intentionally code-like text" in code.literal)
         assertTrue("| column | value |" in code.literal)
+    }
+
+    @Test
+    fun unwrapsGluedChineseTextFenceAsMarkdown() {
+        val blocks = parseMarkdownBlocks(
+            """
+            ```text一级标题
+            这里是普通正文，包含 **重点**。
+            ```
+
+            后续正文
+            """.trimIndent(),
+        )
+
+        assertTrue(blocks.none { it is MarkdownBlock.Code })
+        assertTrue(blocks.debugText(), "一级标题" in blocks.debugText())
+        assertTrue(blocks.debugText(), "这里是普通正文" in blocks.debugText())
+        assertTrue(blocks.debugText(), "后续正文" in blocks.debugText())
+    }
+
+    @Test
+    fun unwrapsSingleLineGluedChineseTextFence() {
+        val blocks = parseMarkdownBlocks("```text左侧布局：主屏 + 日志屏```")
+
+        assertTrue(blocks.none { it is MarkdownBlock.Code })
+        assertEquals(
+            "左侧布局：主屏 + 日志屏",
+            (blocks.single() as MarkdownBlock.Paragraph).text.plainText(),
+        )
+    }
+
+    @Test
+    fun unwrapsInlineGluedChineseTextFenceInsideParagraph() {
+        val blocks = parseMarkdownBlocks("前文 ```text一级内容``` 后文")
+
+        assertTrue(blocks.none { it is MarkdownBlock.Code })
+        assertEquals(
+            "前文 一级内容 后文",
+            (blocks.single() as MarkdownBlock.Paragraph).text.plainText(),
+        )
+    }
+
+    @Test
+    fun preservesValidTextAndTextLikeLanguageFences() {
+        val samples = listOf("text", "plaintext", "text/plain", "kotlin")
+
+        samples.forEach { info ->
+            val code = parseMarkdownBlocks("```$info\n正文日志\n```").single()
+            assertTrue("$info should remain code", code is MarkdownBlock.Code)
+        }
     }
 
     @Test
@@ -472,7 +524,9 @@ class MarkdownMessageParserTest {
         val blocks = parseMarkdownBlocks(source)
 
         assertTrue(source.length >= 4_000)
-        assertEquals(2, blocks.filterIsInstance<MarkdownBlock.Code>().size)
+        val codes = blocks.filterIsInstance<MarkdownBlock.Code>()
+        assertEquals(1, codes.size)
+        assertEquals("标准日志代码块 TOKEN_REAL_CODE", codes.single().literal)
         assertTrue(blocks.any { it is MarkdownBlock.Divider })
         assertTrue(blocks.any { it is MarkdownBlock.Heading })
         assertTrue(blocks.any { it is MarkdownBlock.Quote })
@@ -483,7 +537,7 @@ class MarkdownMessageParserTest {
         assertTrue("TOKEN_TRANSITION" in rendered)
         assertTrue("TOKEN_NESTED" in rendered)
         repeat(80) { index -> assertTrue("Missing TOKEN_$index", "TOKEN_$index" in rendered) }
-        assertTrue(blocks.filterIsInstance<MarkdownBlock.Code>().none { "TOKEN_79" in it.literal })
+        assertTrue(codes.none { "TOKEN_79" in it.literal || "左侧16:18" in it.literal })
     }
 
     @Test
