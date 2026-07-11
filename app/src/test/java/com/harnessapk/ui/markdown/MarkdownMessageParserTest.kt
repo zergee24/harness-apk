@@ -60,6 +60,62 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun recoversTrailingAndUnclosedTextFencesFromModelOutput() {
+        val blocks = parseMarkdownBlocks(
+            """
+            ```text左侧16:18:
+            上：代码下：Codex / Terminal```
+
+            如果 Codex 需要长时间跑任务，也可以临时变成竖屏。
+
+            ```text左侧16:18:
+            上半：Codex 下半：Terminal / 测试 / 日志
+            然后代码临时放右下 24 寸。
+
+            ---
+
+            ## 人体工学上要注意最重要的一点：
+
+            > **你身体应该正对主屏**
+            """.trimIndent(),
+        )
+
+        assertEquals(2, blocks.filterIsInstance<MarkdownBlock.Code>().size)
+        assertTrue(blocks.any { it is MarkdownBlock.Divider })
+        assertEquals(
+            "人体工学上要注意最重要的一点：",
+            blocks.filterIsInstance<MarkdownBlock.Heading>().single().text.plainText(),
+        )
+        val quote = blocks.filterIsInstance<MarkdownBlock.Quote>().single()
+        val quoteParagraph = quote.blocks.single() as MarkdownBlock.Paragraph
+        assertTrue(quoteParagraph.text.any { it is MarkdownInline.Strong })
+        assertTrue(
+            blocks.filterIsInstance<MarkdownBlock.Code>().none {
+                "##" in it.literal || "> **" in it.literal
+            },
+        )
+    }
+
+    @Test
+    fun doesNotRecoverMarkdownMarkersInsideRealCodeFence() {
+        val source = """
+            ```kotlin
+            val divider = "---"
+            # this is intentionally code-like text
+            | column | value |
+
+            fun keepGoing() = divider
+            ```
+        """.trimIndent()
+
+        val code = parseMarkdownBlocks(source).single() as MarkdownBlock.Code
+
+        assertTrue("---" in code.literal)
+        assertTrue("# this is intentionally code-like text" in code.literal)
+        assertTrue("| column | value |" in code.literal)
+    }
+
+    @Test
     fun markdownTextMetricsLeaveRoomForWrappedHeadingsAndCode() {
         assertTrue(markdownHeadingLineHeightSp(level = 1) > markdownHeadingFontSizeSp(level = 1))
         assertTrue(markdownHeadingLineHeightSp(level = 2) > markdownHeadingFontSizeSp(level = 2))
