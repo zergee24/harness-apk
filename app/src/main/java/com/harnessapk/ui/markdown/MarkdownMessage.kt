@@ -197,22 +197,42 @@ private fun MarkdownMathBlock(block: MarkdownBlock.Math) {
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = "KaTeX 暂不可用，已显示源码",
+                text = "数学表达式",
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
                 style = MaterialTheme.typography.labelSmall,
             )
             Text(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
-                text = block.literal,
+                text = mathFallbackText(block.literal),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = TextStyle(
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     fontSize = markdownCodeFontSizeSp().sp,
                     lineHeight = markdownCodeLineHeightSp().sp,
                 ),
             )
         }
     }
+}
+
+internal fun mathFallbackText(latex: String): String {
+    var text = latex.trim()
+        .replace("\\times", "×")
+        .replace("\\cdot", "·")
+        .replace("\\pi", "π")
+        .replace("\\leq", "≤")
+        .replace("\\geq", "≥")
+
+    val squareRoot = Regex("""\\sqrt\{([^{}]*)\}""")
+    while (squareRoot.containsMatchIn(text)) {
+        text = squareRoot.replace(text) { "√(${it.groupValues[1]})" }
+    }
+    val fraction = Regex("""\\frac\{([^{}]*)\}\{([^{}]*)\}""")
+    while (fraction.containsMatchIn(text)) {
+        text = fraction.replace(text) { "(${it.groupValues[1]})/(${it.groupValues[2]})" }
+    }
+    val superscript = mapOf('0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴', '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹')
+    return text.replace(Regex("""\^([0-9])""")) { superscript.getValue(it.groupValues[1].single()).toString() }
 }
 
 @Composable

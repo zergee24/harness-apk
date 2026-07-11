@@ -114,6 +114,11 @@ private fun normalizeModelMarkdown(markdown: String): String {
     return buildList {
         markdown.lineSequence().forEach { rawLine ->
             val trimmed = rawLine.trimStart()
+            if (inDisplayMath && looksLikeMarkdownBlockStart(trimmed)) {
+                add("```")
+                add("")
+                inDisplayMath = false
+            }
             when {
                 !inFence && trimmed.trim() == "$$" -> {
                     add(if (inDisplayMath) "```" else "```math")
@@ -147,6 +152,12 @@ private fun normalizeModelMarkdown(markdown: String): String {
         }
     }.joinToString("\n")
 }
+
+private fun looksLikeMarkdownBlockStart(trimmed: String): Boolean =
+    trimmed.startsWith("#") ||
+        trimmed.startsWith("- ") ||
+        trimmed.startsWith("* ") ||
+        trimmed.matches(Regex("^\\d+[.)]\\s+.*"))
 
 private fun normalizeHeadingLine(line: String): String =
     inlineHeadingMarker.replace(line) { "\n${it.value} " }

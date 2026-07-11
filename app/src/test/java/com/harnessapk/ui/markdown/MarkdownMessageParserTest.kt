@@ -147,6 +147,51 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun recoversHeadingAfterUnclosedDisplayMathFromModelOutput() {
+        val blocks = parseMarkdownBlocks(
+            """
+            \[
+            28 \times \frac{16}{\sqrt{16^2+18^2}}
+            ###43寸16:9 横屏宽约:
+            约 **95.2 cm**
+            """.trimIndent(),
+        )
+
+        val math = blocks.first() as MarkdownBlock.Math
+        assertEquals("28 \\times \\frac{16}{\\sqrt{16^2+18^2}}", math.literal)
+        val heading = blocks.filterIsInstance<MarkdownBlock.Heading>().single()
+        assertEquals("43寸16:9 横屏宽约:", heading.text.plainText())
+        val paragraph = blocks.last() as MarkdownBlock.Paragraph
+        assertEquals("约 95.2 cm", paragraph.text.plainText())
+    }
+
+    @Test
+    fun recoversListAfterUnclosedDollarDisplayMathFromModelOutput() {
+        val blocks = parseMarkdownBlocks(
+            """
+            $$
+            47.3 + 95.2 = 142.5
+            1. 并排总宽度约 143 cm
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            "47.3 + 95.2 = 142.5",
+            (blocks.first() as MarkdownBlock.Math).literal,
+        )
+        val list = blocks.filterIsInstance<MarkdownBlock.OrderedList>().single()
+        assertEquals("并排总宽度约 143 cm", list.items.single().text.plainText())
+    }
+
+    @Test
+    fun mathFallbackTextMakesCommonLatexReadable() {
+        assertEquals(
+            "28 × (16)/(√(16²+18²))",
+            mathFallbackText("28 \\times \\frac{16}{\\sqrt{16^2+18^2}}"),
+        )
+    }
+
+    @Test
     fun parsesMermaidFenceAsMermaidBlock() {
         val blocks = parseMarkdownBlocks(
             """
