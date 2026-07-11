@@ -10,6 +10,7 @@ import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -67,6 +68,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -164,6 +167,11 @@ internal class ProjectDeliverableRefreshController {
 
     fun canPublish(refresh: ProjectDeliverableRefresh): Boolean =
         refresh.generation == currentGeneration
+
+    fun invalidate() {
+        currentGeneration += 1
+        ordinaryRefreshProjectIdToSkip = null
+    }
 }
 
 internal data class ProjectGitRefresh(
@@ -199,6 +207,27 @@ internal fun shouldRefreshGitOnTabSelection(tab: ProjectWorkbenchTab): Boolean =
 
 internal fun shouldRefreshGitForProjectSelection(tab: ProjectWorkbenchTab, projectId: String?): Boolean =
     shouldRefreshGitOnTabSelection(tab) && projectId != null
+
+internal fun shouldShowProjectWorkbenchTabGuidance(
+    tab: ProjectWorkbenchTab,
+    isContentEmpty: Boolean,
+): Boolean = isContentEmpty && tab != ProjectWorkbenchTab.GIT
+
+internal data class ProjectWorkbenchContent(
+    val deliverables: List<ProjectDeliverable>,
+    val selectedDeliverableId: String?,
+    val artifactText: String,
+    val gitStatus: GitStatusSummary?,
+    val gitBranches: List<GitBranchSummary>,
+)
+
+internal fun clearedProjectWorkbenchContent(): ProjectWorkbenchContent = ProjectWorkbenchContent(
+    deliverables = emptyList(),
+    selectedDeliverableId = null,
+    artifactText = "",
+    gitStatus = null,
+    gitBranches = emptyList(),
+)
 
 @Composable
 internal fun ProjectScreen(
@@ -249,6 +278,15 @@ internal fun ProjectScreen(
         deliverableCount = deliverables.size,
         gitStatus = gitStatus,
     )
+
+    fun clearProjectWorkbenchContent() {
+        val cleared = clearedProjectWorkbenchContent()
+        deliverables = cleared.deliverables
+        selectedDeliverableId = cleared.selectedDeliverableId
+        artifactText = cleared.artifactText
+        gitStatus = cleared.gitStatus
+        gitBranches = cleared.gitBranches
+    }
 
     fun refreshProjects() {
         scope.launch {
@@ -612,6 +650,10 @@ internal fun ProjectScreen(
         val targetTab = projectWorkbenchTab(target.destination)
         val refreshAlreadySelectedGit = shouldRefreshGitForProjectSelection(targetTab, project.id) &&
             selectedProjectId == project.id && selectedTab == ProjectWorkbenchTab.GIT
+        if (selectedProjectId != project.id) {
+            gitRefreshController.begin(null)
+            clearProjectWorkbenchContent()
+        }
         selectedProjectId = project.id
         selectedTab = targetTab
         searchQuery = ""
@@ -725,8 +767,12 @@ internal fun ProjectScreen(
                 projects = projects,
                 overview = workbenchOverview,
                 onSelectProject = {
+                    if (selectedProjectId != it.id) {
+                        deliverableRefreshController.invalidate()
+                        gitRefreshController.begin(null)
+                        clearProjectWorkbenchContent()
+                    }
                     selectedProjectId = it.id
-                    selectedDeliverableId = null
                     searchQuery = ""
                 },
                 onCreateProject = { showNewProjectDialog = true },
@@ -780,9 +826,9 @@ internal fun ProjectScreen(
             val isWorkbenchContentEmpty = when (selectedTab) {
                 ProjectWorkbenchTab.CONVERSATIONS -> selectedProjectConversations.isEmpty()
                 ProjectWorkbenchTab.FOLDER -> visibleTreeItems.isEmpty()
-                ProjectWorkbenchTab.GIT -> gitStatus == null
+                ProjectWorkbenchTab.GIT -> false
             }
-            if (isWorkbenchContentEmpty) {
+            if (shouldShowProjectWorkbenchTabGuidance(selectedTab, isWorkbenchContentEmpty)) {
                 item {
                     Text(
                         text = projectWorkbenchTabGuidance(selectedTab),
@@ -1151,19 +1197,25 @@ internal fun ProjectWorkbenchHeader(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                modifier = Modifier.weight(1f),
-                text = projectName,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.MiddleEllipsis,
-            )
-            IconButton(
-                modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
-                onClick = onSelectProject,
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = HarnessSpacing.minimumTouchTarget)
+                    .clickable(onClick = onSelectProject)
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = "切换项目"
+                    },
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "切换项目")
+                Text(
+                    modifier = Modifier.weight(1f),
+                    text = projectName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.MiddleEllipsis,
+                )
+                Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = null)
             }
             overflowContent()
         }

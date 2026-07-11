@@ -1,9 +1,11 @@
 package com.harnessapk.ui.project
 
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import com.harnessapk.ui.theme.HarnessApkTheme
@@ -31,6 +33,8 @@ class ProjectWorkbenchHeaderTest {
         composeRule.onNodeWithContentDescription("切换项目")
             .assertIsDisplayed()
             .assertHasClickAction()
+        composeRule.onAllNodesWithContentDescription("切换项目")
+            .assertCountEquals(1)
         composeRule.onNodeWithText("新建项目会话")
             .assertIsDisplayed()
             .assertHasClickAction()

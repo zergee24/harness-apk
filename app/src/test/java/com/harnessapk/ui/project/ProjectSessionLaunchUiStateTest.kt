@@ -1,6 +1,7 @@
 package com.harnessapk.ui.project
 
 import com.harnessapk.chat.Conversation
+import com.harnessapk.git.GitBranchSummary
 import com.harnessapk.git.GitStatusSummary
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.DeliverableTemplate
@@ -32,6 +33,25 @@ class ProjectSessionLaunchUiStateTest {
         assertEquals("在当前项目内开始或继续工作", projectWorkbenchTabGuidance(ProjectWorkbenchTab.CONVERSATIONS))
         assertEquals("查看会话沉淀和已写入文件", projectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER))
         assertEquals("查看当前分支和工作区变更", projectWorkbenchTabGuidance(ProjectWorkbenchTab.GIT))
+    }
+
+    @Test
+    fun workbenchTabGuidanceOnlyShowsForEmptyConversationOrFolderContent() {
+        assertTrue(shouldShowProjectWorkbenchTabGuidance(ProjectWorkbenchTab.CONVERSATIONS, isContentEmpty = true))
+        assertTrue(shouldShowProjectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER, isContentEmpty = true))
+        assertFalse(shouldShowProjectWorkbenchTabGuidance(ProjectWorkbenchTab.GIT, isContentEmpty = true))
+        assertFalse(shouldShowProjectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER, isContentEmpty = false))
+    }
+
+    @Test
+    fun clearingProjectWorkbenchContentRemovesPreviousProjectSummaryState() {
+        val cleared = clearedProjectWorkbenchContent()
+
+        assertEquals(emptyList<ProjectDeliverable>(), cleared.deliverables)
+        assertEquals(null, cleared.selectedDeliverableId)
+        assertEquals("", cleared.artifactText)
+        assertEquals(null, cleared.gitStatus)
+        assertEquals(emptyList<GitBranchSummary>(), cleared.gitBranches)
     }
 
     @Test
