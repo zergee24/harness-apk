@@ -54,12 +54,14 @@ def main() -> int:
     artifact_name = args.artifact_name or apk_path.name
 
     output_dir = args.output_dir
-    chunks_dir = output_dir / "chunks"
     if output_dir.exists():
         shutil.rmtree(output_dir)
+    release_prefix = Path("releases") / str(args.version_code)
+    release_dir = output_dir / release_prefix
+    chunks_dir = release_dir / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
-    hosted_apk = output_dir / artifact_name
+    hosted_apk = release_dir / artifact_name
     shutil.copy2(apk_path, hosted_apk)
 
     chunk_names: list[str] = []
@@ -79,9 +81,9 @@ def main() -> int:
         "versionCode": args.version_code,
         "versionName": args.version_name,
         "minSupportedVersionCode": args.min_supported_version_code or args.version_code,
-        "apkUrl": f"{base_url}/{artifact_name}",
+        "apkUrl": f"{base_url}/{release_prefix.as_posix()}/{artifact_name}",
         "apkChunks": [
-            f"{base_url}/chunks/{name}"
+            f"{base_url}/{release_prefix.as_posix()}/chunks/{name}"
             for name in chunk_names
         ],
         "sha256": sha256(apk_path),

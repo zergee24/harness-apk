@@ -98,6 +98,17 @@ def upload_file(
     print(f"Uploaded {source} -> {url}")
 
 
+def ordered_release_files(source_dir: Path) -> list[Path]:
+    files = sorted(path for path in source_dir.rglob("*") if path.is_file())
+    manifests = [
+        path
+        for path in files
+        if path.relative_to(source_dir).as_posix() == "update.json"
+    ]
+    assets = [path for path in files if path not in manifests]
+    return assets + manifests
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Upload release directory to Aliyun OSS.")
     parser.add_argument("source_dir", type=Path)
@@ -115,7 +126,7 @@ def main() -> int:
     access_key_secret = env_required("ALIYUN_ACCESS_KEY_SECRET")
     acl = os.environ.get("OSS_ACL", "public-read").strip()
 
-    for source in sorted(path for path in source_dir.rglob("*") if path.is_file()):
+    for source in ordered_release_files(source_dir):
         relative = source.relative_to(source_dir).as_posix()
         key = f"{prefix}/{relative}" if prefix else relative
         upload_file(

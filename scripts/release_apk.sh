@@ -168,7 +168,8 @@ python3 scripts/prepare_apk_release.py \
   --release-notes-file "$NOTES_FILE"
 
 python3 -m json.tool "$OUTPUT_DIR/update.json" >/dev/null
-cat "$OUTPUT_DIR/chunks/${ARTIFACT_NAME}.part-"* > "build/release-oss/${CHANNEL}-reassembled.apk"
+RELEASE_DIR="$OUTPUT_DIR/releases/$VERSION_CODE"
+cat "$RELEASE_DIR/chunks/${ARTIFACT_NAME}.part-"* > "build/release-oss/${CHANNEL}-reassembled.apk"
 cmp -s "build/release-oss/${CHANNEL}-reassembled.apk" "$APK_PATH"
 
 if [ "$UPLOAD" = true ]; then

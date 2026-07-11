@@ -6,16 +6,16 @@
 
 ```text
 https://www.zerg.work/harness-apk/test/update.json
-https://www.zerg.work/harness-apk/test/app-debug.apk
-https://www.zerg.work/harness-apk/test/chunks/app-debug.apk.part-000
+https://www.zerg.work/harness-apk/test/releases/<versionCode>/app-debug.apk
+https://www.zerg.work/harness-apk/test/releases/<versionCode>/chunks/app-debug.apk.part-000
 ```
 
 正式通道：
 
 ```text
 https://www.zerg.work/harness-apk/prod/update.json
-https://www.zerg.work/harness-apk/prod/app-release.apk
-https://www.zerg.work/harness-apk/prod/chunks/app-release.apk.part-000
+https://www.zerg.work/harness-apk/prod/releases/<versionCode>/app-release.apk
+https://www.zerg.work/harness-apk/prod/releases/<versionCode>/chunks/app-release.apk.part-000
 ```
 
 GitHub Actions:
@@ -24,7 +24,7 @@ GitHub Actions:
 - 手动参数：`channel=test|prod`
 - 测试包构建：`./gradlew :app:assembleDebug --console=plain`
 - 正式包构建：`./gradlew :app:assembleRelease --console=plain`
-- 生成：`build/release-oss/update.json`、APK、`chunks/*`
+- 生成：`build/release-oss/update.json`、`releases/<versionCode>/` 下的 APK 与 `chunks/*`
 - 上传：`scripts/upload_to_oss.py build/release-oss`
 
 本地打包机：
@@ -58,6 +58,9 @@ GitHub 配置：
 - GitHub 只存源码，不提交 `release/test/`、APK、分片、生产 `update.json`。
 - manifest、APK 和分片必须使用 HTTPS。
 - `update.json` 同时写入完整包 `apkUrl` 和分片 `apkChunks`，客户端优先使用分片。
+- APK 和分片使用 `releases/<versionCode>/` 不可变路径，发布新版本不得覆盖旧 manifest 正在引用的资源。
+- 上传必须先完成全部 APK/分片，再最后上传顶层 `update.json`；任一资源失败时保留旧 manifest。
+- 历史版本目录默认保留，避免下载中的旧客户端失去资源。
 - OSS 对象需要可公开读取，默认上传对象 ACL 为 `public-read`。
 - Debug 包只读取测试通道 manifest；release 包只读取正式通道 manifest。
 - `test` 和 `prod` 通道都必须使用固定签名；未配置对应签名时，发布脚本和 GitHub Actions 都会失败。
