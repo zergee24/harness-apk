@@ -51,10 +51,52 @@ class SendMessageUseCase(
         sessionContext: SessionRequestContext? = null,
         webSearchContext: WebSearchContext? = null,
         nativeWebSearchMode: NativeWebSearchMode? = null,
-    ) = withContext(dispatchers.io) {
-        val provider = providerId?.let { providerRepository.providerWithKey(it) }
+    ): ChatExecutionResult = withContext(dispatchers.io) {
+        val userMessageId = chatRepository.insertUserMessage(conversationId, text, attachments)
+        execute(
+            entry = ChatExecutionEntry(
+                id = "immediate-$userMessageId",
+                conversationId = conversationId,
+                userMessageId = userMessageId,
+                assistantMessageId = null,
+                targetAssistantMessageId = null,
+                sequence = 0L,
+                type = ChatExecutionType.NORMAL,
+                status = ChatExecutionStatus.RUNNING,
+                providerId = providerId,
+                model = modelOverride,
+                reasoningEffort = reasoningEffort,
+                requestContext = ChatExecutionRequestContext(
+                    sessionContext = sessionContext,
+                    webSearchEnabled = webSearchContext != null || nativeWebSearchMode != null,
+                ),
+                errorMessage = null,
+                createdAt = 0L,
+                updatedAt = 0L,
+            ),
+            history = chatRepository.listMessages(conversationId),
+            webSearchContext = webSearchContext,
+            nativeWebSearchMode = nativeWebSearchMode,
+        )
+    }
+
+    suspend fun execute(
+        entry: ChatExecutionEntry,
+        history: List<ChatMessage>,
+        webSearchContext: WebSearchContext? = null,
+        nativeWebSearchMode: NativeWebSearchMode? = null,
+        onAssistantCreated: suspend (String) -> Unit = {},
+    ): ChatExecutionResult = withContext(dispatchers.io) {
+        val currentUserMessage = requireNotNull(chatRepository.message(entry.userMessageId)) {
+            "待执行的用户消息不存在"
+        }
+        val text = currentUserMessage.content.ifBlank { "请看这张截图" }
+        val attachments = chatRepository.listAttachments(entry.userMessageId).map { attachment ->
+            PendingImageAttachment(Uri.parse(attachment.uri), attachment.mimeType)
+        }
+        val provider = entry.providerId?.let { providerRepository.providerWithKey(it) }
             ?: providerRepository.defaultProviderForText()
-        val selectedModel = modelOverride?.trim()?.takeIf { it.isNotBlank() }
+        val selectedModel = entry.model?.trim()?.takeIf { it.isNotBlank() }
             ?: if (attachments.isNotEmpty()) {
                 provider.profile.defaultVisionModel ?: provider.profile.defaultModel
             } else {
@@ -66,15 +108,20 @@ class SendMessageUseCase(
         ).resolve(provider.profile, requestModel)
         if (attachments.isNotEmpty() && !resolvedCapability.supportsImageInput()) {
             val assistantId = chatRepository.insertAssistantPending(
-                conversationId,
+                entry.conversationId,
                 provider.profile.id,
                 requestModel,
             )
+            onAssistantCreated(assistantId)
             chatRepository.markAssistantFailed(assistantId, AppError.VisionUnsupported().toUserMessage())
-            return@withContext
+            return@withContext ChatExecutionResult(
+                status = ChatExecutionStatus.FAILED,
+                assistantMessageId = assistantId,
+                errorMessage = AppError.VisionUnsupported().toUserMessage(),
+            )
         }
 
-        val userMessageId = chatRepository.insertUserMessage(conversationId, text, attachments)
+        val userMessageId = currentUserMessage.id
         var assistantId: String? = null
         var requestDiagnostics: ModelAwareRequestDiagnostics? = null
         var accumulator: StreamingMessageAccumulator? = null
@@ -86,10 +133,10 @@ class SendMessageUseCase(
 
         try {
             val imageDataUrls = attachments.map { it.toDataUrl() }
-            val existingMemory = chatRepository.memoryForConversation(conversationId)
+            val existingMemory = chatRepository.memoryForConversation(entry.conversationId)
             val compressed = contextCompressor.prepare(
-                conversationId = conversationId,
-                messages = chatRepository.listMessages(conversationId),
+                conversationId = entry.conversationId,
+                messages = executionHistoryWithCurrent(history, currentUserMessage),
                 currentUserMessageId = userMessageId,
                 currentImageDataUrls = imageDataUrls,
                 existingMemory = existingMemory,
@@ -100,16 +147,17 @@ class SendMessageUseCase(
                 chatRepository.upsertMemory(memory)
                 if (shouldRecordCompressionEvent(existingMemory, memory)) {
                     chatRepository.insertSystemEvent(
-                        conversationId,
+                        entry.conversationId,
                         contextCompressionEventText(CompressionTrigger.AUTO, memory),
                     )
                 }
             }
             val nextAssistantId = chatRepository.insertAssistantPending(
-                conversationId,
+                entry.conversationId,
                 provider.profile.id,
                 requestModel,
             )
+            onAssistantCreated(nextAssistantId)
             assistantId = nextAssistantId
             val activeStreamClock = TimeSource.Monotonic.markNow()
             val activeAccumulator = StreamingMessageAccumulator()
@@ -124,9 +172,9 @@ class SendMessageUseCase(
                 provider = provider.profile,
                 apiKey = provider.apiKey,
                 capability = resolvedCapability,
-                messages = buildSessionOutgoingMessages(sessionContext, compressed.messages, webSearchContext),
+                messages = buildSessionOutgoingMessages(entry.requestContext.sessionContext, compressed.messages, webSearchContext),
                 temperature = temperatureForModel(requestModel),
-                selectedReasoningEffort = reasoningEffort,
+                selectedReasoningEffort = entry.reasoningEffort,
                 webSearchRequested = nativeWebSearchMode != null,
             )
             requestDiagnostics = modelAwareRequest.diagnostics
@@ -149,6 +197,11 @@ class SendMessageUseCase(
                 chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
             }
             chatRepository.markAssistantSucceeded(nextAssistantId)
+            ChatExecutionResult(
+                status = ChatExecutionStatus.SUCCEEDED,
+                assistantMessageId = nextAssistantId,
+                errorMessage = null,
+            )
         } catch (cancelled: CancellationException) {
             assistantId?.let { id ->
                 val cancelledSnapshot = cancelStreamingSnapshot(
@@ -164,7 +217,7 @@ class SendMessageUseCase(
             throw cancelled
         } catch (error: Throwable) {
             val failedAssistantId = assistantId ?: chatRepository.insertAssistantPending(
-                conversationId,
+                entry.conversationId,
                 provider.profile.id,
                 requestModel,
             )
@@ -173,7 +226,7 @@ class SendMessageUseCase(
                 buildChatErrorLog(
                     provider = provider.profile,
                     requestModel = requestModel,
-                    conversationId = conversationId,
+                    conversationId = entry.conversationId,
                     error = error,
                     nowMillis = System.currentTimeMillis(),
                     sensitiveTerms = listOf(provider.apiKey, text),
@@ -186,6 +239,11 @@ class SendMessageUseCase(
                         receivedChars = receivedChars,
                     ),
                 ),
+            )
+            ChatExecutionResult(
+                status = ChatExecutionStatus.FAILED,
+                assistantMessageId = failedAssistantId,
+                errorMessage = error.toUserMessage(),
             )
         }
     }
@@ -358,4 +416,10 @@ private fun String.asLlmFailureMessage(): String {
 private data class ImagePayload(
     val bytes: ByteArray,
     val mimeType: String,
+)
+
+data class ChatExecutionResult(
+    val status: ChatExecutionStatus,
+    val assistantMessageId: String?,
+    val errorMessage: String?,
 )

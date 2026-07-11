@@ -4,7 +4,11 @@ import android.content.Context
 import androidx.room.Room
 import com.harnessapk.BuildConfig
 import com.harnessapk.chat.ChatRepository
+import com.harnessapk.chat.ChatExecutionCoordinator
+import com.harnessapk.chat.ChatExecutionRepository
+import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.chat.ManualContextCompressionUseCase
+import com.harnessapk.chat.QueuedAttachmentStore
 import com.harnessapk.chat.SendMessageUseCase
 import com.harnessapk.git.GitCredentialStore
 import com.harnessapk.git.JGitEngine
@@ -39,6 +43,7 @@ class AppContainer(context: Context) {
         AppDatabase.MIGRATION_5_6,
         AppDatabase.MIGRATION_6_7,
         AppDatabase.MIGRATION_7_8,
+        AppDatabase.MIGRATION_8_9,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -68,6 +73,7 @@ class AppContainer(context: Context) {
     )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
+    val queuedAttachmentStore = QueuedAttachmentStore(appContext)
     val projectRepository = FileProjectRepository(
         rootDirectory = appContext.filesDir,
         timeProvider = SystemTimeProvider,
@@ -92,6 +98,21 @@ class AppContainer(context: Context) {
             settingsStore.providerCapabilityCatalogSnapshot.first().rawJson
                 ?.let { rawJson -> runCatching { parseProviderCapabilityCatalogJson(rawJson, json) }.getOrNull() }
         },
+    )
+    val chatExecutionRepository = ChatExecutionRepository(
+        database = database,
+        dao = database.chatExecutionEntryDao(),
+        chatRepository = chatRepository,
+        timeProvider = SystemTimeProvider,
+    )
+    val chatExecutionCoordinator = ChatExecutionCoordinator(
+        executionRepository = chatExecutionRepository,
+        sendMessageUseCase = sendMessageUseCase,
+        providerRepository = providerRepository,
+        webSearchClient = webSearchClient,
+        attachmentStore = queuedAttachmentStore,
+        dispatchers = dispatchers,
+        onWorkScheduled = { ChatExecutionService.start(appContext) },
     )
     val updateRepository = UpdateRepository(
         okHttpClient = updateHttpClient,

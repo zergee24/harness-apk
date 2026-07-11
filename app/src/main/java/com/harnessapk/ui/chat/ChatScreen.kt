@@ -45,15 +45,19 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -100,6 +104,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.ChatMessage
+import com.harnessapk.chat.ChatExecutionEntry
+import com.harnessapk.chat.ChatExecutionRequestContext
+import com.harnessapk.chat.ChatExecutionStatus
+import com.harnessapk.chat.EnqueueChatRequest
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.PendingImageAttachment
@@ -150,7 +158,6 @@ import com.harnessapk.websearch.shouldUseExternalWebSearch
 import com.harnessapk.voice.VoiceSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -168,6 +175,9 @@ fun ChatScreen(
     contentPadding: PaddingValues,
 ) {
     val messages by container.chatRepository.observeMessages(conversationId).collectAsState(initial = emptyList())
+    val executionEntries by container.chatExecutionRepository
+        .observeForConversation(conversationId)
+        .collectAsState(initial = emptyList())
     val memory by container.chatRepository.observeMemory(conversationId).collectAsState(initial = null)
     val providers by container.providerRepository.observeEnabled().collectAsState(initial = emptyList())
     val defaultModelPreference by container.settingsStore.defaultModelPreference.collectAsState(
@@ -197,8 +207,6 @@ fun ChatScreen(
     var selectedProviderId by remember { mutableStateOf<String?>(null) }
     var selectedModel by remember { mutableStateOf("") }
     var selectedReasoningEffort by remember { mutableStateOf(defaultReasoningEffort()) }
-    var isSending by remember { mutableStateOf(false) }
-    var activeSendJob by remember { mutableStateOf<Job?>(null) }
     var webSearchEnabled by remember { mutableStateOf(false) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
@@ -264,8 +272,16 @@ fun ChatScreen(
         modelConfig = selectedModelConfig,
     )
     val assistantActivityText = assistantActivityLabel(messages)
-    val busyText = assistantActivityText ?: if (isSending) "正在发送..." else null
+    val busyText = assistantActivityText
     val isAssistantBusy = busyText != null
+    val executionByUserMessageId = remember(executionEntries) {
+        executionEntries.associateBy(ChatExecutionEntry::userMessageId)
+    }
+    val executionByAssistantMessageId = remember(executionEntries) {
+        executionEntries.mapNotNull { entry ->
+            entry.assistantMessageId?.let { assistantMessageId -> assistantMessageId to entry }
+        }.toMap()
+    }
     val dismissKeyboard = {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
@@ -464,49 +480,34 @@ fun ChatScreen(
 
     fun sendNow() {
         val body = text.trim()
-        if (isAssistantBusy || body.isEmpty() && selectedImage == null) return
-        val nativeWebSearchMode = nativeWebSearchModeForRequest(
-            query = body,
-            enabledForSession = webSearchEnabled,
-            settings = webSearchSettings,
-            provider = selectedProvider,
-        )
+        if (body.isEmpty() && selectedImage == null) return
         val sessionRequestContext = sessionRequestContext(
             finalPrompt = finalSessionPrompt.ifBlank { optimizedSessionPrompt.ifBlank { rawSessionPrompt } },
             project = projects.firstOrNull { it.id == selectedProjectId },
             projectContext = projectContext,
             markdowns = deliverables,
         )
-        val job = scope.launch {
+        val draftImage = selectedImage
+        val draftMimeType = selectedMimeType
+        scope.launch {
             errorText = null
-            isSending = true
             try {
-                val webSearchContext = buildWebSearchContext(
-                    query = body,
-                    enabledForSession = webSearchEnabled,
-                    settings = webSearchSettings,
-                    nativeWebSearchMode = nativeWebSearchMode,
-                    search = {
-                        container.webSearchClient.searchKeywords(
-                            WebSearchRequest(query = body, maxResults = webSearchSettings.maxResults),
-                        )
-                    },
-                    onFailure = {
-                        errorText = "联网搜索失败：${it.toUserMessage()}，已继续发送给模型"
-                    },
-                )
-                container.sendMessageUseCase.send(
-                    conversationId = conversationId,
-                    text = body.ifEmpty { "请看这张截图" },
-                    attachments = selectedImage?.let {
-                        listOf(PendingImageAttachment(it, selectedMimeType))
-                    } ?: emptyList(),
-                    providerId = selectedProviderId,
-                    modelOverride = selectedModel,
-                    reasoningEffort = selectedReasoningEffort,
-                    sessionContext = sessionRequestContext,
-                    webSearchContext = webSearchContext,
-                    nativeWebSearchMode = nativeWebSearchMode,
+                container.chatExecutionCoordinator.enqueue(
+                    EnqueueChatRequest(
+                        conversationId = conversationId,
+                        content = body.ifEmpty { "请看这张截图" },
+                        attachments = draftImage?.let { image ->
+                            listOf(PendingImageAttachment(image, draftMimeType))
+                        }.orEmpty(),
+                        providerId = selectedProviderId,
+                        model = selectedModel,
+                        reasoningEffort = selectedReasoningEffort,
+                        requestContext = ChatExecutionRequestContext(
+                            sessionContext = sessionRequestContext,
+                            webSearchEnabled = webSearchEnabled,
+                            webSearchSettings = webSearchSettings,
+                        ),
+                    ),
                 )
                 text = ""
                 selectedImage = null
@@ -514,27 +515,12 @@ fun ChatScreen(
                 throw cancelled
             } catch (error: Throwable) {
                 errorText = error.toUserMessage()
-            } finally {
-                isSending = false
-                activeSendJob = null
             }
         }
-        activeSendJob = job
     }
 
     fun stopNow() {
-        handleStopIntent(
-            cancelActiveSend = {
-                activeSendJob?.cancel()
-                activeSendJob = null
-                isSending = false
-            },
-            cancelVisibleAssistant = {
-                scope.launch {
-                    container.chatRepository.cancelActiveAssistantMessages(conversationId)
-                }
-            },
-        )
+        container.chatExecutionCoordinator.cancelActive(conversationId)
     }
 
     fun speakAssistantMessage(message: ChatMessage) {
@@ -1145,9 +1131,12 @@ fun ChatScreen(
                                 ContextEventLine(message.content)
                             } else {
                                 val displayParts = messageDisplayParts(message, persistedParts)
+                                val executionEntry = executionByUserMessageId[message.id]
+                                    ?: executionByAssistantMessageId[message.id]
                                 MessageBubble(
                                     message = message,
                                     parts = displayParts,
+                                    executionEntry = executionEntry,
                                     maxBubbleWidth = bubbleMaxWidth,
                                     canWriteBack = message.role == MessageRole.ASSISTANT &&
                                         message.status == MessageStatus.SUCCEEDED &&
@@ -1163,6 +1152,31 @@ fun ChatScreen(
                                     onSelectCopy = { pendingSelectionCopy = message },
                                     isSpeaking = speakingMessageId == message.id,
                                     onSpeak = { speakAssistantMessage(message) },
+                                    onSteer = executionEntry?.takeIf {
+                                        message.role == MessageRole.USER && it.status == ChatExecutionStatus.QUEUED
+                                    }?.let { entry ->
+                                        { container.chatExecutionCoordinator.steer(entry.id) }
+                                    },
+                                    onEditQueued = executionEntry?.takeIf {
+                                        message.role == MessageRole.USER && it.status == ChatExecutionStatus.QUEUED
+                                    }?.let { entry ->
+                                        {
+                                            scope.launch {
+                                                val attachments = container.chatRepository.listAttachments(message.id)
+                                                if (!container.chatExecutionRepository.deleteQueued(entry.id)) return@launch
+                                                text = message.content
+                                                attachments.firstOrNull()?.let { attachment ->
+                                                    selectedImage = Uri.parse(attachment.uri)
+                                                    selectedMimeType = attachment.mimeType
+                                                }
+                                            }
+                                        }
+                                    },
+                                    onDeleteQueued = executionEntry?.takeIf {
+                                        message.role == MessageRole.USER && it.status == ChatExecutionStatus.QUEUED
+                                    }?.let { entry ->
+                                        { scope.launch { container.chatExecutionRepository.deleteQueued(entry.id) } }
+                                    },
                                 )
                             }
                             markdownFileChangeStates
@@ -1236,22 +1250,18 @@ fun ChatScreen(
                 isCompressingContext = isCompressingContext,
                 onCompressContext = ::compressContextNow,
                 inputFocusRequester = inputFocusRequester,
-                canSend = !isAssistantBusy &&
-                    selectedProvider != null &&
+                canSend = selectedProvider != null &&
                     selectedModel.isNotBlank() &&
                     (text.isNotBlank() || selectedImage != null),
                 isBusy = isAssistantBusy,
                 onSend = {
-                    if (isAssistantBusy) {
-                        stopNow()
-                    } else {
-                        handleSendIntent(
-                            hasSelectedImage = selectedImage != null,
-                            dismissKeyboard = dismissKeyboard,
-                            sendNow = ::sendNow,
-                        )
-                    }
+                    handleSendIntent(
+                        hasSelectedImage = selectedImage != null,
+                        dismissKeyboard = dismissKeyboard,
+                        sendNow = ::sendNow,
+                    )
                 },
+                onStop = ::stopNow,
                 showFileChangeSuggestion = shouldShowFileChangeModeEntry(text),
                 canSendFileChange = shouldShowFileChangeModeEntry(text) && !isAssistantBusy,
                 onSendFileChange = {
@@ -1521,6 +1531,7 @@ internal fun sendButtonContentDescription(isBusy: Boolean): String =
 internal enum class ChatInputTrailingAction {
     ATTACHMENT,
     SEND,
+    STOP,
 }
 
 internal fun shouldShowCollapsedAttachmentEntry(
@@ -1533,11 +1544,22 @@ internal fun chatInputTrailingAction(
     hasSelectedImage: Boolean,
     isBusy: Boolean,
 ): ChatInputTrailingAction =
-    if (shouldShowCollapsedAttachmentEntry(text, hasSelectedImage) && !isBusy) {
-        ChatInputTrailingAction.ATTACHMENT
-    } else {
-        ChatInputTrailingAction.SEND
+    when {
+        text.isNotBlank() || hasSelectedImage -> ChatInputTrailingAction.SEND
+        isBusy -> ChatInputTrailingAction.STOP
+        else -> ChatInputTrailingAction.ATTACHMENT
     }
+
+internal fun executionStatusLabel(status: ChatExecutionStatus): String? = when (status) {
+    ChatExecutionStatus.QUEUED -> "等待处理"
+    ChatExecutionStatus.INTERRUPTED -> "已中断"
+    ChatExecutionStatus.STEERED -> "已按引导结束"
+    ChatExecutionStatus.FAILED -> "发送失败"
+    ChatExecutionStatus.CANCELLED -> "已暂停"
+    ChatExecutionStatus.RUNNING,
+    ChatExecutionStatus.SUCCEEDED,
+    -> null
+}
 
 internal enum class FileChangeSendDecision {
     SEND,
@@ -2487,8 +2509,15 @@ private fun ReasoningPart(part: UiMessagePartDraft) {
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
-                TextButton(onClick = { expanded = !expanded }) {
-                    Text(if (expanded) "折叠" else "展开")
+                IconButton(
+                    modifier = Modifier.size(40.dp),
+                    onClick = { expanded = !expanded },
+                ) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        contentDescription = if (expanded) "收起思考过程" else "展开思考过程",
+                        modifier = Modifier.size(20.dp),
+                    )
                 }
             }
             if (expanded) {
@@ -2565,6 +2594,7 @@ private fun MetadataPart(
 private fun MessageBubble(
     message: ChatMessage,
     parts: List<UiMessagePartDraft>,
+    executionEntry: ChatExecutionEntry?,
     maxBubbleWidth: Dp,
     canWriteBack: Boolean,
     onWriteBack: () -> Unit,
@@ -2572,8 +2602,12 @@ private fun MessageBubble(
     onSelectCopy: () -> Unit,
     isSpeaking: Boolean,
     onSpeak: () -> Unit,
+    onSteer: (() -> Unit)?,
+    onEditQueued: (() -> Unit)?,
+    onDeleteQueued: (() -> Unit)?,
 ) {
     val isUser = message.role == MessageRole.USER
+    var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
     val presentation = chatBubblePresentation(message.role)
     val selectionCopyText = messageSelectionCopyText(message, parts)
     val containerColor = when (presentation) {
@@ -2631,6 +2665,46 @@ private fun MessageBubble(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (onSteer != null && onEditQueued != null && onDeleteQueued != null) {
+                        Box {
+                            IconButton(
+                                modifier = Modifier.size(48.dp),
+                                onClick = { queueMenuExpanded = true },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.MoreVert,
+                                    contentDescription = "队列操作",
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = queueMenuExpanded,
+                                onDismissRequest = { queueMenuExpanded = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("引导当前") },
+                                    onClick = {
+                                        queueMenuExpanded = false
+                                        onSteer()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("编辑") },
+                                    onClick = {
+                                        queueMenuExpanded = false
+                                        onEditQueued()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("删除") },
+                                    onClick = {
+                                        queueMenuExpanded = false
+                                        onDeleteQueued()
+                                    },
+                                )
+                            }
+                        }
+                    }
                     if (selectionCopyText.isNotBlank()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank()) {
@@ -2668,6 +2742,15 @@ private fun MessageBubble(
                                 }
                             }
                         }
+                    }
+                }
+                executionEntry?.let { entry ->
+                    executionStatusLabel(entry.status)?.let { label ->
+                        Text(
+                            text = label,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
                     }
                 }
                 if (parts.isNotEmpty()) {
@@ -2763,6 +2846,7 @@ private fun ChatInputBar(
     canSend: Boolean,
     isBusy: Boolean,
     onSend: () -> Unit,
+    onStop: () -> Unit,
     showFileChangeSuggestion: Boolean,
     canSendFileChange: Boolean,
     onSendFileChange: () -> Unit,
@@ -2890,12 +2974,21 @@ private fun ChatInputBar(
                     }
                     ChatInputTrailingAction.SEND -> FilledIconButton(
                         modifier = Modifier.size(56.dp),
-                        enabled = isBusy || canSend,
+                        enabled = canSend,
                         onClick = onSend,
                     ) {
                         Icon(
-                            imageVector = if (isBusy) Icons.Filled.Stop else Icons.AutoMirrored.Filled.Send,
-                            contentDescription = sendButtonContentDescription(isBusy),
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = sendButtonContentDescription(isBusy = false),
+                        )
+                    }
+                    ChatInputTrailingAction.STOP -> FilledIconButton(
+                        modifier = Modifier.size(56.dp),
+                        onClick = onStop,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Stop,
+                            contentDescription = sendButtonContentDescription(isBusy = true),
                         )
                     }
                 }

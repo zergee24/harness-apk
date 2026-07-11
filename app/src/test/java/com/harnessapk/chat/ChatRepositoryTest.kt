@@ -468,6 +468,10 @@ private class FakeMessageDao : MessageDao {
         rows[entity.id] = entity
     }
 
+    override suspend fun deleteById(id: String) {
+        rows.remove(id)
+    }
+
     override suspend fun deleteForConversation(conversationId: String) {
         rows.entries.removeIf { it.value.conversationId == conversationId }
     }

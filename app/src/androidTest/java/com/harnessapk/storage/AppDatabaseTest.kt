@@ -167,4 +167,62 @@ class AppDatabaseTest {
         assertEquals(parts, db.messagePartDao().listForMessage("message-parts"))
         db.close()
     }
+
+    @Test
+    fun storesChatExecutionEntry() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        db.conversationDao().insert(
+            ConversationEntity(
+                id = "conversation-queue",
+                title = "队列测试",
+                createdAt = 1L,
+                updatedAt = 1L,
+                defaultProviderId = null,
+                defaultModel = null,
+                isArchived = false,
+                projectId = null,
+                promptOriginal = "",
+                promptOptimized = "",
+                promptFinal = "",
+            ),
+        )
+        db.messageDao().insert(
+            MessageEntity(
+                id = "message-queue",
+                conversationId = "conversation-queue",
+                role = MessageRole.USER.name,
+                content = "排队消息",
+                status = MessageStatus.SUCCEEDED.name,
+                providerId = null,
+                model = null,
+                createdAt = 2L,
+                updatedAt = 2L,
+                errorCode = null,
+                errorMessage = null,
+            ),
+        )
+        val entry = ChatExecutionEntryEntity(
+            id = "entry-queue",
+            conversationId = "conversation-queue",
+            userMessageId = "message-queue",
+            assistantMessageId = null,
+            targetAssistantMessageId = null,
+            sequence = 1L,
+            type = "NORMAL",
+            status = "QUEUED",
+            providerId = "provider",
+            model = "model",
+            reasoningEffort = "HIGH",
+            requestContextJson = "{}",
+            errorMessage = null,
+            createdAt = 2L,
+            updatedAt = 2L,
+        )
+
+        db.chatExecutionEntryDao().insert(entry)
+
+        assertEquals(listOf(entry), db.chatExecutionEntryDao().listForConversation("conversation-queue"))
+        db.close()
+    }
 }
