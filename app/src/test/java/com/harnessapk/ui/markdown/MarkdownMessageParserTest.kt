@@ -3,6 +3,7 @@ package com.harnessapk.ui.markdown
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.random.Random
 
 class MarkdownMessageParserTest {
     @Test
@@ -113,6 +114,31 @@ class MarkdownMessageParserTest {
         assertTrue("---" in code.literal)
         assertTrue("# this is intentionally code-like text" in code.literal)
         assertTrue("| column | value |" in code.literal)
+    }
+
+    @Test
+    fun recoversTrailingTildeFence() {
+        val blocks = parseMarkdownBlocks("~~~text\n日志内容~~~\n\n后续正文")
+
+        assertEquals("日志内容", (blocks.first() as MarkdownBlock.Code).literal)
+        assertEquals("后续正文", (blocks.last() as MarkdownBlock.Paragraph).text.plainText())
+    }
+
+    @Test
+    fun openingFenceWithInfoInsideCodeIsNotAClosingLine() {
+        val blocks = parseMarkdownBlocks("```text\n第一段\n```text第二段")
+
+        val code = blocks.single() as MarkdownBlock.Code
+        assertTrue("```text第二段" in code.literal)
+    }
+
+    @Test
+    fun shorterTrailingFenceDoesNotCloseLongerOpeningFence() {
+        val blocks = parseMarkdownBlocks("````text\n第一段```\n第二段\n````")
+
+        val code = blocks.single() as MarkdownBlock.Code
+        assertTrue("第一段```" in code.literal)
+        assertTrue("第二段" in code.literal)
     }
 
     @Test
@@ -343,6 +369,27 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun incrementalParserKeepsFenceWithInvalidInfoCloserInTail() {
+        val cache = IncrementalMarkdownBlockCache(
+            maxStableChunkChars = 64,
+            maxTailChars = 16,
+        )
+        val source = buildString {
+            appendLine("```text")
+            appendLine("短日志".repeat(3))
+            appendLine("```text这不是合法关闭行")
+            appendLine()
+            appendLine("仍然属于未闭合代码块".repeat(24))
+        }.trimEnd()
+
+        val chunks = cache.chunksFor(source)
+
+        assertEquals(1, chunks.size)
+        assertEquals(false, chunks.single().stable)
+        assertEquals(source, chunks.single().source)
+    }
+
+    @Test
     fun incrementalParserKeepsUnclosedDisplayMathInTailDuringStreaming() {
         val cache = IncrementalMarkdownBlockCache(
             maxStableChunkChars = 24,
@@ -405,6 +452,7 @@ class MarkdownMessageParserTest {
             "tables_wide.md" to MarkdownBlock.Table::class,
             "long_git_usage.md" to MarkdownBlock.Code::class,
             "chinese_headings_spacing.md" to MarkdownBlock.Heading::class,
+            "malformed_fences_long.md" to MarkdownBlock.Code::class,
         )
 
         samples.forEach { (fileName, expectedBlockType) ->
@@ -413,6 +461,57 @@ class MarkdownMessageParserTest {
             assertTrue(
                 "$fileName did not contain ${expectedBlockType.simpleName}: ${blocks.debugText()}",
                 blocks.any { expectedBlockType.isInstance(it) },
+            )
+        }
+    }
+
+    @Test
+    fun parsesLongMalformedFenceCorpusWithoutLosingStructures() {
+        val source = markdownResource("malformed_fences_long.md")
+
+        val blocks = parseMarkdownBlocks(source)
+
+        assertTrue(source.length >= 4_000)
+        assertEquals(2, blocks.filterIsInstance<MarkdownBlock.Code>().size)
+        assertTrue(blocks.any { it is MarkdownBlock.Divider })
+        assertTrue(blocks.any { it is MarkdownBlock.Heading })
+        assertTrue(blocks.any { it is MarkdownBlock.Quote })
+        assertTrue(blocks.any { it is MarkdownBlock.BulletList })
+        assertTrue(blocks.any { it is MarkdownBlock.Table })
+        assertTrue(blocks.any { it is MarkdownBlock.Math })
+        val rendered = blocks.debugText()
+        assertTrue("TOKEN_TRANSITION" in rendered)
+        assertTrue("TOKEN_NESTED" in rendered)
+        repeat(80) { index -> assertTrue("Missing TOKEN_$index", "TOKEN_$index" in rendered) }
+        assertTrue(blocks.filterIsInstance<MarkdownBlock.Code>().none { "TOKEN_79" in it.literal })
+    }
+
+    @Test
+    fun fixedSeedMarkdownCombinationsKeepVisibleSentinels() {
+        val random = Random(20260711)
+        val structures = listOf(
+            "##紧凑标题###子标题",
+            "> **引用强调** 与 `inlineCode()`",
+            "- [x] 已完成\n- [ ] 待处理\n  - 嵌套项",
+            "| 列 A | 列 B |\n| --- | --- |\n| 中文 | English 🧪 |",
+            "```kotlin\nval divider = \"---\"\nprintln(divider)\n```",
+            "```text\n布局日志```",
+            "```text\n未闭合文本块\n\n---",
+            "$$\nE = mc^2\n$$",
+            "普通长串 ${"X".repeat(512)}",
+        )
+
+        repeat(40) { index ->
+            val sentinel = "TOKEN_GENERATED_$index"
+            val chosen = structures.shuffled(random).take(3)
+            val source = (chosen + "$sentinel 中文 English emoji ✅").joinToString("\n\n")
+
+            val blocks = parseMarkdownBlocks(source)
+
+            assertTrue("Combination $index parsed no blocks", blocks.isNotEmpty())
+            assertTrue(
+                "Combination $index lost $sentinel: ${blocks.debugText()}",
+                sentinel in blocks.debugText(),
             )
         }
     }
@@ -430,10 +529,16 @@ class MarkdownMessageParserTest {
                 is MarkdownBlock.Math -> "math: ${block.literal}"
                 is MarkdownBlock.Mermaid -> "mermaid: ${block.literal}"
                 is MarkdownBlock.Divider -> "divider"
-                is MarkdownBlock.BulletList -> "bullet: ${block.items.map { "${it.taskChecked}:${it.text.plainText()}" }}"
-                is MarkdownBlock.OrderedList -> "ordered: ${block.items.map { it.text.plainText() }}"
+                is MarkdownBlock.BulletList -> "bullet: ${block.items.map { it.debugText() }}"
+                is MarkdownBlock.OrderedList -> "ordered: ${block.items.map { it.debugText() }}"
                 is MarkdownBlock.Code -> "code: ${block.literal}"
                 is MarkdownBlock.Quote -> "quote: ${block.blocks.debugText()}"
             }
         }
+
+    private fun MarkdownListItem.debugText(): String =
+        listOfNotNull(
+            "${taskChecked}:${text.plainText()}",
+            children.debugText().takeIf { it.isNotBlank() },
+        ).joinToString(" ")
 }

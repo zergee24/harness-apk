@@ -107,20 +107,27 @@ private fun String.boundaryIndexes(token: String): Sequence<Int> = sequence {
 }
 
 private fun String.hasUnclosedFence(): Boolean {
-    var activeMarker: String? = null
+    var activeFence: MarkdownFence? = null
+    var previousFenceLineBlank = false
     lineSequence().forEach { line ->
-        val indent = line.takeWhile { it == ' ' }.length
-        if (indent > 3) return@forEach
-        val trimmed = line.trimStart()
-        val marker = when {
-            trimmed.startsWith("```") -> "```"
-            trimmed.startsWith("~~~") -> "~~~"
-            else -> null
-        } ?: return@forEach
-        if (trimmed.indexOf(marker, startIndex = marker.length) >= 0) return@forEach
-        activeMarker = if (activeMarker == marker) null else activeMarker ?: marker
+        val active = activeFence
+        when {
+            active == null -> {
+                activeFence = parseMarkdownFenceOpening(line)
+                previousFenceLineBlank = false
+            }
+            active.isClosingLine(line) || active.trailingCloseContent(line) != null -> {
+                activeFence = null
+                previousFenceLineBlank = false
+            }
+            active.shouldRecoverBefore(line, previousFenceLineBlank) -> {
+                activeFence = parseMarkdownFenceOpening(line)
+                previousFenceLineBlank = false
+            }
+            else -> previousFenceLineBlank = line.isBlank()
+        }
     }
-    return activeMarker != null
+    return activeFence != null
 }
 
 private fun String.hasOpenStreamingStructure(): Boolean =

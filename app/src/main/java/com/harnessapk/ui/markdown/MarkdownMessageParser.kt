@@ -109,35 +109,66 @@ private val compactFenceLanguages = listOf(
 )
 
 private fun normalizeModelMarkdown(markdown: String): String {
-    var inFence = false
+    var activeFence: MarkdownFence? = null
+    var previousFenceLineBlank = false
     var inDisplayMath = false
     return buildList {
         markdown.lineSequence().forEach { rawLine ->
             val trimmed = rawLine.trimStart()
+            activeFence?.let { fence ->
+                val trailingCloseContent = fence.trailingCloseContent(rawLine)
+                when {
+                    fence.isClosingLine(rawLine) -> {
+                        add(rawLine)
+                        activeFence = null
+                        previousFenceLineBlank = false
+                        return@forEach
+                    }
+                    trailingCloseContent != null -> {
+                        add(trailingCloseContent)
+                        add(fence.token)
+                        activeFence = null
+                        previousFenceLineBlank = false
+                        return@forEach
+                    }
+                    fence.shouldRecoverBefore(rawLine, previousFenceLineBlank) -> {
+                        add(fence.token)
+                        add("")
+                        activeFence = null
+                        previousFenceLineBlank = false
+                    }
+                    else -> {
+                        add(rawLine)
+                        previousFenceLineBlank = rawLine.isBlank()
+                        return@forEach
+                    }
+                }
+            }
+            val openingFence = parseMarkdownFenceOpening(rawLine)
             if (inDisplayMath && looksLikeMarkdownBlockStart(trimmed)) {
                 add("```")
                 add("")
                 inDisplayMath = false
             }
             when {
-                !inFence && trimmed.trim() == "$$" -> {
+                trimmed.trim() == "$$" -> {
                     add(if (inDisplayMath) "```" else "```math")
                     inDisplayMath = !inDisplayMath
                 }
-                !inFence && trimmed.trim() == "\\[" -> {
+                trimmed.trim() == "\\[" -> {
                     add("```math")
                     inDisplayMath = true
                 }
-                !inFence && trimmed.trim() == "\\]" -> {
+                trimmed.trim() == "\\]" -> {
                     add("```")
                     inDisplayMath = false
                 }
                 inDisplayMath -> add(rawLine)
-                (trimmed.startsWith("```") || trimmed.startsWith("~~~")) && !hasSingleLineFence(rawLine) -> {
-                    inFence = !inFence
+                openingFence != null -> {
+                    activeFence = openingFence
+                    previousFenceLineBlank = false
                     add(rawLine)
                 }
-                inFence -> add(rawLine)
                 else -> {
                     normalizeCompactCodeFences(rawLine).lineSequence().forEach { compactLine ->
                         normalizeHeadingLine(compactLine).lineSequence().forEach { line ->

@@ -1,10 +1,13 @@
 package com.harnessapk.ui.chat
 
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.unit.dp
 import com.harnessapk.ui.markdown.MarkdownMessage
 import org.junit.Rule
 import org.junit.Test
@@ -54,5 +57,32 @@ class MarkdownMessageTest {
 
         composeRule.onNodeWithText("kotlin").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("复制代码").assertIsDisplayed()
+    }
+
+    @Test
+    fun malformedFencesDoNotLeakHeadingAndQuoteMarkers() {
+        composeRule.setContent {
+            MaterialTheme {
+                MarkdownMessage(
+                    modifier = Modifier.width(360.dp),
+                    markdown = """
+                        ```text
+                        第一块内容```
+
+                        ```text
+                        第二块内容
+
+                        ---
+                        ## 恢复标题
+                        > **身体正对主屏**
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("恢复标题").assertIsDisplayed()
+        composeRule.onNodeWithText("身体正对主屏").assertIsDisplayed()
+        composeRule.onNodeWithText("## 恢复标题").assertDoesNotExist()
+        composeRule.onNodeWithText("> **身体正对主屏**").assertDoesNotExist()
     }
 }
