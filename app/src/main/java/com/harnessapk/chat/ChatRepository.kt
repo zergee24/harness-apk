@@ -250,6 +250,10 @@ class ChatRepository(
     suspend fun listMessages(conversationId: String): List<ChatMessage> =
         messageDao.listForConversation(conversationId).map { it.toDomain() }
 
+    suspend fun deleteMessage(id: String) {
+        messageDao.deleteById(id)
+    }
+
     suspend fun listMessageParts(messageId: String): List<UiMessagePartDraft> {
         val persisted = messagePartDao.listForMessage(messageId)
         if (persisted.isNotEmpty()) return persisted.map { it.toPartDraft() }

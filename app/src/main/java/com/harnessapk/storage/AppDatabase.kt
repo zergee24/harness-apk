@@ -13,8 +13,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessagePartEntity::class,
         ProviderProfileEntity::class,
         ConversationMemoryEntity::class,
+        ChatExecutionEntryEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -24,6 +25,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun messagePartDao(): MessagePartDao
     abstract fun providerProfileDao(): ProviderProfileDao
     abstract fun conversationMemoryDao(): ConversationMemoryDao
+    abstract fun chatExecutionEntryDao(): ChatExecutionEntryDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -111,6 +113,43 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "ALTER TABLE provider_profiles ADD COLUMN customBodyJson TEXT NOT NULL DEFAULT ''",
+                )
+            }
+        }
+
+        val MIGRATION_8_9: Migration = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_execution_entries (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        conversationId TEXT NOT NULL,
+                        userMessageId TEXT NOT NULL,
+                        assistantMessageId TEXT,
+                        targetAssistantMessageId TEXT,
+                        sequence INTEGER NOT NULL,
+                        type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        providerId TEXT,
+                        model TEXT,
+                        reasoningEffort TEXT NOT NULL,
+                        requestContextJson TEXT NOT NULL,
+                        errorMessage TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE,
+                        FOREIGN KEY(userMessageId) REFERENCES messages(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_chat_execution_entries_conversationId ON chat_execution_entries(conversationId)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_chat_execution_entries_userMessageId ON chat_execution_entries(userMessageId)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_chat_execution_entries_conversationId_sequence ON chat_execution_entries(conversationId, sequence)",
                 )
             }
         }
