@@ -383,3 +383,229 @@ git log -6 --oneline
 ```
 
 Expected: 工作区无未提交的任务相关文件；分支只包含本轮设计、计划、修复和测试提交。
+
+### Task 5: 解包 `text` 与中文正文粘连的异常围栏
+
+**Files:**
+- Modify: `app/src/main/java/com/harnessapk/ui/markdown/MarkdownFenceScanner.kt`
+- Modify: `app/src/main/java/com/harnessapk/ui/markdown/MarkdownMessageParser.kt`
+- Test: `app/src/test/java/com/harnessapk/ui/markdown/MarkdownMessageParserTest.kt`
+
+**Interfaces:**
+- Consumes: `MarkdownFence`、`parseMarkdownFenceOpening(line: String)` 和 `parseMarkdownBlocks(markdown: String)`。
+- Produces: `MarkdownFence.gluedTextContent: String?`、`unwrapSingleLineGluedTextFence(line: String): String?` 和展示前解包流程。
+
+- [ ] **Step 1: 添加误判回归和反例保护测试**
+
+```kotlin
+@Test
+fun unwrapsGluedChineseTextFenceAsMarkdown() {
+    val blocks = parseMarkdownBlocks(
+        """
+        ```text一级标题
+        这里是普通正文，包含 **重点**。
+        ```
+
+        后续正文
+        """.trimIndent(),
+    )
+
+    assertTrue(blocks.none { it is MarkdownBlock.Code })
+    assertTrue(blocks.debugText(), "一级标题" in blocks.debugText())
+    assertTrue(blocks.debugText(), "这里是普通正文" in blocks.debugText())
+    assertTrue(blocks.debugText(), "后续正文" in blocks.debugText())
+}
+
+@Test
+fun unwrapsSingleLineGluedChineseTextFence() {
+    val blocks = parseMarkdownBlocks("```text左侧布局：主屏 + 日志屏```")
+    assertTrue(blocks.none { it is MarkdownBlock.Code })
+    assertEquals("左侧布局：主屏 + 日志屏", (blocks.single() as MarkdownBlock.Paragraph).text.plainText())
+}
+
+@Test
+fun preservesValidTextAndTextLikeLanguageFences() {
+    val samples = listOf("text", "plaintext", "text/plain", "kotlin")
+    samples.forEach { info ->
+        val code = parseMarkdownBlocks("```$info\n正文日志\n```").single()
+        assertTrue("$info should remain code", code is MarkdownBlock.Code)
+    }
+}
+```
+
+- [ ] **Step 2: 运行测试确认 RED**
+
+Run:
+
+```bash
+./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.ui.markdown.MarkdownMessageParserTest.unwrapsGluedChineseTextFenceAsMarkdown' --tests 'com.harnessapk.ui.markdown.MarkdownMessageParserTest.unwrapsSingleLineGluedChineseTextFence' --tests 'com.harnessapk.ui.markdown.MarkdownMessageParserTest.preservesValidTextAndTextLikeLanguageFences' --console=plain
+```
+
+Expected: 两个解包测试失败，合法代码块保护测试通过。
+
+- [ ] **Step 3: 在扫描器中识别中文粘连内容**
+
+```kotlin
+internal val MarkdownFence.gluedTextContent: String?
+    get() {
+        if (!info.startsWith("text", ignoreCase = true)) return null
+        val suffix = info.drop(TEXT_LANGUAGE_LENGTH)
+        val first = suffix.firstOrNull() ?: return null
+        return suffix.takeIf {
+            Character.UnicodeScript.of(first.code) == Character.UnicodeScript.HAN
+        }
+    }
+
+internal fun unwrapSingleLineGluedTextFence(line: String): String? {
+    val match = singleLineGluedTextFence.matchEntire(line) ?: return null
+    return match.groupValues[1]
+}
+
+private const val TEXT_LANGUAGE_LENGTH = 4
+private val singleLineGluedTextFence = Regex(
+    pattern = "^\\s{0,3}`{3,}text([\\p{IsHan}].*?)`{3,}\\s*$",
+    option = RegexOption.IGNORE_CASE,
+)
+```
+
+单行 helper 返回中文正文捕获组，不返回围栏 token；测试必须证明返回值精确为 `左侧布局：主屏 + 日志屏`。
+
+- [ ] **Step 4: 在归一化前解包多行和单行异常围栏**
+
+```kotlin
+private fun unwrapGluedTextFences(markdown: String): String {
+    var activeUnwrappedFence: MarkdownFence? = null
+    return buildList {
+        markdown.lineSequence().forEach { line ->
+            activeUnwrappedFence?.let { fence ->
+                val trailingContent = fence.trailingCloseContent(line)
+                when {
+                    fence.isClosingLine(line) -> activeUnwrappedFence = null
+                    trailingContent != null -> {
+                        add(trailingContent)
+                        activeUnwrappedFence = null
+                    }
+                    else -> add(line)
+                }
+                return@forEach
+            }
+            unwrapSingleLineGluedTextFence(line)?.let {
+                add(it)
+                return@forEach
+            }
+            val openingFence = parseMarkdownFenceOpening(line)
+            val gluedContent = openingFence?.gluedTextContent
+            if (openingFence != null && gluedContent != null) {
+                add(gluedContent)
+                activeUnwrappedFence = openingFence
+            } else {
+                add(line)
+            }
+        }
+    }.joinToString("\n")
+}
+```
+
+`parseMarkdownBlocks()` 必须调用 `normalizeModelMarkdown(unwrapGluedTextFences(markdown))`。同时把 `isTextLike` 收窄到精确的 `text` 首 token，避免 `text一级` 再进入文本代码块恢复分支。
+
+- [ ] **Step 5: 运行定向测试确认 GREEN**
+
+Run:
+
+```bash
+./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.ui.markdown.MarkdownMessageParserTest.unwrapsGluedChineseTextFenceAsMarkdown' --tests 'com.harnessapk.ui.markdown.MarkdownMessageParserTest.unwrapsSingleLineGluedChineseTextFence' --tests 'com.harnessapk.ui.markdown.MarkdownMessageParserTest.preservesValidTextAndTextLikeLanguageFences' --console=plain
+```
+
+Expected: 三个测试全部 PASS。
+
+- [ ] **Step 6: 更新旧截图和长语料断言**
+
+原先 `text左侧...`、`text一级...` 语料不再断言产生代码块；断言其正文 token 存在且不在任何 `MarkdownBlock.Code.literal` 中。长语料追加一个标准 ` ```text` 日志块，并只断言该标准块产生代码块。
+
+- [ ] **Step 7: 提交解析回归修复**
+
+```bash
+git add app/src/main/java/com/harnessapk/ui/markdown/MarkdownFenceScanner.kt app/src/main/java/com/harnessapk/ui/markdown/MarkdownMessageParser.kt app/src/test/java/com/harnessapk/ui/markdown/MarkdownMessageParserTest.kt app/src/test/resources/markdown/malformed_fences_long.md
+git commit -m '修复：避免中文正文误判为 text 代码块'
+```
+
+### Task 6: 混合 Markdown Compose 回归与最终验证
+
+**Files:**
+- Modify: `app/src/androidTest/java/com/harnessapk/ui/chat/MarkdownMessageTest.kt`
+
+**Interfaces:**
+- Consumes: Task 5 的解包行为。
+- Produces: 窄屏混合正文只渲染真实代码块的 Compose 回归测试。
+
+- [ ] **Step 1: 添加 Compose 混合渲染测试**
+
+```kotlin
+@Test
+fun mixedMarkdownOnlyRendersRealCodeFenceAsCode() {
+    composeRule.setContent {
+        MaterialTheme {
+            MarkdownMessage(
+                modifier = Modifier.width(360.dp),
+                markdown = """
+                    ```text一级标题
+                    这是普通正文。
+                    ```
+
+                    > **身体正对主屏**
+
+                    ```kotlin
+                    val x = 1
+                    ```
+                """.trimIndent(),
+            )
+        }
+    }
+
+    composeRule.onNodeWithText("一级标题 这是普通正文。").assertIsDisplayed()
+    composeRule.onNodeWithText("身体正对主屏").assertIsDisplayed()
+    composeRule.onNodeWithText("text一级标题").assertDoesNotExist()
+    composeRule.onNodeWithText("kotlin").assertIsDisplayed()
+    composeRule.onNodeWithContentDescription("复制代码").assertIsDisplayed()
+}
+```
+
+- [ ] **Step 2: 运行完整单元测试和 Debug 构建**
+
+Run:
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks --console=plain
+```
+
+Expected: `BUILD SUCCESSFUL`，0 failed tests。
+
+- [ ] **Step 3: 启动 `harness_api36` 并运行 Android 测试**
+
+Run:
+
+```bash
+emulator -avd harness_api36 -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+./gradlew :app:connectedDebugAndroidTest --rerun-tasks --console=plain
+```
+
+Expected: 14 个以上 Android/Compose 测试全部通过，0 failed。
+
+- [ ] **Step 4: 检查差异并提交测试**
+
+```bash
+git diff --check
+git add app/src/androidTest/java/com/harnessapk/ui/chat/MarkdownMessageTest.kt
+git commit -m '测试：验证混合 Markdown 仅保留真实代码块'
+```
+
+- [ ] **Step 5: 确认工作区状态**
+
+Run:
+
+```bash
+git status --short --branch
+git log -5 --oneline
+```
+
+Expected: 工作区干净；不推送远端。
