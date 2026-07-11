@@ -24,6 +24,7 @@ import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.AppSettingsStore
 import com.harnessapk.updater.ApkInstaller
 import com.harnessapk.updater.UpdateRepository
+import com.harnessapk.updater.UpdateDownloadCoordinator
 import com.harnessapk.websearch.JinaWebSearchClient
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
@@ -120,6 +121,10 @@ class AppContainer(context: Context) {
         manifestUrl = BuildConfig.UPDATE_MANIFEST_URL,
         currentVersionCode = BuildConfig.VERSION_CODE,
         cacheDir = appContext.cacheDir,
+    )
+    val updateDownloadCoordinator = UpdateDownloadCoordinator(
+        downloader = updateRepository,
+        ioDispatcher = dispatchers.io,
     )
     val apkInstaller = ApkInstaller(appContext)
 }
