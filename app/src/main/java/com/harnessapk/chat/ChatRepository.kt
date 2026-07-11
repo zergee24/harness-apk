@@ -250,6 +250,8 @@ class ChatRepository(
     suspend fun listMessages(conversationId: String): List<ChatMessage> =
         messageDao.listForConversation(conversationId).map { it.toDomain() }
 
+    suspend fun message(id: String): ChatMessage? = messageDao.findById(id)?.toDomain()
+
     suspend fun deleteMessage(id: String) {
         messageDao.deleteById(id)
     }

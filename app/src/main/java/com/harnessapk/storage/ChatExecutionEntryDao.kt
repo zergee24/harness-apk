@@ -21,6 +21,15 @@ interface ChatExecutionEntryDao {
     @Query("SELECT * FROM chat_execution_entries WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): ChatExecutionEntryEntity?
 
+    @Query("SELECT * FROM chat_execution_entries WHERE conversationId = :conversationId AND status = :status LIMIT 1")
+    suspend fun findByConversationAndStatus(
+        conversationId: String,
+        status: String,
+    ): ChatExecutionEntryEntity?
+
+    @Query("SELECT * FROM chat_execution_entries WHERE userMessageId = :userMessageId LIMIT 1")
+    suspend fun findByUserMessageId(userMessageId: String): ChatExecutionEntryEntity?
+
     @Query("SELECT COALESCE(MAX(sequence), 0) FROM chat_execution_entries WHERE conversationId = :conversationId")
     suspend fun maxSequence(conversationId: String): Long
 

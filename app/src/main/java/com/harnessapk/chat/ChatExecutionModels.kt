@@ -64,6 +64,12 @@ internal fun executionRequestHistory(
     }
 }
 
+internal fun executionHistoryWithCurrent(
+    history: List<ChatMessage>,
+    currentUserMessage: ChatMessage,
+): List<ChatMessage> =
+    history.filterNot { it.id == currentUserMessage.id } + currentUserMessage
+
 internal fun recoveredExecutionStatus(status: ChatExecutionStatus): ChatExecutionStatus =
     if (status == ChatExecutionStatus.RUNNING) ChatExecutionStatus.INTERRUPTED else status
 

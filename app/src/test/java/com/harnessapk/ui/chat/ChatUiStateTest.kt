@@ -426,7 +426,15 @@ class ChatUiStateTest {
         assertEquals(ChatInputTrailingAction.ATTACHMENT, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false))
         assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "你好", hasSelectedImage = false, isBusy = false))
         assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = true, isBusy = false))
-        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true))
+        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true))
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "下一轮", hasSelectedImage = false, isBusy = true))
+    }
+
+    @Test
+    fun executionStatusLabelShowsQueuedAndInterruptedStates() {
+        assertEquals("等待处理", executionStatusLabel(com.harnessapk.chat.ChatExecutionStatus.QUEUED))
+        assertEquals("已按引导结束", executionStatusLabel(com.harnessapk.chat.ChatExecutionStatus.STEERED))
+        assertEquals("已中断", executionStatusLabel(com.harnessapk.chat.ChatExecutionStatus.INTERRUPTED))
     }
 
     @Test

@@ -63,6 +63,12 @@ class ChatExecutionRepository(
             .firstOrNull { it.status == ChatExecutionStatus.QUEUED.name }
             ?.toDomain()
 
+    suspend fun runningEntry(conversationId: String): ChatExecutionEntry? =
+        dao.findByConversationAndStatus(conversationId, ChatExecutionStatus.RUNNING.name)?.toDomain()
+
+    suspend fun entryForUserMessage(userMessageId: String): ChatExecutionEntry? =
+        dao.findByUserMessageId(userMessageId)?.toDomain()
+
     suspend fun queuedConversationIds(): Set<String> =
         dao.listByStatus(ChatExecutionStatus.QUEUED.name).mapTo(linkedSetOf()) { it.conversationId }
 
@@ -116,6 +122,50 @@ class ChatExecutionRepository(
                 chatRepository.markAssistantCancelled(assistantMessageId)
             }
         }
+    }
+
+    suspend fun prepareSteer(entryId: String): ChatExecutionEntry = database.withTransaction {
+        val selected = requireNotNull(dao.findById(entryId)) { "队列任务不存在" }
+        require(selected.status == ChatExecutionStatus.QUEUED.name) { "只有等待处理的消息可以引导当前回复" }
+        val running = dao.findByConversationAndStatus(selected.conversationId, ChatExecutionStatus.RUNNING.name)
+        val entries = dao.listForConversation(selected.conversationId)
+        val now = timeProvider.nowMillis()
+        running?.let { active ->
+            dao.update(
+                active.copy(
+                    status = ChatExecutionStatus.STEERED.name,
+                    updatedAt = now,
+                ),
+            )
+        }
+        val promoted = selected.copy(
+            sequence = (entries.minOfOrNull(ChatExecutionEntryEntity::sequence) ?: 0L) - 1L,
+            type = ChatExecutionType.STEER_CURRENT.name,
+            targetAssistantMessageId = running?.assistantMessageId,
+            updatedAt = now,
+        )
+        dao.update(promoted)
+        promoted.toDomain()
+    }
+
+    suspend fun cancelRunning(conversationId: String): ChatExecutionEntry? = database.withTransaction {
+        val active = dao.findByConversationAndStatus(conversationId, ChatExecutionStatus.RUNNING.name)
+            ?: return@withTransaction null
+        val now = timeProvider.nowMillis()
+        val cancelled = active.copy(
+            status = ChatExecutionStatus.CANCELLED.name,
+            updatedAt = now,
+        )
+        dao.update(cancelled)
+        cancelled.toDomain()
+    }
+
+    suspend fun deleteQueued(entryId: String): Boolean = database.withTransaction {
+        val entry = dao.findById(entryId) ?: return@withTransaction false
+        if (entry.status != ChatExecutionStatus.QUEUED.name) return@withTransaction false
+        dao.deleteById(entryId)
+        chatRepository.deleteMessage(entry.userMessageId)
+        true
     }
 
     private suspend fun updateEntry(

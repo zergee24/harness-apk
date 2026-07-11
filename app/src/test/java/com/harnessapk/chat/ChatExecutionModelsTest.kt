@@ -1,6 +1,8 @@
 package com.harnessapk.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatExecutionModelsTest {
@@ -54,6 +56,34 @@ class ChatExecutionModelsTest {
         )
 
         assertEquals(context, decodeExecutionRequestContext(encodeExecutionRequestContext(context)))
+    }
+
+    @Test
+    fun executionHistoryAddsCurrentUserMessageOnlyOnce() {
+        val current = chatMessage(id = "user-current", role = MessageRole.USER, content = "当前")
+        val history = listOf(
+            chatMessage(id = "assistant", role = MessageRole.ASSISTANT, content = "历史回复"),
+            current,
+        )
+
+        assertEquals(
+            listOf("历史回复", "当前"),
+            executionHistoryWithCurrent(history, current).map(ChatMessage::content),
+        )
+    }
+
+    @Test
+    fun foregroundNotificationSummarizesActiveConversations() {
+        assertEquals("正在生成 2 个回复", foregroundNotificationText(activeCount = 2))
+    }
+
+    @Test
+    fun finishedRunnerDoesNotRemoveItsReplacement() {
+        val original = Any()
+        val replacement = Any()
+
+        assertFalse(shouldRemoveRunner(replacement, original))
+        assertTrue(shouldRemoveRunner(original, original))
     }
 
     private fun executionEntry(
