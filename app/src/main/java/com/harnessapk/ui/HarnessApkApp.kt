@@ -54,7 +54,6 @@ import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
 import com.harnessapk.ui.updater.startupUpdateAction
 import com.harnessapk.ui.voice.VoiceSettingsScreen
-import com.harnessapk.updater.ApkDownloadResult
 import com.harnessapk.updater.UpdateCheckResult
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -121,7 +120,6 @@ fun HarnessApkApp() {
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
-    var downloadedUpdate by remember { mutableStateOf<ApkDownloadResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
 
@@ -134,11 +132,7 @@ fun HarnessApkApp() {
         updateCheckResult = result
         if (startupUpdateAction(result) == StartupUpdateAction.DOWNLOAD_APK) {
             result?.manifest?.let { manifest ->
-                downloadedUpdate = runCatching {
-                    withContext(container.dispatchers.io) {
-                        container.updateRepository.downloadApk(manifest)
-                    }
-                }.getOrNull()
+                runCatching { container.updateDownloadCoordinator.download(manifest) }
             }
         }
     }
@@ -322,7 +316,6 @@ fun HarnessApkApp() {
                     container = container,
                     contentPadding = padding,
                     initialResult = updateCheckResult,
-                    initialDownloaded = downloadedUpdate,
                 )
             }
         }

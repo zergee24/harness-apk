@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -21,11 +20,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -37,7 +37,9 @@ import com.harnessapk.BuildConfig
 import com.harnessapk.common.AppContainer
 import com.harnessapk.updater.ApkDownloadResult
 import com.harnessapk.updater.UpdateCheckResult
+import com.harnessapk.updater.UpdateDownloadState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -45,16 +47,17 @@ fun UpdateSettingsScreen(
     container: AppContainer,
     contentPadding: PaddingValues,
     initialResult: UpdateCheckResult? = null,
-    initialDownloaded: ApkDownloadResult? = null,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
+    val downloadState by container.updateDownloadCoordinator.state.collectAsState()
     var status by remember { mutableStateOf<String?>(null) }
     var statusIsError by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf(initialResult) }
-    var downloaded by remember { mutableStateOf(initialDownloaded) }
     var launchedInstallForSha by remember { mutableStateOf<String?>(null) }
+    val downloaded = (downloadState as? UpdateDownloadState.Ready)?.result
 
     fun openInstallerOrPermissionSettings(apk: ApkDownloadResult) {
         when (installLaunchTarget(container.apkInstaller.canRequestPackageInstalls())) {
@@ -71,12 +74,6 @@ fun UpdateSettingsScreen(
     }
 
     LaunchedEffect(Unit) {
-        if (initialDownloaded != null) {
-            statusIsError = false
-            status = "下载完成，正在打开系统安装器..."
-            return@LaunchedEffect
-        }
-
         if (initialResult != null) {
             result = initialResult
             if (!shouldAutoDownload(initialResult)) {
@@ -97,23 +94,17 @@ fun UpdateSettingsScreen(
             checking = false
         }
 
-        if (downloaded != null) return@LaunchedEffect
         if (result?.let(::shouldAutoDownload) == true) {
-            checking = true
-            statusIsError = false
-            status = "发现新版本，正在下载..."
-            downloaded = result?.manifest?.let { manifest ->
-                withContext(Dispatchers.IO) {
-                    runCatching { container.updateRepository.downloadApk(manifest) }
-                }.onFailure {
-                    statusIsError = true
-                    status = it.message
-                }.getOrNull()
-            }
-            checking = false
-            if (downloaded != null) {
-                statusIsError = false
-                status = "下载完成，正在打开系统安装器..."
+            result?.manifest?.let { manifest ->
+                val shouldStart = when (val state = downloadState) {
+                    UpdateDownloadState.Idle -> true
+                    is UpdateDownloadState.Downloading -> state.versionCode != manifest.versionCode
+                    is UpdateDownloadState.Ready -> state.versionCode != manifest.versionCode
+                    is UpdateDownloadState.Failed -> state.versionCode != manifest.versionCode
+                }
+                if (shouldStart) {
+                    runCatching { container.updateDownloadCoordinator.download(manifest) }
+                }
             }
         } else if (result != null) {
             statusIsError = false
@@ -125,11 +116,12 @@ fun UpdateSettingsScreen(
         if (initialResult != null) result = initialResult
     }
 
-    LaunchedEffect(initialDownloaded?.sha256) {
-        val apk = initialDownloaded ?: return@LaunchedEffect
-        downloaded = apk
-        statusIsError = false
-        status = "下载完成，正在打开系统安装器..."
+    LaunchedEffect(downloadState) {
+        updateDownloadStatusText(downloadState)?.let { message ->
+            status = message
+            statusIsError = downloadState is UpdateDownloadState.Failed
+        }
+        checking = downloadState is UpdateDownloadState.Downloading
     }
 
     LaunchedEffect(downloaded?.sha256) {
@@ -277,9 +269,9 @@ fun UpdateSettingsScreen(
                         MaterialTheme.colorScheme.surfaceVariant
                     },
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Text(
                             text = it,
@@ -290,6 +282,23 @@ fun UpdateSettingsScreen(
                             },
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        if (canRetryUpdateDownload(downloadState)) {
+                            val manifest = result?.manifest
+                            Button(
+                                enabled = manifest != null,
+                                onClick = {
+                                    if (manifest != null) {
+                                        scope.launch {
+                                            runCatching {
+                                                container.updateDownloadCoordinator.download(manifest)
+                                            }
+                                        }
+                                    }
+                                },
+                            ) {
+                                Text("重试下载")
+                            }
+                        }
                     }
                 }
             }

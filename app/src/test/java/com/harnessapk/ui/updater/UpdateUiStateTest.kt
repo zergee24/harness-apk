@@ -1,6 +1,7 @@
 package com.harnessapk.ui.updater
 
 import com.harnessapk.updater.UpdateCheckResult
+import com.harnessapk.updater.UpdateDownloadState
 import com.harnessapk.updater.UpdateManifest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -47,6 +48,23 @@ class UpdateUiStateTest {
     @Test
     fun installerOpensPermissionSettingsWhenPermissionIsMissing() {
         assertEquals(InstallLaunchTarget.UNKNOWN_SOURCES_SETTINGS, installLaunchTarget(canRequestPackageInstalls = false))
+    }
+
+    @Test
+    fun failedBackgroundDownloadShowsReasonAndRetry() {
+        val state = UpdateDownloadState.Failed(6, "安装包分片 2/23 下载失败：HTTP 500")
+
+        assertEquals(
+            "安装包分片 2/23 下载失败：HTTP 500",
+            updateDownloadStatusText(state),
+        )
+        assertTrue(canRetryUpdateDownload(state))
+    }
+
+    @Test
+    fun downloadingAndIdleStatesAreNotRetryable() {
+        assertFalse(canRetryUpdateDownload(UpdateDownloadState.Downloading(6)))
+        assertFalse(canRetryUpdateDownload(UpdateDownloadState.Idle))
     }
 
     private fun updateResult(updateAvailable: Boolean, forceUpdate: Boolean): UpdateCheckResult =
