@@ -87,6 +87,7 @@ class FileProjectRepository(
         require(trimmedName.isNotBlank()) { "项目名称不能为空" }
         val project = projectDirectory(projectId)
         writeLocalProjectName(project, trimmedName)
+        excludeLocalHarnessMetadata(project)
         project.setLastModified(timeProvider.nowMillis())
         return projectFromDirectory(project)
     }

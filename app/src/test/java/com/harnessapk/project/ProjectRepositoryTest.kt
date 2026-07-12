@@ -192,6 +192,22 @@ class ProjectRepositoryTest {
     }
 
     @Test
+    fun renameProjectExcludesLocalNameMetadataFromGit() = runTest {
+        val repository = FileProjectRepository(
+            rootDirectory = temporaryFolder.root,
+            timeProvider = TimeProvider { 380L },
+        )
+        val project = repository.createProject("原项目")
+        val excludeFile = project.rootDirectory.resolve(".git/info/exclude")
+        excludeFile.parentFile?.mkdirs()
+        excludeFile.writeText("# local excludes\n")
+
+        repository.renameProject(project.id, "新项目")
+
+        assertTrue(excludeFile.readText().lineSequence().map(String::trim).any { it == ".harness/" })
+    }
+
+    @Test
     fun createProjectFromPreparedDirectoryUsesLocalMetadataNameAndHidesHarnessFiles() = runTest {
         val repository = FileProjectRepository(
             rootDirectory = temporaryFolder.root,
