@@ -272,8 +272,7 @@ fun ChatScreen(
         modelConfig = selectedModelConfig,
     )
     val assistantActivityText = assistantActivityLabel(messages)
-    val busyText = assistantActivityText
-    val isAssistantBusy = busyText != null
+    val isAssistantBusy = assistantActivityText != null
     val executionByUserMessageId = remember(executionEntries) {
         executionEntries.associateBy(ChatExecutionEntry::userMessageId)
     }
@@ -1216,8 +1215,6 @@ fun ChatScreen(
             }
         }
 
-        busyText?.let { ResponsiveChatContentRail { AssistantActivityIndicator(it) } }
-
         ResponsiveChatContentRail {
             ChatInputBar(
                 text = text,
@@ -1738,14 +1735,6 @@ internal fun legacyPartialRetryReviewState(
         proposals = failedIndexes.map(review.proposals::get),
         diffs = failedIndexes.map { index -> review.diffs.getOrElse(index) { emptyList() } },
     )
-}
-
-private fun assistantMessageStatusText(message: ChatMessage): String? = when {
-    message.role != MessageRole.ASSISTANT -> null
-    message.status == MessageStatus.PENDING -> "正在连接模型..."
-    message.status == MessageStatus.STREAMING -> "正在接收回复..."
-    message.status == MessageStatus.CANCELLED -> "已暂停"
-    else -> null
 }
 
 @Composable
@@ -2761,13 +2750,6 @@ private fun MessageBubble(
                         )
                     }
                 }
-                assistantMessageStatusText(message)?.let {
-                    Text(
-                        text = it,
-                        color = MaterialTheme.colorScheme.primary,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
                 message.errorMessage?.let {
                     Text(
                         text = errorDisplayText(it),
@@ -3176,19 +3158,6 @@ private fun SelectedImagePreview(uri: Uri, onRemove: () -> Unit) {
                 Icon(Icons.Outlined.Close, contentDescription = "移除图片")
             }
         }
-    }
-}
-
-@Composable
-private fun AssistantActivityIndicator(text: String) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        Text(text, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
     }
 }
 
