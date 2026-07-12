@@ -20,6 +20,7 @@ import com.harnessapk.provider.ProviderCapabilityCatalogClient
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.security.ApiKeyCipher
 import com.harnessapk.session.PromptOptimizerUseCase
+import com.harnessapk.session.MarkdownNotebookRepository
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.AppSettingsStore
 import com.harnessapk.updater.ApkInstaller
@@ -45,6 +46,7 @@ class AppContainer(context: Context) {
         AppDatabase.MIGRATION_6_7,
         AppDatabase.MIGRATION_7_8,
         AppDatabase.MIGRATION_8_9,
+        AppDatabase.MIGRATION_9_10,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -114,6 +116,12 @@ class AppContainer(context: Context) {
         attachmentStore = queuedAttachmentStore,
         dispatchers = dispatchers,
         onWorkScheduled = { ChatExecutionService.start(appContext) },
+    )
+    val markdownNotebookRepository = MarkdownNotebookRepository(
+        chatRepository = chatRepository,
+        linkDao = database.conversationMarkdownLinkDao(),
+        draftDao = database.markdownChangeDraftDao(),
+        timeProvider = SystemTimeProvider,
     )
     val updateRepository = UpdateRepository(
         okHttpClient = updateHttpClient,
