@@ -33,6 +33,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
@@ -284,6 +285,7 @@ internal fun ProjectScreen(
     var showCommitDialog by rememberSaveable { mutableStateOf(false) }
     var showBranchDialog by rememberSaveable { mutableStateOf(false) }
     var projectToDelete by remember { mutableStateOf<Project?>(null) }
+    var projectToRename by remember { mutableStateOf<Project?>(null) }
     var gitStatus by remember { mutableStateOf<GitStatusSummary?>(null) }
     var gitBranches by remember { mutableStateOf<List<GitBranchSummary>>(emptyList()) }
 
@@ -472,6 +474,25 @@ internal fun ProjectScreen(
                 }
                 statusText = "已删除项目：${project.name}"
                 refreshProjects()
+            }.onFailure {
+                statusText = it.toUserMessage()
+            }
+        }
+    }
+
+    fun renameProject(project: Project, name: String) {
+        scope.launch {
+            runCatching {
+                withContext(container.dispatchers.io) {
+                    container.projectRepository.renameProject(project.id, name)
+                }
+            }.onSuccess { renamed ->
+                projectToRename = null
+                projects = projects.map { current ->
+                    if (current.id == renamed.id) renamed else current
+                }
+                statusText = "已重命名项目：${renamed.name}"
+                onCurrentProjectNameChange(renamed.name)
             }.onFailure {
                 statusText = it.toUserMessage()
             }
@@ -785,6 +806,14 @@ internal fun ProjectScreen(
         )
     }
 
+    projectToRename?.let { project ->
+        RenameProjectDialog(
+            project = project,
+            onDismiss = { projectToRename = null },
+            onRename = { name -> renameProject(project, name) },
+        )
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -819,6 +848,9 @@ internal fun ProjectScreen(
                 },
                 onShareProjectPackage = {
                     selectedProject?.let(::shareProjectPackage)
+                },
+                onRenameProject = {
+                    selectedProject?.let { projectToRename = it }
                 },
                 onDeleteProject = {
                     selectedProject?.let { projectToDelete = it }
@@ -1066,6 +1098,7 @@ private fun ProjectHeader(
     onImportProjectPackage: () -> Unit,
     onExportProjectPackage: () -> Unit,
     onShareProjectPackage: () -> Unit,
+    onRenameProject: () -> Unit,
     onDeleteProject: () -> Unit,
 ) {
     var projectMenuExpanded by remember { mutableStateOf(false) }
@@ -1083,6 +1116,16 @@ private fun ProjectHeader(
                 expanded = packageMenuExpanded,
                 onDismissRequest = { packageMenuExpanded = false },
             ) {
+                if (ProjectHeaderAction.RENAME in actionLayout.overflowActions) {
+                    DropdownMenuItem(
+                        text = { Text("重命名项目") },
+                        leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
+                        onClick = {
+                            packageMenuExpanded = false
+                            onRenameProject()
+                        },
+                    )
+                }
                 if (ProjectHeaderAction.CLONE in actionLayout.overflowActions) {
                     DropdownMenuItem(
                         text = { Text("克隆仓库") },
@@ -1566,6 +1609,34 @@ private fun NewProjectDialog(
         },
         confirmButton = {
             TextButton(enabled = name.isNotBlank(), onClick = { onCreate(name) }) { Text("创建") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+@Composable
+private fun RenameProjectDialog(
+    project: Project,
+    onDismiss: () -> Unit,
+    onRename: (String) -> Unit,
+) {
+    var name by rememberSaveable(project.id) { mutableStateOf(project.name) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名项目") },
+        text = {
+            OutlinedTextField(
+                modifier = Modifier.fillMaxWidth(),
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("项目名称") },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(enabled = name.isNotBlank(), onClick = { onRename(name) }) { Text("保存") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }

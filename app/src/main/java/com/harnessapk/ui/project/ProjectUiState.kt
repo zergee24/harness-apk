@@ -60,6 +60,7 @@ internal fun defaultProjectWorkbenchTab(): ProjectWorkbenchTab = ProjectWorkbenc
 
 internal enum class ProjectHeaderAction {
     NEW_SESSION,
+    RENAME,
     CLONE,
     IMPORT,
     EXPORT,
@@ -79,6 +80,7 @@ internal fun projectHeaderActionLayout(hasProject: Boolean): ProjectHeaderAction
             showCreateProjectDirectly = true,
             directActions = listOf(ProjectHeaderAction.NEW_SESSION),
             overflowActions = listOf(
+                ProjectHeaderAction.RENAME,
                 ProjectHeaderAction.CLONE,
                 ProjectHeaderAction.IMPORT,
                 ProjectHeaderAction.EXPORT,

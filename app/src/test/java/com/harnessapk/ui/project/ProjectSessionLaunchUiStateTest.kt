@@ -153,6 +153,7 @@ class ProjectSessionLaunchUiStateTest {
         assertEquals(listOf(ProjectHeaderAction.NEW_SESSION), layout.directActions)
         assertEquals(
             listOf(
+                ProjectHeaderAction.RENAME,
                 ProjectHeaderAction.CLONE,
                 ProjectHeaderAction.IMPORT,
                 ProjectHeaderAction.EXPORT,
