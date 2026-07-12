@@ -26,6 +26,7 @@ on:
   push:
     branches:
       - test
+      - main
     paths:
       - ".github/workflows/deploy-apk-to-oss.yml"
       - "app/**"
@@ -41,7 +42,7 @@ permissions:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'test'
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'test' || github.ref_name == 'main'
     runs-on: ubuntu-latest
     env:
       OSS_BUCKET: ${{ vars.OSS_BUCKET }}
@@ -87,7 +88,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CHANNEL="${INPUT_CHANNEL:-test}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            CHANNEL="${INPUT_CHANNEL:-test}"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            CHANNEL="prod"
+          else
+            CHANNEL="test"
+          fi
           if [ "$CHANNEL" != "test" ] && [ "$CHANNEL" != "prod" ]; then
             echo "::error::Invalid channel: $CHANNEL"
             exit 1

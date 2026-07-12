@@ -51,7 +51,7 @@ GitHub 配置：
 - Test signing secrets: `ANDROID_TEST_KEYSTORE_BASE64`, `ANDROID_TEST_STORE_PASSWORD`, `ANDROID_TEST_KEY_ALIAS`, `ANDROID_TEST_KEY_PASSWORD`
 - Prod signing secrets: `ANDROID_RELEASE_KEYSTORE_BASE64`, `ANDROID_RELEASE_STORE_PASSWORD`, `ANDROID_RELEASE_KEY_ALIAS`, `ANDROID_RELEASE_KEY_PASSWORD`
 - Variables: `OSS_BUCKET`, `OSS_ENDPOINT`, `OSS_TEST_PREFIX`, `OSS_PROD_PREFIX`, `OSS_ACL`
-- 推送 `test` 分支会自动部署测试通道；正式通道通过手动运行 workflow 并选择 `prod` 部署。
+- 推送 `test` 分支会自动部署测试通道；推送 `main` 分支会自动部署正式通道。手动运行 workflow 时仍可选择 `test` 或 `prod`。
 
 要求：
 

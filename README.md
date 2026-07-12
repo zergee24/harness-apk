@@ -75,7 +75,7 @@ OSS_ACL=public-read
 ```
 
 默认可以在 GitHub Actions 手动运行 `Deploy APK to OSS`，并选择 `test` 或 `prod`。
-推送到 `test` 分支会自动部署测试通道；正式通道只建议手动运行 workflow 并选择 `prod`。
+推送到 `test` 分支会自动部署测试通道；推送到 `main` 分支会自动部署正式通道。
 `test` 和 `prod` 通道都必须配置固定签名 secrets，避免同包名覆盖安装时出现签名不一致。
 
 版本策略：
