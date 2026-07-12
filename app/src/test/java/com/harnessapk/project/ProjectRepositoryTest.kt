@@ -160,6 +160,38 @@ class ProjectRepositoryTest {
     }
 
     @Test
+    fun renameProjectKeepsStableDirectoryAndPersistsDisplayName() = runTest {
+        val repository = FileProjectRepository(
+            rootDirectory = temporaryFolder.root,
+            timeProvider = TimeProvider { 360L },
+        )
+        val created = repository.createProject("旧名称")
+
+        val renamed = repository.renameProject(created.id, "  新名称  ")
+
+        assertEquals(created.id, renamed.id)
+        assertEquals(created.rootDirectory, renamed.rootDirectory)
+        assertEquals("新名称", renamed.name)
+        assertEquals("新名称", repository.listProjects().single().name)
+    }
+
+    @Test
+    fun renameProjectRejectsBlankName() = runTest {
+        val repository = FileProjectRepository(
+            rootDirectory = temporaryFolder.root,
+            timeProvider = TimeProvider { 370L },
+        )
+        val project = repository.createProject("原项目")
+
+        try {
+            repository.renameProject(project.id, "   ")
+            throw AssertionError("Expected IllegalArgumentException")
+        } catch (error: IllegalArgumentException) {
+            assertEquals("项目名称不能为空", error.message)
+        }
+    }
+
+    @Test
     fun createProjectFromPreparedDirectoryUsesLocalMetadataNameAndHidesHarnessFiles() = runTest {
         val repository = FileProjectRepository(
             rootDirectory = temporaryFolder.root,

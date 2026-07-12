@@ -82,6 +82,15 @@ class FileProjectRepository(
             ?: emptyList()
     }
 
+    suspend fun renameProject(projectId: String, name: String): Project {
+        val trimmedName = name.trim()
+        require(trimmedName.isNotBlank()) { "项目名称不能为空" }
+        val project = projectDirectory(projectId)
+        writeLocalProjectName(project, trimmedName)
+        project.setLastModified(timeProvider.nowMillis())
+        return projectFromDirectory(project)
+    }
+
     suspend fun deleteProject(projectId: String) {
         val project = projectDirectory(projectId)
         if (!project.deleteRecursively()) {
