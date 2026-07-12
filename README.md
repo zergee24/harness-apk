@@ -82,5 +82,5 @@ OSS_ACL=public-read
 
 - `versionName` 按产品版本走，例如 `0.1.15`；测试包自动显示为 `0.1.15-debug`。
 - `versionCode` 按机器更新版本走，必须递增。当前基础 code 使用 `1015000` 这类格式，对应 `0.1.15`。
-- GitHub Actions 的 `test` 通道默认使用 `基础 versionCode + GitHub run number`，所以同一个 `versionName` 可以重复打测试包并触发更新。
+- GitHub Actions 的 `test` / `prod` 通道在未显式传 `version_code` 时，默认使用 `基础 versionCode + GitHub run number`，所以同一个 `versionName` 可以重复打包并触发更新。
 - 本地打测试包时，如需强制让手机收到更新，传 `--version-code` 或环境变量 `APK_VERSION_CODE`。
