@@ -34,7 +34,7 @@ class ChatExecutionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         container.chatExecutionCoordinator.resumePending()
-        return START_NOT_STICKY
+        return START_REDELIVER_INTENT
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -47,8 +47,10 @@ class ChatExecutionService : Service() {
     private suspend fun stopWhenIdle() {
         delay(IDLE_STOP_DELAY_MILLIS)
         if (
-            container.chatExecutionCoordinator.activeExecutionCount.value == 0 &&
-            container.chatExecutionRepository.queuedConversationIds().isEmpty()
+            shouldStopForegroundService(
+                activeCount = container.chatExecutionCoordinator.activeExecutionCount.value,
+                hasOpenWork = container.chatExecutionRepository.hasOpenWork(),
+            )
         ) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -87,3 +89,6 @@ class ChatExecutionService : Service() {
 
 internal fun foregroundNotificationText(activeCount: Int): String =
     "正在生成 ${activeCount.coerceAtLeast(1)} 个回复"
+
+internal fun shouldStopForegroundService(activeCount: Int, hasOpenWork: Boolean): Boolean =
+    activeCount == 0 && !hasOpenWork

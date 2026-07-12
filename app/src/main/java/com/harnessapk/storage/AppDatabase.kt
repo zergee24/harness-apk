@@ -14,8 +14,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProviderProfileEntity::class,
         ConversationMemoryEntity::class,
         ChatExecutionEntryEntity::class,
+        ConversationMarkdownLinkEntity::class,
+        MarkdownChangeDraftEntity::class,
+        MarkdownChangeDraftItemEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -26,6 +29,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun providerProfileDao(): ProviderProfileDao
     abstract fun conversationMemoryDao(): ConversationMemoryDao
     abstract fun chatExecutionEntryDao(): ChatExecutionEntryDao
+    abstract fun conversationMarkdownLinkDao(): ConversationMarkdownLinkDao
+    abstract fun markdownChangeDraftDao(): MarkdownChangeDraftDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -151,6 +156,69 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE UNIQUE INDEX IF NOT EXISTS index_chat_execution_entries_conversationId_sequence ON chat_execution_entries(conversationId, sequence)",
                 )
+            }
+        }
+
+        val MIGRATION_9_10: Migration = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS conversation_markdown_links (
+                        conversationId TEXT NOT NULL,
+                        projectId TEXT NOT NULL,
+                        relativePath TEXT NOT NULL,
+                        linkedAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(conversationId, projectId, relativePath),
+                        FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_conversation_markdown_links_conversationId ON conversation_markdown_links(conversationId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_conversation_markdown_links_projectId ON conversation_markdown_links(projectId)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS markdown_change_drafts (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        conversationId TEXT NOT NULL,
+                        projectId TEXT NOT NULL,
+                        sourceUserMessageId TEXT NOT NULL,
+                        assistantMessageId TEXT,
+                        status TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        rawResponse TEXT,
+                        errorMessage TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_markdown_change_drafts_conversationId ON markdown_change_drafts(conversationId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_markdown_change_drafts_projectId ON markdown_change_drafts(projectId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_markdown_change_drafts_sourceUserMessageId ON markdown_change_drafts(sourceUserMessageId)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS markdown_change_draft_items (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        draftId TEXT NOT NULL,
+                        itemIndex INTEGER NOT NULL,
+                        operation TEXT NOT NULL,
+                        relativePath TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        proposedMarkdown TEXT NOT NULL,
+                        retained INTEGER NOT NULL,
+                        baselineSha256 TEXT,
+                        expectedAbsent INTEGER NOT NULL,
+                        applyStatus TEXT,
+                        applyErrorMessage TEXT,
+                        FOREIGN KEY(draftId) REFERENCES markdown_change_drafts(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_markdown_change_draft_items_draftId ON markdown_change_draft_items(draftId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_markdown_change_draft_items_draftId_itemIndex ON markdown_change_draft_items(draftId, itemIndex)")
             }
         }
     }

@@ -37,15 +37,28 @@ class ChatExecutionModelsTest {
     }
 
     @Test
-    fun interruptedRecoveryDoesNotChangeQueuedEntry() {
+    fun recoveryRequeuesOnlyRunningEntry() {
         assertEquals(
-            ChatExecutionStatus.INTERRUPTED,
+            ChatExecutionStatus.QUEUED,
             recoveredExecutionStatus(ChatExecutionStatus.RUNNING),
         )
         assertEquals(
             ChatExecutionStatus.QUEUED,
             recoveredExecutionStatus(ChatExecutionStatus.QUEUED),
         )
+    }
+
+    @Test
+    fun foregroundServiceStopsOnlyWhenNoOpenExecutionRemains() {
+        assertFalse(shouldStopForegroundService(activeCount = 1, hasOpenWork = false))
+        assertFalse(shouldStopForegroundService(activeCount = 0, hasOpenWork = true))
+        assertTrue(shouldStopForegroundService(activeCount = 0, hasOpenWork = false))
+    }
+
+    @Test
+    fun runningExecutionIsRecoveredOnlyWithoutCurrentRunner() {
+        assertTrue(shouldRecoverRunningExecution(hasActiveRunner = false))
+        assertFalse(shouldRecoverRunningExecution(hasActiveRunner = true))
     }
 
     @Test

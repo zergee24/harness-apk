@@ -72,6 +72,14 @@ class ChatExecutionRepository(
     suspend fun queuedConversationIds(): Set<String> =
         dao.listByStatus(ChatExecutionStatus.QUEUED.name).mapTo(linkedSetOf()) { it.conversationId }
 
+    suspend fun runningConversationIds(): Set<String> =
+        dao.listByStatus(ChatExecutionStatus.RUNNING.name).mapTo(linkedSetOf()) { it.conversationId }
+
+    suspend fun openConversationIds(): Set<String> =
+        dao.listByStatuses(openExecutionStatusNames).mapTo(linkedSetOf()) { it.conversationId }
+
+    suspend fun hasOpenWork(): Boolean = dao.listByStatuses(openExecutionStatusNames).isNotEmpty()
+
     suspend fun requestHistory(entryId: String): List<ChatMessage> {
         val entry = requireNotNull(entry(entryId)) { "队列任务不存在" }
         val entries = dao.listForConversation(entry.conversationId).map(ChatExecutionEntryEntity::toDomain)
@@ -109,12 +117,15 @@ class ChatExecutionRepository(
         }
     }
 
-    suspend fun recoverAfterProcessDeath() = database.withTransaction {
+    suspend fun recoverAfterProcessDeath(conversationId: String? = null) = database.withTransaction {
         dao.listByStatus(ChatExecutionStatus.RUNNING.name).forEach { entity ->
+            if (conversationId != null && entity.conversationId != conversationId) return@forEach
             val now = timeProvider.nowMillis()
             dao.update(
                 entity.copy(
-                    status = ChatExecutionStatus.INTERRUPTED.name,
+                    status = ChatExecutionStatus.QUEUED.name,
+                    assistantMessageId = null,
+                    errorMessage = null,
                     updatedAt = now,
                 ),
             )
@@ -178,6 +189,11 @@ class ChatExecutionRepository(
         updated
     }
 }
+
+private val openExecutionStatusNames = listOf(
+    ChatExecutionStatus.QUEUED.name,
+    ChatExecutionStatus.RUNNING.name,
+)
 
 private fun ChatExecutionEntryEntity.toDomain(): ChatExecutionEntry = ChatExecutionEntry(
     id = id,

@@ -52,7 +52,13 @@ class ChatExecutionCoordinator(
 
     fun resumePending() {
         scope.launch {
-            executionRepository.queuedConversationIds().forEach { conversationId ->
+            executionRepository.runningConversationIds().forEach { conversationId ->
+                val hasActiveRunner = runnersMutex.withLock { runners[conversationId]?.isActive == true }
+                if (shouldRecoverRunningExecution(hasActiveRunner)) {
+                    executionRepository.recoverAfterProcessDeath(conversationId)
+                }
+            }
+            executionRepository.openConversationIds().forEach { conversationId ->
                 ensureRunner(conversationId)
             }
         }
@@ -178,3 +184,5 @@ class ChatExecutionCoordinator(
 
 internal fun <T> shouldRemoveRunner(registered: T?, finished: T?): Boolean =
     registered != null && registered === finished
+
+internal fun shouldRecoverRunningExecution(hasActiveRunner: Boolean): Boolean = !hasActiveRunner

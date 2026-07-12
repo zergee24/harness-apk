@@ -71,7 +71,7 @@ internal fun executionHistoryWithCurrent(
     history.filterNot { it.id == currentUserMessage.id } + currentUserMessage
 
 internal fun recoveredExecutionStatus(status: ChatExecutionStatus): ChatExecutionStatus =
-    if (status == ChatExecutionStatus.RUNNING) ChatExecutionStatus.INTERRUPTED else status
+    if (status == ChatExecutionStatus.RUNNING) ChatExecutionStatus.QUEUED else status
 
 internal fun encodeExecutionRequestContext(context: ChatExecutionRequestContext): String = buildJsonObject {
     put("webSearchEnabled", JsonPrimitive(context.webSearchEnabled))
