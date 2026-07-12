@@ -14,8 +14,7 @@ class HarnessApkApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            container.chatExecutionRepository.recoverAfterProcessDeath()
-            if (container.chatExecutionRepository.queuedConversationIds().isNotEmpty()) {
+            if (container.chatExecutionRepository.hasOpenWork()) {
                 ChatExecutionService.start(this@HarnessApkApplication)
             }
         }

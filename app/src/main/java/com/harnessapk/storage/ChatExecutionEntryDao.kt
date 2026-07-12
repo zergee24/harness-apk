@@ -18,6 +18,9 @@ interface ChatExecutionEntryDao {
     @Query("SELECT * FROM chat_execution_entries WHERE status = :status ORDER BY createdAt ASC")
     suspend fun listByStatus(status: String): List<ChatExecutionEntryEntity>
 
+    @Query("SELECT * FROM chat_execution_entries WHERE status IN (:statuses) ORDER BY createdAt ASC")
+    suspend fun listByStatuses(statuses: List<String>): List<ChatExecutionEntryEntity>
+
     @Query("SELECT * FROM chat_execution_entries WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): ChatExecutionEntryEntity?
 
