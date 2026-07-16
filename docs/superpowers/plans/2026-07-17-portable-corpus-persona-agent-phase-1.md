@@ -33,7 +33,7 @@
 - Create: `tools/agent_builder/requirements.txt`：Codex 运行时之外的可复现依赖声明。
 - Create: `tools/agent_builder/tests/test_builder.py`：确定性构建与安全校验测试。
 - Create: `scripts/agent-builder.sh`：优先发现 Codex 随附 Python 的 M4 macOS 启动器。
-- Create: `.codex/skills/agent-builder/SKILL.md`：会话式构建流程。
+- Create: `.agents/skills/agent-builder/SKILL.md`：会话式构建流程。
 
 ### Android 包、数据与运行时
 
@@ -143,7 +143,7 @@ Expected: PASS，包含 TXT/MD/EPUB、稳定 chunk ID、路径安全、checksum 
 - [x] **Step 6: 提交**
 
 ```bash
-git add .codex/skills/agent-builder scripts/agent-builder.sh tools/agent_builder
+git add .agents/skills/agent-builder scripts/agent-builder.sh tools/agent_builder
 git commit -m "功能：新增桌面智能体构建器"
 ```
 
