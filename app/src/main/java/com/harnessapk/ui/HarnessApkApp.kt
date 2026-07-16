@@ -132,7 +132,7 @@ fun HarnessApkApp() {
         updateCheckResult = result
         if (startupUpdateAction(result) == StartupUpdateAction.DOWNLOAD_APK) {
             result?.manifest?.let { manifest ->
-                runCatching { container.updateDownloadCoordinator.download(manifest) }
+                container.updateDownloadCoordinator.startDownload(manifest)
             }
         }
     }

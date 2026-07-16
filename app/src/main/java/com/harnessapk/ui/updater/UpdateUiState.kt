@@ -23,6 +23,16 @@ internal fun startupUpdateAction(result: UpdateCheckResult?): StartupUpdateActio
         StartupUpdateAction.NONE
     }
 
+internal fun shouldStartUpdateDownload(
+    manifestVersionCode: Int,
+    state: UpdateDownloadState,
+): Boolean = when (state) {
+    UpdateDownloadState.Idle -> true
+    is UpdateDownloadState.Downloading -> state.versionCode != manifestVersionCode
+    is UpdateDownloadState.Ready -> state.versionCode != manifestVersionCode
+    is UpdateDownloadState.Failed -> state.versionCode != manifestVersionCode
+}
+
 internal fun updateDownloadStatusText(state: UpdateDownloadState): String? = when (state) {
     UpdateDownloadState.Idle -> null
     is UpdateDownloadState.Downloading -> "正在后台下载更新..."
