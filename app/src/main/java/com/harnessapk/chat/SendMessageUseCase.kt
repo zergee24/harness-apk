@@ -21,8 +21,12 @@ import com.harnessapk.session.buildSessionOutgoingMessages
 import com.harnessapk.websearch.WebSearchContext
 import com.harnessapk.websearch.toVisibleSourcesMarkdown
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.util.UUID
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -159,15 +163,10 @@ class SendMessageUseCase(
             )
             onAssistantCreated(nextAssistantId)
             assistantId = nextAssistantId
-            val activeStreamClock = TimeSource.Monotonic.markNow()
-            val activeAccumulator = StreamingMessageAccumulator()
-            streamClock = activeStreamClock
-            accumulator = activeAccumulator
             var latestSnapshot = StreamingMessageSnapshot(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
             )
-            val outputTransformerPipeline = outputTransformerPipelineFactory()
             val modelAwareRequest = requestBuilder.build(
                 provider = provider.profile,
                 apiKey = provider.apiKey,
@@ -179,17 +178,41 @@ class SendMessageUseCase(
             )
             requestDiagnostics = modelAwareRequest.diagnostics
 
-            client.streamChatEvents(modelAwareRequest.request).collect { event ->
-                outputTransformerPipeline.transform(event).forEach { transformedEvent ->
-                    receivedChars += transformedEvent.visiblePayloadLength()
-                    activeAccumulator.onEvent(
-                        transformedEvent,
-                        activeStreamClock.elapsedNow().inWholeMilliseconds,
-                    )?.let { flush ->
-                        flushCount += 1
-                        latestSnapshot = flush.snapshot
-                        chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+            var retriesUsed = 0
+            while (true) {
+                val activeStreamClock = TimeSource.Monotonic.markNow()
+                val activeAccumulator = StreamingMessageAccumulator()
+                streamClock = activeStreamClock
+                accumulator = activeAccumulator
+                val outputTransformerPipeline = outputTransformerPipelineFactory()
+                try {
+                    client.streamChatEvents(modelAwareRequest.request).collect { event ->
+                        outputTransformerPipeline.transform(event).forEach { transformedEvent ->
+                            receivedChars += transformedEvent.visiblePayloadLength()
+                            activeAccumulator.onEvent(
+                                transformedEvent,
+                                activeStreamClock.elapsedNow().inWholeMilliseconds,
+                            )?.let { flush ->
+                                flushCount += 1
+                                latestSnapshot = flush.snapshot
+                                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+                            }
+                        }
                     }
+                    break
+                } catch (error: Throwable) {
+                    if (!currentCoroutineContext().isActive ||
+                        !shouldRetryStreamAfterTransportFailure(error, retriesUsed)
+                    ) {
+                        throw error
+                    }
+                    retriesUsed += 1
+                    latestSnapshot = StreamingMessageSnapshot(
+                        status = MessageStatus.PENDING,
+                        parts = emptyList(),
+                    )
+                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+                    delay(STREAM_TRANSPORT_RETRY_DELAY_MILLIS)
                 }
             }
             webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
@@ -413,6 +436,13 @@ private fun String.asLlmFailureMessage(): String {
         "LLM 请求失败：$this"
     }
 }
+
+private const val MAX_STREAM_TRANSPORT_RETRIES = 1
+private const val STREAM_TRANSPORT_RETRY_DELAY_MILLIS = 1_000L
+
+internal fun shouldRetryStreamAfterTransportFailure(error: Throwable, retriesUsed: Int): Boolean =
+    retriesUsed < MAX_STREAM_TRANSPORT_RETRIES &&
+        generateSequence(error) { it.cause }.any { cause -> cause is IOException }
 
 private data class ImagePayload(
     val bytes: ByteArray,

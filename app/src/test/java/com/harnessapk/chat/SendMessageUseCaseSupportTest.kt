@@ -1,8 +1,10 @@
 package com.harnessapk.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.SocketException
 
 class SendMessageUseCaseSupportTest {
     @Test
@@ -54,6 +56,15 @@ class SendMessageUseCaseSupportTest {
         assertEquals(MessageStatus.CANCELLED, snapshot.status)
         assertEquals("已落库未到节流窗口", snapshot.legacyVisibleText())
         assertTrue(snapshot.parts.all { it.stable })
+    }
+
+    @Test
+    fun backgroundSocketAbortGetsOneControlledStreamRetry() {
+        val abort = SocketException("Software caused connection abort")
+
+        assertTrue(shouldRetryStreamAfterTransportFailure(abort, retriesUsed = 0))
+        assertFalse(shouldRetryStreamAfterTransportFailure(abort, retriesUsed = 1))
+        assertFalse(shouldRetryStreamAfterTransportFailure(IllegalStateException("HTTP 401"), retriesUsed = 0))
     }
 
 }
