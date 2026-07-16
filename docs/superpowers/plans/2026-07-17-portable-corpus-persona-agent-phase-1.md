@@ -140,7 +140,7 @@ Run: `CODEX_PYTHON=/Users/tony/.cache/codex-runtimes/codex-primary-runtime/depen
 
 Expected: PASS，包含 TXT/MD/EPUB、稳定 chunk ID、路径安全、checksum 和签名测试；PDF 使用文本层 fixture 或 `pypdf` mock reader 验证。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add .codex/skills/agent-builder scripts/agent-builder.sh tools/agent_builder
