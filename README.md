@@ -27,6 +27,20 @@ scripts/release_apk.sh prod
 scripts/release_apk.sh test --version-code 1015009
 ```
 
+## Agent Builder（M4 macOS）
+
+在仓库目录的桌面 Codex 任务中调用项目 Skill `agent-builder`，提供本地 TXT、Markdown、EPUB 或带文本层的 PDF，并说明智能体名称和版本。Skill 会先生成可审阅的构建目录，再补全人格、观点与评测资料；只有 `validate` 通过后才会输出签名 `.hbundle`。也可以直接运行确定性 CLI：
+
+```bash
+scripts/agent-builder.sh prepare --agent-id person.example --name 资料研究代理 --version 1 --output build/my-agent /path/to/books
+scripts/agent-builder.sh validate build/my-agent
+scripts/agent-builder.sh pack build/my-agent --output build/agent-dist
+```
+
+## Android 智能体导入
+
+智能体功能直接位于原 Harness APK。打开首页“智能体”模式，点击右上角加号，选择桌面生成的 `.hbundle`，核对名称、版本、资料与发布者指纹后安装；状态显示“可用”时点击“开始对话”，会进入原有会话页面并固定当前智能体版本。Agent 会话显示“基于资料模拟”，只注入本地资料检索结果，不启用联网搜索补写。
+
 ## Emulator QA
 
 ```bash

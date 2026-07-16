@@ -152,7 +152,7 @@ git commit -m "功能：新增桌面智能体构建器"
 **Interfaces:**
 - Produces: `AgentBundleReader.read(file: File): ParsedAgentBundle`。
 - Produces: `AgentBundleReader.inspect(file: File): AgentImportPreview`。
-- Produces: `JcaEd25519Verifier.verify(publicKey, payload, signature): Boolean`。
+- Produces: `PortableEd25519Verifier.verify(publicKey, payload, signature): Boolean`。
 
 - [x] **Step 1: 写失败的包读取测试**
 
@@ -181,7 +181,7 @@ Expected: FAIL，原因是读取器和模型尚不存在。
 
 - [x] **Step 4: 实现 Ed25519 校验**
 
-将 32 字节 raw public key 包装为 RFC 8410 X.509 SubjectPublicKeyInfo，使用 `KeyFactory.getInstance("Ed25519")` 与 `Signature.getInstance("Ed25519")` 验证 canonical checksums bytes。算法不可用时返回明确“不支持该签名算法”，不能降级为跳过签名。
+使用 Bouncy Castle 1.84 的低层 `Ed25519Signer` API 验证 32 字节 raw public key、canonical checksums bytes 与 64 字节签名，不注册全局 provider，也不依赖 Android Keystore。算法不可用时返回明确“不支持该签名算法”，不能降级为跳过签名。
 
 - [x] **Step 5: 运行测试确认 GREEN**
 
@@ -270,7 +270,7 @@ Expected: FAIL，原因是 Repository 尚不存在。
 
 - [x] **Step 3: 实现 staging 和原子安装**
 
-`prepareImport` 把 Content URI 流式复制到 `cacheDir/agent-staging/<uuid>.hbundle` 并完成预检。`install` 在数据库事务前把已验证文件原子移动到 `filesDir/agents/<agentId>/<version>/bundle.hbundle`；同版本同 SHA-256 幂等，同版本不同 SHA-256 拒绝，资料按 `corpusId + sourceHash` 去重。
+`prepareImport` 把 Content URI 流式复制到 `cacheDir/agent-staging/<uuid>.hbundle` 并完成预检。`install` 在数据库事务前把已验证文件原子移动到 `filesDir/agents/<agentId>/<version>/bundle.hbundle`，随后从最终路径流式建立索引；同版本同 SHA-256 幂等，同版本不同 SHA-256 拒绝，资料按 `corpusId + sourceHash` 去重。
 
 - [x] **Step 4: 实现中文检索和严格上下文**
 
@@ -368,7 +368,7 @@ Run: `./gradlew assembleDebug`
 
 Expected: 全部 PASS，生成 `app/build/outputs/apk/debug/app-debug.apk`。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add app/src/main/java/com/harnessapk/ui app/src/test/java/com/harnessapk/ui
@@ -381,7 +381,7 @@ git commit -m "功能：在现有应用加入智能体模式"
 - Consumes: 前六项产物。
 - Produces: 可被 APK 安装的 fixture `.hbundle`、构建报告和验收记录。
 
-- [ ] **Step 1: 用桌面 CLI 构建最小 fixture**
+- [x] **Step 1: 用桌面 CLI 构建最小 fixture**
 
 Run: `scripts/agent-builder.sh prepare --agent-id fixture.researcher --name 资料研究代理 --version 1 --output build/agent-fixture app/src/test/resources/agent/source.md`
 
@@ -391,7 +391,7 @@ Run: `scripts/agent-builder.sh pack build/agent-fixture --output build/agent-dis
 
 Expected: 生成签名 `.hbundle` 和通过的 `build-report.json`。
 
-- [ ] **Step 2: 执行完整自动验证**
+- [x] **Step 2: 执行完整自动验证**
 
 Run: `CODEX_PYTHON=/Users/tony/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 scripts/agent-builder.sh -m unittest discover -s tools/agent_builder/tests -v`
 
@@ -401,11 +401,11 @@ Run: `git diff --check`
 
 Expected: 全部退出码为 0。
 
-- [ ] **Step 3: 更新 README 使用入口**
+- [x] **Step 3: 更新 README 使用入口**
 
 README 只增加两段：桌面 Codex 中如何触发 `agent-builder` Skill，以及 `.hbundle` 在现有 APK 的“智能体”模式中如何导入。不复制完整设计规格。
 
-- [ ] **Step 4: 提交验收收口**
+- [x] **Step 4: 提交验收收口**
 
 ```bash
 git add README.md app/src/test/resources/agent
