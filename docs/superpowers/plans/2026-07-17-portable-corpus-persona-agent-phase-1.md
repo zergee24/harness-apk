@@ -189,7 +189,7 @@ Run: `./gradlew testDebugUnitTest --tests com.harnessapk.agent.AgentBundleReader
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add app/src/main/java/com/harnessapk/agent app/src/test/java/com/harnessapk/agent/AgentBundleReaderTest.kt
@@ -203,7 +203,7 @@ git commit -m "功能：校验智能体本地包"
 - Produces: `AgentDao.searchChunkKeys(corpusKeys, ftsQuery, limit): List<String>`。
 - Changes: `ChatRepository.createConversation(title, projectId, agentId, agentVersion)`。
 
-- [ ] **Step 1: 写失败的会话与数据库测试**
+- [x] **Step 1: 写失败的会话与数据库测试**
 
 ```kotlin
 @Test fun createConversationPinsAgentVersion() = runTest {
@@ -215,21 +215,21 @@ git commit -m "功能：校验智能体本地包"
 
 Instrumentation test 插入 Agent、版本、资料和 chunk 后，以中文 n-gram FTS 查询并断言返回正确 chunk。
 
-- [ ] **Step 2: 运行单元测试确认 RED**
+- [x] **Step 2: 运行单元测试确认 RED**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.chat.ChatRepositoryTest`
 
 Expected: FAIL，原因是会话尚无 Agent 字段。
 
-- [ ] **Step 3: 实现实体、DAO 和 migration**
+- [x] **Step 3: 实现实体、DAO 和 migration**
 
 数据库升级为 11。`MIGRATION_10_11` 增加会话字段并创建 `agents`、`agent_versions`、`agent_corpora`、`agent_version_corpora`、`agent_chunks` 和 `agent_chunk_fts`。大正文只在 chunk 表与文件资产中存在，不复制到 Agent 主表。
 
-- [ ] **Step 4: 实现会话固定版本**
+- [x] **Step 4: 实现会话固定版本**
 
 `agentId` 与 `agentVersion` 必须同时为空或同时有值；`ChatRepository.createConversation` 对不完整组合执行 `require`。普通会话行为保持不变。
 
-- [ ] **Step 5: 运行测试确认 GREEN**
+- [x] **Step 5: 运行测试确认 GREEN**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.chat.ChatRepositoryTest`
 

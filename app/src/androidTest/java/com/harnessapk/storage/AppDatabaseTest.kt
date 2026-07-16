@@ -17,6 +17,93 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
     @Test
+    fun storesAgentVersionAndFindsCorpusChunkThroughFts() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val dao = db.agentDao()
+        dao.upsertAgent(
+            AgentEntity(
+                id = "agent-1",
+                name = "资料研究代理",
+                summary = "基于资料模拟",
+                activeVersion = 1,
+                publisherPublicKey = byteArrayOf(1, 2, 3),
+                publisherFingerprint = "fingerprint",
+                installSource = "LOCAL_FILE",
+                status = "READY",
+                requiredCorpusCount = 1,
+                installedCorpusCount = 1,
+                createdAt = 1L,
+                updatedAt = 1L,
+            ),
+        )
+        dao.insertVersion(
+            AgentVersionEntity(
+                agentId = "agent-1",
+                version = 1,
+                schemaVersion = 1,
+                bundlePath = "/tmp/agent.hbundle",
+                bundleSha256 = "bundle-sha",
+                manifestJson = "{}",
+                persona = "只根据资料回答",
+                worldviewJsonl = "",
+                installedAt = 1L,
+                state = "READY",
+            ),
+        )
+        dao.insertCorpus(
+            AgentCorpusEntity(
+                corpusId = "corpus-1",
+                sourceHash = "source-hash",
+                title = "测试资料",
+                indexedAt = 1L,
+                sizeBytes = 100L,
+            ),
+        )
+        dao.insertVersionCorpus(
+            AgentVersionCorpusCrossRef(
+                agentId = "agent-1",
+                version = 1,
+                corpusId = "corpus-1",
+                sourceHash = "source-hash",
+                required = true,
+            ),
+        )
+        dao.insertChunks(
+            listOf(
+                AgentChunkEntity(
+                    chunkKey = "corpus-1:source-hash:chunk-1",
+                    corpusId = "corpus-1",
+                    sourceHash = "source-hash",
+                    chunkId = "chunk-1",
+                    sourceTitle = "测试资料",
+                    location = "第一章",
+                    text = "研究问题必须从事实出发",
+                    keywordsText = "调查 事实",
+                ),
+            ),
+        )
+        dao.insertChunkSearchRows(
+            listOf(
+                AgentChunkFtsEntity(
+                    chunkKey = "corpus-1:source-hash:chunk-1",
+                    corpusKey = "corpus-1:source-hash",
+                    searchableText = "调查 事实 调查研究",
+                ),
+            ),
+        )
+
+        val keys = dao.searchChunkKeys(
+            corpusKeys = listOf("corpus-1:source-hash"),
+            ftsQuery = "调查 OR 事实",
+            limit = 8,
+        )
+
+        assertEquals(listOf("corpus-1:source-hash:chunk-1"), keys)
+        db.close()
+    }
+
+    @Test
     fun storesConversation() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()

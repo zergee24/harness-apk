@@ -16,4 +16,6 @@ data class ConversationEntity(
     val promptOriginal: String,
     val promptOptimized: String,
     val promptFinal: String,
+    val agentId: String? = null,
+    val agentVersion: Int? = null,
 )

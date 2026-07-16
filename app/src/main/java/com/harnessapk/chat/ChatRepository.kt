@@ -44,7 +44,14 @@ class ChatRepository(
     suspend fun createConversation(
         title: String = DefaultConversationTitle,
         projectId: String? = null,
+        agentId: String? = null,
+        agentVersion: Int? = null,
     ): String {
+        val normalizedAgentId = agentId?.trim()?.ifBlank { null }
+        require((normalizedAgentId == null) == (agentVersion == null)) {
+            "agentId 和 agentVersion 必须同时提供"
+        }
+        require(agentVersion == null || agentVersion > 0) { "agentVersion 必须大于 0" }
         val now = timeProvider.nowMillis()
         val id = UUID.randomUUID().toString()
         conversationDao.insert(
@@ -60,6 +67,8 @@ class ChatRepository(
                 promptOriginal = "",
                 promptOptimized = "",
                 promptFinal = "",
+                agentId = normalizedAgentId,
+                agentVersion = agentVersion,
             ),
         )
         return id
@@ -370,6 +379,8 @@ private fun ConversationEntity.toDomain(): Conversation = Conversation(
     promptOriginal = promptOriginal,
     promptOptimized = promptOptimized,
     promptFinal = promptFinal,
+    agentId = agentId,
+    agentVersion = agentVersion,
 )
 
 private fun MessageEntity.toDomain(): ChatMessage = ChatMessage(

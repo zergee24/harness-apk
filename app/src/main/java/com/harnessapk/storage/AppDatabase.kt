@@ -17,8 +17,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ConversationMarkdownLinkEntity::class,
         MarkdownChangeDraftEntity::class,
         MarkdownChangeDraftItemEntity::class,
+        AgentEntity::class,
+        AgentVersionEntity::class,
+        AgentCorpusEntity::class,
+        AgentVersionCorpusCrossRef::class,
+        AgentChunkEntity::class,
+        AgentChunkFtsEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -31,6 +37,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun chatExecutionEntryDao(): ChatExecutionEntryDao
     abstract fun conversationMarkdownLinkDao(): ConversationMarkdownLinkDao
     abstract fun markdownChangeDraftDao(): MarkdownChangeDraftDao
+    abstract fun agentDao(): AgentDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -219,6 +226,100 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_markdown_change_draft_items_draftId ON markdown_change_draft_items(draftId)")
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_markdown_change_draft_items_draftId_itemIndex ON markdown_change_draft_items(draftId, itemIndex)")
+            }
+        }
+
+        val MIGRATION_10_11: Migration = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN agentId TEXT")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN agentVersion INTEGER")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agents (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        activeVersion INTEGER NOT NULL,
+                        publisherPublicKey BLOB NOT NULL,
+                        publisherFingerprint TEXT NOT NULL,
+                        installSource TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        requiredCorpusCount INTEGER NOT NULL,
+                        installedCorpusCount INTEGER NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_versions (
+                        agentId TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        schemaVersion INTEGER NOT NULL,
+                        bundlePath TEXT NOT NULL,
+                        bundleSha256 TEXT NOT NULL,
+                        manifestJson TEXT NOT NULL,
+                        persona TEXT NOT NULL,
+                        worldviewJsonl TEXT NOT NULL,
+                        installedAt INTEGER NOT NULL,
+                        state TEXT NOT NULL,
+                        PRIMARY KEY(agentId, version),
+                        FOREIGN KEY(agentId) REFERENCES agents(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_versions_agentId ON agent_versions(agentId)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_corpora (
+                        corpusId TEXT NOT NULL,
+                        sourceHash TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        indexedAt INTEGER NOT NULL,
+                        sizeBytes INTEGER NOT NULL,
+                        PRIMARY KEY(corpusId, sourceHash)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_version_corpora (
+                        agentId TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        corpusId TEXT NOT NULL,
+                        sourceHash TEXT NOT NULL,
+                        required INTEGER NOT NULL,
+                        PRIMARY KEY(agentId, version, corpusId, sourceHash),
+                        FOREIGN KEY(agentId, version) REFERENCES agent_versions(agentId, version) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(corpusId, sourceHash) REFERENCES agent_corpora(corpusId, sourceHash) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_version_corpora_agentId_version ON agent_version_corpora(agentId, version)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_version_corpora_corpusId_sourceHash ON agent_version_corpora(corpusId, sourceHash)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_chunks (
+                        chunkKey TEXT NOT NULL PRIMARY KEY,
+                        corpusId TEXT NOT NULL,
+                        sourceHash TEXT NOT NULL,
+                        chunkId TEXT NOT NULL,
+                        sourceTitle TEXT NOT NULL,
+                        location TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        keywordsText TEXT NOT NULL,
+                        FOREIGN KEY(corpusId, sourceHash) REFERENCES agent_corpora(corpusId, sourceHash) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_chunks_corpusId_sourceHash ON agent_chunks(corpusId, sourceHash)")
+                db.execSQL(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS agent_chunk_fts
+                    USING FTS4(chunkKey TEXT NOT NULL, corpusKey TEXT NOT NULL, searchableText TEXT NOT NULL, tokenize=unicode61)
+                    """.trimIndent(),
+                )
             }
         }
     }

@@ -123,6 +123,33 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun createConversationPinsAgentVersion() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 37L })
+
+        val conversationId = repository.createConversation(
+            title = "资料研究代理",
+            agentId = "agent-1",
+            agentVersion = 3,
+        )
+
+        val conversation = repository.conversation(conversationId)!!
+        assertEquals("agent-1", conversation.agentId)
+        assertEquals(3, conversation.agentVersion)
+    }
+
+    @Test
+    fun createConversationRejectsPartialAgentBinding() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 38L })
+
+        try {
+            repository.createConversation(agentId = "agent-1", agentVersion = null)
+            org.junit.Assert.fail("Expected incomplete agent binding to fail")
+        } catch (error: IllegalArgumentException) {
+            assertEquals("agentId 和 agentVersion 必须同时提供", error.message)
+        }
+    }
+
+    @Test
     fun markAssistantCancelledPersistsCancelledStatusWithoutError() = runTest {
         val repository = repository(FakeConversationDao(), TimeProvider { 40L })
         val conversationId = repository.createConversation()
