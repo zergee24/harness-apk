@@ -154,7 +154,7 @@ git commit -m "功能：新增桌面智能体构建器"
 - Produces: `AgentBundleReader.inspect(file: File): AgentImportPreview`。
 - Produces: `JcaEd25519Verifier.verify(publicKey, payload, signature): Boolean`。
 
-- [ ] **Step 1: 写失败的包读取测试**
+- [x] **Step 1: 写失败的包读取测试**
 
 ```kotlin
 @Test fun readsValidSignedBundle() {
@@ -169,21 +169,21 @@ git commit -m "功能：新增桌面智能体构建器"
 }
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.agent.AgentBundleReaderTest`
 
 Expected: FAIL，原因是读取器和模型尚不存在。
 
-- [ ] **Step 3: 实现安全读取器**
+- [x] **Step 3: 实现安全读取器**
 
 读取器必须拒绝绝对路径、`..`、符号链接声明、重复条目、超过 50,000 个条目、声明解压体积超过 4 GiB、未列入 checksums 的内容和未知可执行扩展；逐流计算 SHA-256，不把整个语料包读入单个 ByteArray。
 
-- [ ] **Step 4: 实现 Ed25519 校验**
+- [x] **Step 4: 实现 Ed25519 校验**
 
 将 32 字节 raw public key 包装为 RFC 8410 X.509 SubjectPublicKeyInfo，使用 `KeyFactory.getInstance("Ed25519")` 与 `Signature.getInstance("Ed25519")` 验证 canonical checksums bytes。算法不可用时返回明确“不支持该签名算法”，不能降级为跳过签名。
 
-- [ ] **Step 5: 运行测试确认 GREEN**
+- [x] **Step 5: 运行测试确认 GREEN**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.agent.AgentBundleReaderTest`
 
