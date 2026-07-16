@@ -59,6 +59,17 @@ Harness APK                                             v
 3. `validate`：执行引用、覆盖率、检索和包结构检查，输出构建报告。
 4. `pack`：生成版本化包、校验清单和签名，不重新执行语义蒸馏。
 
+### 5.1 支持平台
+
+第一期桌面构建器只支持以下环境：
+
+- 硬件：Apple M4 Mac mini。
+- 系统：macOS 26.x。
+- 架构：`darwin/arm64` 原生运行。
+- 入口：由桌面 Codex 在本地仓库中调用，不单独开发常驻桌面应用。
+
+不构建 Universal Binary，不维护 Intel Mac、Windows 或 Linux 兼容层，也不建立对应的 CI 测试矩阵。后续系统小版本升级只需在同一台 M4 Mac mini 上通过完整构建验收，不承诺向更早 macOS 版本回溯兼容。
+
 第一期输入格式：
 
 - TXT。
@@ -68,7 +79,7 @@ Harness APK                                             v
 
 扫描 PDF 和图片 OCR 不在第一期范围。提取失败的文件不能静默跳过；构建报告必须列出失败文件，发布质量门槛要求声明的输入文件全部成功处理。
 
-### 5.1 分层蒸馏
+### 5.2 分层蒸馏
 
 蒸馏流程：
 
@@ -96,7 +107,7 @@ Harness APK                                             v
 
 单一来源观点必须显式标记。不同书籍或时期存在冲突时，保留多个带适用时期和证据的观点，不强行合并成一个永恒人格。
 
-### 5.2 构建产物
+### 5.3 构建产物
 
 语义产物至少包括：
 
@@ -459,6 +470,7 @@ AgentSourceEntity
 
 ### 桌面构建器
 
+- 在 Apple M4 Mac mini、macOS 26.x、`arm64` 环境完成全部测试；不要求跨平台测试。
 - TXT、Markdown、EPUB 和文本 PDF 的提取与稳定来源 ID。
 - 失败输入不被静默忽略。
 - 分块结果可重复，来源位置和哈希稳定。
@@ -502,7 +514,7 @@ AgentSourceEntity
 
 ## 18. 验收标准
 
-1. 用户能在桌面 Codex 以一批文本书籍生成通过校验的 `.hbundle`。
+1. 用户能在 Apple M4 Mac mini 的 macOS 26.x 桌面 Codex 中，以一批文本书籍生成通过校验的 `.hbundle`。
 2. 用户在 Harness 中只选择一次文件即可安装核心和所选资料包。
 3. 至少一个必需资料包安装完成后，Agent 可以创建固定版本会话。
 4. 回答使用第一人称，核心判断可展开查看真实来源片段。
@@ -547,6 +559,7 @@ AgentSourceEntity
 - Agent 自动修改自身 persona 或 worldview。
 - 远端版本静默激活。
 - 在 Agent 包中执行代码、插件或任意工具。
+- Intel Mac、Windows、Linux、Universal Binary 和跨平台桌面应用。
 
 ## 21. 参考项目与官方资料
 
