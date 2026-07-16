@@ -143,8 +143,8 @@ class ProviderSettingsUiStateTest {
         val withTimeout = updateReadTimeoutSeconds(withTool, seconds = 240)
 
         assertEquals(listOf("text", "image"), withImage.inputModalities)
-        assertEquals(listOf("low", "medium", "high", "xhigh"), withReasoning.reasoningEffortOptions)
-        assertEquals("high", withReasoning.defaultReasoningEffort)
+        assertEquals(listOf("minimal", "low", "medium", "high", "xhigh", "max"), withReasoning.reasoningEffortOptions)
+        assertEquals("xhigh", withReasoning.defaultReasoningEffort)
         assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, withSearch.webSearchMode)
         assertEquals(true, withTool.supportsToolCalling)
         assertEquals(240_000L, withTimeout.readTimeoutMillis)

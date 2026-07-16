@@ -231,15 +231,25 @@ private fun bundledProviderCapabilityCatalog(): ProviderCapabilityCatalog =
                         id = config.id,
                         contextWindowTokens = config.contextWindowTokens,
                         compressionThresholdPercent = config.compressionThresholdPercent,
-                        inputModalities = if (template.supportsVision) listOf("text", "image") else listOf("text"),
-                        outputModalities = listOf("text"),
-                        reasoningEffortOptions = if (config.id.lowercase().startsWith("gpt-")) {
-                            listOf("low", "medium", "high", "xhigh")
-                        } else {
-                            emptyList()
-                        },
-                        defaultReasoningEffort = if (config.id.lowercase().startsWith("gpt-")) "high" else null,
-                        webSearchMode = template.nativeWebSearchMode,
+                        maxOutputTokens = config.maxOutputTokens,
+                        inputModalities = config.inputModalities
+                            ?: if (template.supportsVision) listOf("text", "image") else listOf("text"),
+                        outputModalities = config.outputModalities ?: listOf("text"),
+                        reasoningEffortOptions = config.reasoningEffortOptions
+                            ?: if (config.id.lowercase().startsWith("gpt-")) {
+                                OPEN_AI_REASONING_EFFORT_OPTIONS
+                            } else {
+                                emptyList()
+                            },
+                        defaultReasoningEffort = config.defaultReasoningEffort
+                            ?: if (config.id.lowercase().startsWith("gpt-")) {
+                                DEFAULT_OPEN_AI_REASONING_EFFORT
+                            } else {
+                                null
+                            },
+                        webSearchMode = config.webSearchMode ?: template.nativeWebSearchMode,
+                        supportsToolCalling = config.supportsToolCalling ?: false,
+                        readTimeoutMillis = config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS,
                     )
                 },
             )
@@ -253,11 +263,15 @@ private fun fallbackModelCapability(modelId: String): ModelCapability =
             contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS,
             compressionThresholdPercent = DEFAULT_COMPRESSION_THRESHOLD_PERCENT,
             reasoningEffortOptions = if (normalizedModel.startsWith("gpt-")) {
-                listOf("low", "medium", "high", "xhigh")
+                OPEN_AI_REASONING_EFFORT_OPTIONS
             } else {
                 emptyList()
             },
-            defaultReasoningEffort = if (normalizedModel.startsWith("gpt-")) "high" else null,
+            defaultReasoningEffort = if (normalizedModel.startsWith("gpt-")) {
+                DEFAULT_OPEN_AI_REASONING_EFFORT
+            } else {
+                null
+            },
             webSearchMode = NativeWebSearchMode.DISABLED,
         )
     }

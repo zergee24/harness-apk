@@ -31,29 +31,44 @@ class ChatRequestOptionsTest {
     }
 
     @Test
-    fun defaultReasoningEffortIsHigh() {
-        assertEquals(ReasoningEffort.HIGH, defaultReasoningEffort())
+    fun defaultReasoningEffortIsExtraHigh() {
+        assertEquals(ReasoningEffort.XHIGH, defaultReasoningEffort())
+    }
+
+    @Test
+    fun reasoningEffortSupportsAllSixOpenAiLevels() {
+        assertEquals(
+            listOf(
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ),
+            ReasoningEffort.entries.map { it.wireValue },
+        )
     }
 
     @Test
     fun openAiProviderUsesSelectedReasoningEffort() {
-        val provider = providerProfile(name = "OpenAI", defaultModel = "gpt-5.5")
+        val provider = providerProfile(name = "OpenAI", defaultModel = "gpt-5.6-terra")
 
-        assertEquals("medium", reasoningEffortForRequest(provider, "gpt-5.5", ReasoningEffort.MEDIUM))
+        assertEquals("medium", reasoningEffortForRequest(provider, "gpt-5.6-terra", ReasoningEffort.MEDIUM))
     }
 
     @Test
     fun openAiProviderCanUseExtraHighReasoningEffort() {
-        val provider = providerProfile(name = "OpenAI", defaultModel = "gpt-5.5")
+        val provider = providerProfile(name = "OpenAI", defaultModel = "gpt-5.6-terra")
 
-        assertEquals("xhigh", reasoningEffortForRequest(provider, "gpt-5.5", ReasoningEffort.XHIGH))
+        assertEquals("xhigh", reasoningEffortForRequest(provider, "gpt-5.6-terra", ReasoningEffort.XHIGH))
     }
 
     @Test
     fun gptModelUsesSelectedReasoningEffortForOpenAiCompatibleProxy() {
-        val provider = providerProfile(name = "HappyCode", defaultModel = "gpt-5.5")
+        val provider = providerProfile(name = "HappyCode", defaultModel = "gpt-5.6-sol")
 
-        assertEquals("low", reasoningEffortForRequest(provider, "gpt-5.5", ReasoningEffort.LOW))
+        assertEquals("low", reasoningEffortForRequest(provider, "gpt-5.6-sol", ReasoningEffort.LOW))
     }
 
     @Test

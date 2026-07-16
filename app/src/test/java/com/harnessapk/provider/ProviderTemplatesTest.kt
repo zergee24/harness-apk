@@ -40,11 +40,18 @@ class ProviderTemplatesTest {
         val template = ProviderTemplates.defaults.first { it.name == "OpenAI" }
 
         assertEquals("https://happycode.vip/v1", template.baseUrl)
-        assertEquals("gpt-5.5", template.defaultModel)
-        assertEquals("gpt-5.5", template.defaultVisionModel)
-        assertEquals(listOf("gpt-5.5"), template.availableModels)
+        assertEquals("gpt-5.6-terra", template.defaultModel)
+        assertEquals("gpt-5.6-terra", template.defaultVisionModel)
+        assertEquals(listOf("gpt-5.6-terra", "gpt-5.6-sol"), template.availableModels)
         assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, template.nativeWebSearchMode)
-        assertEquals(200_000, template.modelConfigs.first { it.id == "gpt-5.5" }.contextWindowTokens)
+        assertEquals(200_000, template.modelConfigs.first { it.id == "gpt-5.6-terra" }.contextWindowTokens)
+        assertEquals(200_000, template.modelConfigs.first { it.id == "gpt-5.6-sol" }.contextWindowTokens)
+        template.modelConfigs.forEach { config ->
+            assertEquals(listOf("text", "image"), config.inputModalities)
+            assertEquals(listOf("minimal", "low", "medium", "high", "xhigh", "max"), config.reasoningEffortOptions)
+            assertEquals("xhigh", config.defaultReasoningEffort)
+            assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, config.webSearchMode)
+        }
     }
 
     @Test

@@ -7,13 +7,15 @@ enum class ReasoningEffort(
     val wireValue: String,
     val label: String,
 ) {
+    MINIMAL("minimal", "最小"),
     LOW("low", "低"),
     MEDIUM("medium", "中"),
     HIGH("high", "高"),
     XHIGH("xhigh", "超高"),
+    MAX("max", "最大"),
 }
 
-fun defaultReasoningEffort(): ReasoningEffort = ReasoningEffort.HIGH
+fun defaultReasoningEffort(): ReasoningEffort = ReasoningEffort.XHIGH
 
 fun reasoningEffortForRequest(
     provider: ProviderProfile,

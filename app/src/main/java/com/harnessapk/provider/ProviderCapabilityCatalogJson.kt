@@ -50,7 +50,7 @@ private fun JsonObject.toModelCapability(): ModelCapability? {
     val reasoningOptions = stringArrayValue("reasoningEffortOptions")
         .ifEmpty {
             if (booleanValue("supportsReasoningEffort") == true) {
-                listOf("low", "medium", "high", "xhigh")
+                OPEN_AI_REASONING_EFFORT_OPTIONS
             } else {
                 emptyList()
             }

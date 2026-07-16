@@ -51,9 +51,11 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.BuildConfig
 import com.harnessapk.common.AppContainer
 import com.harnessapk.provider.CapabilitySource
+import com.harnessapk.provider.DEFAULT_OPEN_AI_REASONING_EFFORT
 import com.harnessapk.provider.ModelConfig
 import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.OPEN_AI_REASONING_EFFORT_OPTIONS
 import com.harnessapk.provider.ProviderCapabilityCatalog
 import com.harnessapk.provider.ProviderDraft
 import com.harnessapk.provider.ProviderProfile
@@ -966,8 +968,8 @@ internal fun updateInputModality(
 internal fun updateReasoningCapability(config: ModelConfig, enabled: Boolean): ModelConfig =
     if (enabled) {
         config.copy(
-            reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
-            defaultReasoningEffort = "high",
+            reasoningEffortOptions = OPEN_AI_REASONING_EFFORT_OPTIONS,
+            defaultReasoningEffort = DEFAULT_OPEN_AI_REASONING_EFFORT,
         )
     } else {
         config.copy(reasoningEffortOptions = null, defaultReasoningEffort = null)
