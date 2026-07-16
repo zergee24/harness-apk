@@ -31,6 +31,7 @@ class ChatExecutionCoordinator(
     private val webSearchClient: JinaWebSearchClient,
     private val attachmentStore: QueuedAttachmentStore,
     private val dispatchers: AppDispatchers,
+    private val webSearchAllowed: suspend (conversationId: String) -> Boolean = { true },
     private val onWorkScheduled: () -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
@@ -142,6 +143,7 @@ class ChatExecutionCoordinator(
     }
 
     private suspend fun webSearchContextFor(entry: ChatExecutionEntry): WebSearchContext? {
+        if (!webSearchAllowed(entry.conversationId)) return null
         val settings = entry.requestContext.webSearchSettings
         val query = entryUserText(entry)
         val nativeMode = nativeWebSearchModeFor(entry)
@@ -156,6 +158,7 @@ class ChatExecutionCoordinator(
     }
 
     private suspend fun nativeWebSearchModeFor(entry: ChatExecutionEntry): NativeWebSearchMode? {
+        if (!webSearchAllowed(entry.conversationId)) return null
         val provider = if (entry.providerId == null) {
             providerRepository.defaultProviderForText().profile
         } else {

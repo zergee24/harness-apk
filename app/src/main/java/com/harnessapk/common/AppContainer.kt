@@ -2,6 +2,9 @@ package com.harnessapk.common
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.withTransaction
+import com.harnessapk.agent.AgentRepository
+import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.BuildConfig
 import com.harnessapk.chat.ChatImageStore
 import com.harnessapk.chat.ChatRepository
@@ -11,6 +14,7 @@ import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.chat.ManualContextCompressionUseCase
 import com.harnessapk.chat.QueuedAttachmentStore
 import com.harnessapk.chat.SendMessageUseCase
+import com.harnessapk.chat.webSearchAllowedForAgentConversation
 import com.harnessapk.git.GitCredentialStore
 import com.harnessapk.git.JGitEngine
 import com.harnessapk.network.OpenAiCompatibleClient
@@ -76,6 +80,16 @@ class AppContainer(context: Context) {
         memoryDao = database.conversationMemoryDao(),
         timeProvider = SystemTimeProvider,
     )
+    val agentRepository = AgentRepository(
+        filesDir = appContext.filesDir,
+        cacheDir = appContext.cacheDir,
+        dao = database.agentDao(),
+        transactionRunner = AgentTransactionRunner { block ->
+            database.withTransaction { block() }
+        },
+        timeProvider = SystemTimeProvider,
+        ioDispatcher = dispatchers.io,
+    )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
     val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
@@ -104,6 +118,16 @@ class AppContainer(context: Context) {
             settingsStore.providerCapabilityCatalogSnapshot.first().rawJson
                 ?.let { rawJson -> runCatching { parseProviderCapabilityCatalogJson(rawJson, json) }.getOrNull() }
         },
+        agentContextProvider = { conversationId, query ->
+            val conversation = chatRepository.conversation(conversationId)
+            val agentId = conversation?.agentId
+            val agentVersion = conversation?.agentVersion
+            if (agentId == null || agentVersion == null) {
+                null
+            } else {
+                agentRepository.runtimeContext(agentId, agentVersion, query)
+            }
+        },
     )
     val chatExecutionRepository = ChatExecutionRepository(
         database = database,
@@ -118,6 +142,9 @@ class AppContainer(context: Context) {
         webSearchClient = webSearchClient,
         attachmentStore = queuedAttachmentStore,
         dispatchers = dispatchers,
+        webSearchAllowed = { conversationId ->
+            webSearchAllowedForAgentConversation(chatRepository.conversation(conversationId)?.agentId)
+        },
         onWorkScheduled = { ChatExecutionService.start(appContext) },
     )
     val markdownNotebookRepository = MarkdownNotebookRepository(

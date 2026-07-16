@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
+import com.harnessapk.agent.AgentRuntimeContext
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.AppError
 import com.harnessapk.common.toUserMessage
@@ -41,6 +42,7 @@ class SendMessageUseCase(
     private val imageCompressionPolicy: ImageCompressionPolicy = ImageCompressionPolicy(),
     private val requestBuilder: ModelAwareRequestBuilder = ModelAwareRequestBuilder(),
     private val remoteCapabilityCatalog: suspend () -> ProviderCapabilityCatalog? = { null },
+    private val agentContextProvider: suspend (conversationId: String, query: String) -> AgentRuntimeContext? = { _, _ -> null },
     private val outputTransformerPipelineFactory: () -> StreamEventTransformerPipeline = {
         StreamEventTransformerPipeline(listOf(ThinkTagStreamTransformer()))
     },
@@ -136,6 +138,12 @@ class SendMessageUseCase(
         var receivedChars = 0
 
         try {
+            val agentContext = agentContextProvider(entry.conversationId, text)
+            val effectiveSearchContexts = effectiveAgentSearchContexts(
+                agentContext = agentContext,
+                webSearchContext = webSearchContext,
+                nativeWebSearchMode = nativeWebSearchMode,
+            )
             val imageDataUrls = attachments.map { it.toDataUrl() }
             val existingMemory = chatRepository.memoryForConversation(entry.conversationId)
             val compressed = contextCompressor.prepare(
@@ -171,10 +179,15 @@ class SendMessageUseCase(
                 provider = provider.profile,
                 apiKey = provider.apiKey,
                 capability = resolvedCapability,
-                messages = buildSessionOutgoingMessages(entry.requestContext.sessionContext, compressed.messages, webSearchContext),
+                messages = buildSessionOutgoingMessages(
+                    context = entry.requestContext.sessionContext,
+                    baseMessages = compressed.messages,
+                    webSearchContext = effectiveSearchContexts.webSearchContext,
+                    agentSystemContext = agentContext?.systemPrompt,
+                ),
                 temperature = temperatureForModel(requestModel),
                 selectedReasoningEffort = entry.reasoningEffort,
-                webSearchRequested = nativeWebSearchMode != null,
+                webSearchRequested = effectiveSearchContexts.nativeWebSearchMode != null,
             )
             requestDiagnostics = modelAwareRequest.diagnostics
 
@@ -215,7 +228,7 @@ class SendMessageUseCase(
                     delay(STREAM_TRANSPORT_RETRY_DELAY_MILLIS)
                 }
             }
-            webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
+            effectiveSearchContexts.webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
                 latestSnapshot = appendVisibleTextPart(latestSnapshot, it)
                 chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
             }
@@ -322,6 +335,23 @@ class SendMessageUseCase(
         private const val MAX_IMAGE_BYTES = 8 * 1024 * 1024
     }
 }
+
+internal data class EffectiveAgentSearchContexts(
+    val webSearchContext: WebSearchContext?,
+    val nativeWebSearchMode: NativeWebSearchMode?,
+)
+
+internal fun effectiveAgentSearchContexts(
+    agentContext: AgentRuntimeContext?,
+    webSearchContext: WebSearchContext?,
+    nativeWebSearchMode: NativeWebSearchMode?,
+): EffectiveAgentSearchContexts = if (agentContext == null) {
+    EffectiveAgentSearchContexts(webSearchContext, nativeWebSearchMode)
+} else {
+    EffectiveAgentSearchContexts(null, null)
+}
+
+internal fun webSearchAllowedForAgentConversation(agentId: String?): Boolean = agentId.isNullOrBlank()
 
 internal fun appendVisibleTextPart(
     snapshot: StreamingMessageSnapshot,

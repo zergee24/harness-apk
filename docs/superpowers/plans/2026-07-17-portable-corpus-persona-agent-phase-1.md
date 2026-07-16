@@ -282,7 +282,7 @@ Run: `./gradlew testDebugUnitTest --tests com.harnessapk.agent.AgentRetrievalTes
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add app/src/main/java/com/harnessapk/agent/AgentRepository.kt app/src/test/java/com/harnessapk/agent/AgentRetrievalTest.kt
@@ -295,7 +295,7 @@ git commit -m "功能：安装并检索本地智能体资料"
 - Changes: `buildSessionOutgoingMessages(context, baseMessages, webSearchContext, agentSystemContext)`。
 - Changes: `SendMessageUseCase` 注入 `agentContextProvider: suspend (conversationId, query) -> AgentRuntimeContext?`。
 
-- [ ] **Step 1: 写失败的 system message 测试**
+- [x] **Step 1: 写失败的 system message 测试**
 
 ```kotlin
 @Test fun agentContextPrecedesProjectAndHistory() {
@@ -308,17 +308,17 @@ git commit -m "功能：安装并检索本地智能体资料"
 }
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.session.SessionContextBuilderTest`
 
 Expected: FAIL，原因是尚无 Agent context 参数。
 
-- [ ] **Step 3: 实现执行时注入**
+- [x] **Step 3: 实现执行时注入**
 
 `SendMessageUseCase.execute` 根据 `Conversation.agentId + agentVersion` 和当前用户文本获取上下文。Agent 会话忽略 web search context，并将 native web search 设置为禁用；普通会话保持原行为。上下文必须随后台恢复重新检索，不依赖 Compose 临时状态。
 
-- [ ] **Step 4: 运行测试确认 GREEN**
+- [x] **Step 4: 运行测试确认 GREEN**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.session.SessionContextBuilderTest --tests com.harnessapk.chat.SendMessageUseCaseSupportTest`
 

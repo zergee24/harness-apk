@@ -1,5 +1,10 @@
 package com.harnessapk.chat
 
+import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.websearch.WebSearchCapability
+import com.harnessapk.websearch.WebSearchContext
+import com.harnessapk.websearch.WebSearchResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -7,6 +12,29 @@ import org.junit.Test
 import java.net.SocketException
 
 class SendMessageUseCaseSupportTest {
+    @Test
+    fun agentRequestDisablesExternalAndNativeWebSearch() {
+        val web = WebSearchContext(
+            WebSearchResult(
+                query = "调查",
+                providerId = "jina",
+                capability = WebSearchCapability.SEARCH_KEYWORDS,
+                inputs = listOf("调查"),
+                results = emptyList(),
+            ),
+        )
+        val contexts = effectiveAgentSearchContexts(
+            agentContext = AgentRuntimeContext("agent-1", 1, "严格资料", emptyList()),
+            webSearchContext = web,
+            nativeWebSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
+        )
+
+        assertEquals(null, contexts.webSearchContext)
+        assertEquals(null, contexts.nativeWebSearchMode)
+        assertFalse(webSearchAllowedForAgentConversation(agentId = "agent-1"))
+        assertTrue(webSearchAllowedForAgentConversation(agentId = null))
+    }
+
     @Test
     fun appendVisibleTextPartKeepsExistingStableTextPartUnchanged() {
         val snapshot = StreamingMessageSnapshot(
