@@ -30,11 +30,12 @@ object ProviderTemplates {
         ProviderTemplate(
             name = "OpenAI",
             baseUrl = "https://happycode.vip/v1",
-            defaultModel = "gpt-5.5",
+            defaultModel = "gpt-5.6-terra",
             modelConfigs = listOf(
-                ModelConfig("gpt-5.5", contextWindowTokens = 200_000),
+                openAiModelConfig("gpt-5.6-terra"),
+                openAiModelConfig("gpt-5.6-sol"),
             ),
-            defaultVisionModel = "gpt-5.5",
+            defaultVisionModel = "gpt-5.6-terra",
             supportsVision = true,
             nativeWebSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
         ),
@@ -68,3 +69,16 @@ data class ProviderTemplate(
 ) {
     val availableModels: List<String> = modelConfigs.map { it.id }
 }
+
+private fun openAiModelConfig(id: String): ModelConfig = ModelConfig(
+    id = id,
+    contextWindowTokens = 200_000,
+    maxOutputTokens = 32_000,
+    inputModalities = listOf("text", "image"),
+    outputModalities = listOf("text"),
+    reasoningEffortOptions = OPEN_AI_REASONING_EFFORT_OPTIONS,
+    defaultReasoningEffort = DEFAULT_OPEN_AI_REASONING_EFFORT,
+    webSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
+    supportsToolCalling = false,
+    readTimeoutMillis = 180_000L,
+)

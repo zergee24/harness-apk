@@ -196,22 +196,43 @@ class ModelCapabilityResolverTest {
                 "bundled",
                 providerTemplate(
                     modelCapability(
-                        id = "gpt-5.5",
+                        id = "gpt-5.6-terra",
                         contextWindowTokens = 200_000,
-                        reasoningEffortOptions = listOf("low", "medium", "high", "xhigh"),
-                        defaultReasoningEffort = "high",
+                        reasoningEffortOptions = listOf("minimal", "low", "medium", "high", "xhigh", "max"),
+                        defaultReasoningEffort = "xhigh",
                         webSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
                     ),
                 ),
             ),
         )
 
-        val resolved = resolver.resolve(providerProfile("OpenAI"), "gpt-5.5")
+        val resolved = resolver.resolve(providerProfile("OpenAI"), "gpt-5.6-terra")
 
-        assertEquals(listOf("low", "medium", "high", "xhigh"), resolved.reasoningEffortOptions)
-        assertEquals("high", resolved.defaultReasoningEffort)
+        assertEquals(listOf("minimal", "low", "medium", "high", "xhigh", "max"), resolved.reasoningEffortOptions)
+        assertEquals("xhigh", resolved.defaultReasoningEffort)
         assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, resolved.webSearchMode)
         assertTrue(resolved.supportsReasoningEffort)
+    }
+
+    @Test
+    fun gptFallbackUsesSixReasoningLevelsWithExtraHighDefault() {
+        val resolved = ModelCapabilityResolver().resolve(providerProfile("HappyCode"), "gpt-5.6-sol")
+
+        assertEquals(listOf("minimal", "low", "medium", "high", "xhigh", "max"), resolved.reasoningEffortOptions)
+        assertEquals("xhigh", resolved.defaultReasoningEffort)
+    }
+
+    @Test
+    fun bundledOpenAiModelUsesItsCompleteDefaultCapability() {
+        val resolved = ModelCapabilityResolver().resolve(providerProfile("OpenAI"), "gpt-5.6-sol")
+
+        assertEquals(32_000, resolved.maxOutputTokens)
+        assertEquals(listOf("text", "image"), resolved.inputModalities)
+        assertEquals(listOf("minimal", "low", "medium", "high", "xhigh", "max"), resolved.reasoningEffortOptions)
+        assertEquals("xhigh", resolved.defaultReasoningEffort)
+        assertEquals(NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS, resolved.webSearchMode)
+        assertEquals(false, resolved.supportsToolCalling)
+        assertEquals(180_000L, resolved.readTimeoutMillis)
     }
 
     private fun catalog(

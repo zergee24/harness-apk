@@ -54,6 +54,8 @@ data class ModelConfig(
 
 const val DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 const val DEFAULT_COMPRESSION_THRESHOLD_PERCENT = 70
+val OPEN_AI_REASONING_EFFORT_OPTIONS = listOf("minimal", "low", "medium", "high", "xhigh", "max")
+const val DEFAULT_OPEN_AI_REASONING_EFFORT = "xhigh"
 
 fun modelConfigForProvider(provider: ProviderProfile?, model: String): ModelConfig {
     if (provider == null || model.isBlank()) return defaultModelConfig("", model)
