@@ -164,6 +164,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("org.commonmark:commonmark:0.25.1")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.25.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.84")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
     implementation("org.eclipse.jgit:org.eclipse.jgit:7.7.0.202606012155-r")
     implementation("org.slf4j:slf4j-nop:2.0.17")

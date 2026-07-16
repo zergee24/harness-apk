@@ -13,12 +13,31 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.nio.file.Files
 
 class AgentRetrievalTest {
+    @Test
+    fun purgesOnlyExpiredImportStagingFiles() {
+        val directory = Files.createTempDirectory("agent-staging-test").toFile().apply { deleteOnExit() }
+        val expired = directory.resolve("expired.hbundle").apply {
+            writeText("expired")
+            setLastModified(1L)
+        }
+        val current = directory.resolve("current.hbundle").apply {
+            writeText("current")
+            setLastModified(86_400_001L)
+        }
+
+        purgeStaleImportFiles(directory, nowMillis = 86_400_002L)
+
+        assertFalse(expired.exists())
+        assertTrue(current.exists())
+    }
+
     @Test
     fun installsValidatedBundleIntoExistingAppStore() = runTest {
         val dao = FakeAgentDao()
@@ -269,6 +288,7 @@ private class FakeAgentBundleAccess(
         corpus: AgentCorpusManifest,
         block: suspend (AgentCorpusChunk) -> Unit,
     ) {
+        check(bundle.file.isFile) { "bundle file must remain readable while indexing" }
         chunks.forEach { block(it) }
     }
 }

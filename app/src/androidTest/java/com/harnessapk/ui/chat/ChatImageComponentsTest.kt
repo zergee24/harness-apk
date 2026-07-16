@@ -1,6 +1,8 @@
 package com.harnessapk.ui.chat
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,8 +23,8 @@ import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
+import java.io.ByteArrayOutputStream
 import java.io.File
-import java.util.Base64
 
 class ChatImageComponentsTest {
     @get:Rule
@@ -106,9 +108,7 @@ class ChatImageComponentsTest {
     fun readyThumbnailDecodesValidImage() {
         val uri = imageUri(
             name = "valid.png",
-            bytes = Base64.getDecoder().decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9M0V4AAAAASUVORK5CYII=",
-            ),
+            bytes = validPngBytes(),
         )
 
         composeRule.setContent {
@@ -150,5 +150,16 @@ class ChatImageComponentsTest {
         imageDirectory.mkdirs()
         val image = File(imageDirectory, name).apply { writeBytes(bytes) }
         return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", image)
+    }
+
+    private fun validPngBytes(): ByteArray {
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.RED)
+        }
+        return ByteArrayOutputStream().use { output ->
+            assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+            bitmap.recycle()
+            output.toByteArray()
+        }
     }
 }

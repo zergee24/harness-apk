@@ -1243,7 +1243,7 @@ fun ChatScreen(
                 if (messages.isEmpty()) {
                     item {
                         ChatContentRail(contentMaxWidth = contentMaxWidth) {
-                            EmptyChatState()
+                            EmptyChatState(showProviderHint = !isAgentConversation)
                         }
                     }
                 }
@@ -3483,7 +3483,7 @@ private fun InlineStatus(text: String) {
 }
 
 @Composable
-private fun EmptyChatState() {
+private fun EmptyChatState(showProviderHint: Boolean) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -3496,11 +3496,13 @@ private fun EmptyChatState() {
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold,
         )
-        Text(
-            text = "支持多供应商和截图输入。",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (showProviderHint) {
+            Text(
+                text = "支持多供应商和截图输入。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Spacer(modifier = Modifier.heightIn(min = 8.dp))
         HorizontalDivider(
             modifier = Modifier.widthIn(max = 160.dp),

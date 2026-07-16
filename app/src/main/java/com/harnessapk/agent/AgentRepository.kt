@@ -43,6 +43,7 @@ class AgentRepository(
         openInputStream: () -> InputStream,
     ): AgentImportSession = withContext(ioDispatcher) {
         val stagingDirectory = File(cacheDir, "agent-staging").apply { mkdirs() }
+        purgeStaleImportFiles(stagingDirectory, timeProvider.nowMillis())
         val stagedFile = File(stagingDirectory, "${UUID.randomUUID()}.hbundle")
         try {
             openInputStream().use { input -> copyBundleWithLimit(input, stagedFile) }
@@ -80,6 +81,7 @@ class AgentRepository(
         val finalBundle = File(versionDirectory, "bundle.hbundle")
         versionDirectory.mkdirs()
         moveAtomically(session.stagedFile, finalBundle)
+        val installedBundle = bundle.copy(file = finalBundle)
         try {
             val now = timeProvider.nowMillis()
             var resultAgent: AgentEntity? = null
@@ -87,7 +89,7 @@ class AgentRepository(
                 val availableCorpora = linkedMapOf<String, AgentCorpusEntity>()
                 bundle.corpora.forEach { corpus ->
                     val existingCorpus = dao.findCorpus(corpus.id, corpus.sourceHash)
-                    val storedCorpus = existingCorpus ?: installCorpus(bundle, corpus, now)
+                    val storedCorpus = existingCorpus ?: installCorpus(installedBundle, corpus, now)
                     availableCorpora[corpus.id] = storedCorpus
                 }
                 bundle.agent.requiredCorpora.filterNot(availableCorpora::containsKey).forEach { corpusId ->
@@ -335,6 +337,12 @@ private fun copyBundleWithLimit(input: InputStream, target: File) {
     }
 }
 
+internal fun purgeStaleImportFiles(directory: File, nowMillis: Long) {
+    directory.listFiles()?.filter { file ->
+        file.isFile && nowMillis - file.lastModified() >= IMPORT_STAGING_TTL_MILLIS
+    }?.forEach(File::delete)
+}
+
 private fun safeFileSegment(value: String): String =
     value.replace(Regex("[^A-Za-z0-9._-]"), "-").trim('.', '-').ifBlank { "agent" }
 
@@ -356,4 +364,5 @@ private fun AgentEntity.toDomain(): Agent = Agent(
 
 private const val MAX_QUERY_TERM_COUNT = 24
 private const val MAX_IMPORT_BUNDLE_BYTES = 2L * 1024 * 1024 * 1024
+private const val IMPORT_STAGING_TTL_MILLIS = 24L * 60 * 60 * 1000
 private val FTS_OPERATORS = setOf("and", "or", "not", "near")

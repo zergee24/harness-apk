@@ -12,13 +12,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.io.InputStream
 import java.io.RandomAccessFile
-import java.security.KeyFactory
 import java.security.MessageDigest
-import java.security.Signature
-import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
+import org.bouncycastle.crypto.signers.Ed25519Signer
 
 interface AgentBundleAccess {
     fun inspect(file: File): AgentImportPreview
@@ -32,7 +31,7 @@ interface AgentBundleAccess {
 
 class AgentBundleReader(
     private val json: Json = Json { ignoreUnknownKeys = true },
-    private val signatureVerifier: AgentSignatureVerifier = JcaEd25519Verifier,
+    private val signatureVerifier: AgentSignatureVerifier = PortableEd25519Verifier,
 ) : AgentBundleAccess {
     override fun inspect(file: File): AgentImportPreview {
         val parsed = read(file)
@@ -344,25 +343,19 @@ fun interface AgentSignatureVerifier {
     fun verify(publicKey: ByteArray, payload: ByteArray, signature: ByteArray): Boolean
 }
 
-object JcaEd25519Verifier : AgentSignatureVerifier {
+object PortableEd25519Verifier : AgentSignatureVerifier {
     override fun verify(publicKey: ByteArray, payload: ByteArray, signature: ByteArray): Boolean {
         if (publicKey.size != 32 || signature.size != 64) return false
         return try {
-            val encodedKey = ED25519_X509_PREFIX + publicKey
-            val key = KeyFactory.getInstance("Ed25519").generatePublic(X509EncodedKeySpec(encodedKey))
-            Signature.getInstance("Ed25519").run {
-                initVerify(key)
-                update(payload)
-                verify(signature)
+            Ed25519Signer().run {
+                init(false, Ed25519PublicKeyParameters(publicKey, 0))
+                update(payload, 0, payload.size)
+                verifySignature(signature)
             }
         } catch (error: Throwable) {
             throw AgentBundleException("当前设备不支持 Ed25519 签名校验", error)
         }
     }
-
-    private val ED25519_X509_PREFIX = byteArrayOf(
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    )
 }
 
 private data class SignatureRecord(
