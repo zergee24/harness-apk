@@ -237,7 +237,7 @@ Run: `./gradlew assembleDebug`
 
 Expected: PASS；Room KSP schema validation 通过。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add app/src/main/java/com/harnessapk/storage app/src/main/java/com/harnessapk/chat app/src/test/java/com/harnessapk/chat app/src/androidTest/java/com/harnessapk/storage
@@ -251,7 +251,7 @@ git commit -m "功能：持久化智能体与固定会话版本"
 - Produces: `AgentRepository.install(session): AgentInstallResult`。
 - Produces: `AgentRepository.runtimeContext(agentId, version, query, limit = 8): AgentRuntimeContext`。
 
-- [ ] **Step 1: 写失败的检索测试**
+- [x] **Step 1: 写失败的检索测试**
 
 ```kotlin
 @Test fun buildsStrictFirstPersonContextFromTopEvidence() = runTest {
@@ -262,21 +262,21 @@ git commit -m "功能：持久化智能体与固定会话版本"
 }
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.agent.AgentRetrievalTest`
 
 Expected: FAIL，原因是 Repository 尚不存在。
 
-- [ ] **Step 3: 实现 staging 和原子安装**
+- [x] **Step 3: 实现 staging 和原子安装**
 
 `prepareImport` 把 Content URI 流式复制到 `cacheDir/agent-staging/<uuid>.hbundle` 并完成预检。`install` 在数据库事务前把已验证文件原子移动到 `filesDir/agents/<agentId>/<version>/bundle.hbundle`；同版本同 SHA-256 幂等，同版本不同 SHA-256 拒绝，资料按 `corpusId + sourceHash` 去重。
 
-- [ ] **Step 4: 实现中文检索和严格上下文**
+- [x] **Step 4: 实现中文检索和严格上下文**
 
 查询归一化为词项与中文 2-gram，FTS4 取候选后按关键词覆盖、连续词命中和 chunk 顺序稳定排序，最多返回 8 条。无证据时 system prompt 必须要求明确回答“当前资料不足”；有证据时每条以 `[资料 N] 标题 · 位置` 呈现。
 
-- [ ] **Step 5: 运行测试确认 GREEN**
+- [x] **Step 5: 运行测试确认 GREEN**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.agent.AgentRetrievalTest`
 

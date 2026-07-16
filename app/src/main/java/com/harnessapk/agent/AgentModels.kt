@@ -46,6 +46,7 @@ data class ParsedAgentBundle(
     val packageSha256: String,
     val publisherPublicKey: ByteArray,
     val publisherFingerprint: String,
+    val manifestJson: String,
     val agent: AgentPackageManifest,
     val corpora: List<AgentCorpusManifest>,
     val persona: String,
@@ -59,6 +60,7 @@ data class ParsedAgentBundle(
             packageSha256 == other.packageSha256 &&
             publisherPublicKey.contentEquals(other.publisherPublicKey) &&
             publisherFingerprint == other.publisherFingerprint &&
+            manifestJson == other.manifestJson &&
             agent == other.agent &&
             corpora == other.corpora &&
             persona == other.persona &&
@@ -78,6 +80,34 @@ data class AgentImportPreview(
     val corpora: List<String>,
     val compressedSizeBytes: Long,
     val includesOriginalSources: Boolean,
+)
+
+data class Agent(
+    val id: String,
+    val name: String,
+    val summary: String,
+    val activeVersion: Int,
+    val publisherFingerprint: String,
+    val status: AgentStatus,
+    val requiredCorpusCount: Int,
+    val installedCorpusCount: Int,
+)
+
+data class AgentImportSession(
+    val id: String,
+    val stagedFile: File,
+    val parsedBundle: ParsedAgentBundle,
+    val preview: AgentImportPreview,
+)
+
+enum class AgentInstallOutcome {
+    INSTALLED,
+    ALREADY_INSTALLED,
+}
+
+data class AgentInstallResult(
+    val outcome: AgentInstallOutcome,
+    val agent: Agent,
 )
 
 data class AgentEvidence(

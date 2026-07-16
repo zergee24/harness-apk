@@ -20,11 +20,21 @@ import java.util.Base64
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
+interface AgentBundleAccess {
+    fun inspect(file: File): AgentImportPreview
+    fun read(file: File): ParsedAgentBundle
+    suspend fun forEachChunkSuspending(
+        bundle: ParsedAgentBundle,
+        corpus: AgentCorpusManifest,
+        block: suspend (AgentCorpusChunk) -> Unit,
+    )
+}
+
 class AgentBundleReader(
     private val json: Json = Json { ignoreUnknownKeys = true },
     private val signatureVerifier: AgentSignatureVerifier = JcaEd25519Verifier,
-) {
-    fun inspect(file: File): AgentImportPreview {
+) : AgentBundleAccess {
+    override fun inspect(file: File): AgentImportPreview {
         val parsed = read(file)
         return AgentImportPreview(
             agentId = parsed.agent.id,
@@ -40,7 +50,7 @@ class AgentBundleReader(
         )
     }
 
-    fun read(file: File): ParsedAgentBundle {
+    override fun read(file: File): ParsedAgentBundle {
         if (!file.isFile) throw AgentBundleException("智能体包不存在")
         if (file.length() > MAX_COMPRESSED_BYTES) throw AgentBundleException("智能体包超过 2 GiB 上限")
         try {
@@ -67,6 +77,7 @@ class AgentBundleReader(
                     packageSha256 = file.sha256(),
                     publisherPublicKey = signatureRecord.publicKey,
                     publisherFingerprint = signatureRecord.publicKey.sha256(),
+                    manifestJson = manifestBytes.decodeToString(),
                     agent = manifest.agent,
                     corpora = manifest.corpora,
                     persona = persona,
@@ -97,6 +108,30 @@ class AgentBundleReader(
                         throw AgentBundleException("资料块第 ${index + 1} 行超过大小上限")
                     }
                     block(parseChunk(line, corpus, index + 1))
+                }
+            }
+        }
+    }
+
+    override suspend fun forEachChunkSuspending(
+        bundle: ParsedAgentBundle,
+        corpus: AgentCorpusManifest,
+        block: suspend (AgentCorpusChunk) -> Unit,
+    ) {
+        if (corpus !in bundle.corpora) throw AgentBundleException("资料包不属于当前智能体")
+        ZipFile(bundle.file).use { archive ->
+            val entry = archive.getEntry(corpus.chunksPath)
+                ?: throw AgentBundleException("缺少资料块文件：${corpus.chunksPath}")
+            archive.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { lines ->
+                var lineNumber = 0
+                while (true) {
+                    val line = lines.readLine() ?: break
+                    lineNumber += 1
+                    if (line.isBlank()) continue
+                    if (line.length > MAX_JSONL_LINE_CHARS) {
+                        throw AgentBundleException("资料块第 $lineNumber 行超过大小上限")
+                    }
+                    block(parseChunk(line, corpus, lineNumber))
                 }
             }
         }
@@ -247,11 +282,6 @@ class AgentBundleReader(
         }.orEmpty()
         if (corpora.map(AgentCorpusManifest::id).toSet().size != corpora.size) {
             throw AgentBundleException("manifest 包含重复 corpus id")
-        }
-        val corpusIds = corpora.mapTo(mutableSetOf(), AgentCorpusManifest::id)
-        val missingRequired = agent.requiredCorpora.filterNot(corpusIds::contains)
-        if (missingRequired.isNotEmpty()) {
-            throw AgentBundleException("manifest 缺少必需资料：${missingRequired.first()}")
         }
         return BundleManifest(agent, corpora)
     }
