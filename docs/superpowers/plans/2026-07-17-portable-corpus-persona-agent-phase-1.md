@@ -77,7 +77,7 @@
 - Produces: `pack_workspace(workspace, output_dir, private_key_path) -> PackResult`，返回 `.hagent`、每份 `.hcorpus`、可选 `.hsource` 和 `.hbundle` 路径。
 - Produces: `.hbundle` 根条目 `bundle-manifest.json`、`agent/*`、`corpora/*`、可选 `sources/*`、`checksums.json`、`signature.json`。
 
-- [ ] **Step 1: 写失败的 Python 测试**
+- [x] **Step 1: 写失败的 Python 测试**
 
 ```python
 def test_prepare_and_pack_is_deterministic(self):
@@ -90,13 +90,13 @@ def test_rejects_source_without_extractable_text(self):
         prepare_workspace([empty_source], workspace, "agent-1", "测试", 1)
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 Run: `CODEX_PYTHON=/Users/tony/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 scripts/agent-builder.sh -m unittest tools.agent_builder.tests.test_builder -v`
 
 Expected: FAIL，原因是 `tools.agent_builder` 尚不存在。
 
-- [ ] **Step 3: 实现提取、分块、验证、签名和打包**
+- [x] **Step 3: 实现提取、分块、验证、签名和打包**
 
 `bundle-manifest.json` 使用稳定 schema：
 
@@ -124,7 +124,7 @@ Expected: FAIL，原因是 `tools.agent_builder` 尚不存在。
 
 每条 chunk 写入 `id`、`sourceTitle`、`location`、`text`、`keywords`、`ngrams`。`pack` 同时生成核心 `.hagent`、按 corpus 拆分的 `.hcorpus`、用户显式要求时才生成的 `.hsource`，以及组合安装用 `.hbundle`。各包的 `checksums.json` 对除自身和 `signature.json` 外的全部条目按路径排序；签名算法固定为 Ed25519，签名对象是 canonical checksums bytes。
 
-- [ ] **Step 4: 实现 CLI 和 Skill**
+- [x] **Step 4: 实现 CLI 和 Skill**
 
 ```text
 agent-builder prepare --agent-id ID --name NAME --version N --output WORKSPACE INPUT...
@@ -134,7 +134,7 @@ agent-builder pack WORKSPACE --output DIST --key KEY
 
 Skill 必须先执行 `prepare`，再让 Codex 分批补全 `persona.md`、`worldview.jsonl`、`examples.jsonl`、`eval.jsonl`，最后执行 `validate` 和 `pack`；任何 validation failure 都不能打包为可安装版本。
 
-- [ ] **Step 5: 运行 Python 测试确认 GREEN**
+- [x] **Step 5: 运行 Python 测试确认 GREEN**
 
 Run: `CODEX_PYTHON=/Users/tony/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 scripts/agent-builder.sh -m unittest tools.agent_builder.tests.test_builder -v`
 
