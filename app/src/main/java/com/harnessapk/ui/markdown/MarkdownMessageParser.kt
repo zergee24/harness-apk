@@ -87,6 +87,11 @@ private val markdownParser = Parser.builder()
 private val headingWithoutSpaceAtStart = Regex("^(\\s{0,3})(#{1,6})(?!#)(?=\\S)")
 private val inlineHeadingMarker = Regex("(?<=[^#\\s])(#{1,6})(?!#)(?=[\\p{L}\\p{N}])")
 private val thematicBreakLine = Regex("^\\s{0,3}([-*_])(?:\\s*\\1){2,}\\s*$")
+private val compactBulletMarker = Regex("^(\\s{0,3})-(?=\\S)")
+private val unicodeBulletMarker = Regex("^(\\s{0,3})[•‣◦·]+\\s*")
+private val compactOrderedMarker = Regex("^(\\s{0,3})(\\d{1,9})([.)、）])(?=\\S)")
+private val compactTaskMarker = Regex("^(\\s{0,3}[-*]\\s*\\[[ xX]\\])(?=\\S)")
+private val topLevelListItem = Regex("^(?:[-*+]\\s+|\\d+[.)]\\s+)")
 private val compactFence = Regex("```([^`]*)```")
 private val inlineDollarMath = Regex("""(?<!\\)\$(?!\s)(.+?)(?<!\\)\$""")
 private val inlineParenMath = Regex("""\\\((.+?)\\\)""")
@@ -212,7 +217,10 @@ private fun normalizeModelMarkdown(markdown: String): String {
                 }
                 else -> {
                     normalizeCompactCodeFences(rawLine).lineSequence().forEach { compactLine ->
-                        normalizeHeadingLine(compactLine).lineSequence().forEach { line ->
+                        normalizeHeadingLine(normalizeListLine(compactLine)).lineSequence().forEach { line ->
+                            if (shouldSeparateTopLevelList(lastOrNull(), line)) {
+                                add("")
+                            }
                             if (thematicBreakLine.matches(line) && lastOrNull()?.isNotBlank() == true) {
                                 add("")
                             }
@@ -224,6 +232,26 @@ private fun normalizeModelMarkdown(markdown: String): String {
         }
     }.joinToString("\n")
 }
+
+private fun normalizeListLine(line: String): String {
+    val orderedMatch = compactOrderedMarker.find(line)
+    val markerNormalized = when {
+        unicodeBulletMarker.containsMatchIn(line) -> unicodeBulletMarker.replaceFirst(line, "$1- ")
+        compactBulletMarker.containsMatchIn(line) -> compactBulletMarker.replaceFirst(line, "$1- ")
+        orderedMatch != null -> orderedMatch.let { match ->
+            line.replaceRange(match.range, "${match.groupValues[1]}${match.groupValues[2]}. ")
+        }
+        else -> line
+    }
+    return compactTaskMarker.replaceFirst(markerNormalized, "$1 ")
+}
+
+private fun shouldSeparateTopLevelList(previousLine: String?, line: String): Boolean =
+    topLevelListItem.containsMatchIn(line) &&
+        previousLine != null &&
+        previousLine.isNotBlank() &&
+        !topLevelListItem.containsMatchIn(previousLine) &&
+        !previousLine.first().isWhitespace()
 
 private fun looksLikeMarkdownBlockStart(trimmed: String): Boolean =
     trimmed.startsWith("#") ||
