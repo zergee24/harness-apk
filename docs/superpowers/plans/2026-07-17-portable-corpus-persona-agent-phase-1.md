@@ -324,7 +324,7 @@ Run: `./gradlew testDebugUnitTest --tests com.harnessapk.session.SessionContextB
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add app/src/main/java/com/harnessapk/session app/src/main/java/com/harnessapk/chat app/src/main/java/com/harnessapk/common/AppContainer.kt app/src/test/java/com/harnessapk/session app/src/test/java/com/harnessapk/chat
@@ -337,7 +337,7 @@ git commit -m "功能：在原会话链路注入智能体资料"
 - Adds: `MainMode.AGENT("智能体")`。
 - Produces: `AgentScreen(container, contentPadding, importRequestKey, onImportRequestConsumed, onStartConversation)`。
 
-- [ ] **Step 1: 写失败的 UI 状态测试**
+- [x] **Step 1: 写失败的 UI 状态测试**
 
 ```kotlin
 @Test fun agentModeUsesAgentTitleAndCreateAction() {
@@ -346,21 +346,21 @@ git commit -m "功能：在原会话链路注入智能体资料"
 }
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 Run: `./gradlew testDebugUnitTest --tests com.harnessapk.ui.HomeModeUiStateTest --tests com.harnessapk.ui.agent.AgentUiStateTest`
 
 Expected: FAIL，原因是第三种模式和状态尚不存在。
 
-- [ ] **Step 3: 实现列表与一次导入确认**
+- [x] **Step 3: 实现列表与一次导入确认**
 
 Agent 模式使用现有 TopAppBar 的加号触发 Android `OpenDocument`。选择后只展示一次确认弹窗：名称、版本、发布者指纹、核心包、资料包、总大小；确认后安装，取消则删除 staging。原始文件默认不导入。
 
-- [ ] **Step 4: 实现开始对话**
+- [x] **Step 4: 实现开始对话**
 
 READY Agent 行直接提供“开始对话”，调用现有 `ChatRepository.createConversation` 固定 active version 并导航到现有 `ChatScreen`。WAITING_FOR_CORPUS 禁用开始按钮并显示缺少资料，不增加第二个聊天页面。
 
-- [ ] **Step 5: 运行测试与构建确认 GREEN**
+- [x] **Step 5: 运行测试与构建确认 GREEN**
 
 Run: `./gradlew testDebugUnitTest`
 

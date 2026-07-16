@@ -250,6 +250,8 @@ fun ChatScreen(
     var selectedModel by remember { mutableStateOf("") }
     var selectedReasoningEffort by remember { mutableStateOf(defaultReasoningEffort()) }
     var webSearchEnabled by remember { mutableStateOf(false) }
+    var isAgentConversation by remember(conversationId) { mutableStateOf(false) }
+    var agentSimulationLabel by remember(conversationId) { mutableStateOf<String?>(null) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
     var deliverables by remember { mutableStateOf<List<MarkdownDeliverable>>(emptyList()) }
@@ -386,6 +388,14 @@ fun ChatScreen(
                 val projectId = conversation?.projectId
                 if (!projectId.isNullOrBlank()) {
                     selectedProjectId = projectId
+                }
+                val agentId = conversation?.agentId
+                isAgentConversation = !agentId.isNullOrBlank()
+                if (isAgentConversation) webSearchEnabled = false
+                agentSimulationLabel = agentId?.let { id ->
+                    container.agentRepository.agent(id)?.let { agent ->
+                        "${agent.name} · 基于资料模拟"
+                    } ?: "基于资料模拟"
                 }
             }
             .onFailure { sessionStatus = it.toUserMessage() }
@@ -1204,6 +1214,16 @@ fun ChatScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),
     ) {
+        agentSimulationLabel?.let { label ->
+            ResponsiveChatContentRail {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 6.dp),
+                )
+            }
+        }
         errorText?.let { ResponsiveChatContentRail { InlineError(it) } }
         sessionStatus?.let { ResponsiveChatContentRail { InlineStatus(it) } }
 
@@ -1346,7 +1366,7 @@ fun ChatScreen(
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
                 onRemoveImage = ::removeSelectedImage,
-                showWebSearch = shouldShowWebSearchButton(webSearchSettings),
+                showWebSearch = shouldShowWebSearchButton(webSearchSettings) && !isAgentConversation,
                 webSearchEnabled = webSearchEnabled,
                 onToggleWebSearch = { enabled ->
                     if (enabled && !webSearchSettings.enabled) {

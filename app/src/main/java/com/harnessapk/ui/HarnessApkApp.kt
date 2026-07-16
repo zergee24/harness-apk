@@ -38,6 +38,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.harnessapk.HarnessApkApplication
 import com.harnessapk.chat.Conversation
+import com.harnessapk.ui.agent.AgentScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.components.WarmSegmentedControl
 import com.harnessapk.ui.conversation.ConversationListScreen
@@ -114,6 +115,7 @@ fun HarnessApkApp() {
     var mainMode by rememberSaveable { mutableStateOf(MainMode.SESSION) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
+    var agentImportRequestKey by remember { mutableStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
     val isHomeRoute = route == Routes.Conversations || route == null
@@ -197,9 +199,10 @@ fun HarnessApkApp() {
                 actions = {
                     if (isHomeRoute) {
                         HomeTopBarActions(
-                            showCreate = mainMode == MainMode.SESSION,
+                            primaryAction = homePrimaryAction(mainMode),
                             showUpdateBadge = showUpdateBadge,
-                            onCreate = onCreateConversation,
+                            onCreateConversation = onCreateConversation,
+                            onImportAgent = { agentImportRequestKey += 1 },
                             onOpenSettings = { navController.navigate(Routes.Settings) },
                         )
                     } else if (route == Routes.ChatPattern) {
@@ -216,15 +219,14 @@ fun HarnessApkApp() {
             startDestination = Routes.Conversations,
         ) {
             composable(Routes.Conversations) {
-                if (mainMode == MainMode.SESSION) {
-                    ConversationListScreen(
+                when (mainMode) {
+                    MainMode.SESSION -> ConversationListScreen(
                         container = container,
                         contentPadding = padding,
                         onOpenChat = { navController.navigate(Routes.chat(it)) },
                         onCreateConversation = onCreateConversation,
                     )
-                } else {
-                    ProjectScreen(
+                    MainMode.PROJECT -> ProjectScreen(
                         container = container,
                         contentPadding = padding,
                         onCurrentProjectNameChange = { currentProjectName = it },
@@ -249,6 +251,27 @@ fun HarnessApkApp() {
                         },
                         onOpenSession = { conversationId ->
                             navController.navigate(Routes.chat(conversationId = conversationId))
+                        },
+                    )
+                    MainMode.AGENT -> AgentScreen(
+                        container = container,
+                        contentPadding = padding,
+                        importRequestKey = agentImportRequestKey,
+                        onImportRequestConsumed = { agentImportRequestKey = 0 },
+                        onStartConversation = { agent ->
+                            scope.launch {
+                                val conversationId = container.chatRepository.createConversation(
+                                    title = agent.name,
+                                    agentId = agent.id,
+                                    agentVersion = agent.activeVersion,
+                                )
+                                navController.navigate(
+                                    Routes.chat(
+                                        conversationId = conversationId,
+                                        focusInput = true,
+                                    ),
+                                )
+                            }
                         },
                     )
                 }
@@ -345,9 +368,10 @@ private fun ModeSwitcher(
 
 @Composable
 private fun HomeTopBarActions(
-    showCreate: Boolean,
+    primaryAction: HomePrimaryAction,
     showUpdateBadge: Boolean,
-    onCreate: () -> Unit,
+    onCreateConversation: () -> Unit,
+    onImportAgent: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     Box {
@@ -363,9 +387,13 @@ private fun HomeTopBarActions(
             )
         }
     }
-    if (showCreate) {
-        FilledIconButton(onClick = onCreate) {
-            Icon(Icons.Filled.Add, contentDescription = "新建对话")
+    if (primaryAction != HomePrimaryAction.NONE) {
+        val isImport = primaryAction == HomePrimaryAction.IMPORT_AGENT
+        FilledIconButton(onClick = if (isImport) onImportAgent else onCreateConversation) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = if (isImport) "导入智能体" else "新建对话",
+            )
         }
     }
 }
