@@ -3,4 +3,5 @@
     <cache-path name="update_apks" path="updates/" />
     <cache-path name="project_exports" path="project-exports/" />
     <files-path name="project_files" path="projects/" />
+    <files-path name="chat_images" path="chat-images/" />
 </paths>

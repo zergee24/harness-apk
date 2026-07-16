@@ -3,6 +3,7 @@ package com.harnessapk.common
 import android.content.Context
 import androidx.room.Room
 import com.harnessapk.BuildConfig
+import com.harnessapk.chat.ChatImageStore
 import com.harnessapk.chat.ChatRepository
 import com.harnessapk.chat.ChatExecutionCoordinator
 import com.harnessapk.chat.ChatExecutionRepository
@@ -75,6 +76,7 @@ class AppContainer(context: Context) {
         timeProvider = SystemTimeProvider,
     )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
+    val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
     val queuedAttachmentStore = QueuedAttachmentStore(appContext)
     val projectRepository = FileProjectRepository(

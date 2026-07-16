@@ -1,8 +1,11 @@
 package com.harnessapk.ui.chat
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
 import android.net.Uri
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -58,6 +61,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -65,6 +69,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -79,6 +84,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -103,11 +109,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.ChatExecutionRequestContext
 import com.harnessapk.chat.ChatExecutionStatus
 import com.harnessapk.chat.EnqueueChatRequest
+import com.harnessapk.chat.ChatAttachment
+import com.harnessapk.chat.ChatImageSource
+import com.harnessapk.chat.ChatImageStore
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.PendingImageAttachment
@@ -159,7 +169,38 @@ import com.harnessapk.voice.VoiceSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.flowOf
 import java.util.Locale
+
+internal enum class ChatImageSourceAction {
+    REQUEST_CAMERA_PERMISSION,
+    LAUNCH_CAMERA,
+}
+
+internal fun cameraAction(permissionGranted: Boolean): ChatImageSourceAction =
+    if (permissionGranted) ChatImageSourceAction.LAUNCH_CAMERA
+    else ChatImageSourceAction.REQUEST_CAMERA_PERMISSION
+
+internal data class CameraCancelledFeedback(
+    val text: String,
+    val errorText: String?,
+)
+
+internal fun cameraCancelledFeedback(
+    currentText: String,
+    @Suppress("UNUSED_PARAMETER") currentErrorText: String?,
+): CameraCancelledFeedback = CameraCancelledFeedback(
+    text = currentText,
+    errorText = null,
+)
+
+internal data class PendingCameraUriState(
+    val savedUri: String? = null,
+) {
+    fun start(uri: String): PendingCameraUriState = copy(savedUri = uri)
+
+    fun clear(): PendingCameraUriState = copy(savedUri = null)
+}
 
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
@@ -202,6 +243,7 @@ fun ChatScreen(
     var text by remember { mutableStateOf("") }
     var selectedImage by remember { mutableStateOf<Uri?>(null) }
     var selectedMimeType by remember { mutableStateOf("image/png") }
+    var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
     var showModelPicker by remember { mutableStateOf(false) }
     var selectedProviderId by remember { mutableStateOf<String?>(null) }
@@ -470,10 +512,71 @@ fun ChatScreen(
         }
     }
 
+    fun discardPendingCameraImage() {
+        val pendingState = PendingCameraUriState(pendingCameraUriString)
+        val uri = pendingState.savedUri?.let(Uri::parse) ?: return
+        pendingCameraUriString = pendingState.clear().savedUri
+        scope.launch {
+            container.chatImageStore.deleteIfManaged(uri)
+        }
+    }
+
+    fun replaceSelectedImage(uri: Uri, mimeType: String) {
+        val previousUri = selectedImage
+        selectedImage = uri
+        selectedMimeType = mimeType
+        previousUri?.let { replacedUri ->
+            scope.launch {
+                container.chatImageStore.deleteIfManaged(replacedUri)
+            }
+        }
+    }
+
+    fun removeSelectedImage() {
+        val uri = selectedImage ?: return
+        selectedImage = null
+        selectedMimeType = "image/png"
+        scope.launch {
+            container.chatImageStore.deleteIfManaged(uri)
+        }
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val pendingState = PendingCameraUriState(pendingCameraUriString)
+        val uri = pendingState.savedUri?.let(Uri::parse)
+        pendingCameraUriString = pendingState.clear().savedUri
+        if (success && uri != null) {
+            replaceSelectedImage(uri, "image/jpeg")
+        } else {
+            uri?.let { cancelledUri ->
+                scope.launch {
+                    container.chatImageStore.deleteIfManaged(cancelledUri)
+                }
+            }
+            val feedback = cameraCancelledFeedback(text, errorText)
+            text = feedback.text
+            errorText = feedback.errorText
+        }
+    }
+
+    fun launchCamera() {
+        discardPendingCameraImage()
+        val uri = container.chatImageStore.createCameraUri()
+        pendingCameraUriString = PendingCameraUriState().start(uri.toString()).savedUri
+        cameraLauncher.launch(uri)
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            launchCamera()
+        } else {
+            errorText = "未获得相机权限，可从相册选择图片"
+        }
+    }
+
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
-            selectedImage = uri
-            selectedMimeType = context.contentResolver.getType(uri) ?: "image/png"
+            replaceSelectedImage(uri, context.contentResolver.getType(uri) ?: "image/png")
         }
     }
 
@@ -509,7 +612,11 @@ fun ChatScreen(
                     ),
                 )
                 text = ""
-                selectedImage = null
+                if (selectedImage == draftImage) {
+                    selectedImage = null
+                    selectedMimeType = "image/png"
+                }
+                draftImage?.let { sentUri -> container.chatImageStore.deleteIfManaged(sentUri) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -1124,6 +1231,13 @@ fun ChatScreen(
                     val persistedParts by container.chatRepository
                         .observeMessageParts(message.id)
                         .collectAsState(initial = emptyList())
+                    val attachments by remember(message.id, message.role) {
+                        if (message.role == MessageRole.USER) {
+                            container.chatRepository.observeAttachments(message.id)
+                        } else {
+                            flowOf<List<ChatAttachment>>(emptyList())
+                        }
+                    }.collectAsState(initial = emptyList())
                     ChatContentRail(contentMaxWidth = contentMaxWidth) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             if (message.role == MessageRole.SYSTEM) {
@@ -1136,6 +1250,8 @@ fun ChatScreen(
                                     message = message,
                                     parts = displayParts,
                                     executionEntry = executionEntry,
+                                    attachments = attachments,
+                                    imageStore = container.chatImageStore,
                                     maxBubbleWidth = bubbleMaxWidth,
                                     canWriteBack = message.role == MessageRole.ASSISTANT &&
                                         message.status == MessageStatus.SUCCEEDED &&
@@ -1220,10 +1336,16 @@ fun ChatScreen(
                 text = text,
                 onTextChange = { text = it },
                 selectedImage = selectedImage,
-                onPickImage = {
+                onTakePhoto = {
+                    when (cameraAction(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)) {
+                        ChatImageSourceAction.REQUEST_CAMERA_PERMISSION -> cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        ChatImageSourceAction.LAUNCH_CAMERA -> launchCamera()
+                    }
+                },
+                onPickFromAlbum = {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
-                onRemoveImage = { selectedImage = null },
+                onRemoveImage = ::removeSelectedImage,
                 showWebSearch = shouldShowWebSearchButton(webSearchSettings),
                 webSearchEnabled = webSearchEnabled,
                 onToggleWebSearch = { enabled ->
@@ -1453,6 +1575,8 @@ internal fun messageDisplayParts(
     )
 }
 
+internal fun imagePartSource(part: UiMessagePartDraft): String = part.content.trim()
+
 internal fun modelPickerButtonText(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
@@ -1534,7 +1658,7 @@ internal enum class ChatInputTrailingAction {
 internal fun shouldShowCollapsedAttachmentEntry(
     text: String,
     hasSelectedImage: Boolean,
-): Boolean = text.isBlank() && !hasSelectedImage
+): Boolean = !hasSelectedImage
 
 internal fun chatInputTrailingAction(
     text: String,
@@ -2443,11 +2567,12 @@ private fun ChatContentRail(
 private fun MessagePartsColumn(
     parts: List<UiMessagePartDraft>,
     textColor: androidx.compose.ui.graphics.Color,
+    imageStore: ChatImageStore,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { part ->
             key(part.index, part.type) {
-                MessagePartView(part = part, textColor = textColor)
+                MessagePartView(part = part, textColor = textColor, imageStore = imageStore)
             }
         }
     }
@@ -2457,6 +2582,7 @@ private fun MessagePartsColumn(
 private fun MessagePartView(
     part: UiMessagePartDraft,
     textColor: androidx.compose.ui.graphics.Color,
+    imageStore: ChatImageStore,
 ) {
     when (part.type) {
         UiMessagePartType.TEXT -> MarkdownMessage(markdown = part.content, textColor = textColor)
@@ -2466,9 +2592,100 @@ private fun MessagePartView(
         UiMessagePartType.TOOL_RESULT -> MetadataPart(label = "工具结果", content = part.content)
         UiMessagePartType.ERROR_DETAIL -> MetadataPart(label = "错误详情", content = part.content)
         UiMessagePartType.FILE_CHANGE -> MetadataPart(label = "文件变更", content = part.content)
-        UiMessagePartType.IMAGE -> MetadataPart(label = "图片", content = part.content.ifBlank { "图片附件" })
+        UiMessagePartType.IMAGE -> ChatMessageImage(
+            source = imagePartSource(part),
+            mimeType = part.metadata["mimeType"],
+            imageStore = imageStore,
+        )
         UiMessagePartType.DOCUMENT -> MetadataPart(label = "文档", content = part.content.ifBlank { "文档附件" })
         UiMessagePartType.SYSTEM_EVENT -> MetadataPart(label = "系统事件", content = part.content)
+    }
+}
+
+@Composable
+private fun ChatMessageImage(
+    source: String,
+    mimeType: String?,
+    imageStore: ChatImageStore,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var loadAttempt by remember(source, mimeType) { mutableStateOf(0) }
+    var image by remember(source, mimeType) { mutableStateOf<ChatImageDisplay>(ChatImageDisplay.Loading) }
+    var previewOpen by remember(source) { mutableStateOf(false) }
+    var saveStatus by remember(source) { mutableStateOf<String?>(null) }
+
+    fun saveReadyImage() {
+        val readyImage = image as? ChatImageDisplay.Ready ?: return
+        scope.launch {
+            saveStatus = "正在保存图片..."
+            saveStatus = runCatching {
+                imageStore.saveToMediaStore(readyImage.uri, readyImage.mimeType)
+            }.fold(
+                onSuccess = { "已保存图片" },
+                onFailure = { "保存图片失败：${it.toUserMessage()}" },
+            )
+        }
+    }
+
+    val storagePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            saveReadyImage()
+        } else {
+            saveStatus = "未获得存储权限，无法保存图片"
+        }
+    }
+
+    fun requestSave() {
+        val needsStoragePermission = Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Build.VERSION_CODES.P &&
+            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        if (needsStoragePermission) {
+            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            saveReadyImage()
+        }
+    }
+
+    fun markImageDecodeFailed(uri: Uri, message: String) {
+        val readyImage = image as? ChatImageDisplay.Ready ?: return
+        if (readyImage.uri == uri) {
+            image = ChatImageDisplay.Failed(message)
+        }
+    }
+
+    LaunchedEffect(source, mimeType, loadAttempt) {
+        saveStatus = null
+        image = ChatImageDisplay.Loading
+        image = runCatching {
+            when (val displaySource = imageStore.resolveDisplaySource(source, mimeType)) {
+                is ChatImageSource.Local -> ChatImageDisplay.Ready(displaySource.uri, displaySource.mimeType)
+                is ChatImageSource.Data,
+                is ChatImageSource.Remote,
+                -> imageStore.materialize(displaySource).let { persisted ->
+                    ChatImageDisplay.Ready(persisted.uri, persisted.mimeType)
+                }
+                is ChatImageSource.Invalid -> ChatImageDisplay.Failed(displaySource.reason)
+            }
+        }.getOrElse { error ->
+            ChatImageDisplay.Failed(error.toUserMessage())
+        }
+    }
+
+    ChatImageThumbnail(
+        image = image,
+        onOpen = { previewOpen = image is ChatImageDisplay.Ready },
+        onRetry = { loadAttempt++ },
+        onDecodeFailed = ::markImageDecodeFailed,
+    )
+    if (previewOpen) {
+        ChatImagePreviewDialog(
+            image = image,
+            onDismiss = { previewOpen = false },
+            onSave = ::requestSave,
+            saveStatus = saveStatus,
+            onRetry = { loadAttempt++ },
+            onDecodeFailed = ::markImageDecodeFailed,
+        )
     }
 }
 
@@ -2584,6 +2801,8 @@ private fun MessageBubble(
     message: ChatMessage,
     parts: List<UiMessagePartDraft>,
     executionEntry: ChatExecutionEntry?,
+    attachments: List<ChatAttachment>,
+    imageStore: ChatImageStore,
     maxBubbleWidth: Dp,
     canWriteBack: Boolean,
     onWriteBack: () -> Unit,
@@ -2747,9 +2966,21 @@ private fun MessageBubble(
                         MessagePartsColumn(
                             parts = parts,
                             textColor = contentColor,
+                            imageStore = imageStore,
                         )
                     }
                 }
+                attachments
+                    .filter { it.type.equals("image", ignoreCase = true) }
+                    .forEach { attachment ->
+                        key(attachment.id) {
+                            ChatMessageImage(
+                                source = attachment.uri,
+                                mimeType = attachment.mimeType,
+                                imageStore = imageStore,
+                            )
+                        }
+                    }
                 message.errorMessage?.let {
                     Text(
                         text = errorDisplayText(it),
@@ -2809,7 +3040,8 @@ private fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
     selectedImage: Uri?,
-    onPickImage: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onPickFromAlbum: () -> Unit,
     onRemoveImage: () -> Unit,
     showWebSearch: Boolean,
     webSearchEnabled: Boolean,
@@ -2948,12 +3180,10 @@ private fun ChatInputBar(
                     maxLines = 5,
                 )
                 when (trailingAction) {
-                    ChatInputTrailingAction.ATTACHMENT -> IconButton(
-                        modifier = Modifier.size(56.dp),
-                        onClick = onPickImage,
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = "选择图片")
-                    }
+                    ChatInputTrailingAction.ATTACHMENT -> ChatImageSourceEntryMenu(
+                        onTakePhoto = onTakePhoto,
+                        onPickFromAlbum = onPickFromAlbum,
+                    )
                     ChatInputTrailingAction.SEND -> FilledIconButton(
                         modifier = Modifier.size(56.dp),
                         enabled = canSend,
@@ -2973,6 +3203,55 @@ private fun ChatInputBar(
                             contentDescription = sendButtonContentDescription(isBusy = true),
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ChatImageSourceEntryMenu(
+    onTakePhoto: () -> Unit,
+    onPickFromAlbum: () -> Unit,
+) {
+    var showImageSourceSheet by remember { mutableStateOf(false) }
+
+    IconButton(
+        modifier = Modifier.size(56.dp),
+        onClick = { showImageSourceSheet = true },
+    ) {
+        Icon(Icons.Outlined.Add, contentDescription = "添加图片")
+    }
+
+    if (showImageSourceSheet) {
+        ModalBottomSheet(onDismissRequest = { showImageSourceSheet = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 8.dp),
+            ) {
+                TextButton(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp),
+                    onClick = {
+                        showImageSourceSheet = false
+                        onTakePhoto()
+                    },
+                ) {
+                    Text("拍照")
+                }
+                TextButton(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp),
+                    onClick = {
+                        showImageSourceSheet = false
+                        onPickFromAlbum()
+                    },
+                ) {
+                    Text("从相册选择")
                 }
             }
         }
