@@ -5,6 +5,14 @@ import org.junit.Test
 
 class HomeModeUiStateTest {
     @Test
+    fun homeModesKeepConversationAgentProjectOrder() {
+        assertEquals(
+            listOf(MainMode.SESSION, MainMode.AGENT, MainMode.PROJECT),
+            MainMode.entries.toList(),
+        )
+    }
+
+    @Test
     fun topLevelTitleKeepsSessionModeProjectAgnostic() {
         assertEquals(
             "会话",

@@ -3,7 +3,16 @@ package com.harnessapk.ui
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -187,40 +196,35 @@ fun HarnessApkApp(
     }
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    if (isHomeRoute) {
-                        ModeSwitcher(
-                            mode = mainMode,
-                            onModeChange = { mainMode = it },
-                        )
-                    } else {
-                        Text(title)
-                    }
-                },
-                navigationIcon = {
-                    if (canGoBack) {
-                        IconButton(onClick = { navController.popBackStack() }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            if (isHomeRoute) {
+                HomeTopBar(
+                    mode = mainMode,
+                    onModeChange = { mainMode = it },
+                    primaryAction = homePrimaryAction(mainMode),
+                    showUpdateBadge = showUpdateBadge,
+                    onCreateConversation = onCreateConversation,
+                    onImportAgent = { agentImportRequestKey += 1 },
+                    onOpenSettings = { navController.navigate(Routes.Settings) },
+                )
+            } else {
+                TopAppBar(
+                    title = { Text(title) },
+                    navigationIcon = {
+                        if (canGoBack) {
+                            IconButton(onClick = { navController.popBackStack() }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                            }
                         }
-                    }
-                },
-                actions = {
-                    if (isHomeRoute) {
-                        HomeTopBarActions(
-                            primaryAction = homePrimaryAction(mainMode),
-                            showUpdateBadge = showUpdateBadge,
-                            onCreateConversation = onCreateConversation,
-                            onImportAgent = { agentImportRequestKey += 1 },
-                            onOpenSettings = { navController.navigate(Routes.Settings) },
-                        )
-                    } else if (route == Routes.ChatPattern) {
-                        IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
-                            Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
+                    },
+                    actions = {
+                        if (route == Routes.ChatPattern) {
+                            IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
+                                Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
+                            }
                         }
-                    }
-                },
-            )
+                    },
+                )
+            }
         },
     ) { padding ->
         NavHost(
@@ -366,14 +370,52 @@ internal fun chatTopBarTitle(
     ?: "对话"
 
 @Composable
+private fun HomeTopBar(
+    mode: MainMode,
+    onModeChange: (MainMode) -> Unit,
+    primaryAction: HomePrimaryAction,
+    showUpdateBadge: Boolean,
+    onCreateConversation: () -> Unit,
+    onImportAgent: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .height(64.dp)
+            .padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ModeSwitcher(
+            mode = mode,
+            onModeChange = onModeChange,
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .widthIn(max = 216.dp),
+        )
+        HomeTopBarActions(
+            primaryAction = primaryAction,
+            showUpdateBadge = showUpdateBadge,
+            onCreateConversation = onCreateConversation,
+            onImportAgent = onImportAgent,
+            onOpenSettings = onOpenSettings,
+        )
+    }
+}
+
+@Composable
 private fun ModeSwitcher(
     mode: MainMode,
     onModeChange: (MainMode) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     WarmSegmentedControl(
         options = MainMode.entries.map { it.label },
         selectedIndex = MainMode.entries.indexOf(mode),
         onSelected = { index -> onModeChange(MainMode.entries[index]) },
+        modifier = modifier,
     )
 }
 

@@ -4,8 +4,8 @@ import com.harnessapk.updater.UpdateCheckResult
 
 enum class MainMode(val label: String) {
     SESSION("会话"),
-    PROJECT("项目"),
     AGENT("智能体"),
+    PROJECT("项目"),
 }
 
 enum class HomePrimaryAction {
