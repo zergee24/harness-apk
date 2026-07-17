@@ -271,6 +271,7 @@ fun HarnessApkApp(
                         contentPadding = padding,
                         importRequestKey = agentImportRequestKey,
                         onImportRequestConsumed = { agentImportRequestKey = 0 },
+                        onRequestImport = { agentImportRequestKey += 1 },
                         externalImportUri = incomingAgentBundleUri,
                         onExternalImportConsumed = onIncomingAgentBundleUriConsumed,
                         onStartConversation = { agent ->

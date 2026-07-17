@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -52,6 +53,7 @@ fun AgentScreen(
     contentPadding: PaddingValues,
     importRequestKey: Int,
     onImportRequestConsumed: () -> Unit,
+    onRequestImport: () -> Unit,
     externalImportUri: Uri?,
     onExternalImportConsumed: () -> Unit,
     onStartConversation: (Agent) -> Unit,
@@ -114,26 +116,11 @@ fun AgentScreen(
     ) {
         when {
             agents.isEmpty() && !isWorking -> {
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(horizontal = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    errorText?.let { message ->
-                        Text(
-                            text = message,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                    Text(
-                        text = "尚未安装智能体",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                AgentEmptyState(
+                    errorText = errorText,
+                    onRequestImport = onRequestImport,
+                    modifier = Modifier.align(Alignment.Center),
+                )
             }
             else -> {
                 LazyColumn(
@@ -181,6 +168,42 @@ fun AgentScreen(
                 }
             },
         )
+    }
+}
+
+@Composable
+internal fun AgentEmptyState(
+    errorText: String?,
+    onRequestImport: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        errorText?.let { message ->
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        Text(
+            text = "还没有智能体",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = "从系统文件中选择 .hbundle 安装包，确认后即可开始对话。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(onClick = onRequestImport) {
+            Icon(Icons.Filled.Add, contentDescription = null)
+            Spacer(Modifier.width(6.dp))
+            Text("添加智能体")
+        }
     }
 }
 
