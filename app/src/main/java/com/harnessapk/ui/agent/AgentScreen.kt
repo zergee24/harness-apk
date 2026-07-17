@@ -1,5 +1,6 @@
 package com.harnessapk.ui.agent
 
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentBundleException
 import com.harnessapk.agent.AgentImportSession
+import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
 import com.harnessapk.common.AppContainer
 import kotlinx.coroutines.launch
 
@@ -50,6 +52,8 @@ fun AgentScreen(
     contentPadding: PaddingValues,
     importRequestKey: Int,
     onImportRequestConsumed: () -> Unit,
+    externalImportUri: Uri?,
+    onExternalImportConsumed: () -> Unit,
     onStartConversation: (Agent) -> Unit,
 ) {
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
@@ -59,25 +63,27 @@ fun AgentScreen(
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
 
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                isWorking = true
-                errorText = null
-                runCatching {
-                    container.agentRepository.prepareImport(uri.lastPathSegment ?: "智能体包") {
-                        context.contentResolver.openInputStream(uri)
-                            ?: throw AgentBundleException("无法读取所选文件")
-                    }
-                }.onSuccess { session ->
-                    importSession?.let(container.agentRepository::discardImport)
-                    importSession = session
-                }.onFailure { error ->
-                    errorText = error.message ?: "智能体包读取失败"
+    fun prepareImport(uri: Uri) {
+        scope.launch {
+            isWorking = true
+            errorText = null
+            runCatching {
+                container.agentRepository.prepareImport(uri.lastPathSegment ?: "智能体包") {
+                    context.contentResolver.openInputStream(uri)
+                        ?: throw AgentBundleException("无法读取所选文件")
                 }
-                isWorking = false
+            }.onSuccess { session ->
+                importSession?.let(container.agentRepository::discardImport)
+                importSession = session
+            }.onFailure { error ->
+                errorText = error.message ?: "智能体包读取失败"
             }
+            isWorking = false
         }
+    }
+
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(::prepareImport)
     }
 
     LaunchedEffect(importRequestKey) {
@@ -85,11 +91,19 @@ fun AgentScreen(
             onImportRequestConsumed()
             filePicker.launch(
                 arrayOf(
+                    H_BUNDLE_MIME_TYPE,
                     "application/zip",
                     "application/x-zip-compressed",
                     "application/octet-stream",
                 ),
             )
+        }
+    }
+
+    LaunchedEffect(externalImportUri) {
+        externalImportUri?.let { uri ->
+            onExternalImportConsumed()
+            prepareImport(uri)
         }
     }
 

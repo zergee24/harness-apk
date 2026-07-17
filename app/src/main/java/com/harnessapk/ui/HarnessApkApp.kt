@@ -107,7 +107,10 @@ internal fun projectWorkbenchTarget(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HarnessApkApp() {
+fun HarnessApkApp(
+    incomingAgentBundleUri: Uri? = null,
+    onIncomingAgentBundleUriConsumed: () -> Unit = {},
+) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val route = backStackEntry?.destination?.route
@@ -151,6 +154,12 @@ fun HarnessApkApp() {
         else -> topLevelTitle(mainMode, currentProjectName)
     }
     val scope = rememberCoroutineScope()
+    LaunchedEffect(incomingAgentBundleUri) {
+        if (incomingAgentBundleUri != null) {
+            mainMode = MainMode.AGENT
+            navController.popBackStack(Routes.Conversations, inclusive = false)
+        }
+    }
     val onCreateConversation: () -> Unit = {
         scope.launch {
             navController.navigate(
@@ -258,6 +267,8 @@ fun HarnessApkApp() {
                         contentPadding = padding,
                         importRequestKey = agentImportRequestKey,
                         onImportRequestConsumed = { agentImportRequestKey = 0 },
+                        externalImportUri = incomingAgentBundleUri,
+                        onExternalImportConsumed = onIncomingAgentBundleUriConsumed,
                         onStartConversation = { agent ->
                             scope.launch {
                                 val conversationId = container.chatRepository.createConversation(
