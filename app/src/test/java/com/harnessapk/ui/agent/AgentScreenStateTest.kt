@@ -16,6 +16,15 @@ class AgentScreenStateTest {
     }
 
     @Test
+    fun agentScreenShowsTopicsAndCanOpenOrCreateOne() {
+        val source = File("src/main/java/com/harnessapk/ui/agent/AgentScreen.kt").readText()
+
+        assertTrue(source.contains("新话题"))
+        assertTrue(source.contains("个话题"))
+        assertTrue(source.contains("onOpenConversation"))
+    }
+
+    @Test
     fun installDialogShowsIndexingProgressWhileInstalling() {
         val source = File("src/main/java/com/harnessapk/ui/agent/AgentScreen.kt").readText()
 

@@ -274,7 +274,7 @@ fun HarnessApkApp(
                         onRequestImport = { agentImportRequestKey += 1 },
                         externalImportUri = incomingAgentBundleUri,
                         onExternalImportConsumed = onIncomingAgentBundleUriConsumed,
-                        onStartConversation = { agent ->
+                        onCreateTopic = { agent ->
                             scope.launch {
                                 val conversationId = container.chatRepository.createConversation(
                                     title = agent.name,
@@ -288,6 +288,9 @@ fun HarnessApkApp(
                                     ),
                                 )
                             }
+                        },
+                        onOpenConversation = { conversationId ->
+                            navController.navigate(Routes.chat(conversationId = conversationId))
                         },
                     )
                 }
