@@ -36,9 +36,9 @@ class PrepareReleaseTest(unittest.TestCase):
                     "--public-base-url",
                     "https://example.com/harness-apk/test",
                     "--version-code",
-                    "1016036",
+                    "2000001",
                     "--version-name",
-                    "0.1.16-debug",
+                    "0.2.0-debug",
                     "--artifact-name",
                     "app-debug.apk",
                 ],
@@ -48,13 +48,13 @@ class PrepareReleaseTest(unittest.TestCase):
 
             manifest = json.loads((output / "update.json").read_text())
             self.assertEqual(
-                "https://example.com/harness-apk/test/releases/1016036/app-debug.apk",
+                "https://example.com/harness-apk/test/releases/2000001/app-debug.apk",
                 manifest["apkUrl"],
             )
             self.assertTrue(
-                all("/releases/1016036/chunks/" in url for url in manifest["apkChunks"]),
+                all("/releases/2000001/chunks/" in url for url in manifest["apkChunks"]),
             )
-            self.assertTrue((output / "releases/1016036/app-debug.apk").is_file())
+            self.assertTrue((output / "releases/2000001/app-debug.apk").is_file())
 
 
 class UploadOrderTest(unittest.TestCase):

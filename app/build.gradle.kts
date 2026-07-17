@@ -31,10 +31,10 @@ val hasReleaseSigning = listOf(
 
 val appVersionCode = providers.gradleProperty("versionCodeOverride")
     .map { it.toInt() }
-    .orElse(1016000)
+    .orElse(2000000)
     .get()
 val appVersionName = providers.gradleProperty("versionNameOverride")
-    .orElse("0.1.16")
+    .orElse("0.2.0")
     .get()
 
 android {
