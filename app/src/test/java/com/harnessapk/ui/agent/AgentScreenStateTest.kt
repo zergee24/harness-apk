@@ -14,4 +14,12 @@ class AgentScreenStateTest {
         assertTrue(source.contains("添加智能体"))
         assertTrue(source.contains("onRequestImport"))
     }
+
+    @Test
+    fun installDialogShowsIndexingProgressWhileInstalling() {
+        val source = File("src/main/java/com/harnessapk/ui/agent/AgentScreen.kt").readText()
+
+        assertTrue(source.contains("LinearProgressIndicator"))
+        assertTrue(source.contains("正在安装智能体并建立资料索引"))
+    }
 }

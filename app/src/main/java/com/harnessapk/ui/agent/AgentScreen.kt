@@ -24,6 +24,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -144,7 +145,7 @@ fun AgentScreen(
                 }
             }
         }
-        if (isWorking) {
+        if (isWorking && importSession == null) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
         }
     }
@@ -274,11 +275,19 @@ private fun AgentImportDialog(
                 if (preview.includesOriginalSources) {
                     Text("包含原始资料文件", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                if (isInstalling) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        text = "正在安装智能体并建立资料索引，请保持应用开启。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(enabled = !isInstalling, onClick = onInstall) {
-                Text("安装")
+                Text(if (isInstalling) "正在安装" else "安装")
             }
         },
         dismissButton = {
