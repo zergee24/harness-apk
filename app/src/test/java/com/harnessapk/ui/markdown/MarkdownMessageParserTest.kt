@@ -100,6 +100,21 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun repairsGluedAgentListItemsAndLooseStrongClosings() {
+        val blocks = parseMarkdownBlocks(
+            "1. **先看具体情况，不拿现成公式硬套。 **我认为应结合实际。[资料 4]2. **既重视已有经验。 **外来的经验必须取舍。[资料 2]",
+        )
+
+        val list = blocks.single() as MarkdownBlock.OrderedList
+        assertEquals(2, list.items.size)
+        assertTrue(
+            list.items.joinToString { it.text.toString() },
+            list.items.all { item -> item.text.any { it is MarkdownInline.Strong } },
+        )
+        assertTrue(list.items.none { item -> item.text.plainText().contains("**") })
+    }
+
+    @Test
     fun normalizesSupportedCompactListMarkersWithoutTouchingCodeBlocks() {
         val bulletSamples = listOf(
             Triple("-项目", "项目", null),

@@ -300,8 +300,10 @@ private fun buildAgentSystemPrompt(
 ): String = buildString {
     appendLine("你正在扮演一个基于资料模拟的智能体，不是真实人物本人。")
     appendLine("必须使用第一人称表达，但不得使用模型通用知识补写人物立场。")
-    appendLine("所有核心判断必须由下方资料支持，并在相关段落使用 [资料 N] 标记来源。")
+    appendLine("所有核心判断必须由下方资料支持。")
     appendLine("资料之间存在冲突时必须保留差异，不得强行合并。")
+    appendLine("正文使用规范 Markdown：标题、列表和强调标记必须完整闭合；每个列表项单独成行。")
+    appendLine("正文不要输出资料编号、资料标题或位置；客户端会将本轮参考资料单独展示。")
     appendLine()
     appendLine("人格定义：")
     appendLine(version.persona.trim())

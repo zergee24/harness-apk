@@ -1,6 +1,7 @@
 package com.harnessapk.chat
 
 import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.agent.AgentEvidence
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.websearch.WebSearchCapability
 import com.harnessapk.websearch.WebSearchContext
@@ -68,6 +69,33 @@ class SendMessageUseCaseSupportTest {
         )
 
         assertEquals(snapshot, appendVisibleTextPart(snapshot, "   "))
+    }
+
+    @Test
+    fun appendAgentSourcesPartKeepsEvidenceOutsideTheResponseText() {
+        val snapshot = StreamingMessageSnapshot(
+            status = MessageStatus.SUCCEEDED,
+            parts = listOf(
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.TEXT,
+                    content = "正文回答",
+                    stable = true,
+                ),
+            ),
+        )
+        val evidence = listOf(
+            AgentEvidence("chunk-1", "实践论", "第一章", "资料内容", 8),
+            AgentEvidence("chunk-2", "矛盾论", "第二章", "资料内容", 6),
+        )
+
+        val next = appendAgentSourcesPart(snapshot, evidence)
+
+        assertEquals(2, next.parts.size)
+        assertEquals(UiMessagePartType.AGENT_SOURCES, next.parts.last().type)
+        assertTrue(next.parts.last().content.contains("资料 1 · 实践论 · 第一章"))
+        assertTrue(next.parts.last().content.contains("资料 2 · 矛盾论 · 第二章"))
+        assertEquals("正文回答", next.legacyVisibleText())
     }
 
     @Test

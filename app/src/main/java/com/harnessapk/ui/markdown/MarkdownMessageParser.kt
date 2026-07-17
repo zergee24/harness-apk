@@ -92,6 +92,9 @@ private val unicodeBulletMarker = Regex("^(\\s{0,3})[•‣◦·]+\\s*")
 private val compactOrderedMarker = Regex("^(\\s{0,3})(\\d{1,9})([.)、）])(?=\\S)")
 private val compactTaskMarker = Regex("^(\\s{0,3}[-*]\\s*\\[[ xX]\\])(?=\\S)")
 private val topLevelListItem = Regex("^(?:[-*+]\\s+|\\d+[.)]\\s+)")
+private val gluedCitationListItem = Regex("""(\[资料\s*\d+\])(?=\s*\d{1,9}[.)、）]\s*\*\*)""")
+private val looseStrongClosing = Regex("""(\*\*[^*\n]+?)\s+\*\*""")
+private val gluedStrongAndText = Regex("""(\*\*[^*\n]+?\*\*)(?=[\p{L}\p{N}])""")
 private val compactFence = Regex("```([^`]*)```")
 private val inlineDollarMath = Regex("""(?<!\\)\$(?!\s)(.+?)(?<!\\)\$""")
 private val inlineParenMath = Regex("""\\\((.+?)\\\)""")
@@ -159,7 +162,7 @@ private fun normalizeModelMarkdown(markdown: String): String {
     var previousFenceLineBlank = false
     var inDisplayMath = false
     return buildList {
-        markdown.lineSequence().forEach { rawLine ->
+        normalizeGluedAgentListItems(markdown).lineSequence().forEach { rawLine ->
             val trimmed = rawLine.trimStart()
             activeFence?.let { fence ->
                 val trailingCloseContent = fence.trailingCloseContent(rawLine)
@@ -216,7 +219,7 @@ private fun normalizeModelMarkdown(markdown: String): String {
                     add(rawLine)
                 }
                 else -> {
-                    normalizeCompactCodeFences(rawLine).lineSequence().forEach { compactLine ->
+                    normalizeCompactCodeFences(normalizeLooseStrongClosing(rawLine)).lineSequence().forEach { compactLine ->
                         normalizeHeadingLine(normalizeListLine(compactLine)).lineSequence().forEach { line ->
                             if (shouldSeparateTopLevelList(lastOrNull(), line)) {
                                 add("")
@@ -232,6 +235,13 @@ private fun normalizeModelMarkdown(markdown: String): String {
         }
     }.joinToString("\n")
 }
+
+private fun normalizeGluedAgentListItems(markdown: String): String =
+    gluedCitationListItem.replace(markdown, "$1\n\n")
+
+private fun normalizeLooseStrongClosing(line: String): String =
+    looseStrongClosing.replace(line) { "${it.groupValues[1]}**" }
+        .let { normalized -> gluedStrongAndText.replace(normalized) { "${it.groupValues[1]} " } }
 
 private fun normalizeListLine(line: String): String {
     val orderedMatch = compactOrderedMarker.find(line)

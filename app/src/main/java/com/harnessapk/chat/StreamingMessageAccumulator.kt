@@ -31,6 +31,7 @@ enum class UiMessagePartType {
     FILE_CHANGE,
     ERROR_DETAIL,
     SYSTEM_EVENT,
+    AGENT_SOURCES,
 }
 
 data class UiMessagePartDraft(

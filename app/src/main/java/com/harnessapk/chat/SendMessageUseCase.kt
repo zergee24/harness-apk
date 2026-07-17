@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
+import com.harnessapk.agent.AgentEvidence
 import com.harnessapk.agent.AgentRuntimeContext
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.AppError
@@ -232,6 +233,10 @@ class SendMessageUseCase(
                 latestSnapshot = appendVisibleTextPart(latestSnapshot, it)
                 chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
             }
+            latestSnapshot = appendAgentSourcesPart(latestSnapshot, agentContext?.evidence.orEmpty())
+            if (latestSnapshot.parts.lastOrNull()?.type == UiMessagePartType.AGENT_SOURCES) {
+                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+            }
             chatRepository.markAssistantSucceeded(nextAssistantId)
             ChatExecutionResult(
                 status = ChatExecutionStatus.SUCCEEDED,
@@ -365,6 +370,27 @@ internal fun appendVisibleTextPart(
             content = text,
             metadata = emptyMap(),
             stable = snapshot.status != MessageStatus.PENDING && snapshot.status != MessageStatus.STREAMING,
+        ),
+    )
+}
+
+internal fun appendAgentSourcesPart(
+    snapshot: StreamingMessageSnapshot,
+    evidence: List<AgentEvidence>,
+): StreamingMessageSnapshot {
+    if (snapshot.legacyVisibleText().isBlank()) return snapshot
+    val sources = evidence
+        .map { evidence -> "${evidence.sourceTitle} · ${evidence.location}" }
+        .distinct()
+    if (sources.isEmpty()) return snapshot
+    return snapshot.copy(
+        parts = snapshot.parts + UiMessagePartDraft(
+            index = snapshot.parts.size,
+            type = UiMessagePartType.AGENT_SOURCES,
+            content = sources.mapIndexed { index, source -> "资料 ${index + 1} · $source" }
+                .joinToString(separator = "\n"),
+            metadata = emptyMap(),
+            stable = true,
         ),
     )
 }

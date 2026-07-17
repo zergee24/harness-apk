@@ -1273,6 +1273,7 @@ fun ChatScreen(
                                     attachments = attachments,
                                     imageStore = container.chatImageStore,
                                     maxBubbleWidth = bubbleMaxWidth,
+                                    isAgentConversation = isAgentConversation,
                                     canWriteBack = message.role == MessageRole.ASSISTANT &&
                                         message.status == MessageStatus.SUCCEEDED &&
                                         canWriteBackMarkdown(selectedProjectId, null, message.content),
@@ -1597,6 +1598,11 @@ internal fun messageDisplayParts(
 
 internal fun imagePartSource(part: UiMessagePartDraft): String = part.content.trim()
 
+internal fun stripAgentCitationMarkers(markdown: String): String =
+    agentCitationMarker.replace(markdown, "")
+
+private val agentCitationMarker = Regex("""\s*\[资料\s*\d+\]""")
+
 internal fun modelPickerButtonText(
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
@@ -1623,9 +1629,12 @@ internal fun errorCopyText(errorText: String): String = errorText
 internal fun messageSelectionCopyText(
     message: ChatMessage,
     parts: List<UiMessagePartDraft> = emptyList(),
+    hideAgentCitationMarkers: Boolean = false,
 ): String =
     message.errorMessage?.let(::errorCopyText)
-        ?: parts.visibleText().takeIf { it.isNotBlank() }
+        ?: parts.visibleText()
+            .let { text -> if (hideAgentCitationMarkers) stripAgentCitationMarkers(text) else text }
+            .takeIf { it.isNotBlank() }
         ?: assistantMessageDisplayText(message)
 
 private fun List<UiMessagePartDraft>.visibleText(): String =
@@ -2588,11 +2597,17 @@ private fun MessagePartsColumn(
     parts: List<UiMessagePartDraft>,
     textColor: androidx.compose.ui.graphics.Color,
     imageStore: ChatImageStore,
+    hideAgentCitationMarkers: Boolean,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { part ->
             key(part.index, part.type) {
-                MessagePartView(part = part, textColor = textColor, imageStore = imageStore)
+                MessagePartView(
+                    part = part,
+                    textColor = textColor,
+                    imageStore = imageStore,
+                    hideAgentCitationMarkers = hideAgentCitationMarkers,
+                )
             }
         }
     }
@@ -2603,9 +2618,13 @@ private fun MessagePartView(
     part: UiMessagePartDraft,
     textColor: androidx.compose.ui.graphics.Color,
     imageStore: ChatImageStore,
+    hideAgentCitationMarkers: Boolean,
 ) {
     when (part.type) {
-        UiMessagePartType.TEXT -> MarkdownMessage(markdown = part.content, textColor = textColor)
+        UiMessagePartType.TEXT -> MarkdownMessage(
+            markdown = if (hideAgentCitationMarkers) stripAgentCitationMarkers(part.content) else part.content,
+            textColor = textColor,
+        )
         UiMessagePartType.REASONING -> ReasoningPart(part)
         UiMessagePartType.SEARCH_RESULT -> SearchResultPart(part)
         UiMessagePartType.TOOL_CALL -> MetadataPart(label = "工具调用", content = part.content)
@@ -2619,6 +2638,7 @@ private fun MessagePartView(
         )
         UiMessagePartType.DOCUMENT -> MetadataPart(label = "文档", content = part.content.ifBlank { "文档附件" })
         UiMessagePartType.SYSTEM_EVENT -> MetadataPart(label = "系统事件", content = part.content)
+        UiMessagePartType.AGENT_SOURCES -> AgentSourcesPart(part)
     }
 }
 
@@ -2774,6 +2794,56 @@ internal fun reasoningCollapsedPreviewText(content: String): String =
         .orEmpty()
 
 @Composable
+private fun AgentSourcesPart(part: UiMessagePartDraft) {
+    val sources = remember(part.content) { part.content.lineSequence().filter(String::isNotBlank).toList() }
+    var expanded by remember(part.index) { mutableStateOf(false) }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "本轮参考资料 · ${sources.size} 条",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                IconButton(
+                    modifier = Modifier.size(40.dp),
+                    onClick = { expanded = !expanded },
+                ) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        contentDescription = if (expanded) "收起参考资料" else "展开参考资料",
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+            if (expanded) {
+                sources.forEach { source ->
+                    Text(
+                        text = source,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SearchResultPart(part: UiMessagePartDraft) {
     val title = part.metadata["title"].orEmpty().ifBlank { "搜索结果" }
     val url = part.metadata["url"].orEmpty()
@@ -2824,6 +2894,7 @@ private fun MessageBubble(
     attachments: List<ChatAttachment>,
     imageStore: ChatImageStore,
     maxBubbleWidth: Dp,
+    isAgentConversation: Boolean,
     canWriteBack: Boolean,
     onWriteBack: () -> Unit,
     onCopy: () -> Unit,
@@ -2837,7 +2908,12 @@ private fun MessageBubble(
     val isUser = message.role == MessageRole.USER
     var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
     val presentation = chatBubblePresentation(message.role)
-    val selectionCopyText = messageSelectionCopyText(message, parts)
+    val hideAgentCitationMarkers = isAgentConversation && parts.any { it.type == UiMessagePartType.AGENT_SOURCES }
+    val selectionCopyText = messageSelectionCopyText(
+        message = message,
+        parts = parts,
+        hideAgentCitationMarkers = hideAgentCitationMarkers,
+    )
     val containerColor = when (presentation) {
         ChatBubblePresentation.UNFRAMED -> MaterialTheme.colorScheme.surface.copy(alpha = 0f)
         ChatBubblePresentation.WARM_USER -> MaterialTheme.colorScheme.primaryContainer
@@ -2987,6 +3063,7 @@ private fun MessageBubble(
                             parts = parts,
                             textColor = contentColor,
                             imageStore = imageStore,
+                            hideAgentCitationMarkers = hideAgentCitationMarkers,
                         )
                     }
                 }
