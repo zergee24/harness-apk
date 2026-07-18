@@ -215,6 +215,8 @@ private class FakeAgentDao : AgentDao {
 
     override fun observeAgents(): Flow<List<AgentEntity>> = agents
     override suspend fun findAgent(id: String): AgentEntity? = agents.value.firstOrNull { it.id == id }
+    override suspend fun listReadyAgents(): List<AgentEntity> =
+        agents.value.filter { it.status == AgentStatus.READY.name }
     override suspend fun findVersion(agentId: String, version: Int): AgentVersionEntity? =
         this.version?.takeIf { it.agentId == agentId && it.version == version }
 

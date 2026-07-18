@@ -15,6 +15,24 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): ConversationEntity?
 
+    @Query(
+        """
+        SELECT * FROM conversations
+        WHERE isArchived = 0 AND agentId IS NOT NULL
+        ORDER BY updatedAt DESC LIMIT 1
+        """,
+    )
+    suspend fun findLatestWithAgent(): ConversationEntity?
+
+    @Query(
+        """
+        SELECT * FROM conversations
+        WHERE isArchived = 0 AND projectId = :projectId AND agentId IS NOT NULL
+        ORDER BY updatedAt DESC LIMIT 1
+        """,
+    )
+    suspend fun findLatestWithAgentInProject(projectId: String): ConversationEntity?
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(entity: ConversationEntity)
 

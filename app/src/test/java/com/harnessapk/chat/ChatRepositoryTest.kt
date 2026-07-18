@@ -456,6 +456,12 @@ private class FakeConversationDao : ConversationDao {
 
     override suspend fun findById(id: String): ConversationEntity? = rows[id]
 
+    override suspend fun findLatestWithAgent(): ConversationEntity? =
+        rows.values.filter { !it.isArchived && it.agentId != null }.maxByOrNull { it.updatedAt }
+
+    override suspend fun findLatestWithAgentInProject(projectId: String): ConversationEntity? =
+        rows.values.filter { !it.isArchived && it.projectId == projectId && it.agentId != null }.maxByOrNull { it.updatedAt }
+
     override suspend fun insert(entity: ConversationEntity) {
         rows[entity.id] = entity
         refresh()
@@ -486,6 +492,9 @@ private class FakeMessageDao : MessageDao {
         rows.values.filter { it.conversationId == conversationId }.sortedBy { it.createdAt }
 
     override suspend fun findById(id: String): MessageEntity? = rows[id]
+
+    override suspend fun countUserMessages(conversationId: String): Int =
+        rows.values.count { it.conversationId == conversationId && it.role == "USER" }
 
     override suspend fun insert(entity: MessageEntity) {
         rows[entity.id] = entity

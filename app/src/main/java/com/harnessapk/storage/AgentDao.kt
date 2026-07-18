@@ -15,6 +15,9 @@ interface AgentDao {
     @Query("SELECT * FROM agents WHERE id = :id LIMIT 1")
     suspend fun findAgent(id: String): AgentEntity?
 
+    @Query("SELECT * FROM agents WHERE status = 'READY' ORDER BY updatedAt DESC")
+    suspend fun listReadyAgents(): List<AgentEntity>
+
     @Query("SELECT * FROM agent_versions WHERE agentId = :agentId AND version = :version LIMIT 1")
     suspend fun findVersion(agentId: String, version: Int): AgentVersionEntity?
 
