@@ -3,6 +3,10 @@ package com.harnessapk.agent
 import com.harnessapk.chat.StreamingMessageSnapshot
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.storage.AgentVersionEntity
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 internal fun buildAgentSystemPrompt(
     version: AgentVersionEntity,
@@ -18,10 +22,10 @@ internal fun buildAgentSystemPrompt(
     appendLine()
     appendLine("身份内核：")
     appendLine(version.persona.trim())
-    version.worldviewJsonl.trim().takeIf(String::isNotBlank)?.let {
+    renderWorldviewStatements(version.worldviewJsonl).takeIf(List<String>::isNotEmpty)?.let { statements ->
         appendLine()
         appendLine("人物立场：")
-        appendLine(it)
+        statements.forEach(::appendLine)
     }
     if (evidence.isNotEmpty()) {
         appendLine()
@@ -32,6 +36,37 @@ internal fun buildAgentSystemPrompt(
         }
     }
 }
+
+private val worldviewJson = Json { ignoreUnknownKeys = true }
+
+private fun renderWorldviewStatements(worldviewJsonl: String): List<String> = worldviewJsonl
+    .lineSequence()
+    .filter(String::isNotBlank)
+    .mapNotNull { line ->
+        runCatching { worldviewJson.parseToJsonElement(line) }
+            .getOrNull()
+            ?.let { it as? JsonObject }
+            ?.renderWorldviewStatement()
+    }
+    .toList()
+
+private fun JsonObject.renderWorldviewStatement(): String? {
+    val statement = nonBlankString("statement") ?: return null
+    val details = listOfNotNull(
+        nonBlankString("scope")?.let { "适用范围：$it" },
+        nonBlankString("period")?.let { "时间范围：$it" },
+        nonBlankString("conditions")?.let { "条件：$it" },
+        nonBlankString("topic")?.let { "主题：$it" },
+    )
+    return if (details.isEmpty()) statement else "$statement（${details.joinToString("；")}）"
+}
+
+private fun JsonObject.nonBlankString(key: String): String? =
+    (this[key] as? JsonPrimitive)
+        ?.takeIf(JsonPrimitive::isString)
+        ?.contentOrNull
+        ?.trim()
+        ?.takeIf(String::isNotBlank)
 
 internal fun sanitizeAgentCitationMarkers(
     snapshot: StreamingMessageSnapshot,

@@ -120,18 +120,18 @@ class AgentRetrievalTest {
         val dao = FakeAgentDao().apply {
             version = AgentVersionEntity(
                 agentId = "agent-1",
-                version = 2,
+                version = 1,
                 schemaVersion = 1,
                 bundlePath = "/tmp/agent.hbundle",
                 bundleSha256 = "sha",
                 manifestJson = "{}",
                 persona = "我重视从事实出发。",
-                worldviewJsonl = "{\"statement\":\"调查先于结论\"}",
+                worldviewJsonl = """{"id":"view-investigation","statement":"调查先于结论","evidence":["chunk-secret-42"],"confidence":1.0}""",
                 installedAt = 1L,
                 state = "READY",
             )
             versionCorpora = listOf(
-                AgentVersionCorpusCrossRef("agent-1", 2, "corpus-current", "hash-current", true),
+                AgentVersionCorpusCrossRef("agent-1", 1, "corpus-current", "hash-current", true),
             )
             chunks["corpus-current:hash-current:chunk-investigation"] = AgentChunkEntity(
                 chunkKey = "corpus-current:hash-current:chunk-investigation",
@@ -147,7 +147,7 @@ class AgentRetrievalTest {
         }
         val repository = repository(dao)
 
-        val context = repository.runtimeContext("agent-1", 2, "为什么要先调查事实", 8)!!
+        val context = repository.runtimeContext("agent-1", 1, "为什么要先调查事实", 8)!!
 
         assertEquals(listOf("corpus-current:hash-current"), dao.lastCorpusKeys)
         assertEquals("chunk-investigation", context.evidence.single().chunkId)
@@ -155,8 +155,11 @@ class AgentRetrievalTest {
         assertTrue(context.systemPrompt.contains("基于资料模拟"))
         assertTrue(context.systemPrompt.contains("历史事实、人物经历和核心立场必须由人物资料支持"))
         assertTrue(context.systemPrompt.contains("没有调查，没有发言权。研究问题必须从事实出发。"))
+        assertTrue(context.systemPrompt.contains("调查先于结论"))
         assertFalse(context.systemPrompt.contains("[资料 1]"))
         assertFalse(context.systemPrompt.contains("调查研究 · 第一章 · 1"))
+        assertFalse(context.systemPrompt.contains("chunk-secret-42"))
+        assertFalse(context.systemPrompt.contains("view-investigation"))
     }
 
     @Test
@@ -206,7 +209,7 @@ class AgentRetrievalTest {
     }
 }
 
-private class FakeAgentDao : AgentDao {
+internal class FakeAgentDao : AgentDao {
     private val agents = MutableStateFlow<List<AgentEntity>>(emptyList())
     var version: AgentVersionEntity? = null
     var versionCorpora: List<AgentVersionCorpusCrossRef> = emptyList()

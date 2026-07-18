@@ -32,6 +32,67 @@ class AgentPromptContractTest {
     }
 
     @Test
+    fun worldviewRendersOnlyWhitelistedSemanticFields() {
+        val prompt = buildAgentSystemPrompt(
+            version(
+                """{"id":"view-investigation","statement":"调查应先于结论","scope":"方法论","period":"长期","conditions":"证据充分时","topic":"研究方法","evidence":["chunk-secret-42"],"confidence":1.0}""",
+            ),
+            emptyList(),
+        )
+
+        assertTrue(prompt.contains("调查应先于结论"))
+        assertTrue(prompt.contains("适用范围：方法论"))
+        assertTrue(prompt.contains("时间范围：长期"))
+        assertTrue(prompt.contains("条件：证据充分时"))
+        assertTrue(prompt.contains("主题：研究方法"))
+        assertFalse(prompt.contains("chunk-secret-42"))
+        assertFalse(prompt.contains("view-investigation"))
+        assertFalse(prompt.contains("evidence"))
+        assertFalse(prompt.contains("confidence"))
+        assertFalse(prompt.contains("{"))
+        assertFalse(prompt.contains("\""))
+    }
+
+    @Test
+    fun worldviewOmitsUnknownNestedFieldsContainingInternalIds() {
+        val prompt = buildAgentSystemPrompt(
+            version(
+                """{"statement":"先观察再判断","debug":{"chunkId":"nested-secret-7","trace":"trace-8"},"metadata":{"id":"unknown-id"}}""",
+            ),
+            emptyList(),
+        )
+
+        assertTrue(prompt.contains("先观察再判断"))
+        assertFalse(prompt.contains("nested-secret-7"))
+        assertFalse(prompt.contains("trace-8"))
+        assertFalse(prompt.contains("unknown-id"))
+        assertFalse(prompt.contains("debug"))
+    }
+
+    @Test
+    fun worldviewSkipsMalformedAndStatementlessRowsWhileKeepingLaterRowsInOrder() {
+        val prompt = buildAgentSystemPrompt(
+            version(
+                """
+                {not-json}
+                {"scope":"方法论","id":"missing-statement"}
+                {"statement":"第一条立场"}
+                {"statement":"   ","topic":"空白"}
+                {"statement":"第二条立场","topic":"实践"}
+                """.trimIndent(),
+            ),
+            emptyList(),
+        )
+
+        assertTrue(prompt.contains("第一条立场"))
+        assertTrue(prompt.contains("第二条立场"))
+        assertTrue(prompt.indexOf("第一条立场") < prompt.indexOf("第二条立场"))
+        assertFalse(prompt.contains("missing-statement"))
+        assertFalse(prompt.contains("{not-json}"))
+        assertFalse(prompt.contains("主题：空白"))
+    }
+
+    @Test
     fun sanitizerRemovesInternalMarkersFromTextPartsOnly() {
         val sourcePart = UiMessagePartDraft(
             index = 1,
@@ -83,7 +144,7 @@ class AgentPromptContractTest {
         assertEquals("First second\n段二。", sanitized.legacyVisibleText())
     }
 
-    private fun version() = AgentVersionEntity(
+    private fun version(worldviewJsonl: String = "{\"statement\":\"调查先于结论\"}") = AgentVersionEntity(
         agentId = "agent-1",
         version = 1,
         schemaVersion = 1,
@@ -91,7 +152,7 @@ class AgentPromptContractTest {
         bundleSha256 = "sha",
         manifestJson = "{}",
         persona = "我重视从事实出发。",
-        worldviewJsonl = "{\"statement\":\"调查先于结论\"}",
+        worldviewJsonl = worldviewJsonl,
         installedAt = 1L,
         state = "READY",
     )

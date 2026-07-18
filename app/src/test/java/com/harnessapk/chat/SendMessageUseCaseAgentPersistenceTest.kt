@@ -2,7 +2,9 @@ package com.harnessapk.chat
 
 import android.content.ContextWrapper
 import com.harnessapk.agent.AgentEvidence
+import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.agent.FakeAgentDao
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.network.OpenAiCompatibleClient
@@ -21,6 +23,7 @@ import com.harnessapk.storage.MessagePartDao
 import com.harnessapk.storage.MessagePartEntity
 import com.harnessapk.storage.ProviderProfileDao
 import com.harnessapk.storage.ProviderProfileEntity
+import com.harnessapk.storage.AgentVersionEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -33,12 +36,18 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.file.Files
 
 class SendMessageUseCaseAgentPersistenceTest {
     @Test
@@ -74,6 +83,48 @@ class SendMessageUseCaseAgentPersistenceTest {
         ).also { (_, parts) ->
             assertEquals("先调查。[资料1]再决定。", parts.single().content)
         }
+    }
+
+    @Test
+    fun executeSendsStoredV1RuntimeContextWithoutWorldviewInternalId() = runTest {
+        var requestBody = ""
+        val root = Files.createTempDirectory("agent-send-context-test").toFile().apply { deleteOnExit() }
+        val agentRepository = AgentRepository(
+            filesDir = root.resolve("files"),
+            cacheDir = root.resolve("cache"),
+            dao = FakeAgentDao().apply {
+                version = AgentVersionEntity(
+                    agentId = "agent-1",
+                    version = 1,
+                    schemaVersion = 1,
+                    bundlePath = "/tmp/agent.hbundle",
+                    bundleSha256 = "sha",
+                    manifestJson = "{}",
+                    persona = "我重视从事实出发。",
+                    worldviewJsonl = """{"id":"view-investigation","statement":"调查应先于结论","evidence":["chunk-secret-42"],"confidence":1.0}""",
+                    installedAt = 1L,
+                    state = "READY",
+                )
+            },
+            timeProvider = TimeProvider { 1L },
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+
+        executeAndReadParts(
+            response = "收到。",
+            agentContext = null,
+            agentContextProvider = { _, query -> agentRepository.runtimeContext("agent-1", 1, query) },
+            onRequestBody = { requestBody = it },
+        )
+
+        val messages = Json.parseToJsonElement(requestBody).jsonObject["messages"]!!.jsonArray
+        val outgoingSystemContext = messages.first { message ->
+            message.jsonObject["role"]!!.jsonPrimitive.contentOrNull == "system"
+        }.jsonObject["content"]!!.jsonPrimitive.content
+        assertTrue(outgoingSystemContext.contains("调查应先于结论"))
+        assertFalse(outgoingSystemContext.contains("chunk-secret-42"))
+        assertFalse(outgoingSystemContext.contains("view-investigation"))
+        assertFalse(outgoingSystemContext.contains("evidence"))
     }
 
     @Test
@@ -173,6 +224,8 @@ class SendMessageUseCaseAgentPersistenceTest {
         includeToolResult: Boolean = false,
         realJobCancellationAfterMarker: Boolean = false,
         cancelCurrentContextAfterSourceWrite: Boolean = false,
+        agentContextProvider: suspend (conversationId: String, query: String) -> AgentRuntimeContext? = { _, _ -> agentContext },
+        onRequestBody: ((String) -> Unit)? = null,
     ): Pair<MessageStatus, List<UiMessagePartDraft>> {
         val server = MockWebServer()
         val responseBody = """
@@ -207,7 +260,7 @@ class SendMessageUseCaseAgentPersistenceTest {
                 providerRepository = providerRepository(server),
                 client = OpenAiCompatibleClient(OkHttpClient(), Json { ignoreUnknownKeys = true }),
                 dispatchers = AppDispatchers(Dispatchers.Unconfined, Dispatchers.Unconfined, Dispatchers.Unconfined),
-                agentContextProvider = { _, _ -> agentContext },
+                agentContextProvider = agentContextProvider,
                 outputTransformerPipelineFactory = {
                     StreamEventTransformerPipeline(
                         listOf(object : StreamEventTransformer {
@@ -277,6 +330,7 @@ class SendMessageUseCaseAgentPersistenceTest {
             ) {
                 assertEquals(ChatExecutionStatus.SUCCEEDED, result.status)
             }
+            onRequestBody?.invoke(requireNotNull(server.takeRequest()).body.readUtf8())
             val assistantId = requireNotNull(result.assistantMessageId)
             val persisted = repository.listMessages(conversationId).last { it.id == assistantId }
             return persisted.status to repository.listMessageParts(assistantId)
