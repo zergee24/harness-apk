@@ -24,6 +24,7 @@ import com.harnessapk.session.buildSessionOutgoingMessages
 import com.harnessapk.websearch.WebSearchContext
 import com.harnessapk.websearch.toVisibleSourcesMarkdown
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -251,23 +252,29 @@ class SendMessageUseCase(
                 errorMessage = null,
             )
         } catch (cancelled: CancellationException) {
-            assistantId?.let { id ->
-                val cancelledSnapshot = if (streamCompleted) {
-                    latestSnapshot?.toCancelledSnapshot()
-                } else {
-                    cancelStreamingSnapshot(
-                        accumulator = accumulator,
-                        nowMillis = streamClock?.elapsedNow()?.inWholeMilliseconds ?: 0L,
-                    )
+            val cancelledSnapshot = if (streamCompleted) {
+                latestSnapshot?.toCancelledSnapshot()
+            } else {
+                cancelStreamingSnapshot(
+                    accumulator = accumulator,
+                    nowMillis = streamClock?.elapsedNow()?.inWholeMilliseconds ?: 0L,
+                )
+            }
+            try {
+                withContext(NonCancellable) {
+                    assistantId?.let { id ->
+                        if (cancelledSnapshot == null) {
+                            chatRepository.markAssistantCancelled(id)
+                        } else {
+                            chatRepository.replaceMessagePartsFromSnapshot(
+                                id,
+                                sanitizeAgentSnapshotIfNeeded(cancelledSnapshot, agentContext),
+                            )
+                        }
+                    }
                 }
-                if (cancelledSnapshot == null) {
-                    chatRepository.markAssistantCancelled(id)
-                } else {
-                    chatRepository.replaceMessagePartsFromSnapshot(
-                        id,
-                        sanitizeAgentSnapshotIfNeeded(cancelledSnapshot, agentContext),
-                    )
-                }
+            } catch (_: Throwable) {
+                // Preserve the original cancellation even if best-effort cleanup fails.
             }
             throw cancelled
         } catch (error: Throwable) {

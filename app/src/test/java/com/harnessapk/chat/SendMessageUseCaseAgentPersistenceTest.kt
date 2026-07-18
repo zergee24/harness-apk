@@ -22,7 +22,13 @@ import com.harnessapk.storage.MessagePartEntity
 import com.harnessapk.storage.ProviderProfileDao
 import com.harnessapk.storage.ProviderProfileEntity
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -95,6 +101,19 @@ class SendMessageUseCaseAgentPersistenceTest {
     }
 
     @Test
+    fun executeRealJobCancellationSanitizesAlreadyPersistedAgentText() = runTest {
+        executeAndReadParts(
+            response = "中途结果[资料1]",
+            agentContext = agentContext(evidence = emptyList()),
+            realJobCancellationAfterMarker = true,
+        ).also { (status, parts) ->
+            assertEquals(MessageStatus.CANCELLED, status)
+            assertEquals("中途结果", parts.single { it.type == UiMessagePartType.TEXT }.content)
+            assertTrue(parts.all { it.stable })
+        }
+    }
+
+    @Test
     fun executeKeepsSourcesAndNonTextPartsWhenFinalSourceWriteFails() = runTest {
         executeAndReadParts(
             response = "最终回答[资料1]",
@@ -127,6 +146,24 @@ class SendMessageUseCaseAgentPersistenceTest {
         }
     }
 
+    @Test
+    fun executeRealJobCancellationAfterSourceWritePreservesFinalAgentParts() = runTest {
+        executeAndReadParts(
+            response = "最终回答[资料1]",
+            agentContext = agentContext(
+                evidence = listOf(AgentEvidence("chunk-1", "实践论", "第一章", "调查先于结论。", 8)),
+            ),
+            cancelCurrentContextAfterSourceWrite = true,
+            includeToolResult = true,
+        ).also { (status, parts) ->
+            assertEquals(MessageStatus.CANCELLED, status)
+            assertEquals("最终回答", parts.first { it.type == UiMessagePartType.TEXT }.content)
+            assertEquals("[资料9]", parts.first { it.type == UiMessagePartType.TOOL_RESULT }.content)
+            assertEquals(UiMessagePartType.AGENT_SOURCES, parts.last().type)
+            assertTrue(parts.all { it.stable })
+        }
+    }
+
     private suspend fun executeAndReadParts(
         response: String,
         agentContext: AgentRuntimeContext?,
@@ -134,19 +171,33 @@ class SendMessageUseCaseAgentPersistenceTest {
         cancelAfterText: Boolean = false,
         failureAfterSourceWrite: Throwable? = null,
         includeToolResult: Boolean = false,
+        realJobCancellationAfterMarker: Boolean = false,
+        cancelCurrentContextAfterSourceWrite: Boolean = false,
     ): Pair<MessageStatus, List<UiMessagePartDraft>> {
         val server = MockWebServer()
+        val responseBody = """
+            data: {"choices":[{"delta":{"content":"$response"}}]}
+            ${if (malformedAfterText) "data: {not-json}" else "data: [DONE]"}
+        """.trimIndent()
         server.enqueue(
-            MockResponse().setBody(
-                """
-                data: {"choices":[{"delta":{"content":"$response"}}]}
-                ${if (malformedAfterText) "data: {not-json}" else "data: [DONE]"}
-                """.trimIndent(),
-            ),
+            if (realJobCancellationAfterMarker) {
+                MockResponse().setChunkedBody(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"$response\"}}]}\n" + " ".repeat(128 * 1024),
+                    1024,
+                )
+            } else {
+                MockResponse().setBody(responseBody)
+            },
         )
         server.start()
         try {
-            val store = inMemoryChatStore(failureAfterSourceWrite)
+            val markerPersisted = CompletableDeferred<Unit>()
+            val store = inMemoryChatStore(
+                failureAfterSourceWrite = failureAfterSourceWrite,
+                cancellationAware = realJobCancellationAfterMarker,
+                markerPersisted = markerPersisted,
+                cancelCurrentContextAfterSourceWrite = cancelCurrentContextAfterSourceWrite,
+            )
             val repository = store.repository
             val conversationId = repository.createConversation()
             val userMessageId = repository.insertUserMessage(conversationId, "怎么做", emptyList())
@@ -192,17 +243,38 @@ class SendMessageUseCaseAgentPersistenceTest {
                     createdAt = 0L,
                     updatedAt = 0L,
             )
-            val result = try {
-                useCase.execute(entry, repository.listMessages(conversationId))
-            } catch (cancelled: CancellationException) {
-                ChatExecutionResult(
-                    status = ChatExecutionStatus.CANCELLED,
-                    assistantMessageId = repository.listMessages(conversationId).last().id,
-                    errorMessage = null,
-                )
+            val result = if (realJobCancellationAfterMarker || cancelCurrentContextAfterSourceWrite) {
+                coroutineScope {
+                    val execution = async {
+                        useCase.execute(entry, repository.listMessages(conversationId))
+                    }
+                    if (realJobCancellationAfterMarker) {
+                        markerPersisted.await()
+                        execution.cancel()
+                    }
+                    val failure = runCatching { execution.await() }.exceptionOrNull()
+                    assertTrue(failure is CancellationException)
+                    ChatExecutionResult(
+                        status = ChatExecutionStatus.CANCELLED,
+                        assistantMessageId = repository.listMessages(conversationId).last().id,
+                        errorMessage = null,
+                    )
+                }
+            } else {
+                try {
+                    useCase.execute(entry, repository.listMessages(conversationId))
+                } catch (cancelled: CancellationException) {
+                    ChatExecutionResult(
+                        status = ChatExecutionStatus.CANCELLED,
+                        assistantMessageId = repository.listMessages(conversationId).last().id,
+                        errorMessage = null,
+                    )
+                }
             }
 
-            if (!malformedAfterText && !cancelAfterText && failureAfterSourceWrite == null) {
+            if (!malformedAfterText && !cancelAfterText && failureAfterSourceWrite == null &&
+                !realJobCancellationAfterMarker && !cancelCurrentContextAfterSourceWrite
+            ) {
                 assertEquals(ChatExecutionStatus.SUCCEEDED, result.status)
             }
             val assistantId = requireNotNull(result.assistantMessageId)
@@ -221,8 +293,18 @@ private data class ExecuteChatStore(
     val repository: ChatRepository,
 )
 
-private fun inMemoryChatStore(failureAfterSourceWrite: Throwable? = null): ExecuteChatStore {
-    val messagePartDao = ExecuteMessagePartDao(failureAfterSourceWrite)
+private fun inMemoryChatStore(
+    failureAfterSourceWrite: Throwable? = null,
+    cancellationAware: Boolean = false,
+    markerPersisted: CompletableDeferred<Unit>? = null,
+    cancelCurrentContextAfterSourceWrite: Boolean = false,
+): ExecuteChatStore {
+    val messagePartDao = ExecuteMessagePartDao(
+        failureAfterSourceWrite = failureAfterSourceWrite,
+        cancellationAware = cancellationAware,
+        markerPersisted = markerPersisted,
+        cancelCurrentContextAfterSourceWrite = cancelCurrentContextAfterSourceWrite,
+    )
     return ExecuteChatStore(
         repository = ChatRepository(
             conversationDao = ExecuteConversationDao(),
@@ -287,6 +369,9 @@ private class ExecuteMessageDao : MessageDao {
 
 private class ExecuteMessagePartDao(
     private var failureAfterSourceWrite: Throwable? = null,
+    private val cancellationAware: Boolean = false,
+    private val markerPersisted: CompletableDeferred<Unit>? = null,
+    private var cancelCurrentContextAfterSourceWrite: Boolean = false,
 ) : MessagePartDao {
     private val rows = linkedMapOf<String, MessagePartEntity>()
     override fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>> = MutableStateFlow(rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex })
@@ -295,9 +380,18 @@ private class ExecuteMessagePartDao(
     override suspend fun deleteForMessage(messageId: String) { rows.entries.removeIf { it.value.messageId == messageId } }
     override suspend fun markStableForMessage(messageId: String, updatedAt: Long) { rows.replaceAll { _, value -> if (value.messageId == messageId) value.copy(stable = true, updatedAt = updatedAt) else value } }
     override suspend fun replaceForMessage(messageId: String, parts: List<MessagePartEntity>) {
+        if (cancellationAware) currentCoroutineContext().ensureActive()
         deleteForMessage(messageId)
         insertAll(parts)
+        if (parts.any { it.type == UiMessagePartType.TEXT.name && it.content.contains("[资料") }) {
+            markerPersisted?.complete(Unit)
+        }
         if (parts.any { it.type == UiMessagePartType.AGENT_SOURCES.name }) {
+            if (cancelCurrentContextAfterSourceWrite) {
+                cancelCurrentContextAfterSourceWrite = false
+                currentCoroutineContext().cancel(CancellationException("source write cancelled"))
+                currentCoroutineContext().ensureActive()
+            }
             failureAfterSourceWrite?.let { failure ->
                 failureAfterSourceWrite = null
                 throw failure
