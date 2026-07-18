@@ -11,6 +11,7 @@ import com.harnessapk.websearch.shouldUseExternalWebSearch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -46,8 +47,12 @@ class ChatExecutionCoordinator(
     suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = withContext(dispatchers.io) {
         val persistedAttachments = request.attachments.map(attachmentStore::persist)
         val entry = executionRepository.enqueue(request.copy(attachments = persistedAttachments))
-        ensureRunner(entry.conversationId)
-        onWorkScheduled()
+        withContext(NonCancellable) {
+            runCatching {
+                ensureRunner(entry.conversationId)
+                onWorkScheduled()
+            }
+        }
         entry
     }
 

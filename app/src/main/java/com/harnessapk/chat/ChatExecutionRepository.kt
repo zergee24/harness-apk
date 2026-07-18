@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.map
 import java.util.UUID
 
 data class EnqueueChatRequest(
+    val requestId: String = UUID.randomUUID().toString(),
     val conversationId: String,
     val content: String,
     val attachments: List<PendingImageAttachment>,
@@ -31,6 +32,7 @@ class ChatExecutionRepository(
         dao.observeForConversation(conversationId).map { rows -> rows.map(ChatExecutionEntryEntity::toDomain) }
 
     suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = database.withTransaction {
+        dao.findById(request.requestId)?.toDomain()?.let { return@withTransaction it }
         identityRepository.pinForFirstMessage(request.conversationId)
         val now = timeProvider.nowMillis()
         val userMessageId = chatRepository.insertUserMessage(
@@ -39,7 +41,7 @@ class ChatExecutionRepository(
             attachments = request.attachments,
         )
         val entity = ChatExecutionEntryEntity(
-            id = UUID.randomUUID().toString(),
+            id = request.requestId,
             conversationId = request.conversationId,
             userMessageId = userMessageId,
             assistantMessageId = null,

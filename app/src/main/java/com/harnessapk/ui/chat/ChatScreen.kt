@@ -174,6 +174,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flowOf
 import java.util.Locale
+import java.util.UUID
 
 internal enum class ChatImageSourceAction {
     REQUEST_CAMERA_PERMISSION,
@@ -257,6 +258,8 @@ fun ChatScreen(
     var conversation by remember(conversationId) { mutableStateOf<Conversation?>(null) }
     var isAgentConversation by remember(conversationId) { mutableStateOf(false) }
     var firstMessagePending by remember(conversationId) { mutableStateOf(false) }
+    var identityMessageStateKnown by remember(conversationId) { mutableStateOf(false) }
+    var persistedUserMessage by remember(conversationId) { mutableStateOf(false) }
     var showIdentityDetails by remember { mutableStateOf(false) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
@@ -284,6 +287,22 @@ fun ChatScreen(
     var initialProjectApplied by remember { mutableStateOf(false) }
     var autoFocusInputRequested by remember(conversationId) { mutableStateOf(false) }
     var streamingAutoScrollEnabled by remember(conversationId) { mutableStateOf(true) }
+    val identityController = remember(conversationId) {
+        ConversationIdentityController(
+            scope = scope,
+            selectDraft = { agentId ->
+                container.conversationIdentityRepository.selectDraft(conversationId, agentId)
+            },
+            reloadConversation = { container.chatRepository.conversation(conversationId) },
+        )
+    }
+    val identityControllerState by identityController.state.collectAsState()
+    val sendController = remember(conversationId) {
+        ChatSendController(
+            enqueue = container.chatExecutionCoordinator::enqueue,
+            requestExists = { requestId -> container.chatExecutionRepository.entry(requestId) != null },
+        )
+    }
     val remoteProviderCatalog = remember(providerCatalogSnapshot.rawJson) {
         providerCatalogSnapshot.rawJson?.let { rawJson ->
             runCatching { parseProviderCapabilityCatalogJson(rawJson, container.json) }.getOrNull()
@@ -323,8 +342,23 @@ fun ChatScreen(
     )
     val assistantActivityText = assistantActivityLabel(messages)
     val isAssistantBusy = assistantActivityText != null
-    val identityState = remember(conversation, messages, agents, firstMessagePending) {
-        conversationIdentityUiState(conversation, messages, agents, firstMessagePending)
+    val identityState = remember(
+        conversation,
+        messages,
+        agents,
+        firstMessagePending,
+        identityControllerState.selectionPending,
+        identityMessageStateKnown,
+        persistedUserMessage,
+    ) {
+        conversationIdentityUiState(
+            conversation = conversation,
+            messages = messages,
+            agents = agents,
+            firstMessagePending = firstMessagePending || identityControllerState.selectionPending,
+            messageStateKnown = identityMessageStateKnown,
+            persistedUserMessage = persistedUserMessage,
+        )
     }
     val executionByUserMessageId = remember(executionEntries) {
         executionEntries.associateBy(ChatExecutionEntry::userMessageId)
@@ -389,9 +423,14 @@ fun ChatScreen(
     }
 
     LaunchedEffect(conversationId) {
-        runCatching { container.chatRepository.conversation(conversationId) }
-            .onSuccess { loadedConversation ->
+        runCatching {
+            container.chatRepository.conversation(conversationId) to
+                container.chatRepository.hasUserMessage(conversationId)
+        }
+            .onSuccess { (loadedConversation, hasPersistedUserMessage) ->
                 conversation = loadedConversation
+                identityMessageStateKnown = true
+                persistedUserMessage = hasPersistedUserMessage
                 rawSessionPrompt = loadedConversation?.promptOriginal.orEmpty()
                 optimizedSessionPrompt = loadedConversation?.promptOptimized.orEmpty()
                 finalSessionPrompt = loadedConversation?.promptFinal.orEmpty()
@@ -406,6 +445,15 @@ fun ChatScreen(
             .onFailure { sessionStatus = it.toUserMessage() }
     }
 
+    LaunchedEffect(identityControllerState.settledGeneration) {
+        identityControllerState.refreshedConversation?.let { refreshedConversation ->
+            conversation = refreshedConversation
+            isAgentConversation = refreshedConversation.agentId != null
+            if (isAgentConversation) webSearchEnabled = false
+        }
+        identityControllerState.failure?.let { errorText = it.toUserMessage() }
+    }
+
     LaunchedEffect(conversationId, initialProjectId) {
         if (!initialProjectId.isNullOrBlank()) {
             container.chatRepository.updateConversationProject(conversationId, initialProjectId)
@@ -414,6 +462,7 @@ fun ChatScreen(
 
     LaunchedEffect(messages) {
         if (messages.any { it.role == MessageRole.USER }) {
+            persistedUserMessage = true
             firstMessagePending = reduceFirstMessagePending(
                 pending = firstMessagePending,
                 isFirstUserMessage = true,
@@ -605,20 +654,8 @@ fun ChatScreen(
         }
     }
 
-    suspend fun firstUserMessageLanding(): FirstUserMessageLanding = try {
-        if (container.chatRepository.hasUserMessage(conversationId)) {
-            FirstUserMessageLanding.LANDED
-        } else {
-            FirstUserMessageLanding.NOT_LANDED
-        }
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (_: Throwable) {
-        FirstUserMessageLanding.UNKNOWN
-    }
-
-    suspend fun settlePersistedSend(draftImage: Uri?): List<String> {
-        text = ""
+    suspend fun settlePersistedSend(submittedText: String, draftImage: Uri?): List<String> {
+        text = sendController.settleText(text, submittedText)
         if (selectedImage == draftImage) {
             selectedImage = null
             selectedMimeType = "image/png"
@@ -665,10 +702,13 @@ fun ChatScreen(
     }
 
     fun sendNow() {
-        val body = text.trim()
+        val submittedText = text
+        val body = submittedText.trim()
         if (body.isEmpty() && selectedImage == null) return
-        if (firstMessagePending) return
-        val isFirstUserMessage = messages.none { it.role == MessageRole.USER }
+        if (firstMessagePending || !identityController.canSend()) return
+        val isFirstUserMessage = identityMessageStateKnown &&
+            !persistedUserMessage &&
+            messages.none { it.role == MessageRole.USER }
         firstMessagePending = reduceFirstMessagePending(
             pending = firstMessagePending,
             isFirstUserMessage = isFirstUserMessage,
@@ -684,89 +724,69 @@ fun ChatScreen(
         val draftMimeType = selectedMimeType
         scope.launch {
             errorText = null
-            try {
-                container.chatExecutionCoordinator.enqueue(
-                    EnqueueChatRequest(
-                        conversationId = conversationId,
-                        content = body.ifEmpty { "请看这张截图" },
-                        attachments = draftImage?.let { image ->
-                            listOf(PendingImageAttachment(image, draftMimeType))
-                        }.orEmpty(),
-                        providerId = selectedProviderId,
-                        model = selectedModel,
-                        reasoningEffort = selectedReasoningEffort,
-                        requestContext = ChatExecutionRequestContext(
-                            sessionContext = sessionRequestContext,
-                            webSearchEnabled = webSearchEnabled,
-                            webSearchSettings = webSearchSettings,
-                        ),
+            val settlement = sendController.submit(
+                EnqueueChatRequest(
+                    requestId = UUID.randomUUID().toString(),
+                    conversationId = conversationId,
+                    content = body.ifEmpty { "请看这张截图" },
+                    attachments = draftImage?.let { image ->
+                        listOf(PendingImageAttachment(image, draftMimeType))
+                    }.orEmpty(),
+                    providerId = selectedProviderId,
+                    model = selectedModel,
+                    reasoningEffort = selectedReasoningEffort,
+                    requestContext = ChatExecutionRequestContext(
+                        sessionContext = sessionRequestContext,
+                        webSearchEnabled = webSearchEnabled,
+                        webSearchSettings = webSearchSettings,
                     ),
-                )
-            } catch (cancelled: CancellationException) {
-                val landing = if (isFirstUserMessage) {
-                    withContext(NonCancellable) { firstUserMessageLanding() }
-                } else {
-                    FirstUserMessageLanding.NOT_LANDED
+                ),
+            )
+            when (settlement) {
+                is ChatSendSettlement.Accepted -> {
+                    reportPostPersistProblems(
+                        prefix = "消息已发送",
+                        problems = settlePersistedSend(submittedText, draftImage),
+                    )
                 }
-                val disposition = enqueueExceptionDisposition(
-                    pending = firstMessagePending,
-                    isFirstUserMessage = isFirstUserMessage,
-                    landing = landing,
-                )
-                firstMessagePending = disposition.pending
-                if (disposition.settlePersistedSend) {
-                    withContext(NonCancellable) {
-                        settlePersistedSendThenRethrowCancellation(cancelled) {
-                            val problems = settlePersistedSend(draftImage)
+                is ChatSendSettlement.AcceptedAfterFailure -> {
+                    val problems = settlePersistedSend(submittedText, draftImage)
+                    reportPostPersistProblems(
+                        prefix = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
+                        problems = problems,
+                        alwaysReport = true,
+                    )
+                }
+                is ChatSendSettlement.Failed -> {
+                    firstMessagePending = reduceFirstMessagePending(
+                        pending = firstMessagePending,
+                        isFirstUserMessage = isFirstUserMessage,
+                        event = FirstMessagePendingEvent.ENQUEUE_FAILED,
+                    )
+                    errorText = settlement.failure.toUserMessage()
+                }
+                is ChatSendSettlement.Cancelled -> {
+                    firstMessagePending = reduceFirstMessagePending(
+                        pending = firstMessagePending,
+                        isFirstUserMessage = isFirstUserMessage,
+                        event = FirstMessagePendingEvent.ENQUEUE_FAILED,
+                        firstUserMessageLanded = settlement.persisted,
+                    )
+                    if (settlement.persisted) {
+                        withContext(NonCancellable) {
+                            val problems = settlePersistedSend(submittedText, draftImage)
                             reportPostPersistProblems(
                                 prefix = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
                                 problems = problems,
                                 alwaysReport = true,
                             )
-                        }
                     }
-                }
-                if (disposition.presentation == EnqueueExceptionPresentation.UNKNOWN_WARNING) {
-                    sessionStatus = "消息状态待确认，身份已锁定，请勿重复发送"
-                } else if (disposition.presentation == EnqueueExceptionPresentation.SEND_FAILURE) {
-                    errorText = "消息未发送，已取消"
-                }
-                throw cancelled
-            } catch (error: Throwable) {
-                val landing = if (isFirstUserMessage) {
-                    firstUserMessageLanding()
-                } else {
-                    FirstUserMessageLanding.NOT_LANDED
-                }
-                val disposition = enqueueExceptionDisposition(
-                    pending = firstMessagePending,
-                    isFirstUserMessage = isFirstUserMessage,
-                    landing = landing,
-                )
-                firstMessagePending = disposition.pending
-                when (disposition.presentation) {
-                    EnqueueExceptionPresentation.SEND_FAILURE -> errorText = error.toUserMessage()
-                    EnqueueExceptionPresentation.QUEUED_WARNING -> {
-                        val problems = settlePersistedSend(draftImage)
-                        reportPostPersistProblems(
-                            prefix = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
-                            problems = problems,
-                        )
-                        if (problems.isEmpty()) {
-                            sessionStatus = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理"
-                        }
+                    } else {
+                        errorText = "消息未发送，已取消"
                     }
-                    EnqueueExceptionPresentation.UNKNOWN_WARNING -> {
-                        sessionStatus = "消息状态待确认，身份已锁定，请勿重复发送"
-                    }
+                    throw settlement.cancellation
                 }
-                return@launch
             }
-
-            reportPostPersistProblems(
-                prefix = "消息已发送",
-                problems = settlePersistedSend(draftImage),
-            )
         }
     }
 
@@ -1531,24 +1551,15 @@ fun ChatScreen(
                 selectedReasoningEffort = selectedReasoningEffort,
                 onOpenModelPicker = { showModelPicker = true },
                 identityState = identityState,
-                onSelectIdentity = { agentId ->
-                    scope.launch {
-                        runCatching {
-                            container.conversationIdentityRepository.selectDraft(conversationId, agentId)
-                            container.chatRepository.conversation(conversationId)
-                        }.onSuccess { refreshedConversation ->
-                            conversation = refreshedConversation
-                            isAgentConversation = refreshedConversation?.agentId != null
-                            if (isAgentConversation) webSearchEnabled = false
-                        }.onFailure { errorText = it.toUserMessage() }
-                    }
-                },
+                onSelectIdentity = identityController::selectIdentity,
                 contextStatus = contextStatus,
                 isCompressingContext = isCompressingContext,
                 onCompressContext = ::compressContextNow,
                 inputFocusRequester = inputFocusRequester,
                 canSend = selectedProvider != null &&
                     selectedModel.isNotBlank() &&
+                    !firstMessagePending &&
+                    identityController.canSend() &&
                     (text.isNotBlank() || selectedImage != null),
                 isBusy = isAssistantBusy,
                 onSend = {

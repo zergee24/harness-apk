@@ -71,6 +71,20 @@ class ChatExecutionRepositoryInstrumentedTest {
     }
 
     @Test
+    fun enqueueUsesCallerRequestIdAndIsIdempotentForTheSameAcceptedRequest() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val request = request(conversationId).copy(requestId = "stable-request-id")
+
+        val first = repository.enqueue(request)
+        val second = repository.enqueue(request)
+
+        assertEquals("stable-request-id", first.id)
+        assertEquals(first, second)
+        assertEquals(1, database.chatExecutionEntryDao().listForConversation(conversationId).size)
+        assertEquals(1, database.messageDao().countUserMessages(conversationId))
+    }
+
+    @Test
     fun enqueueRollsBackPinnedIdentityAndUserMessageWhenQueueInsertFails() = runBlocking {
         database.agentDao().upsertAgent(readyAgent(id = "a1", activeVersion = 4))
         val conversationId = chatRepository.createConversation(agentId = "a1", agentVersion = 1)

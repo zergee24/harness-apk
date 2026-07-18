@@ -5,7 +5,6 @@ import com.harnessapk.agent.AgentStatus
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.MessageRole
-import kotlinx.coroutines.CancellationException
 
 data class ConversationIdentityOption(
     val agentId: String?,
@@ -40,83 +39,22 @@ internal fun reduceFirstMessagePending(
     FirstMessagePendingEvent.USER_OBSERVED -> false
 }
 
-internal enum class FirstUserMessageLanding {
-    NOT_LANDED,
-    LANDED,
-    UNKNOWN,
-}
-
-internal enum class EnqueueExceptionPresentation {
-    SEND_FAILURE,
-    QUEUED_WARNING,
-    UNKNOWN_WARNING,
-}
-
-internal data class EnqueueExceptionDisposition(
-    val pending: Boolean,
-    val settlePersistedSend: Boolean,
-    val presentation: EnqueueExceptionPresentation,
-)
-
-internal fun enqueueExceptionDisposition(
-    pending: Boolean,
-    isFirstUserMessage: Boolean,
-    landing: FirstUserMessageLanding,
-): EnqueueExceptionDisposition {
-    if (!isFirstUserMessage) {
-        return EnqueueExceptionDisposition(
-            pending = pending,
-            settlePersistedSend = false,
-            presentation = EnqueueExceptionPresentation.SEND_FAILURE,
-        )
-    }
-    return when (landing) {
-    FirstUserMessageLanding.NOT_LANDED -> EnqueueExceptionDisposition(
-        pending = reduceFirstMessagePending(
-            pending = pending,
-            isFirstUserMessage = isFirstUserMessage,
-            event = FirstMessagePendingEvent.ENQUEUE_FAILED,
-        ),
-        settlePersistedSend = false,
-        presentation = EnqueueExceptionPresentation.SEND_FAILURE,
-    )
-    FirstUserMessageLanding.LANDED -> EnqueueExceptionDisposition(
-        pending = reduceFirstMessagePending(
-            pending = pending,
-            isFirstUserMessage = isFirstUserMessage,
-            event = FirstMessagePendingEvent.ENQUEUE_FAILED,
-            firstUserMessageLanded = true,
-        ),
-        settlePersistedSend = true,
-        presentation = EnqueueExceptionPresentation.QUEUED_WARNING,
-    )
-    FirstUserMessageLanding.UNKNOWN -> EnqueueExceptionDisposition(
-        pending = pending || isFirstUserMessage,
-        settlePersistedSend = false,
-        presentation = EnqueueExceptionPresentation.UNKNOWN_WARNING,
-    )
-    }
-}
-
-internal suspend fun settlePersistedSendThenRethrowCancellation(
-    cancelled: CancellationException = CancellationException(),
-    settle: suspend () -> Unit,
-): Nothing {
-    settle()
-    throw cancelled
-}
-
 internal fun conversationIdentityUiState(
     conversation: Conversation?,
     messages: List<ChatMessage>,
     agents: List<Agent>,
     firstMessagePending: Boolean = false,
+    messageStateKnown: Boolean = true,
+    persistedUserMessage: Boolean = false,
 ): ConversationIdentityUiState {
     val options = listOf(ConversationIdentityOption(null, "普通助手", null)) +
         agents.filter { it.status == AgentStatus.READY }.map {
             ConversationIdentityOption(it.id, it.name, it.activeVersion)
         }
-    val mutable = !firstMessagePending && messages.none { it.role == MessageRole.USER }
+    val mutable = messageStateKnown &&
+        !persistedUserMessage &&
+        !firstMessagePending &&
+        messages.none { it.role == MessageRole.USER }
     val selected = if (!mutable && conversation?.agentId != null) {
         val installedAgent = agents.firstOrNull { it.id == conversation.agentId }
         ConversationIdentityOption(
