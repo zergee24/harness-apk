@@ -9,8 +9,12 @@ import kotlinx.coroutines.flow.map
 data class ChatSendRequestState(
     val requestId: String,
     val submittedText: String,
-    val draftImage: Uri?,
+    val submittedImage: Uri?,
+    val submittedMimeType: String,
     val isFirstUserMessage: Boolean,
+    val currentDraftText: String = submittedText,
+    val currentDraftImage: Uri? = submittedImage,
+    val currentDraftMimeType: String = submittedMimeType,
     val phase: ChatSendRequestPhase = ChatSendRequestPhase.IN_FLIGHT,
     val originalFailure: Throwable? = null,
     val cancellation: CancellationException? = null,
@@ -94,9 +98,30 @@ class ChatSendRecoveryStore {
         )
     }
 
-    fun clearIfRequest(conversationId: String, expectedRequestId: String): Boolean = synchronized(lock) {
+    fun updateCurrentDraft(
+        conversationId: String,
+        expectedRequestId: String,
+        text: String,
+        image: Uri?,
+        mimeType: String,
+    ): Boolean = transitionIfRequest(
+        conversationId = conversationId,
+        expectedRequestId = expectedRequestId,
+        allowedPhases = setOf(ChatSendRequestPhase.IN_FLIGHT, ChatSendRequestPhase.UNKNOWN),
+    ) { current ->
+        current.copy(
+            currentDraftText = text,
+            currentDraftImage = image,
+            currentDraftMimeType = mimeType,
+        )
+    }
+
+    fun acknowledgeTerminal(conversationId: String, expectedRequestId: String): Boolean = synchronized(lock) {
         val current = states.value[conversationId] ?: return@synchronized false
-        if (current.requestId != expectedRequestId) return@synchronized false
+        if (
+            current.requestId != expectedRequestId ||
+            current.phase !in setOf(ChatSendRequestPhase.LANDED, ChatSendRequestPhase.NOT_LANDED)
+        ) return@synchronized false
         states.value = states.value - conversationId
         true
     }

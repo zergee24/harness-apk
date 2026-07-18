@@ -59,7 +59,7 @@ class ChatSendRecoveryStoreTest {
         val screenBRequest = store.observe("c1").first()
         assertEquals("r1", screenBRequest?.requestId)
         assertEquals(ChatSendRequestPhase.LANDED, screenBRequest?.phase)
-        assertTrue(store.clearIfRequest("c1", "r1"))
+        assertTrue(store.acknowledgeTerminal("c1", "r1"))
         assertNull(store.current("c1"))
         managerScope.cancel()
     }
@@ -105,11 +105,11 @@ class ChatSendRecoveryStoreTest {
         val store = ChatSendRecoveryStore()
         assertTrue(store.start("c1", request("old")))
         assertTrue(store.markLanded("c1", "old"))
-        assertTrue(store.clearIfRequest("c1", "old"))
+        assertTrue(store.acknowledgeTerminal("c1", "old"))
         assertTrue(store.start("c1", request("new")))
 
         assertFalse(store.markNotLanded("c1", "old", IllegalStateException("old"), null))
-        assertFalse(store.clearIfRequest("c1", "old"))
+        assertFalse(store.acknowledgeTerminal("c1", "old"))
         assertEquals("new", store.current("c1")?.requestId)
         assertEquals(ChatSendRequestPhase.IN_FLIGHT, store.current("c1")?.phase)
     }
@@ -135,6 +135,30 @@ class ChatSendRecoveryStoreTest {
         fixture.scope.cancel()
     }
 
+    @Test
+    fun acknowledgeRejectsInFlightAndUnknownButAcceptsOnlyTheExactTerminalRequest() {
+        val store = ChatSendRecoveryStore()
+        val failure = IllegalStateException("enqueue")
+        assertTrue(store.start("c1", request("in-flight")))
+        assertFalse(store.acknowledgeTerminal("c1", "in-flight"))
+        assertTrue(store.markUnknown("c1", "in-flight", failure, null, IllegalStateException("lookup")))
+        assertFalse(store.acknowledgeTerminal("c1", "in-flight"))
+        assertTrue(store.markNotLanded("c1", "in-flight", failure, null))
+        assertFalse(store.acknowledgeTerminal("c1", "other"))
+        assertTrue(store.acknowledgeTerminal("c1", "in-flight"))
+    }
+
+    @Test
+    fun currentDraftSnapshotUpdatesOnlyWhileTheExactRequestIsActive() {
+        val store = ChatSendRecoveryStore()
+        assertTrue(store.start("c1", request("request")))
+        assertTrue(store.updateCurrentDraft("c1", "request", "B", null, "image/png"))
+        assertEquals("B", store.current("c1")?.currentDraftText)
+        assertTrue(store.markLanded("c1", "request"))
+        assertFalse(store.updateCurrentDraft("c1", "request", "C", null, "image/png"))
+        assertEquals("B", store.current("c1")?.currentDraftText)
+    }
+
     private fun manager(
         dispatcher: TestDispatcher,
         store: ChatSendRecoveryStore,
@@ -156,7 +180,8 @@ class ChatSendRecoveryStoreTest {
     private fun request(requestId: String, first: Boolean = false) = ChatSendRequestState(
         requestId = requestId,
         submittedText = "A",
-        draftImage = null,
+        submittedImage = null,
+        submittedMimeType = "image/png",
         isFirstUserMessage = first,
     )
 

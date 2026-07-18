@@ -1,6 +1,7 @@
 package com.harnessapk.ui.chat
 
 import com.harnessapk.chat.Conversation
+import com.harnessapk.chat.ChatSendRequestPhase
 import com.harnessapk.chat.ChatSendRequestState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -108,3 +109,37 @@ internal fun canAcceptChatSend(
     identityMessageStateKnown: Boolean,
     request: ChatSendRequestState?,
 ): Boolean = identityMessageStateKnown && request == null
+
+data class ChatDraftUiState<T>(
+    val text: String,
+    val image: T?,
+    val mimeType: String,
+)
+
+internal fun <T> reduceTerminalDraft(
+    phase: ChatSendRequestPhase,
+    submittedText: String,
+    submittedImage: T?,
+    submittedMimeType: String,
+    currentText: String,
+    currentImage: T?,
+    currentMimeType: String,
+): ChatDraftUiState<T> = when (phase) {
+    ChatSendRequestPhase.LANDED -> ChatDraftUiState(
+        text = if (currentText == submittedText) "" else currentText,
+        image = if (
+            currentImage == submittedImage && currentMimeType == submittedMimeType
+        ) null else currentImage,
+        mimeType = if (
+            currentImage == submittedImage && currentMimeType == submittedMimeType
+        ) "image/png" else currentMimeType,
+    )
+    ChatSendRequestPhase.NOT_LANDED -> ChatDraftUiState(
+        text = currentText,
+        image = currentImage,
+        mimeType = currentMimeType,
+    )
+    ChatSendRequestPhase.IN_FLIGHT,
+    ChatSendRequestPhase.UNKNOWN,
+    -> error("仅能结算终态发送请求")
+}

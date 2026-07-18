@@ -302,6 +302,20 @@ fun ChatScreen(
     val sendRequestState by container.chatSendRecoveryStore
         .observe(conversationId)
         .collectAsState(initial = container.chatSendRecoveryStore.current(conversationId))
+    LaunchedEffect(
+        sendRequestState?.requestId,
+        sendRequestState?.phase,
+        sendRequestState?.currentDraftText,
+        sendRequestState?.currentDraftImage,
+        sendRequestState?.currentDraftMimeType,
+    ) {
+        val request = sendRequestState ?: return@LaunchedEffect
+        if (request.phase == ChatSendRequestPhase.IN_FLIGHT || request.phase == ChatSendRequestPhase.UNKNOWN) {
+            text = request.currentDraftText
+            selectedImage = request.currentDraftImage
+            selectedMimeType = request.currentDraftMimeType
+        }
+    }
     val remoteProviderCatalog = remember(providerCatalogSnapshot.rawJson) {
         providerCatalogSnapshot.rawJson?.let { rawJson ->
             runCatching { parseProviderCapabilityCatalogJson(rawJson, container.json) }.getOrNull()
@@ -597,24 +611,40 @@ fun ChatScreen(
         }
     }
 
+    fun updateActiveDraftSnapshot(nextText: String, nextImage: Uri?, nextMimeType: String) {
+        val request = container.chatSendRecoveryStore.current(conversationId) ?: return
+        container.chatSendRecoveryStore.updateCurrentDraft(
+            conversationId = conversationId,
+            expectedRequestId = request.requestId,
+            text = nextText,
+            image = nextImage,
+            mimeType = nextMimeType,
+        )
+    }
+
+    fun syncActiveDraftSnapshot() = updateActiveDraftSnapshot(text, selectedImage, selectedMimeType)
+
+    fun deleteReplacedImageIfNoLongerSubmitted(uri: Uri) {
+        if (container.chatSendRecoveryStore.current(conversationId)?.submittedImage == uri) return
+        scope.launch {
+            container.chatImageStore.deleteIfManaged(uri)
+        }
+    }
+
     fun replaceSelectedImage(uri: Uri, mimeType: String) {
         val previousUri = selectedImage
+        updateActiveDraftSnapshot(text, uri, mimeType)
         selectedImage = uri
         selectedMimeType = mimeType
-        previousUri?.let { replacedUri ->
-            scope.launch {
-                container.chatImageStore.deleteIfManaged(replacedUri)
-            }
-        }
+        previousUri?.let(::deleteReplacedImageIfNoLongerSubmitted)
     }
 
     fun removeSelectedImage() {
         val uri = selectedImage ?: return
+        updateActiveDraftSnapshot(text, null, "image/png")
         selectedImage = null
         selectedMimeType = "image/png"
-        scope.launch {
-            container.chatImageStore.deleteIfManaged(uri)
-        }
+        deleteReplacedImageIfNoLongerSubmitted(uri)
     }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
@@ -630,6 +660,7 @@ fun ChatScreen(
                 }
             }
             val feedback = cameraCancelledFeedback(text, errorText)
+            updateActiveDraftSnapshot(feedback.text, selectedImage, selectedMimeType)
             text = feedback.text
             errorText = feedback.errorText
         }
@@ -656,12 +687,7 @@ fun ChatScreen(
         }
     }
 
-    suspend fun settlePersistedSend(submittedText: String, draftImage: Uri?): List<String> {
-        text = if (text == submittedText) "" else text
-        if (selectedImage == draftImage) {
-            selectedImage = null
-            selectedMimeType = "image/png"
-        }
+    suspend fun settlePersistedSend(submittedImage: Uri?): List<String> {
         val problems = mutableListOf<String>()
         try {
             conversation = container.chatRepository.conversation(conversationId)
@@ -672,7 +698,7 @@ fun ChatScreen(
         } catch (error: Throwable) {
             problems += "会话状态刷新失败：${error.toUserMessage()}"
         }
-        draftImage?.let { sentUri ->
+        submittedImage?.let { sentUri ->
             try {
                 container.chatImageStore.deleteIfManaged(sentUri)
             } catch (cancelled: CancellationException) {
@@ -727,7 +753,8 @@ fun ChatScreen(
         val requestState = ChatSendRequestState(
             requestId = requestId,
             submittedText = submittedText,
-            draftImage = draftImage,
+            submittedImage = draftImage,
+            submittedMimeType = draftMimeType,
             isFirstUserMessage = isFirstUserMessage,
         )
         val enqueueRequest = EnqueueChatRequest(
@@ -764,6 +791,18 @@ fun ChatScreen(
                 if (container.chatSendRecoveryStore.current(conversationId)?.requestId != request.requestId) {
                     return@LaunchedEffect
                 }
+                val terminalDraft = reduceTerminalDraft(
+                    phase = request.phase,
+                    submittedText = request.submittedText,
+                    submittedImage = request.submittedImage,
+                    submittedMimeType = request.submittedMimeType,
+                    currentText = request.currentDraftText,
+                    currentImage = request.currentDraftImage,
+                    currentMimeType = request.currentDraftMimeType,
+                )
+                text = terminalDraft.text
+                selectedImage = terminalDraft.image
+                selectedMimeType = terminalDraft.mimeType
                 persistedUserMessage = true
                 firstMessagePending = reduceFirstMessagePending(
                     pending = firstMessagePending,
@@ -771,18 +810,33 @@ fun ChatScreen(
                     event = FirstMessagePendingEvent.USER_OBSERVED,
                 )
                 sessionStatus = null
-                val problems = settlePersistedSend(request.submittedText, request.draftImage)
+                val problems = settlePersistedSend(request.submittedImage)
                 reportPostPersistProblems(
                     prefix = if (request.originalFailure == null) "消息已发送"
                     else "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
                     problems = problems,
                     alwaysReport = request.originalFailure != null,
                 )
-                container.chatSendRecoveryStore.clearIfRequest(conversationId, request.requestId)
+                container.chatSendRecoveryStore.acknowledgeTerminal(conversationId, request.requestId)
             }
             ChatSendRequestPhase.NOT_LANDED -> {
                 if (container.chatSendRecoveryStore.current(conversationId)?.requestId != request.requestId) {
                     return@LaunchedEffect
+                }
+                val terminalDraft = reduceTerminalDraft(
+                    phase = request.phase,
+                    submittedText = request.submittedText,
+                    submittedImage = request.submittedImage,
+                    submittedMimeType = request.submittedMimeType,
+                    currentText = request.currentDraftText,
+                    currentImage = request.currentDraftImage,
+                    currentMimeType = request.currentDraftMimeType,
+                )
+                text = terminalDraft.text
+                selectedImage = terminalDraft.image
+                selectedMimeType = terminalDraft.mimeType
+                if (request.submittedImage != null && request.currentDraftImage != request.submittedImage) {
+                    scope.launch { container.chatImageStore.deleteIfManaged(request.submittedImage) }
                 }
                 firstMessagePending = reduceFirstMessagePending(
                     pending = firstMessagePending,
@@ -793,7 +847,7 @@ fun ChatScreen(
                     ?: request.originalFailure?.toUserMessage()
                     ?: "消息发送失败"
                 sessionStatus = null
-                container.chatSendRecoveryStore.clearIfRequest(conversationId, request.requestId)
+                container.chatSendRecoveryStore.acknowledgeTerminal(conversationId, request.requestId)
             }
         }
     }
@@ -1477,6 +1531,7 @@ fun ChatScreen(
                                                     selectedImage = Uri.parse(attachment.uri)
                                                     selectedMimeType = attachment.mimeType
                                                 }
+                                                syncActiveDraftSnapshot()
                                             }
                                         }
                                     },
@@ -1527,7 +1582,10 @@ fun ChatScreen(
         ResponsiveChatContentRail {
             ChatInputBar(
                 text = text,
-                onTextChange = { text = it },
+                onTextChange = {
+                    updateActiveDraftSnapshot(it, selectedImage, selectedMimeType)
+                    text = it
+                },
                 selectedImage = selectedImage,
                 onTakePhoto = {
                     when (cameraAction(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)) {

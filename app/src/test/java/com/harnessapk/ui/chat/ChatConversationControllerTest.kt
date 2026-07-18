@@ -8,6 +8,7 @@ import com.harnessapk.chat.ChatRequestLanding
 import com.harnessapk.chat.ChatSendController
 import com.harnessapk.chat.ChatSendRequestState
 import com.harnessapk.chat.ChatSendSettlement
+import com.harnessapk.chat.ChatSendRequestPhase
 import com.harnessapk.chat.EnqueueChatRequest
 import com.harnessapk.chat.defaultReasoningEffort
 import com.harnessapk.chat.Conversation
@@ -342,6 +343,101 @@ class ChatConversationControllerTest {
         assertEquals("", controller.settleText("A", "A"))
     }
 
+    @Test
+    fun landedDraftReducerClearsTheUnchangedSubmittedTextAndImage() {
+        val submittedImage = "submitted"
+
+        assertEquals(
+            ChatDraftUiState(text = "", image = null, mimeType = "image/png"),
+            terminalDraft(
+                    phase = ChatSendRequestPhase.LANDED,
+                    submittedText = "A",
+                    submittedImage = submittedImage,
+                    currentText = "A",
+                    currentImage = submittedImage,
+                    currentMimeType = "image/jpeg",
+                ),
+        )
+    }
+
+    @Test
+    fun landedDraftReducerKeepsReplacementTextAndImageAcrossScreenRecreation() {
+        val submittedImage = "submitted"
+        val replacementImage = "replacement"
+
+        assertEquals(
+            ChatDraftUiState(text = "B", image = replacementImage, mimeType = "image/png"),
+            terminalDraft(
+                    phase = ChatSendRequestPhase.LANDED,
+                    submittedText = "A",
+                    submittedImage = submittedImage,
+                    currentText = "B",
+                    currentImage = replacementImage,
+                    currentMimeType = "image/png",
+                ),
+        )
+    }
+
+    @Test
+    fun landedDraftReducerKeepsAnExplicitlyRemovedSubmittedImageRemoved() {
+        val submittedImage = "submitted"
+
+        assertEquals(
+            ChatDraftUiState(text = "", image = null, mimeType = "image/png"),
+            terminalDraft(
+                    phase = ChatSendRequestPhase.LANDED,
+                    submittedText = "A",
+                    submittedImage = submittedImage,
+                    currentText = "A",
+                    currentImage = null,
+                    currentMimeType = "image/png",
+                ),
+        )
+    }
+
+    @Test
+    fun notLandedDraftReducerRestoresTheLatestSnapshotInsteadOfSubmittedDraft() {
+        val replacementImage = "replacement"
+
+        assertEquals(
+            ChatDraftUiState(text = "B", image = replacementImage, mimeType = "image/png"),
+            terminalDraft(
+                    phase = ChatSendRequestPhase.NOT_LANDED,
+                    submittedText = "A",
+                    submittedImage = "submitted",
+                    currentText = "B",
+                    currentImage = replacementImage,
+                    currentMimeType = "image/png",
+                ),
+        )
+    }
+
+    @Test
+    fun notLandedDraftReducerRestoresUnchangedAndRemovedImageSnapshots() {
+        assertEquals(
+            ChatDraftUiState(text = "A", image = "submitted", mimeType = "image/jpeg"),
+            terminalDraft(
+                phase = ChatSendRequestPhase.NOT_LANDED,
+                submittedText = "A",
+                submittedImage = "submitted",
+                currentText = "A",
+                currentImage = "submitted",
+                currentMimeType = "image/jpeg",
+            ),
+        )
+        assertEquals(
+            ChatDraftUiState(text = "A", image = null, mimeType = "image/png"),
+            terminalDraft(
+                phase = ChatSendRequestPhase.NOT_LANDED,
+                submittedText = "A",
+                submittedImage = "submitted",
+                currentText = "A",
+                currentImage = null,
+                currentMimeType = "image/png",
+            ),
+        )
+    }
+
     private fun request(requestId: String, content: String = "A"): EnqueueChatRequest = EnqueueChatRequest(
         requestId = requestId,
         conversationId = "c1",
@@ -384,10 +480,28 @@ class ChatConversationControllerTest {
     private fun pendingRequest() = ChatSendRequestState(
         requestId = "pending",
         submittedText = "A",
-        draftImage = null,
+        submittedImage = null,
+        submittedMimeType = "image/png",
         isFirstUserMessage = false,
         originalFailure = IllegalStateException("pending"),
         cancellation = null,
+    )
+
+    private fun terminalDraft(
+        phase: ChatSendRequestPhase,
+        submittedText: String,
+        submittedImage: String?,
+        currentText: String,
+        currentImage: String?,
+        currentMimeType: String,
+    ) = reduceTerminalDraft(
+        phase = phase,
+        submittedText = submittedText,
+        submittedImage = submittedImage,
+        submittedMimeType = "image/jpeg",
+        currentText = currentText,
+        currentImage = currentImage,
+        currentMimeType = currentMimeType,
     )
 
     private class LifoDispatcher : CoroutineDispatcher() {
