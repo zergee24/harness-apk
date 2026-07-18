@@ -115,6 +115,7 @@ import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.ChatExecutionRequestContext
 import com.harnessapk.chat.ChatExecutionStatus
+import com.harnessapk.chat.ChatSendRequestState
 import com.harnessapk.chat.EnqueueChatRequest
 import com.harnessapk.chat.ChatAttachment
 import com.harnessapk.chat.ChatImageSource
@@ -260,7 +261,6 @@ fun ChatScreen(
     var firstMessagePending by remember(conversationId) { mutableStateOf(false) }
     var identityMessageStateKnown by remember(conversationId) { mutableStateOf(false) }
     var persistedUserMessage by remember(conversationId) { mutableStateOf(false) }
-    var sendRequestState by remember(conversationId) { mutableStateOf<ChatSendRequestState?>(null) }
     var showIdentityDetails by remember { mutableStateOf(false) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
@@ -304,6 +304,9 @@ fun ChatScreen(
             requestExists = { requestId -> container.chatExecutionRepository.entry(requestId) != null },
         )
     }
+    val sendRequestState by container.chatSendRecoveryStore
+        .observe(conversationId)
+        .collectAsState(initial = container.chatSendRecoveryStore.current(conversationId))
     val remoteProviderCatalog = remember(providerCatalogSnapshot.rawJson) {
         providerCatalogSnapshot.rawJson?.let { rawJson ->
             runCatching { parseProviderCapabilityCatalogJson(rawJson, container.json) }.getOrNull()
@@ -356,7 +359,9 @@ fun ChatScreen(
             conversation = conversation,
             messages = messages,
             agents = agents,
-            firstMessagePending = firstMessagePending || identityControllerState.selectionPending,
+            firstMessagePending = firstMessagePending ||
+                identityControllerState.selectionPending ||
+                identityLockedForPendingSend(sendRequestState),
             messageStateKnown = identityMessageStateKnown,
             persistedUserMessage = persistedUserMessage,
         )
@@ -373,6 +378,14 @@ fun ChatScreen(
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
         Unit
+    }
+
+    DisposableEffect(conversationId) {
+        onDispose {
+            container.chatSendRecoveryStore.current(conversationId)?.let { request ->
+                container.chatSendRecoveryStore.handoffInFlight(conversationId, request.requestId)
+            }
+        }
     }
 
     DisposableEffect(context) {
@@ -709,7 +722,7 @@ fun ChatScreen(
         if (
             firstMessagePending ||
             !identityController.canSend() ||
-            !canAcceptChatSend(identityMessageStateKnown, sendRequestState)
+            !canAcceptChatSend(identityMessageStateKnown, container.chatSendRecoveryStore.current(conversationId))
         ) return
         val isFirstUserMessage = identityMessageStateKnown &&
             !persistedUserMessage &&
@@ -734,7 +747,7 @@ fun ChatScreen(
             draftImage = draftImage,
             isFirstUserMessage = isFirstUserMessage,
         )
-        sendRequestState = requestState
+        if (!container.chatSendRecoveryStore.start(conversationId, requestState)) return
         scope.launch {
             errorText = null
             val settlement = sendController.submit(
@@ -761,7 +774,7 @@ fun ChatScreen(
                         prefix = "消息已发送",
                         problems = settlePersistedSend(submittedText, draftImage),
                     )
-                    sendRequestState = null
+                    container.chatSendRecoveryStore.clearIfRequest(conversationId, requestId)
                 }
                 is ChatSendSettlement.AcceptedAfterFailure -> {
                     val problems = settlePersistedSend(submittedText, draftImage)
@@ -770,7 +783,7 @@ fun ChatScreen(
                         problems = problems,
                         alwaysReport = true,
                     )
-                    sendRequestState = null
+                    container.chatSendRecoveryStore.clearIfRequest(conversationId, requestId)
                 }
                 is ChatSendSettlement.Failed -> {
                     firstMessagePending = reduceFirstMessagePending(
@@ -779,7 +792,7 @@ fun ChatScreen(
                         event = FirstMessagePendingEvent.ENQUEUE_FAILED,
                     )
                     errorText = settlement.failure.toUserMessage()
-                    sendRequestState = null
+                    container.chatSendRecoveryStore.clearIfRequest(conversationId, requestId)
                 }
                 is ChatSendSettlement.Cancelled -> {
                     firstMessagePending = reduceFirstMessagePending(
@@ -800,11 +813,13 @@ fun ChatScreen(
                     } else {
                         errorText = "消息未发送，已取消"
                     }
-                    sendRequestState = null
+                    container.chatSendRecoveryStore.clearIfRequest(conversationId, requestId)
                     throw settlement.cancellation
                 }
                 is ChatSendSettlement.Unknown -> {
-                    sendRequestState = requestState.copy(
+                    container.chatSendRecoveryStore.updateUnknown(
+                        conversationId = conversationId,
+                        expectedRequestId = requestId,
                         originalFailure = settlement.originalFailure,
                         cancellation = settlement.cancellation,
                         lookupFailure = settlement.lookupFailure,
@@ -819,17 +834,22 @@ fun ChatScreen(
     LaunchedEffect(sendRequestState?.requestId, sendRequestState?.originalFailure) {
         val pendingRequest = sendRequestState ?: return@LaunchedEffect
         if (pendingRequest.originalFailure == null) return@LaunchedEffect
+        sessionStatus = "消息状态待确认，请勿重复发送"
         when (sendController.awaitLanding(pendingRequest.requestId)) {
             ChatRequestLanding.Landed -> {
-                if (sendRequestState?.requestId != pendingRequest.requestId) return@LaunchedEffect
+                if (container.chatSendRecoveryStore.current(conversationId)?.requestId != pendingRequest.requestId) {
+                    return@LaunchedEffect
+                }
                 reportPostPersistProblems(
                     prefix = "消息已发送",
                     problems = settlePersistedSend(pendingRequest.submittedText, pendingRequest.draftImage),
                 )
-                sendRequestState = null
+                container.chatSendRecoveryStore.clearIfRequest(conversationId, pendingRequest.requestId)
             }
             ChatRequestLanding.NotLanded -> {
-                if (sendRequestState?.requestId != pendingRequest.requestId) return@LaunchedEffect
+                if (container.chatSendRecoveryStore.current(conversationId)?.requestId != pendingRequest.requestId) {
+                    return@LaunchedEffect
+                }
                 firstMessagePending = reduceFirstMessagePending(
                     pending = firstMessagePending,
                     isFirstUserMessage = pendingRequest.isFirstUserMessage,
@@ -838,7 +858,7 @@ fun ChatScreen(
                 errorText = pendingRequest.cancellation?.let { "消息未发送，已取消" }
                     ?: pendingRequest.originalFailure.toUserMessage()
                 sessionStatus = null
-                sendRequestState = null
+                container.chatSendRecoveryStore.clearIfRequest(conversationId, pendingRequest.requestId)
             }
             is ChatRequestLanding.Unknown -> error("awaitLanding must not return UNKNOWN")
         }
@@ -1614,7 +1634,10 @@ fun ChatScreen(
                     selectedModel.isNotBlank() &&
                     !firstMessagePending &&
                     identityController.canSend() &&
-                    canAcceptChatSend(identityMessageStateKnown, sendRequestState) &&
+                    canAcceptChatSend(
+                        identityMessageStateKnown,
+                        container.chatSendRecoveryStore.current(conversationId),
+                    ) &&
                     (text.isNotBlank() || selectedImage != null),
                 isBusy = isAssistantBusy,
                 onSend = {

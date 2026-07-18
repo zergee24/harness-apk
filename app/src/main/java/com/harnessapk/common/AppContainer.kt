@@ -11,6 +11,7 @@ import com.harnessapk.chat.ChatImageStore
 import com.harnessapk.chat.ChatRepository
 import com.harnessapk.chat.ChatExecutionCoordinator
 import com.harnessapk.chat.ChatExecutionRepository
+import com.harnessapk.chat.ChatSendRecoveryStore
 import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.chat.ManualContextCompressionUseCase
 import com.harnessapk.chat.NewConversationUseCase
@@ -154,6 +155,7 @@ class AppContainer(context: Context) {
         identityRepository = conversationIdentityRepository,
         timeProvider = SystemTimeProvider,
     )
+    val chatSendRecoveryStore = ChatSendRecoveryStore()
     val chatExecutionCoordinator = ChatExecutionCoordinator(
         executionRepository = chatExecutionRepository,
         sendMessageUseCase = sendMessageUseCase,

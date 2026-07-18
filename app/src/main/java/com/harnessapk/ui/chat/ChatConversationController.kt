@@ -1,9 +1,9 @@
 package com.harnessapk.ui.chat
 
-import android.net.Uri
 import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.EnqueueChatRequest
+import com.harnessapk.chat.ChatSendRequestState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
@@ -144,20 +144,13 @@ sealed interface ChatRequestLanding {
     data class Unknown(val lookupFailure: Throwable) : ChatRequestLanding
 }
 
-data class ChatSendRequestState(
-    val requestId: String,
-    val submittedText: String,
-    val draftImage: Uri?,
-    val isFirstUserMessage: Boolean,
-    val originalFailure: Throwable? = null,
-    val cancellation: CancellationException? = null,
-    val lookupFailure: Throwable? = null,
-)
-
 internal fun canAcceptChatSend(
     identityMessageStateKnown: Boolean,
     request: ChatSendRequestState?,
 ): Boolean = identityMessageStateKnown && request == null
+
+internal fun identityLockedForPendingSend(request: ChatSendRequestState?): Boolean =
+    request?.isFirstUserMessage == true
 
 class ChatSendController(
     private val enqueue: suspend (EnqueueChatRequest) -> ChatExecutionEntry,
