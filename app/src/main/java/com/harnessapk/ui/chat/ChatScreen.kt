@@ -115,6 +115,7 @@ import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.ChatExecutionRequestContext
 import com.harnessapk.chat.ChatExecutionStatus
+import com.harnessapk.chat.ChatSendRequestPhase
 import com.harnessapk.chat.ChatSendRequestState
 import com.harnessapk.chat.EnqueueChatRequest
 import com.harnessapk.chat.ChatAttachment
@@ -127,6 +128,7 @@ import com.harnessapk.chat.ReasoningEffort
 import com.harnessapk.chat.UiMessagePartDraft
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.chat.defaultReasoningEffort
+import com.harnessapk.chat.identityLockedForPendingSend
 import com.harnessapk.chat.supportsReasoningEffort
 import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
@@ -169,7 +171,6 @@ import com.harnessapk.websearch.nativeWebSearchModeForRequest
 import com.harnessapk.websearch.shouldUseExternalWebSearch
 import com.harnessapk.voice.VoiceSettings
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -298,12 +299,6 @@ fun ChatScreen(
         )
     }
     val identityControllerState by identityController.state.collectAsState()
-    val sendController = remember(conversationId) {
-        ChatSendController(
-            enqueue = container.chatExecutionCoordinator::enqueue,
-            requestExists = { requestId -> container.chatExecutionRepository.entry(requestId) != null },
-        )
-    }
     val sendRequestState by container.chatSendRecoveryStore
         .observe(conversationId)
         .collectAsState(initial = container.chatSendRecoveryStore.current(conversationId))
@@ -354,6 +349,7 @@ fun ChatScreen(
         identityControllerState.selectionPending,
         identityMessageStateKnown,
         persistedUserMessage,
+        sendRequestState,
     ) {
         conversationIdentityUiState(
             conversation = conversation,
@@ -378,14 +374,6 @@ fun ChatScreen(
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
         Unit
-    }
-
-    DisposableEffect(conversationId) {
-        onDispose {
-            container.chatSendRecoveryStore.current(conversationId)?.let { request ->
-                container.chatSendRecoveryStore.handoffInFlight(conversationId, request.requestId)
-            }
-        }
     }
 
     DisposableEffect(context) {
@@ -669,7 +657,7 @@ fun ChatScreen(
     }
 
     suspend fun settlePersistedSend(submittedText: String, draftImage: Uri?): List<String> {
-        text = sendController.settleText(text, submittedText)
+        text = if (text == submittedText) "" else text
         if (selectedImage == draftImage) {
             selectedImage = null
             selectedMimeType = "image/png"
@@ -727,11 +715,6 @@ fun ChatScreen(
         val isFirstUserMessage = identityMessageStateKnown &&
             !persistedUserMessage &&
             messages.none { it.role == MessageRole.USER }
-        firstMessagePending = reduceFirstMessagePending(
-            pending = firstMessagePending,
-            isFirstUserMessage = isFirstUserMessage,
-            event = FirstMessagePendingEvent.SEND_ACCEPTED,
-        )
         val sessionRequestContext = sessionRequestContext(
             finalPrompt = finalSessionPrompt.ifBlank { optimizedSessionPrompt.ifBlank { rawSessionPrompt } },
             project = projects.firstOrNull { it.id == selectedProjectId },
@@ -747,120 +730,71 @@ fun ChatScreen(
             draftImage = draftImage,
             isFirstUserMessage = isFirstUserMessage,
         )
-        if (!container.chatSendRecoveryStore.start(conversationId, requestState)) return
-        scope.launch {
-            errorText = null
-            val settlement = sendController.submit(
-                EnqueueChatRequest(
-                    requestId = requestId,
-                    conversationId = conversationId,
-                    content = body.ifEmpty { "请看这张截图" },
-                    attachments = draftImage?.let { image ->
-                        listOf(PendingImageAttachment(image, draftMimeType))
-                    }.orEmpty(),
-                    providerId = selectedProviderId,
-                    model = selectedModel,
-                    reasoningEffort = selectedReasoningEffort,
-                    requestContext = ChatExecutionRequestContext(
-                        sessionContext = sessionRequestContext,
-                        webSearchEnabled = webSearchEnabled,
-                        webSearchSettings = webSearchSettings,
-                    ),
-                ),
-            )
-            when (settlement) {
-                is ChatSendSettlement.Accepted -> {
-                    reportPostPersistProblems(
-                        prefix = "消息已发送",
-                        problems = settlePersistedSend(submittedText, draftImage),
-                    )
-                    container.chatSendRecoveryStore.clearIfRequest(conversationId, requestId)
-                }
-                is ChatSendSettlement.AcceptedAfterFailure -> {
-                    val problems = settlePersistedSend(submittedText, draftImage)
-                    reportPostPersistProblems(
-                        prefix = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
-                        problems = problems,
-                        alwaysReport = true,
-                    )
-                    container.chatSendRecoveryStore.clearIfRequest(conversationId, requestId)
-                }
-                is ChatSendSettlement.Failed -> {
-                    firstMessagePending = reduceFirstMessagePending(
-                        pending = firstMessagePending,
-                        isFirstUserMessage = isFirstUserMessage,
-                        event = FirstMessagePendingEvent.ENQUEUE_FAILED,
-                    )
-                    errorText = settlement.failure.toUserMessage()
-                    container.chatSendRecoveryStore.clearIfRequest(conversationId, requestId)
-                }
-                is ChatSendSettlement.Cancelled -> {
-                    firstMessagePending = reduceFirstMessagePending(
-                        pending = firstMessagePending,
-                        isFirstUserMessage = isFirstUserMessage,
-                        event = FirstMessagePendingEvent.ENQUEUE_FAILED,
-                        firstUserMessageLanded = settlement.persisted,
-                    )
-                    if (settlement.persisted) {
-                        withContext(NonCancellable) {
-                            val problems = settlePersistedSend(submittedText, draftImage)
-                            reportPostPersistProblems(
-                                prefix = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
-                                problems = problems,
-                                alwaysReport = true,
-                            )
-                    }
-                    } else {
-                        errorText = "消息未发送，已取消"
-                    }
-                    container.chatSendRecoveryStore.clearIfRequest(conversationId, requestId)
-                    throw settlement.cancellation
-                }
-                is ChatSendSettlement.Unknown -> {
-                    container.chatSendRecoveryStore.updateUnknown(
-                        conversationId = conversationId,
-                        expectedRequestId = requestId,
-                        originalFailure = settlement.originalFailure,
-                        cancellation = settlement.cancellation,
-                        lookupFailure = settlement.lookupFailure,
-                    )
-                    sessionStatus = "消息状态待确认，请勿重复发送"
-                    settlement.cancellation?.let { throw it }
-                }
-            }
-        }
+        val enqueueRequest = EnqueueChatRequest(
+            requestId = requestId,
+            conversationId = conversationId,
+            content = body.ifEmpty { "请看这张截图" },
+            attachments = draftImage?.let { image ->
+                listOf(PendingImageAttachment(image, draftMimeType))
+            }.orEmpty(),
+            providerId = selectedProviderId,
+            model = selectedModel,
+            reasoningEffort = selectedReasoningEffort,
+            requestContext = ChatExecutionRequestContext(
+                sessionContext = sessionRequestContext,
+                webSearchEnabled = webSearchEnabled,
+                webSearchSettings = webSearchSettings,
+            ),
+        )
+        if (container.chatSendRecoveryManager.start(conversationId, requestState, enqueueRequest) == null) return
+        firstMessagePending = reduceFirstMessagePending(
+            pending = firstMessagePending,
+            isFirstUserMessage = isFirstUserMessage,
+            event = FirstMessagePendingEvent.SEND_ACCEPTED,
+        )
+        errorText = null
     }
 
-    LaunchedEffect(sendRequestState?.requestId, sendRequestState?.originalFailure) {
-        val pendingRequest = sendRequestState ?: return@LaunchedEffect
-        if (pendingRequest.originalFailure == null) return@LaunchedEffect
-        sessionStatus = "消息状态待确认，请勿重复发送"
-        when (sendController.awaitLanding(pendingRequest.requestId)) {
-            ChatRequestLanding.Landed -> {
-                if (container.chatSendRecoveryStore.current(conversationId)?.requestId != pendingRequest.requestId) {
+    LaunchedEffect(sendRequestState?.requestId, sendRequestState?.phase) {
+        val request = sendRequestState ?: return@LaunchedEffect
+        when (request.phase) {
+            ChatSendRequestPhase.IN_FLIGHT -> Unit
+            ChatSendRequestPhase.UNKNOWN -> sessionStatus = "消息状态待确认，请勿重复发送"
+            ChatSendRequestPhase.LANDED -> {
+                if (container.chatSendRecoveryStore.current(conversationId)?.requestId != request.requestId) {
                     return@LaunchedEffect
                 }
-                reportPostPersistProblems(
-                    prefix = "消息已发送",
-                    problems = settlePersistedSend(pendingRequest.submittedText, pendingRequest.draftImage),
+                persistedUserMessage = true
+                firstMessagePending = reduceFirstMessagePending(
+                    pending = firstMessagePending,
+                    isFirstUserMessage = request.isFirstUserMessage,
+                    event = FirstMessagePendingEvent.USER_OBSERVED,
                 )
-                container.chatSendRecoveryStore.clearIfRequest(conversationId, pendingRequest.requestId)
+                sessionStatus = null
+                val problems = settlePersistedSend(request.submittedText, request.draftImage)
+                reportPostPersistProblems(
+                    prefix = if (request.originalFailure == null) "消息已发送"
+                    else "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
+                    problems = problems,
+                    alwaysReport = request.originalFailure != null,
+                )
+                container.chatSendRecoveryStore.clearIfRequest(conversationId, request.requestId)
             }
-            ChatRequestLanding.NotLanded -> {
-                if (container.chatSendRecoveryStore.current(conversationId)?.requestId != pendingRequest.requestId) {
+            ChatSendRequestPhase.NOT_LANDED -> {
+                if (container.chatSendRecoveryStore.current(conversationId)?.requestId != request.requestId) {
                     return@LaunchedEffect
                 }
                 firstMessagePending = reduceFirstMessagePending(
                     pending = firstMessagePending,
-                    isFirstUserMessage = pendingRequest.isFirstUserMessage,
+                    isFirstUserMessage = request.isFirstUserMessage,
                     event = FirstMessagePendingEvent.ENQUEUE_FAILED,
                 )
-                errorText = pendingRequest.cancellation?.let { "消息未发送，已取消" }
-                    ?: pendingRequest.originalFailure.toUserMessage()
+                errorText = request.cancellation?.let { "消息未发送，已取消" }
+                    ?: request.originalFailure?.toUserMessage()
+                    ?: "消息发送失败"
                 sessionStatus = null
-                container.chatSendRecoveryStore.clearIfRequest(conversationId, pendingRequest.requestId)
+                container.chatSendRecoveryStore.clearIfRequest(conversationId, request.requestId)
             }
-            is ChatRequestLanding.Unknown -> error("awaitLanding must not return UNKNOWN")
         }
     }
 

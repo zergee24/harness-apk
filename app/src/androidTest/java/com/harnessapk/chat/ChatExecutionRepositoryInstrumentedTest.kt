@@ -15,8 +15,6 @@ import com.harnessapk.security.EncryptedValue
 import com.harnessapk.security.StringCipher
 import com.harnessapk.storage.AgentEntity
 import com.harnessapk.storage.AppDatabase
-import com.harnessapk.ui.chat.ChatSendController
-import com.harnessapk.ui.chat.ChatSendSettlement
 import com.harnessapk.websearch.JinaWebSearchClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers

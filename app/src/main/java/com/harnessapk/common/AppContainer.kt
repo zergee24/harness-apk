@@ -11,6 +11,8 @@ import com.harnessapk.chat.ChatImageStore
 import com.harnessapk.chat.ChatRepository
 import com.harnessapk.chat.ChatExecutionCoordinator
 import com.harnessapk.chat.ChatExecutionRepository
+import com.harnessapk.chat.ChatSendController
+import com.harnessapk.chat.ChatSendRecoveryManager
 import com.harnessapk.chat.ChatSendRecoveryStore
 import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.chat.ManualContextCompressionUseCase
@@ -36,12 +38,15 @@ import com.harnessapk.updater.ApkInstaller
 import com.harnessapk.updater.UpdateRepository
 import com.harnessapk.updater.UpdateDownloadCoordinator
 import com.harnessapk.websearch.JinaWebSearchClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
     val dispatchers = AppDispatchers()
+    private val chatSendRecoveryScope = CoroutineScope(SupervisorJob() + dispatchers.io)
     val database: AppDatabase = Room.databaseBuilder(
         appContext,
         AppDatabase::class.java,
@@ -167,6 +172,14 @@ class AppContainer(context: Context) {
             webSearchAllowedForAgentConversation(chatRepository.conversation(conversationId)?.agentId)
         },
         onWorkScheduled = { ChatExecutionService.start(appContext) },
+    )
+    val chatSendRecoveryManager = ChatSendRecoveryManager(
+        scope = chatSendRecoveryScope,
+        store = chatSendRecoveryStore,
+        controller = ChatSendController(
+            enqueue = chatExecutionCoordinator::enqueue,
+            requestExists = { requestId -> chatExecutionRepository.entry(requestId) != null },
+        ),
     )
     val markdownNotebookRepository = MarkdownNotebookRepository(
         chatRepository = chatRepository,

@@ -11,10 +11,18 @@ data class ChatSendRequestState(
     val submittedText: String,
     val draftImage: Uri?,
     val isFirstUserMessage: Boolean,
+    val phase: ChatSendRequestPhase = ChatSendRequestPhase.IN_FLIGHT,
     val originalFailure: Throwable? = null,
     val cancellation: CancellationException? = null,
     val lookupFailure: Throwable? = null,
 )
+
+enum class ChatSendRequestPhase {
+    IN_FLIGHT,
+    UNKNOWN,
+    LANDED,
+    NOT_LANDED,
+}
 
 class ChatSendRecoveryStore {
     private val lock = Any()
@@ -33,29 +41,57 @@ class ChatSendRecoveryStore {
         true
     }
 
-    fun updateUnknown(
+    fun markUnknown(
         conversationId: String,
         expectedRequestId: String,
         originalFailure: Throwable,
         cancellation: CancellationException?,
         lookupFailure: Throwable,
-    ): Boolean = updateIfRequest(conversationId, expectedRequestId) { current ->
+    ): Boolean = transitionIfRequest(
+        conversationId = conversationId,
+        expectedRequestId = expectedRequestId,
+        allowedPhases = setOf(ChatSendRequestPhase.IN_FLIGHT),
+    ) { current ->
         current.copy(
+            phase = ChatSendRequestPhase.UNKNOWN,
             originalFailure = originalFailure,
             cancellation = cancellation,
             lookupFailure = lookupFailure,
         )
     }
 
-    fun handoffInFlight(conversationId: String, expectedRequestId: String): Boolean = synchronized(lock) {
-        val current = states.value[conversationId] ?: return@synchronized false
-        if (current.requestId != expectedRequestId || current.originalFailure != null) return@synchronized false
-        states.value = states.value + (
-            conversationId to current.copy(
-                originalFailure = CancellationException("会话页面已离开，待确认请求是否已落地"),
-            )
+    fun markLanded(
+        conversationId: String,
+        expectedRequestId: String,
+        originalFailure: Throwable? = null,
+        cancellation: CancellationException? = null,
+    ): Boolean = transitionIfRequest(
+        conversationId = conversationId,
+        expectedRequestId = expectedRequestId,
+        allowedPhases = setOf(ChatSendRequestPhase.IN_FLIGHT, ChatSendRequestPhase.UNKNOWN),
+    ) { current ->
+        current.copy(
+            phase = ChatSendRequestPhase.LANDED,
+            originalFailure = originalFailure,
+            cancellation = cancellation,
         )
-        true
+    }
+
+    fun markNotLanded(
+        conversationId: String,
+        expectedRequestId: String,
+        originalFailure: Throwable,
+        cancellation: CancellationException?,
+    ): Boolean = transitionIfRequest(
+        conversationId = conversationId,
+        expectedRequestId = expectedRequestId,
+        allowedPhases = setOf(ChatSendRequestPhase.IN_FLIGHT, ChatSendRequestPhase.UNKNOWN),
+    ) { current ->
+        current.copy(
+            phase = ChatSendRequestPhase.NOT_LANDED,
+            originalFailure = originalFailure,
+            cancellation = cancellation,
+        )
     }
 
     fun clearIfRequest(conversationId: String, expectedRequestId: String): Boolean = synchronized(lock) {
@@ -65,14 +101,18 @@ class ChatSendRecoveryStore {
         true
     }
 
-    private fun updateIfRequest(
+    private fun transitionIfRequest(
         conversationId: String,
         expectedRequestId: String,
+        allowedPhases: Set<ChatSendRequestPhase>,
         update: (ChatSendRequestState) -> ChatSendRequestState,
     ): Boolean = synchronized(lock) {
         val current = states.value[conversationId] ?: return@synchronized false
-        if (current.requestId != expectedRequestId) return@synchronized false
+        if (current.requestId != expectedRequestId || current.phase !in allowedPhases) return@synchronized false
         states.value = states.value + (conversationId to update(current))
         true
     }
 }
+
+fun identityLockedForPendingSend(request: ChatSendRequestState?): Boolean =
+    request?.isFirstUserMessage == true
