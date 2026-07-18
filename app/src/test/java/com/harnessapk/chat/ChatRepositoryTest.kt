@@ -456,11 +456,13 @@ private class FakeConversationDao : ConversationDao {
 
     override suspend fun findById(id: String): ConversationEntity? = rows[id]
 
-    override suspend fun findLatestWithAgent(): ConversationEntity? =
-        rows.values.filter { !it.isArchived && it.agentId != null }.maxByOrNull { it.updatedAt }
+    override suspend fun findLatestActive(): ConversationEntity? =
+        rows.values.filter { !it.isArchived }
+            .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
 
-    override suspend fun findLatestWithAgentInProject(projectId: String): ConversationEntity? =
-        rows.values.filter { !it.isArchived && it.projectId == projectId && it.agentId != null }.maxByOrNull { it.updatedAt }
+    override suspend fun findLatestActiveInProject(projectId: String): ConversationEntity? =
+        rows.values.filter { !it.isArchived && it.projectId == projectId }
+            .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
 
     override suspend fun insert(entity: ConversationEntity) {
         rows[entity.id] = entity

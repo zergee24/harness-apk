@@ -14,9 +14,9 @@ class ConversationIdentityRepository(
 ) {
     suspend fun suggest(projectId: String?): ConversationIdentitySelection {
         val recent = if (projectId.isNullOrBlank()) {
-            conversationDao.findLatestWithAgent()
+            conversationDao.findLatestActive()
         } else {
-            conversationDao.findLatestWithAgentInProject(projectId)
+            conversationDao.findLatestActiveInProject(projectId)
         }
         return selectionFor(recent?.agentId, locked = false)
     }

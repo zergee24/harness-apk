@@ -18,20 +18,20 @@ interface ConversationDao {
     @Query(
         """
         SELECT * FROM conversations
-        WHERE isArchived = 0 AND agentId IS NOT NULL
-        ORDER BY updatedAt DESC LIMIT 1
+        WHERE isArchived = 0
+        ORDER BY updatedAt DESC, id DESC LIMIT 1
         """,
     )
-    suspend fun findLatestWithAgent(): ConversationEntity?
+    suspend fun findLatestActive(): ConversationEntity?
 
     @Query(
         """
         SELECT * FROM conversations
-        WHERE isArchived = 0 AND projectId = :projectId AND agentId IS NOT NULL
-        ORDER BY updatedAt DESC LIMIT 1
+        WHERE isArchived = 0 AND projectId = :projectId
+        ORDER BY updatedAt DESC, id DESC LIMIT 1
         """,
     )
-    suspend fun findLatestWithAgentInProject(projectId: String): ConversationEntity?
+    suspend fun findLatestActiveInProject(projectId: String): ConversationEntity?
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(entity: ConversationEntity)

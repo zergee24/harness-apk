@@ -60,6 +60,15 @@ internal fun conversationIdentityLabel(conversation: Conversation, agents: Map<S
         "${agents[id]?.name ?: "已安装人物"} · 基于资料模拟"
     }
 
+internal fun conversationMetadataLabel(
+    conversation: Conversation,
+    projects: Map<String, WorkspaceProject>,
+    agents: Map<String, Agent>,
+): String? = listOfNotNull(
+    conversation.projectId?.let { projects[it]?.name ?: "未知项目" },
+    conversationIdentityLabel(conversation, agents),
+).joinToString(" · ").takeIf { it.isNotEmpty() }
+
 @Composable
 fun ConversationListScreen(
     container: AppContainer,
@@ -250,8 +259,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.conversationItems(
     items(conversations, key = { it.id }) { conversation ->
         ConversationRow(
             conversation = conversation,
-            metadata = conversationIdentityLabel(conversation, agentsById)
-                ?: conversation.projectId?.let { projectsById[it]?.name ?: "未知项目" },
+            metadata = conversationMetadataLabel(conversation, projectsById, agentsById),
             onOpen = { onOpenChat(conversation.id) },
             onEdit = { onEdit(conversation) },
             onDelete = { onDelete(conversation) },

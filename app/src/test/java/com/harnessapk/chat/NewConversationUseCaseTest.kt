@@ -123,9 +123,11 @@ private class NewConversationFakeConversationDao : ConversationDao {
 
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(rows.values.toList())
     override suspend fun findById(id: String): ConversationEntity? = rows[id]
-    override suspend fun findLatestWithAgent(): ConversationEntity? = rows.values.filter { it.agentId != null }.maxByOrNull { it.updatedAt }
-    override suspend fun findLatestWithAgentInProject(projectId: String): ConversationEntity? =
-        rows.values.filter { it.projectId == projectId && it.agentId != null }.maxByOrNull { it.updatedAt }
+    override suspend fun findLatestActive(): ConversationEntity? = rows.values.filter { !it.isArchived }
+        .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
+    override suspend fun findLatestActiveInProject(projectId: String): ConversationEntity? =
+        rows.values.filter { !it.isArchived && it.projectId == projectId }
+            .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
     override suspend fun insert(entity: ConversationEntity) { rows[entity.id] = entity }
     override suspend fun update(entity: ConversationEntity) { rows[entity.id] = entity }
     override suspend fun updateIdentityIfNoUserMessages(

@@ -347,8 +347,11 @@ private class ExecuteConversationDao : ConversationDao {
     private val rows = linkedMapOf<String, ConversationEntity>()
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(rows.values.toList())
     override suspend fun findById(id: String) = rows[id]
-    override suspend fun findLatestWithAgent() = rows.values.lastOrNull { it.agentId != null }
-    override suspend fun findLatestWithAgentInProject(projectId: String) = rows.values.lastOrNull { it.projectId == projectId && it.agentId != null }
+    override suspend fun findLatestActive() = rows.values.filter { !it.isArchived }
+        .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
+    override suspend fun findLatestActiveInProject(projectId: String) = rows.values
+        .filter { !it.isArchived && it.projectId == projectId }
+        .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
     override suspend fun insert(entity: ConversationEntity) { rows[entity.id] = entity }
     override suspend fun update(entity: ConversationEntity) { rows[entity.id] = entity }
     override suspend fun updateIdentityIfNoUserMessages(id: String, agentId: String?, agentVersion: Int?, updatedAt: Long): Int = 0

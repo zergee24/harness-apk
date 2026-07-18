@@ -55,6 +55,30 @@ class ConversationIdentityRepositoryTest {
     }
 
     @Test
+    fun globalSuggestionUsesRecentAssistantInsteadOfOlderPerson() = runTest {
+        conversationDao.rows += conversation("older-person", agentId = "a1", updatedAt = 10)
+        conversationDao.rows += conversation("recent-assistant", updatedAt = 20)
+        agentDao.rows["a1"] = readyAgent("a1", activeVersion = 1)
+
+        assertEquals(
+            ConversationIdentitySelection(null, null, null, locked = false),
+            repository.suggest(projectId = null),
+        )
+    }
+
+    @Test
+    fun projectSuggestionUsesRecentAssistantInsteadOfOlderPerson() = runTest {
+        conversationDao.rows += conversation("older-person", projectId = "p1", agentId = "a1", updatedAt = 10)
+        conversationDao.rows += conversation("recent-assistant", projectId = "p1", updatedAt = 20)
+        agentDao.rows["a1"] = readyAgent("a1", activeVersion = 1)
+
+        assertEquals(
+            ConversationIdentitySelection(null, null, null, locked = false),
+            repository.suggest(projectId = "p1"),
+        )
+    }
+
+    @Test
     fun selectDraftUsesAssistantWhenIdentityIsCleared() = runTest {
         conversationDao.rows += conversation("c1", agentId = "a1", agentVersion = 1)
 
@@ -103,9 +127,11 @@ class ConversationIdentityRepositoryTest {
     }
 
     @Test
-    fun disabledSuggestedIdentityFallsBackToAssistant() = runTest {
-        conversationDao.rows += conversation("recent", agentId = "a1", agentVersion = 1)
-        agentDao.rows["a1"] = readyAgent("a1", activeVersion = 2).copy(status = AgentStatus.DRAFT.name)
+    fun disabledRecentIdentityFallsBackToAssistantWithoutUsingOlderPerson() = runTest {
+        conversationDao.rows += conversation("older-ready", agentId = "a1", agentVersion = 1, updatedAt = 10)
+        conversationDao.rows += conversation("recent-disabled", agentId = "a2", agentVersion = 1, updatedAt = 20)
+        agentDao.rows["a1"] = readyAgent("a1", activeVersion = 1)
+        agentDao.rows["a2"] = readyAgent("a2", activeVersion = 2).copy(status = AgentStatus.DRAFT.name)
 
         assertNull(repository.suggest(projectId = null).agentId)
     }
@@ -167,9 +193,11 @@ private class FakeConversationDao : ConversationDao {
 
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(rows)
     override suspend fun findById(id: String): ConversationEntity? = rows.firstOrNull { it.id == id }
-    override suspend fun findLatestWithAgent(): ConversationEntity? = rows.filter { !it.isArchived && it.agentId != null }.maxByOrNull { it.updatedAt }
-    override suspend fun findLatestWithAgentInProject(projectId: String): ConversationEntity? =
-        rows.filter { !it.isArchived && it.projectId == projectId && it.agentId != null }.maxByOrNull { it.updatedAt }
+    override suspend fun findLatestActive(): ConversationEntity? =
+        rows.filter { !it.isArchived }.maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
+    override suspend fun findLatestActiveInProject(projectId: String): ConversationEntity? =
+        rows.filter { !it.isArchived && it.projectId == projectId }
+            .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
     override suspend fun insert(entity: ConversationEntity) { rows += entity }
     override suspend fun update(entity: ConversationEntity) { rows.replaceAll { if (it.id == entity.id) entity else it } }
     override suspend fun updateIdentityIfNoUserMessages(

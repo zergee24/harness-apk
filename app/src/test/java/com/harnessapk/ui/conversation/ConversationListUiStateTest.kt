@@ -27,6 +27,38 @@ class ConversationListUiStateTest {
         )
         assertEquals(null, conversationIdentityLabel(conversation("assistant", "普通会话", 1L, null), emptyMap()))
     }
+
+    @Test
+    fun conversationMetadataShowsProjectAndPersonForCombinedConversation() {
+        val projects = mapOf("p1" to project("p1", "移动端 Harness"))
+        val agents = mapOf("a1" to agent("a1", "李德胜"))
+
+        assertEquals(
+            "移动端 Harness · 李德胜 · 基于资料模拟",
+            conversationMetadataLabel(
+                conversation("combined", "项目人物会话", 1L, "p1").copy(agentId = "a1"),
+                projects,
+                agents,
+            ),
+        )
+        assertEquals(
+            "移动端 Harness",
+            conversationMetadataLabel(conversation("project", "项目会话", 1L, "p1"), projects, agents),
+        )
+        assertEquals(
+            "李德胜 · 基于资料模拟",
+            conversationMetadataLabel(
+                conversation("person", "人物会话", 1L, null).copy(agentId = "a1"),
+                projects,
+                agents,
+            ),
+        )
+        assertEquals(
+            null,
+            conversationMetadataLabel(conversation("assistant", "普通会话", 1L, null), projects, agents),
+        )
+    }
+
     @Test
     fun conversationTabsDoNotDuplicateTitleOrUseDisabledSelectedState() {
         val source = File("src/main/java/com/harnessapk/ui/conversation/ConversationListScreen.kt").readText()

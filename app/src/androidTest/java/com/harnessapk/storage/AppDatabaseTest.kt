@@ -128,6 +128,30 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun latestActiveConversationIncludesAssistantAndKeepsProjectScope() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val dao = db.conversationDao()
+
+        dao.insert(conversation(id = "older-person", updatedAt = 10L, agentId = "agent-1"))
+        dao.insert(conversation(id = "recent-assistant", updatedAt = 20L))
+        assertEquals("recent-assistant", dao.findLatestActive()!!.id)
+
+        dao.insert(conversation(id = "project-old-person", updatedAt = 30L, projectId = "project-1", agentId = "agent-1"))
+        dao.insert(conversation(id = "project-recent-assistant", updatedAt = 40L, projectId = "project-1"))
+        dao.insert(conversation(id = "other-project-person", updatedAt = 50L, projectId = "project-2", agentId = "agent-2"))
+
+        assertEquals("other-project-person", dao.findLatestActive()!!.id)
+        assertEquals("project-recent-assistant", dao.findLatestActiveInProject("project-1")!!.id)
+
+        dao.insert(conversation(id = "tie-a", updatedAt = 60L))
+        dao.insert(conversation(id = "tie-z", updatedAt = 60L, agentId = "agent-3"))
+
+        assertEquals("tie-z", dao.findLatestActive()!!.id)
+        db.close()
+    }
+
+    @Test
     fun storesAllLegalProjectAndAgentIdentityCombinations() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
@@ -403,4 +427,25 @@ class AppDatabaseTest {
         assertEquals(listOf(entry), db.chatExecutionEntryDao().listForConversation("conversation-queue"))
         db.close()
     }
+
+    private fun conversation(
+        id: String,
+        updatedAt: Long,
+        projectId: String? = null,
+        agentId: String? = null,
+    ) = ConversationEntity(
+        id = id,
+        title = id,
+        createdAt = 1L,
+        updatedAt = updatedAt,
+        defaultProviderId = null,
+        defaultModel = null,
+        isArchived = false,
+        projectId = projectId,
+        promptOriginal = "",
+        promptOptimized = "",
+        promptFinal = "",
+        agentId = agentId,
+        agentVersion = agentId?.let { 1 },
+    )
 }
