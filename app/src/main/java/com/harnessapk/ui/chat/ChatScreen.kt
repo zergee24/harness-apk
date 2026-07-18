@@ -168,8 +168,10 @@ import com.harnessapk.websearch.nativeWebSearchModeForRequest
 import com.harnessapk.websearch.shouldUseExternalWebSearch
 import com.harnessapk.voice.VoiceSettings
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flowOf
 import java.util.Locale
 
@@ -411,7 +413,13 @@ fun ChatScreen(
     }
 
     LaunchedEffect(messages) {
-        if (messages.any { it.role == MessageRole.USER }) firstMessagePending = false
+        if (messages.any { it.role == MessageRole.USER }) {
+            firstMessagePending = reduceFirstMessagePending(
+                pending = firstMessagePending,
+                isFirstUserMessage = true,
+                event = FirstMessagePendingEvent.USER_OBSERVED,
+            )
+        }
     }
 
     LaunchedEffect(providers, defaultModelPreference, selectableModelsByProviderId) {
@@ -597,12 +605,24 @@ fun ChatScreen(
         }
     }
 
+    suspend fun firstUserMessageHasLanded(): Boolean = try {
+        container.chatRepository.hasUserMessage(conversationId)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        true
+    }
+
     fun sendNow() {
         val body = text.trim()
         if (body.isEmpty() && selectedImage == null) return
         if (firstMessagePending) return
         val isFirstUserMessage = messages.none { it.role == MessageRole.USER }
-        if (isFirstUserMessage) firstMessagePending = true
+        firstMessagePending = reduceFirstMessagePending(
+            pending = firstMessagePending,
+            isFirstUserMessage = isFirstUserMessage,
+            event = FirstMessagePendingEvent.SEND_ACCEPTED,
+        )
         val sessionRequestContext = sessionRequestContext(
             finalPrompt = finalSessionPrompt.ifBlank { optimizedSessionPrompt.ifBlank { rawSessionPrompt } },
             project = projects.firstOrNull { it.id == selectedProjectId },
@@ -631,21 +651,61 @@ fun ChatScreen(
                         ),
                     ),
                 )
+            } catch (cancelled: CancellationException) {
+                val landed = withContext(NonCancellable) { firstUserMessageHasLanded() }
+                firstMessagePending = reduceFirstMessagePending(
+                    pending = firstMessagePending,
+                    isFirstUserMessage = isFirstUserMessage,
+                    event = FirstMessagePendingEvent.ENQUEUE_FAILED,
+                    firstUserMessageLanded = landed,
+                )
+                throw cancelled
+            } catch (error: Throwable) {
+                val landed = firstUserMessageHasLanded()
+                firstMessagePending = reduceFirstMessagePending(
+                    pending = firstMessagePending,
+                    isFirstUserMessage = isFirstUserMessage,
+                    event = FirstMessagePendingEvent.ENQUEUE_FAILED,
+                    firstUserMessageLanded = landed,
+                )
+                errorText = error.toUserMessage()
+                return@launch
+            }
+
+            text = ""
+            if (selectedImage == draftImage) {
+                selectedImage = null
+                selectedMimeType = "image/png"
+            }
+
+            try {
                 conversation = container.chatRepository.conversation(conversationId)
                 isAgentConversation = conversation?.agentId != null
                 if (isAgentConversation) webSearchEnabled = false
-                text = ""
-                if (selectedImage == draftImage) {
-                    selectedImage = null
-                    selectedMimeType = "image/png"
-                }
-                draftImage?.let { sentUri -> container.chatImageStore.deleteIfManaged(sentUri) }
             } catch (cancelled: CancellationException) {
-                if (isFirstUserMessage) firstMessagePending = false
                 throw cancelled
             } catch (error: Throwable) {
-                if (isFirstUserMessage) firstMessagePending = false
-                errorText = error.toUserMessage()
+                firstMessagePending = reduceFirstMessagePending(
+                    pending = firstMessagePending,
+                    isFirstUserMessage = isFirstUserMessage,
+                    event = FirstMessagePendingEvent.POST_SUCCESS_FAILED,
+                )
+                sessionStatus = "消息已发送，会话状态刷新失败：${error.toUserMessage()}"
+            }
+
+            draftImage?.let { sentUri ->
+                try {
+                    container.chatImageStore.deleteIfManaged(sentUri)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    firstMessagePending = reduceFirstMessagePending(
+                        pending = firstMessagePending,
+                        isFirstUserMessage = isFirstUserMessage,
+                        event = FirstMessagePendingEvent.POST_SUCCESS_FAILED,
+                    )
+                    sessionStatus = "消息已发送，图片临时文件清理失败：${error.toUserMessage()}"
+                }
             }
         }
     }

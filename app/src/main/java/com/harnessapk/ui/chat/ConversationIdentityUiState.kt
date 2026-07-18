@@ -19,6 +19,26 @@ data class ConversationIdentityUiState(
     val options: List<ConversationIdentityOption>,
 )
 
+internal enum class FirstMessagePendingEvent {
+    SEND_ACCEPTED,
+    ENQUEUE_FAILED,
+    POST_SUCCESS_FAILED,
+    USER_OBSERVED,
+}
+
+internal fun reduceFirstMessagePending(
+    pending: Boolean,
+    isFirstUserMessage: Boolean,
+    event: FirstMessagePendingEvent,
+    firstUserMessageLanded: Boolean = false,
+): Boolean = when (event) {
+    FirstMessagePendingEvent.SEND_ACCEPTED -> pending || isFirstUserMessage
+    FirstMessagePendingEvent.ENQUEUE_FAILED ->
+        if (isFirstUserMessage && !firstUserMessageLanded) false else pending
+    FirstMessagePendingEvent.POST_SUCCESS_FAILED -> pending
+    FirstMessagePendingEvent.USER_OBSERVED -> false
+}
+
 internal fun conversationIdentityUiState(
     conversation: Conversation?,
     messages: List<ChatMessage>,

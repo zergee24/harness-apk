@@ -78,6 +78,45 @@ class ConversationIdentityUiStateTest {
         assertEquals("李德胜", disabled.selectedName)
     }
 
+    @Test
+    fun enqueueFailureReleasesFirstMessagePendingLock() {
+        val accepted = reduceFirstMessagePending(
+            pending = false,
+            isFirstUserMessage = true,
+            event = FirstMessagePendingEvent.SEND_ACCEPTED,
+        )
+
+        assertFalse(
+            reduceFirstMessagePending(
+                pending = accepted,
+                isFirstUserMessage = true,
+                event = FirstMessagePendingEvent.ENQUEUE_FAILED,
+            ),
+        )
+    }
+
+    @Test
+    fun postSuccessFailureKeepsFirstMessagePendingLock() {
+        assertTrue(
+            reduceFirstMessagePending(
+                pending = true,
+                isFirstUserMessage = true,
+                event = FirstMessagePendingEvent.POST_SUCCESS_FAILED,
+            ),
+        )
+    }
+
+    @Test
+    fun userObservationReleasesFirstMessagePendingLock() {
+        assertFalse(
+            reduceFirstMessagePending(
+                pending = true,
+                isFirstUserMessage = true,
+                event = FirstMessagePendingEvent.USER_OBSERVED,
+            ),
+        )
+    }
+
     private fun conversation(agentId: String? = null): Conversation = Conversation(
         id = "c1",
         title = "会话",

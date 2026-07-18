@@ -32,6 +32,9 @@ class ChatRepository(
     fun observeMessages(conversationId: String): Flow<List<ChatMessage>> =
         messageDao.observeForConversation(conversationId).map { rows -> rows.map { it.toDomain() } }
 
+    suspend fun hasUserMessage(conversationId: String): Boolean =
+        messageDao.countUserMessages(conversationId) > 0
+
     fun observeMessageParts(messageId: String): Flow<List<UiMessagePartDraft>> =
         messagePartDao.observeForMessage(messageId).map { rows -> rows.map { it.toPartDraft() } }
 
