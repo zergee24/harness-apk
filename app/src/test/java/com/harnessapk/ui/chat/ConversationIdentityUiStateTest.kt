@@ -6,6 +6,8 @@ import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -115,6 +117,60 @@ class ConversationIdentityUiStateTest {
                 event = FirstMessagePendingEvent.USER_OBSERVED,
             ),
         )
+    }
+
+    @Test
+    fun notLandedEnqueueFailureReleasesLockAndKeepsDraft() {
+        val disposition = enqueueExceptionDisposition(
+            pending = true,
+            isFirstUserMessage = true,
+            landing = FirstUserMessageLanding.NOT_LANDED,
+        )
+
+        assertFalse(disposition.pending)
+        assertFalse(disposition.settlePersistedSend)
+        assertFalse(disposition.clearDraft)
+        assertEquals(EnqueueExceptionPresentation.SEND_FAILURE, disposition.presentation)
+    }
+
+    @Test
+    fun landedEnqueueFailureKeepsLockAndSettlesPersistedDraft() {
+        val disposition = enqueueExceptionDisposition(
+            pending = true,
+            isFirstUserMessage = true,
+            landing = FirstUserMessageLanding.LANDED,
+        )
+
+        assertTrue(disposition.pending)
+        assertTrue(disposition.settlePersistedSend)
+        assertTrue(disposition.clearDraft)
+        assertEquals(EnqueueExceptionPresentation.QUEUED_WARNING, disposition.presentation)
+    }
+
+    @Test
+    fun unknownEnqueueFailureKeepsLockWithoutReportingSendFailure() {
+        val disposition = enqueueExceptionDisposition(
+            pending = true,
+            isFirstUserMessage = true,
+            landing = FirstUserMessageLanding.UNKNOWN,
+        )
+
+        assertTrue(disposition.pending)
+        assertFalse(disposition.settlePersistedSend)
+        assertFalse(disposition.clearDraft)
+        assertEquals(EnqueueExceptionPresentation.UNKNOWN_WARNING, disposition.presentation)
+    }
+
+    @Test
+    fun landedCancellationSettlesBeforeItRethrows() = runTest {
+        var settled = false
+
+        val failure = runCatching {
+            settlePersistedSendThenRethrowCancellation { settled = true }
+        }.exceptionOrNull()
+
+        assertTrue(settled)
+        assertTrue(failure is CancellationException)
     }
 
     private fun conversation(agentId: String? = null): Conversation = Conversation(

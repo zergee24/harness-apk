@@ -605,12 +605,63 @@ fun ChatScreen(
         }
     }
 
-    suspend fun firstUserMessageHasLanded(): Boolean = try {
-        container.chatRepository.hasUserMessage(conversationId)
+    suspend fun firstUserMessageLanding(): FirstUserMessageLanding = try {
+        if (container.chatRepository.hasUserMessage(conversationId)) {
+            FirstUserMessageLanding.LANDED
+        } else {
+            FirstUserMessageLanding.NOT_LANDED
+        }
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: Throwable) {
-        true
+        FirstUserMessageLanding.UNKNOWN
+    }
+
+    suspend fun settlePersistedSend(draftImage: Uri?): List<String> {
+        text = ""
+        if (selectedImage == draftImage) {
+            selectedImage = null
+            selectedMimeType = "image/png"
+        }
+        val problems = mutableListOf<String>()
+        try {
+            conversation = container.chatRepository.conversation(conversationId)
+            isAgentConversation = conversation?.agentId != null
+            if (isAgentConversation) webSearchEnabled = false
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            problems += "会话状态刷新失败：${error.toUserMessage()}"
+        }
+        draftImage?.let { sentUri ->
+            try {
+                container.chatImageStore.deleteIfManaged(sentUri)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                problems += "图片临时文件清理失败：${error.toUserMessage()}"
+            }
+        }
+        return problems
+    }
+
+    fun reportPostPersistProblems(
+        prefix: String,
+        problems: List<String>,
+        alwaysReport: Boolean = false,
+    ) {
+        if (problems.isNotEmpty() || alwaysReport) {
+            firstMessagePending = reduceFirstMessagePending(
+                pending = firstMessagePending,
+                isFirstUserMessage = true,
+                event = FirstMessagePendingEvent.POST_SUCCESS_FAILED,
+            )
+            if (problems.isEmpty()) {
+                sessionStatus = prefix
+            } else {
+                sessionStatus = prefix + "：" + problems.joinToString("；")
+            }
+        }
     }
 
     fun sendNow() {
@@ -652,61 +703,62 @@ fun ChatScreen(
                     ),
                 )
             } catch (cancelled: CancellationException) {
-                val landed = withContext(NonCancellable) { firstUserMessageHasLanded() }
-                firstMessagePending = reduceFirstMessagePending(
+                val landing = withContext(NonCancellable) { firstUserMessageLanding() }
+                val disposition = enqueueExceptionDisposition(
                     pending = firstMessagePending,
                     isFirstUserMessage = isFirstUserMessage,
-                    event = FirstMessagePendingEvent.ENQUEUE_FAILED,
-                    firstUserMessageLanded = landed,
+                    landing = landing,
                 )
+                firstMessagePending = disposition.pending
+                if (disposition.settlePersistedSend) {
+                    withContext(NonCancellable) {
+                        settlePersistedSendThenRethrowCancellation(cancelled) {
+                            val problems = settlePersistedSend(draftImage)
+                            reportPostPersistProblems(
+                                prefix = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
+                                problems = problems,
+                                alwaysReport = true,
+                            )
+                        }
+                    }
+                }
+                if (disposition.presentation == EnqueueExceptionPresentation.UNKNOWN_WARNING) {
+                    sessionStatus = "消息状态待确认，身份已锁定，请勿重复发送"
+                } else if (disposition.presentation == EnqueueExceptionPresentation.SEND_FAILURE) {
+                    errorText = "消息未发送，已取消"
+                }
                 throw cancelled
             } catch (error: Throwable) {
-                val landed = firstUserMessageHasLanded()
-                firstMessagePending = reduceFirstMessagePending(
+                val landing = firstUserMessageLanding()
+                val disposition = enqueueExceptionDisposition(
                     pending = firstMessagePending,
                     isFirstUserMessage = isFirstUserMessage,
-                    event = FirstMessagePendingEvent.ENQUEUE_FAILED,
-                    firstUserMessageLanded = landed,
+                    landing = landing,
                 )
-                errorText = error.toUserMessage()
+                firstMessagePending = disposition.pending
+                when (disposition.presentation) {
+                    EnqueueExceptionPresentation.SEND_FAILURE -> errorText = error.toUserMessage()
+                    EnqueueExceptionPresentation.QUEUED_WARNING -> {
+                        val problems = settlePersistedSend(draftImage)
+                        reportPostPersistProblems(
+                            prefix = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
+                            problems = problems,
+                        )
+                        if (problems.isEmpty()) {
+                            sessionStatus = "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理"
+                        }
+                    }
+                    EnqueueExceptionPresentation.UNKNOWN_WARNING -> {
+                        sessionStatus = "消息状态待确认，身份已锁定，请勿重复发送"
+                    }
+                }
                 return@launch
             }
 
-            text = ""
-            if (selectedImage == draftImage) {
-                selectedImage = null
-                selectedMimeType = "image/png"
-            }
-
-            try {
-                conversation = container.chatRepository.conversation(conversationId)
-                isAgentConversation = conversation?.agentId != null
-                if (isAgentConversation) webSearchEnabled = false
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                firstMessagePending = reduceFirstMessagePending(
-                    pending = firstMessagePending,
-                    isFirstUserMessage = isFirstUserMessage,
-                    event = FirstMessagePendingEvent.POST_SUCCESS_FAILED,
-                )
-                sessionStatus = "消息已发送，会话状态刷新失败：${error.toUserMessage()}"
-            }
-
-            draftImage?.let { sentUri ->
-                try {
-                    container.chatImageStore.deleteIfManaged(sentUri)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Throwable) {
-                    firstMessagePending = reduceFirstMessagePending(
-                        pending = firstMessagePending,
-                        isFirstUserMessage = isFirstUserMessage,
-                        event = FirstMessagePendingEvent.POST_SUCCESS_FAILED,
-                    )
-                    sessionStatus = "消息已发送，图片临时文件清理失败：${error.toUserMessage()}"
-                }
-            }
+            reportPostPersistProblems(
+                prefix = "消息已发送",
+                problems = settlePersistedSend(draftImage),
+            )
         }
     }
 
