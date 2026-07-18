@@ -19,4 +19,7 @@ interface ConversationMarkdownLinkDao {
 
     @Query("DELETE FROM conversation_markdown_links WHERE conversationId = :conversationId AND projectId = :projectId AND relativePath = :relativePath")
     suspend fun delete(conversationId: String, projectId: String, relativePath: String)
+
+    @Query("DELETE FROM conversation_markdown_links WHERE projectId = :projectId")
+    suspend fun deleteForProject(projectId: String)
 }

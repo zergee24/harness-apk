@@ -21,6 +21,7 @@ import com.harnessapk.git.GitCredentialStore
 import com.harnessapk.git.JGitEngine
 import com.harnessapk.network.OpenAiCompatibleClient
 import com.harnessapk.project.FileProjectRepository
+import com.harnessapk.project.DeleteProjectUseCase
 import com.harnessapk.project.ProjectWorkspaceGatewayAdapter
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderCapabilityCatalogClient
@@ -108,6 +109,11 @@ class AppContainer(context: Context) {
     val queuedAttachmentStore = QueuedAttachmentStore(appContext)
     val projectRepository = FileProjectRepository(
         rootDirectory = appContext.filesDir,
+        timeProvider = SystemTimeProvider,
+    )
+    val deleteProjectUseCase = DeleteProjectUseCase(
+        projectRepository = projectRepository,
+        database = database,
         timeProvider = SystemTimeProvider,
     )
     val projectWorkspaceGateway = ProjectWorkspaceGatewayAdapter(projectRepository)

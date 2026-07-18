@@ -464,7 +464,7 @@ internal fun ProjectScreen(
         scope.launch {
             runCatching {
                 withContext(container.dispatchers.io) {
-                    container.projectRepository.deleteProject(project.id)
+                    container.deleteProjectUseCase.delete(project.id)
                 }
             }.onSuccess {
                 if (selectedProjectId == project.id) {

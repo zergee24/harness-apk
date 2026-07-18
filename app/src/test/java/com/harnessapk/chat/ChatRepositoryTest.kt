@@ -484,6 +484,13 @@ private class FakeConversationDao : ConversationDao {
         return 1
     }
 
+    override suspend fun clearProject(projectId: String, updatedAt: Long) {
+        rows.replaceAll { _, conversation ->
+            if (conversation.projectId == projectId) conversation.copy(projectId = null, updatedAt = updatedAt) else conversation
+        }
+        refresh()
+    }
+
     override suspend fun archive(id: String, updatedAt: Long) {
         rows[id]?.let { rows[id] = it.copy(isArchived = true, updatedAt = updatedAt) }
         refresh()

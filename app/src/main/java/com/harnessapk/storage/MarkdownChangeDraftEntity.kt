@@ -87,6 +87,15 @@ interface MarkdownChangeDraftDao {
     @Update
     suspend fun updateDraft(draft: MarkdownChangeDraftEntity)
 
+    @Query(
+        """
+        DELETE FROM markdown_change_drafts
+        WHERE projectId = :projectId
+          AND status IN ('PLANNING', 'READY', 'FAILED', 'PARTIALLY_APPLIED')
+        """,
+    )
+    suspend fun deleteExecutableOrRetryableForProject(projectId: String)
+
     @Query("DELETE FROM markdown_change_draft_items WHERE draftId = :draftId")
     suspend fun deleteItems(draftId: String)
 
