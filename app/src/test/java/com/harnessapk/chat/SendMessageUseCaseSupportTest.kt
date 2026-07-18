@@ -99,6 +99,20 @@ class SendMessageUseCaseSupportTest {
     }
 
     @Test
+    fun ordinaryChatSnapshotKeepsCitationLikeTextUntouched() {
+        val snapshot = StreamingMessageSnapshot(
+            status = MessageStatus.SUCCEEDED,
+            parts = listOf(
+                UiMessagePartDraft(0, UiMessagePartType.TEXT, "搜索结果见[资料1]。", stable = true),
+            ),
+        )
+
+        val next = sanitizeAgentSnapshotIfNeeded(snapshot, agentContext = null)
+
+        assertEquals("搜索结果见[资料1]。", next.legacyVisibleText())
+    }
+
+    @Test
     fun cancelStreamingSnapshotIncludesBufferedUnflushedText() {
         val accumulator = StreamingMessageAccumulator(
             flushIntervalMillis = 1_000L,

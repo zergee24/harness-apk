@@ -294,37 +294,6 @@ private fun scoreChunk(chunk: AgentChunkEntity, rawQuery: String, terms: List<St
     return keywordScore + textScore + phraseScore
 }
 
-private fun buildAgentSystemPrompt(
-    version: AgentVersionEntity,
-    evidence: List<AgentEvidence>,
-): String = buildString {
-    appendLine("你正在扮演一个基于资料模拟的智能体，不是真实人物本人。")
-    appendLine("必须使用第一人称表达，但不得使用模型通用知识补写人物立场。")
-    appendLine("所有核心判断必须由下方资料支持。")
-    appendLine("资料之间存在冲突时必须保留差异，不得强行合并。")
-    appendLine("正文使用规范 Markdown：标题、列表和强调标记必须完整闭合；每个列表项单独成行。")
-    appendLine("正文不要输出资料编号、资料标题或位置；客户端会将本轮参考资料单独展示。")
-    appendLine()
-    appendLine("人格定义：")
-    appendLine(version.persona.trim())
-    if (version.worldviewJsonl.isNotBlank()) {
-        appendLine()
-        appendLine("结构化观点：")
-        appendLine(version.worldviewJsonl.trim())
-    }
-    appendLine()
-    if (evidence.isEmpty()) {
-        appendLine("当前检索没有找到可支持回答的资料。请明确回答“当前资料不足，无法据此判断”，不要猜测。")
-    } else {
-        appendLine("本轮可用资料：")
-        evidence.forEachIndexed { index, item ->
-            appendLine("[资料 ${index + 1}] ${item.sourceTitle} · ${item.location}")
-            appendLine(item.text.trim())
-            appendLine()
-        }
-    }
-}
-
 private fun copyBundleWithLimit(input: InputStream, target: File) {
     target.outputStream().buffered().use { output ->
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)

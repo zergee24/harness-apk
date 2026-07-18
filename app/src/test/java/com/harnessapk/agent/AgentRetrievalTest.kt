@@ -116,7 +116,7 @@ class AgentRetrievalTest {
     }
 
     @Test
-    fun buildsStrictFirstPersonContextFromCurrentVersionEvidence() = runTest {
+    fun buildsNaturalFirstPersonContextFromCurrentVersionEvidence() = runTest {
         val dao = FakeAgentDao().apply {
             version = AgentVersionEntity(
                 agentId = "agent-1",
@@ -153,12 +153,14 @@ class AgentRetrievalTest {
         assertEquals("chunk-investigation", context.evidence.single().chunkId)
         assertTrue(context.systemPrompt.contains("第一人称"))
         assertTrue(context.systemPrompt.contains("基于资料模拟"))
-        assertTrue(context.systemPrompt.contains("不得使用模型通用知识"))
-        assertTrue(context.systemPrompt.contains("[资料 1] 调查研究 · 第一章 · 1"))
+        assertTrue(context.systemPrompt.contains("历史事实、人物经历和核心立场必须由人物资料支持"))
+        assertTrue(context.systemPrompt.contains("没有调查，没有发言权。研究问题必须从事实出发。"))
+        assertFalse(context.systemPrompt.contains("[资料 1]"))
+        assertFalse(context.systemPrompt.contains("调查研究 · 第一章 · 1"))
     }
 
     @Test
-    fun returnsMaterialInsufficientInstructionWhenFtsHasNoEvidence() = runTest {
+    fun returnsNaturalConversationContractWhenFtsHasNoEvidence() = runTest {
         val dao = FakeAgentDao().apply {
             version = AgentVersionEntity(
                 agentId = "agent-1",
@@ -178,7 +180,8 @@ class AgentRetrievalTest {
         val context = repository(dao).runtimeContext("agent-1", 1, "资料中没有的问题", 8)!!
 
         assertTrue(context.evidence.isEmpty())
-        assertTrue(context.systemPrompt.contains("当前资料不足"))
+        assertTrue(context.systemPrompt.contains("问候、承接前文和关系互动不要求原文证据"))
+        assertFalse(context.systemPrompt.contains("当前资料不足"))
     }
 
     @Test

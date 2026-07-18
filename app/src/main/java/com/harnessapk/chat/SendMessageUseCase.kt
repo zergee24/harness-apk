@@ -7,6 +7,7 @@ import android.net.Uri
 import android.util.Base64
 import com.harnessapk.agent.AgentEvidence
 import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.agent.sanitizeAgentCitationMarkers
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.AppError
 import com.harnessapk.common.toUserMessage
@@ -233,6 +234,7 @@ class SendMessageUseCase(
                 latestSnapshot = appendVisibleTextPart(latestSnapshot, it)
                 chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
             }
+            latestSnapshot = sanitizeAgentSnapshotIfNeeded(latestSnapshot, agentContext)
             latestSnapshot = appendAgentSourcesPart(latestSnapshot, agentContext?.evidence.orEmpty())
             if (latestSnapshot.parts.lastOrNull()?.type == UiMessagePartType.AGENT_SOURCES) {
                 chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
@@ -357,6 +359,11 @@ internal fun effectiveAgentSearchContexts(
 }
 
 internal fun webSearchAllowedForAgentConversation(agentId: String?): Boolean = agentId.isNullOrBlank()
+
+internal fun sanitizeAgentSnapshotIfNeeded(
+    snapshot: StreamingMessageSnapshot,
+    agentContext: AgentRuntimeContext?,
+): StreamingMessageSnapshot = if (agentContext == null) snapshot else sanitizeAgentCitationMarkers(snapshot)
 
 internal fun appendVisibleTextPart(
     snapshot: StreamingMessageSnapshot,
