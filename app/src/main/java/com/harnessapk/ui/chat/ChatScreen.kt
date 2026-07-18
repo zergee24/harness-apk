@@ -111,6 +111,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.harnessapk.chat.ChatMessage
+import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.ChatExecutionRequestContext
 import com.harnessapk.chat.ChatExecutionStatus
@@ -216,6 +217,7 @@ fun ChatScreen(
     contentPadding: PaddingValues,
 ) {
     val messages by container.chatRepository.observeMessages(conversationId).collectAsState(initial = emptyList())
+    val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
     val executionEntries by container.chatExecutionRepository
         .observeForConversation(conversationId)
         .collectAsState(initial = emptyList())
@@ -250,8 +252,9 @@ fun ChatScreen(
     var selectedModel by remember { mutableStateOf("") }
     var selectedReasoningEffort by remember { mutableStateOf(defaultReasoningEffort()) }
     var webSearchEnabled by remember { mutableStateOf(false) }
+    var conversation by remember(conversationId) { mutableStateOf<Conversation?>(null) }
     var isAgentConversation by remember(conversationId) { mutableStateOf(false) }
-    var agentSimulationLabel by remember(conversationId) { mutableStateOf<String?>(null) }
+    var showIdentityDetails by remember { mutableStateOf(false) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
     var deliverables by remember { mutableStateOf<List<MarkdownDeliverable>>(emptyList()) }
@@ -317,6 +320,17 @@ fun ChatScreen(
     )
     val assistantActivityText = assistantActivityLabel(messages)
     val isAssistantBusy = assistantActivityText != null
+    val identityState = remember(conversation, messages, agents) {
+        conversationIdentityUiState(conversation, messages, agents)
+    }
+    val displayedIdentityState = if (!identityState.mutable && conversation?.agentId != null) {
+        identityState.copy(
+            selectedAgentId = conversation?.agentId,
+            selectedName = agents.firstOrNull { it.id == conversation?.agentId }?.name ?: "已安装人物",
+        )
+    } else {
+        identityState
+    }
     val executionByUserMessageId = remember(executionEntries) {
         executionEntries.associateBy(ChatExecutionEntry::userMessageId)
     }
@@ -381,22 +395,18 @@ fun ChatScreen(
 
     LaunchedEffect(conversationId) {
         runCatching { container.chatRepository.conversation(conversationId) }
-            .onSuccess { conversation ->
-                rawSessionPrompt = conversation?.promptOriginal.orEmpty()
-                optimizedSessionPrompt = conversation?.promptOptimized.orEmpty()
-                finalSessionPrompt = conversation?.promptFinal.orEmpty()
-                val projectId = conversation?.projectId
+            .onSuccess { loadedConversation ->
+                conversation = loadedConversation
+                rawSessionPrompt = loadedConversation?.promptOriginal.orEmpty()
+                optimizedSessionPrompt = loadedConversation?.promptOptimized.orEmpty()
+                finalSessionPrompt = loadedConversation?.promptFinal.orEmpty()
+                val projectId = loadedConversation?.projectId
                 if (!projectId.isNullOrBlank()) {
                     selectedProjectId = projectId
                 }
-                val agentId = conversation?.agentId
+                val agentId = loadedConversation?.agentId
                 isAgentConversation = !agentId.isNullOrBlank()
                 if (isAgentConversation) webSearchEnabled = false
-                agentSimulationLabel = agentId?.let { id ->
-                    container.agentRepository.agent(id)?.let { agent ->
-                        "${agent.name} · 基于资料模拟"
-                    } ?: "基于资料模拟"
-                }
             }
             .onFailure { sessionStatus = it.toUserMessage() }
     }
@@ -1146,6 +1156,16 @@ fun ChatScreen(
         )
     }
 
+    if (showIdentityDetails) {
+        ConversationIdentityDetailsDialog(
+            version = conversation?.agentVersion,
+            installedCorpusCount = agents.firstOrNull { it.id == conversation?.agentId }?.installedCorpusCount,
+            requiredCorpusCount = agents.firstOrNull { it.id == conversation?.agentId }?.requiredCorpusCount,
+            publisherFingerprint = agents.firstOrNull { it.id == conversation?.agentId }?.publisherFingerprint,
+            onDismiss = { showIdentityDetails = false },
+        )
+    }
+
     if (showSessionConfig) {
         SessionConfigDialog(
             projects = projects,
@@ -1214,13 +1234,12 @@ fun ChatScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),
     ) {
-        agentSimulationLabel?.let { label ->
+        if (!displayedIdentityState.mutable && displayedIdentityState.selectedAgentId != null) {
             ResponsiveChatContentRail {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(vertical = 6.dp),
+                ConversationIdentityPicker(
+                    state = displayedIdentityState,
+                    onSelectAgentId = {},
+                    onShowDetails = { showIdentityDetails = true },
                 )
             }
         }
@@ -1386,6 +1405,19 @@ fun ChatScreen(
                 selectedModel = selectedModel,
                 selectedReasoningEffort = selectedReasoningEffort,
                 onOpenModelPicker = { showModelPicker = true },
+                identityState = identityState,
+                onSelectIdentity = { agentId ->
+                    scope.launch {
+                        runCatching {
+                            container.conversationIdentityRepository.selectDraft(conversationId, agentId)
+                            container.chatRepository.conversation(conversationId)
+                        }.onSuccess { refreshedConversation ->
+                            conversation = refreshedConversation
+                            isAgentConversation = refreshedConversation?.agentId != null
+                            if (isAgentConversation) webSearchEnabled = false
+                        }.onFailure { errorText = it.toUserMessage() }
+                    }
+                },
                 contextStatus = contextStatus,
                 isCompressingContext = isCompressingContext,
                 onCompressContext = ::compressContextNow,
@@ -3133,6 +3165,32 @@ private fun MessageSelectionCopyDialog(
 }
 
 @Composable
+private fun ConversationIdentityDetailsDialog(
+    version: Int?,
+    installedCorpusCount: Int?,
+    requiredCorpusCount: Int?,
+    publisherFingerprint: String?,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("人物资料") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("固定版本：v${version ?: "未知"}")
+                Text(
+                    "资料覆盖：${installedCorpusCount ?: "未知"}/${requiredCorpusCount ?: "未知"}",
+                )
+                Text("发布者指纹：${publisherFingerprint ?: "未知"}")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+@Composable
 private fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
@@ -3150,6 +3208,8 @@ private fun ChatInputBar(
     selectedModel: String,
     selectedReasoningEffort: ReasoningEffort,
     onOpenModelPicker: () -> Unit,
+    identityState: ConversationIdentityUiState,
+    onSelectIdentity: (String?) -> Unit,
     contextStatus: ContextWindowStatus,
     isCompressingContext: Boolean,
     onCompressContext: () -> Unit,
@@ -3229,6 +3289,13 @@ private fun ChatInputBar(
                     selectedReasoningEffort = selectedReasoningEffort,
                     onOpenModelPicker = onOpenModelPicker,
                 )
+                if (identityState.mutable) {
+                    ConversationIdentityPicker(
+                        state = identityState,
+                        onSelectAgentId = onSelectIdentity,
+                        onShowDetails = {},
+                    )
+                }
                 ContextStatusChip(
                     contextStatus = contextStatus,
                     expanded = showContextDetails,

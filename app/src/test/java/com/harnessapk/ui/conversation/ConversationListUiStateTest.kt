@@ -1,6 +1,8 @@
 package com.harnessapk.ui.conversation
 
 import com.harnessapk.chat.Conversation
+import com.harnessapk.agent.Agent
+import com.harnessapk.agent.AgentStatus
 import com.harnessapk.session.WorkspaceProject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -9,6 +11,22 @@ import org.junit.Test
 import java.io.File
 
 class ConversationListUiStateTest {
+    @Test
+    fun agentConversationUsesUnifiedSimulationDisclosure() {
+        val conversation = conversation("agent", "人物会话", 1L, null).copy(agentId = "a1")
+        val label = conversationIdentityLabel(conversation, mapOf("a1" to agent("a1", "李德胜")))
+
+        assertEquals("李德胜 · 基于资料模拟", label)
+    }
+
+    @Test
+    fun missingAgentNameUsesInstalledPersonFallbackAndAssistantHasNoDisclosure() {
+        assertEquals(
+            "已安装人物 · 基于资料模拟",
+            conversationIdentityLabel(conversation("agent", "人物会话", 1L, null).copy(agentId = "missing"), emptyMap()),
+        )
+        assertEquals(null, conversationIdentityLabel(conversation("assistant", "普通会话", 1L, null), emptyMap()))
+    }
     @Test
     fun conversationTabsDoNotDuplicateTitleOrUseDisabledSelectedState() {
         val source = File("src/main/java/com/harnessapk/ui/conversation/ConversationListScreen.kt").readText()
@@ -135,5 +153,16 @@ class ConversationListUiStateTest {
     private fun project(id: String, name: String): WorkspaceProject = WorkspaceProject(
         id = id,
         name = name,
+    )
+
+    private fun agent(id: String, name: String): Agent = Agent(
+        id = id,
+        name = name,
+        summary = "",
+        activeVersion = 1,
+        publisherFingerprint = "fingerprint",
+        status = AgentStatus.READY,
+        requiredCorpusCount = 0,
+        installedCorpusCount = 0,
     )
 }
