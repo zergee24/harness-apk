@@ -2,6 +2,7 @@ package com.harnessapk.chat
 
 import androidx.room.RoomDatabase
 import androidx.room.withTransaction
+import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.ChatExecutionEntryDao
 import com.harnessapk.storage.ChatExecutionEntryEntity
@@ -23,12 +24,14 @@ class ChatExecutionRepository(
     private val database: RoomDatabase,
     private val dao: ChatExecutionEntryDao,
     private val chatRepository: ChatRepository,
+    private val identityRepository: ConversationIdentityRepository,
     private val timeProvider: TimeProvider,
 ) {
     fun observeForConversation(conversationId: String): Flow<List<ChatExecutionEntry>> =
         dao.observeForConversation(conversationId).map { rows -> rows.map(ChatExecutionEntryEntity::toDomain) }
 
     suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = database.withTransaction {
+        identityRepository.pinForFirstMessage(request.conversationId)
         val now = timeProvider.nowMillis()
         val userMessageId = chatRepository.insertUserMessage(
             conversationId = request.conversationId,

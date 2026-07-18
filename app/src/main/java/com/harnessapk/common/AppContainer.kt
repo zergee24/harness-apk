@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.room.withTransaction
 import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentTransactionRunner
+import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.BuildConfig
 import com.harnessapk.chat.ChatImageStore
 import com.harnessapk.chat.ChatRepository
@@ -12,6 +13,7 @@ import com.harnessapk.chat.ChatExecutionCoordinator
 import com.harnessapk.chat.ChatExecutionRepository
 import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.chat.ManualContextCompressionUseCase
+import com.harnessapk.chat.NewConversationUseCase
 import com.harnessapk.chat.QueuedAttachmentStore
 import com.harnessapk.chat.SendMessageUseCase
 import com.harnessapk.chat.webSearchAllowedForAgentConversation
@@ -90,6 +92,16 @@ class AppContainer(context: Context) {
         timeProvider = SystemTimeProvider,
         ioDispatcher = dispatchers.io,
     )
+    val conversationIdentityRepository = ConversationIdentityRepository(
+        conversationDao = database.conversationDao(),
+        messageDao = database.messageDao(),
+        agentDao = database.agentDao(),
+        timeProvider = SystemTimeProvider,
+    )
+    val newConversationUseCase = NewConversationUseCase(
+        chatRepository = chatRepository,
+        identityRepository = conversationIdentityRepository,
+    )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
     val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
@@ -133,6 +145,7 @@ class AppContainer(context: Context) {
         database = database,
         dao = database.chatExecutionEntryDao(),
         chatRepository = chatRepository,
+        identityRepository = conversationIdentityRepository,
         timeProvider = SystemTimeProvider,
     )
     val chatExecutionCoordinator = ChatExecutionCoordinator(

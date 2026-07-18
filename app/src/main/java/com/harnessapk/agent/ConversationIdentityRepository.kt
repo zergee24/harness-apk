@@ -51,6 +51,9 @@ class ConversationIdentityRepository(
         return selected
     }
 
+    suspend fun selectionForNewConversation(agentId: String): ConversationIdentitySelection =
+        selectionFor(agentId, locked = false)
+
     private suspend fun selectionFor(agentId: String?, locked: Boolean): ConversationIdentitySelection {
         val agent = agentId?.let { agentDao.findAgent(it) }?.takeIf { it.status == AgentStatus.READY.name }
         return ConversationIdentitySelection(
