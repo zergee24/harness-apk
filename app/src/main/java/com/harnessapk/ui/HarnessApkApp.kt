@@ -376,8 +376,8 @@ fun HarnessApkApp(
                     sourceProjectId = agentImportSourceProjectId,
                     externalImportUri = incomingAgentBundleUri,
                     onExternalImportConsumed = onIncomingAgentBundleUriConsumed,
-                    onStartConversation = { agent ->
-                        val request = installedAgentConversationRequest(agent, agentImportSourceProjectId)
+                    onStartConversation = { agent, sourceProjectId ->
+                        val request = installedAgentConversationRequest(agent, sourceProjectId)
                         dispatchAgentPackageImport(AgentPackageImportEvent.StartConversation)
                         scope.launch {
                             val conversationId = container.newConversationUseCase.create(request)

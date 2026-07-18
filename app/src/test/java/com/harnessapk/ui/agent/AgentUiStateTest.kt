@@ -2,7 +2,6 @@ package com.harnessapk.ui.agent
 
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentStatus
-import com.harnessapk.chat.Conversation
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -32,21 +31,6 @@ class AgentUiStateTest {
         assertEquals("1.5 MB", formatAgentPackageSize(1_572_864))
     }
 
-    @Test
-    fun agentTopicsOnlyIncludeThatAgentAndKeepTheMostRecentFirst() {
-        val topics = agentTopicConversations(
-            agent = agent(status = AgentStatus.READY, installed = 1, required = 1),
-            conversations = listOf(
-                conversation(id = "older", agentId = "agent-1", updatedAt = 100),
-                conversation(id = "other-agent", agentId = "agent-2", updatedAt = 300),
-                conversation(id = "latest", agentId = "agent-1", updatedAt = 200),
-                conversation(id = "regular", agentId = null, updatedAt = 400),
-            ),
-        )
-
-        assertEquals(listOf("latest", "older"), topics.map(Conversation::id))
-    }
-
     private fun agent(status: AgentStatus, installed: Int, required: Int): Agent = Agent(
         id = "agent-1",
         name = "资料研究代理",
@@ -56,16 +40,5 @@ class AgentUiStateTest {
         status = status,
         requiredCorpusCount = required,
         installedCorpusCount = installed,
-    )
-
-    private fun conversation(id: String, agentId: String?, updatedAt: Long) = Conversation(
-        id = id,
-        title = id,
-        updatedAt = updatedAt,
-        promptOriginal = "",
-        promptOptimized = "",
-        promptFinal = "",
-        agentId = agentId,
-        agentVersion = agentId?.let { 1 },
     )
 }

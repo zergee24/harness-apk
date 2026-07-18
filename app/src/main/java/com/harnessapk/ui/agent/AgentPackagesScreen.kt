@@ -42,7 +42,6 @@ import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentBundleException
 import com.harnessapk.agent.AgentImportSession
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
-import com.harnessapk.chat.Conversation
 import com.harnessapk.common.AppContainer
 import kotlinx.coroutines.launch
 
@@ -53,7 +52,7 @@ fun AgentPackagesScreen(
     sourceProjectId: String?,
     externalImportUri: Uri?,
     onExternalImportConsumed: () -> Unit,
-    onStartConversation: (Agent) -> Unit,
+    onStartConversation: (Agent, String?) -> Unit,
     onDone: () -> Unit,
 ) {
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
@@ -174,20 +173,11 @@ fun AgentPackagesScreen(
     }
 
     installedAgent?.let { agent ->
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("智能体已安装") },
-            text = { Text("${agent.name} 已可用于新对话。") },
-            confirmButton = {
-                TextButton(onClick = { onStartConversation(agent) }) {
-                    Text("开始对话")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = onDone) {
-                    Text("完成")
-                }
-            },
+        AgentInstallSuccessDialog(
+            agent = agent,
+            sourceProjectId = sourceProjectId,
+            onStartConversation = onStartConversation,
+            onDone = onDone,
         )
     }
 }
@@ -219,13 +209,6 @@ internal fun AgentPackagesEmptyState(
         }
     }
 }
-
-internal fun agentTopicConversations(
-    agent: Agent,
-    conversations: List<Conversation>,
-): List<Conversation> = conversations
-    .filter { conversation -> conversation.agentId == agent.id }
-    .sortedByDescending(Conversation::updatedAt)
 
 @Composable
 private fun AgentPackageRow(agent: Agent) {
@@ -267,12 +250,7 @@ private fun AgentImportDialog(
                     Text("包含原始资料文件", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (isInstalling) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Text(
-                        text = "正在安装智能体并建立资料索引，请保持应用开启。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    AgentInstallProgress()
                 }
             }
         },
@@ -284,6 +262,40 @@ private fun AgentImportDialog(
         dismissButton = {
             TextButton(enabled = !isInstalling, onClick = onDismiss) {
                 Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
+internal fun AgentInstallProgress() {
+    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+    Text(
+        text = "正在安装智能体并建立资料索引，请保持应用开启。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+internal fun AgentInstallSuccessDialog(
+    agent: Agent,
+    sourceProjectId: String?,
+    onStartConversation: (Agent, String?) -> Unit,
+    onDone: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("智能体已安装") },
+        text = { Text("${agent.name} 已可用于新对话。") },
+        confirmButton = {
+            TextButton(onClick = { onStartConversation(agent, sourceProjectId) }) {
+                Text("开始对话")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDone) {
+                Text("完成")
             }
         },
     )
