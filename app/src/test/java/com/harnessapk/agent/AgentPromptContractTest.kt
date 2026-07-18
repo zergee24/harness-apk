@@ -54,6 +54,49 @@ class AgentPromptContractTest {
     }
 
     @Test
+    fun worldviewRendersNonblankStringConditionsArrayInNaturalChinese() {
+        val prompt = buildAgentSystemPrompt(
+            version(
+                """{"statement":"调查应先于结论","conditions":["事实充分","范围明确"]}""",
+            ),
+            emptyList(),
+        )
+
+        assertTrue(prompt.contains("条件：事实充分；范围明确"))
+        assertFalse(prompt.contains("["))
+        assertFalse(prompt.contains("\"conditions\""))
+    }
+
+    @Test
+    fun worldviewRejectsInvalidConditionsArraysWithoutLeakingNestedInternalIds() {
+        val prompt = buildAgentSystemPrompt(
+            version(
+                """
+                {"statement":"空数组条件","conditions":[]}
+                {"statement":"空白条件","conditions":["有效条件","   "]}
+                {"statement":"混合条件","conditions":["有效条件",42]}
+                {"statement":"对象条件","conditions":[{"id":"object-secret-id"}]}
+                {"statement":"嵌套条件","conditions":[["nested-secret-id"]]}
+                {"statement":"空值条件","conditions":[null]}
+                """.trimIndent(),
+            ),
+            emptyList(),
+        )
+
+        assertTrue(prompt.contains("空数组条件"))
+        assertTrue(prompt.contains("空白条件"))
+        assertTrue(prompt.contains("混合条件"))
+        assertTrue(prompt.contains("对象条件"))
+        assertTrue(prompt.contains("嵌套条件"))
+        assertTrue(prompt.contains("空值条件"))
+        assertFalse(prompt.contains("条件："))
+        assertFalse(prompt.contains("object-secret-id"))
+        assertFalse(prompt.contains("nested-secret-id"))
+        assertFalse(prompt.contains("{"))
+        assertFalse(prompt.contains("["))
+    }
+
+    @Test
     fun worldviewOmitsUnknownNestedFieldsContainingInternalIds() {
         val prompt = buildAgentSystemPrompt(
             version(

@@ -4,6 +4,7 @@ import com.harnessapk.chat.StreamingMessageSnapshot
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.storage.AgentVersionEntity
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -55,18 +56,29 @@ private fun JsonObject.renderWorldviewStatement(): String? {
     val details = listOfNotNull(
         nonBlankString("scope")?.let { "适用范围：$it" },
         nonBlankString("period")?.let { "时间范围：$it" },
-        nonBlankString("conditions")?.let { "条件：$it" },
+        conditionsText()?.let { "条件：$it" },
         nonBlankString("topic")?.let { "主题：$it" },
     )
     return if (details.isEmpty()) statement else "$statement（${details.joinToString("；")}）"
 }
 
 private fun JsonObject.nonBlankString(key: String): String? =
-    (this[key] as? JsonPrimitive)
-        ?.takeIf(JsonPrimitive::isString)
-        ?.contentOrNull
-        ?.trim()
-        ?.takeIf(String::isNotBlank)
+    (this[key] as? JsonPrimitive)?.nonBlankString()
+
+private fun JsonObject.conditionsText(): String? = when (val conditions = this["conditions"]) {
+    is JsonPrimitive -> conditions.nonBlankString()
+    is JsonArray -> conditions
+        .map { value -> (value as? JsonPrimitive)?.nonBlankString() }
+        .takeIf { values -> values.isNotEmpty() && values.all { it != null } }
+        ?.joinToString("；") { requireNotNull(it) }
+    else -> null
+}
+
+private fun JsonPrimitive.nonBlankString(): String? = this
+    .takeIf(JsonPrimitive::isString)
+    ?.contentOrNull
+    ?.trim()
+    ?.takeIf(String::isNotBlank)
 
 internal fun sanitizeAgentCitationMarkers(
     snapshot: StreamingMessageSnapshot,
