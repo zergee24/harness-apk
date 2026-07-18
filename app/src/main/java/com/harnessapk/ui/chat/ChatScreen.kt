@@ -260,6 +260,7 @@ fun ChatScreen(
     var firstMessagePending by remember(conversationId) { mutableStateOf(false) }
     var identityMessageStateKnown by remember(conversationId) { mutableStateOf(false) }
     var persistedUserMessage by remember(conversationId) { mutableStateOf(false) }
+    var sendRequestState by remember(conversationId) { mutableStateOf<ChatSendRequestState?>(null) }
     var showIdentityDetails by remember { mutableStateOf(false) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
@@ -705,7 +706,11 @@ fun ChatScreen(
         val submittedText = text
         val body = submittedText.trim()
         if (body.isEmpty() && selectedImage == null) return
-        if (firstMessagePending || !identityController.canSend()) return
+        if (
+            firstMessagePending ||
+            !identityController.canSend() ||
+            !canAcceptChatSend(identityMessageStateKnown, sendRequestState)
+        ) return
         val isFirstUserMessage = identityMessageStateKnown &&
             !persistedUserMessage &&
             messages.none { it.role == MessageRole.USER }
@@ -722,11 +727,19 @@ fun ChatScreen(
         )
         val draftImage = selectedImage
         val draftMimeType = selectedMimeType
+        val requestId = UUID.randomUUID().toString()
+        val requestState = ChatSendRequestState(
+            requestId = requestId,
+            submittedText = submittedText,
+            draftImage = draftImage,
+            isFirstUserMessage = isFirstUserMessage,
+        )
+        sendRequestState = requestState
         scope.launch {
             errorText = null
             val settlement = sendController.submit(
                 EnqueueChatRequest(
-                    requestId = UUID.randomUUID().toString(),
+                    requestId = requestId,
                     conversationId = conversationId,
                     content = body.ifEmpty { "请看这张截图" },
                     attachments = draftImage?.let { image ->
@@ -748,6 +761,7 @@ fun ChatScreen(
                         prefix = "消息已发送",
                         problems = settlePersistedSend(submittedText, draftImage),
                     )
+                    sendRequestState = null
                 }
                 is ChatSendSettlement.AcceptedAfterFailure -> {
                     val problems = settlePersistedSend(submittedText, draftImage)
@@ -756,6 +770,7 @@ fun ChatScreen(
                         problems = problems,
                         alwaysReport = true,
                     )
+                    sendRequestState = null
                 }
                 is ChatSendSettlement.Failed -> {
                     firstMessagePending = reduceFirstMessagePending(
@@ -764,6 +779,7 @@ fun ChatScreen(
                         event = FirstMessagePendingEvent.ENQUEUE_FAILED,
                     )
                     errorText = settlement.failure.toUserMessage()
+                    sendRequestState = null
                 }
                 is ChatSendSettlement.Cancelled -> {
                     firstMessagePending = reduceFirstMessagePending(
@@ -784,9 +800,47 @@ fun ChatScreen(
                     } else {
                         errorText = "消息未发送，已取消"
                     }
+                    sendRequestState = null
                     throw settlement.cancellation
                 }
+                is ChatSendSettlement.Unknown -> {
+                    sendRequestState = requestState.copy(
+                        originalFailure = settlement.originalFailure,
+                        cancellation = settlement.cancellation,
+                        lookupFailure = settlement.lookupFailure,
+                    )
+                    sessionStatus = "消息状态待确认，请勿重复发送"
+                    settlement.cancellation?.let { throw it }
+                }
             }
+        }
+    }
+
+    LaunchedEffect(sendRequestState?.requestId, sendRequestState?.originalFailure) {
+        val pendingRequest = sendRequestState ?: return@LaunchedEffect
+        if (pendingRequest.originalFailure == null) return@LaunchedEffect
+        when (sendController.awaitLanding(pendingRequest.requestId)) {
+            ChatRequestLanding.Landed -> {
+                if (sendRequestState?.requestId != pendingRequest.requestId) return@LaunchedEffect
+                reportPostPersistProblems(
+                    prefix = "消息已发送",
+                    problems = settlePersistedSend(pendingRequest.submittedText, pendingRequest.draftImage),
+                )
+                sendRequestState = null
+            }
+            ChatRequestLanding.NotLanded -> {
+                if (sendRequestState?.requestId != pendingRequest.requestId) return@LaunchedEffect
+                firstMessagePending = reduceFirstMessagePending(
+                    pending = firstMessagePending,
+                    isFirstUserMessage = pendingRequest.isFirstUserMessage,
+                    event = FirstMessagePendingEvent.ENQUEUE_FAILED,
+                )
+                errorText = pendingRequest.cancellation?.let { "消息未发送，已取消" }
+                    ?: pendingRequest.originalFailure.toUserMessage()
+                sessionStatus = null
+                sendRequestState = null
+            }
+            is ChatRequestLanding.Unknown -> error("awaitLanding must not return UNKNOWN")
         }
     }
 
@@ -1560,6 +1614,7 @@ fun ChatScreen(
                     selectedModel.isNotBlank() &&
                     !firstMessagePending &&
                     identityController.canSend() &&
+                    canAcceptChatSend(identityMessageStateKnown, sendRequestState) &&
                     (text.isNotBlank() || selectedImage != null),
                 isBusy = isAssistantBusy,
                 onSend = {

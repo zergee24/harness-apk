@@ -148,6 +148,50 @@ class ChatConversationControllerTest {
     }
 
     @Test
+    fun cancelledLatestSelectionReloadsPersistedConversationWithoutPublishingCancellation() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val controller = ConversationIdentityController(
+            scope = scope,
+            selectDraft = { throw CancellationException("latest request cancelled") },
+            reloadConversation = { conversation(agentId = "persisted") },
+        )
+
+        controller.selectIdentity("a")
+        advanceUntilIdle()
+
+        assertFalse(controller.state.value.selectionPending)
+        assertEquals("persisted", controller.state.value.refreshedConversation?.agentId)
+        assertEquals(null, controller.state.value.failure)
+        scope.cancel()
+    }
+
+    @Test
+    fun workerScopeCancellationDoesNotPublishIdentityUiState() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val started = CompletableDeferred<Unit>()
+        val controller = ConversationIdentityController(
+            scope = scope,
+            selectDraft = {
+                started.complete(Unit)
+                CompletableDeferred<Unit>().await()
+            },
+            reloadConversation = { conversation(agentId = "should-not-publish") },
+        )
+
+        controller.selectIdentity("a")
+        runCurrent()
+        started.await()
+        scope.cancel()
+        advanceUntilIdle()
+
+        assertTrue(controller.state.value.selectionPending)
+        assertEquals(null, controller.state.value.refreshedConversation)
+        assertEquals(null, controller.state.value.failure)
+    }
+
+    @Test
     fun acceptedCancellationIsSettledOnlyWhenTheExactRequestLanded() = runTest {
         val landedIds = mutableSetOf<String>()
         val controller = ChatSendController(
@@ -175,6 +219,69 @@ class ChatConversationControllerTest {
 
         assertTrue(result is ChatSendSettlement.Cancelled)
         assertFalse((result as ChatSendSettlement.Cancelled).persisted)
+    }
+
+    @Test
+    fun lookupFailureBecomesConservativeUnknownInsteadOfEscapingAsSendFailure() = runTest {
+        val originalFailure = IllegalStateException("enqueue failed")
+        val lookupFailure = IllegalStateException("lookup failed")
+        val controller = ChatSendController(
+            enqueue = { throw originalFailure },
+            requestExists = { throw lookupFailure },
+        )
+
+        val result = controller.submit(request(requestId = "unknown"))
+
+        assertTrue(result is ChatSendSettlement.Unknown)
+        result as ChatSendSettlement.Unknown
+        assertEquals(originalFailure, result.originalFailure)
+        assertEquals(lookupFailure, result.lookupFailure)
+    }
+
+    @Test
+    fun unknownCancellationKeepsTheOriginalCancellationForTheCaller() = runTest {
+        val originalCancellation = CancellationException("enqueue cancelled")
+        val controller = ChatSendController(
+            enqueue = { throw originalCancellation },
+            requestExists = { throw IllegalStateException("lookup failed") },
+        )
+
+        val result = controller.submit(request(requestId = "cancel-unknown"))
+
+        assertTrue(result is ChatSendSettlement.Unknown)
+        assertEquals(originalCancellation, (result as ChatSendSettlement.Unknown).cancellation)
+    }
+
+    @Test
+    fun retryLandingReturnsLandedAndNotLandedWithoutLeakingLookupFailures() = runTest {
+        var landedLookups = 0
+        val landedController = ChatSendController(
+            enqueue = { entryFor(it.requestId) },
+            requestExists = {
+                if (++landedLookups == 1) throw IllegalStateException("temporary")
+                true
+            },
+        )
+        var notLandedLookups = 0
+        val notLandedController = ChatSendController(
+            enqueue = { entryFor(it.requestId) },
+            requestExists = {
+                if (++notLandedLookups == 1) throw IllegalStateException("temporary")
+                false
+            },
+        )
+
+        assertTrue(landedController.awaitLanding("landed", retryDelayMillis = 0) is ChatRequestLanding.Landed)
+        assertEquals("", landedController.settleText(currentText = "A", submittedText = "A"))
+        assertTrue(notLandedController.awaitLanding("not-landed", retryDelayMillis = 0) is ChatRequestLanding.NotLanded)
+        assertEquals("B", notLandedController.settleText(currentText = "B", submittedText = "A"))
+    }
+
+    @Test
+    fun unknownIdentityStateOrPendingRequestCannotAcceptAnotherSend() {
+        assertFalse(canAcceptChatSend(identityMessageStateKnown = false, request = null))
+        assertFalse(canAcceptChatSend(identityMessageStateKnown = true, request = pendingRequest()))
+        assertTrue(canAcceptChatSend(identityMessageStateKnown = true, request = null))
     }
 
     @Test
@@ -268,6 +375,15 @@ class ChatConversationControllerTest {
         promptOptimized = "",
         promptFinal = "",
         agentId = agentId,
+    )
+
+    private fun pendingRequest() = ChatSendRequestState(
+        requestId = "pending",
+        submittedText = "A",
+        draftImage = null,
+        isFirstUserMessage = false,
+        originalFailure = IllegalStateException("pending"),
+        cancellation = null,
     )
 
     private class LifoDispatcher : CoroutineDispatcher() {

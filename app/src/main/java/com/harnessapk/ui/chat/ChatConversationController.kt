@@ -1,5 +1,6 @@
 package com.harnessapk.ui.chat
 
+import android.net.Uri
 import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.EnqueueChatRequest
@@ -13,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 data class ConversationIdentityControllerState(
@@ -65,6 +67,27 @@ class ConversationIdentityController(
             }
         } catch (cancelled: CancellationException) {
             if (!currentCoroutineContext().isActive) throw cancelled
+            if (!isLatest(request.generation)) return
+            val refreshed = withContext(NonCancellable) {
+                runCatching { reloadConversation() }
+            }
+            if (!currentCoroutineContext().isActive) throw cancelled
+            if (isLatest(request.generation)) {
+                _state.value = refreshed.fold(
+                    onSuccess = { conversation ->
+                        ConversationIdentityControllerState(
+                            refreshedConversation = conversation,
+                            settledGeneration = request.generation,
+                        )
+                    },
+                    onFailure = { failure ->
+                        ConversationIdentityControllerState(
+                            failure = failure,
+                            settledGeneration = request.generation,
+                        )
+                    },
+                )
+            }
         } catch (failure: Throwable) {
             if (isLatest(request.generation)) {
                 _state.value = ConversationIdentityControllerState(
@@ -106,7 +129,35 @@ sealed interface ChatSendSettlement {
         val cancellation: CancellationException,
         val persisted: Boolean,
     ) : ChatSendSettlement
+
+    data class Unknown(
+        override val requestId: String,
+        val originalFailure: Throwable,
+        val lookupFailure: Throwable,
+        val cancellation: CancellationException?,
+    ) : ChatSendSettlement
 }
+
+sealed interface ChatRequestLanding {
+    data object Landed : ChatRequestLanding
+    data object NotLanded : ChatRequestLanding
+    data class Unknown(val lookupFailure: Throwable) : ChatRequestLanding
+}
+
+data class ChatSendRequestState(
+    val requestId: String,
+    val submittedText: String,
+    val draftImage: Uri?,
+    val isFirstUserMessage: Boolean,
+    val originalFailure: Throwable? = null,
+    val cancellation: CancellationException? = null,
+    val lookupFailure: Throwable? = null,
+)
+
+internal fun canAcceptChatSend(
+    identityMessageStateKnown: Boolean,
+    request: ChatSendRequestState?,
+): Boolean = identityMessageStateKnown && request == null
 
 class ChatSendController(
     private val enqueue: suspend (EnqueueChatRequest) -> ChatExecutionEntry,
@@ -115,19 +166,64 @@ class ChatSendController(
     suspend fun submit(request: EnqueueChatRequest): ChatSendSettlement = try {
         ChatSendSettlement.Accepted(enqueue(request))
     } catch (cancelled: CancellationException) {
-        ChatSendSettlement.Cancelled(
-            requestId = request.requestId,
-            cancellation = cancelled,
-            persisted = withContext(NonCancellable) { requestExists(request.requestId) },
-        )
+        when (val landing = landingFor(request.requestId)) {
+            ChatRequestLanding.Landed -> ChatSendSettlement.Cancelled(
+                requestId = request.requestId,
+                cancellation = cancelled,
+                persisted = true,
+            )
+            ChatRequestLanding.NotLanded -> ChatSendSettlement.Cancelled(
+                requestId = request.requestId,
+                cancellation = cancelled,
+                persisted = false,
+            )
+            is ChatRequestLanding.Unknown -> ChatSendSettlement.Unknown(
+                requestId = request.requestId,
+                originalFailure = cancelled,
+                lookupFailure = landing.lookupFailure,
+                cancellation = cancelled,
+            )
+        }
     } catch (failure: Throwable) {
-        if (requestExists(request.requestId)) {
-            ChatSendSettlement.AcceptedAfterFailure(request.requestId, failure)
-        } else {
-            ChatSendSettlement.Failed(request.requestId, failure)
+        when (val landing = landingFor(request.requestId)) {
+            ChatRequestLanding.Landed -> ChatSendSettlement.AcceptedAfterFailure(request.requestId, failure)
+            ChatRequestLanding.NotLanded -> ChatSendSettlement.Failed(request.requestId, failure)
+            is ChatRequestLanding.Unknown -> ChatSendSettlement.Unknown(
+                requestId = request.requestId,
+                originalFailure = failure,
+                lookupFailure = landing.lookupFailure,
+                cancellation = null,
+            )
+        }
+    }
+
+    suspend fun awaitLanding(
+        requestId: String,
+        retryDelayMillis: Long = REQUEST_LOOKUP_RETRY_DELAY_MILLIS,
+    ): ChatRequestLanding {
+        while (currentCoroutineContext().isActive) {
+            when (val landing = landingFor(requestId)) {
+                ChatRequestLanding.Landed,
+                ChatRequestLanding.NotLanded,
+                -> return landing
+                is ChatRequestLanding.Unknown -> delay(retryDelayMillis)
+            }
+        }
+        throw CancellationException("请求落地确认已取消")
+    }
+
+    private suspend fun landingFor(requestId: String): ChatRequestLanding = withContext(NonCancellable) {
+        try {
+            if (requestExists(requestId)) ChatRequestLanding.Landed else ChatRequestLanding.NotLanded
+        } catch (failure: Throwable) {
+            ChatRequestLanding.Unknown(failure)
         }
     }
 
     fun settleText(currentText: String, submittedText: String): String =
         if (currentText == submittedText) "" else currentText
+
+    private companion object {
+        const val REQUEST_LOOKUP_RETRY_DELAY_MILLIS = 250L
+    }
 }
