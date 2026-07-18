@@ -165,6 +165,26 @@ class ChatSendRecoveryStoreTest {
         assertEquals("B", store.consumeTerminal("c1", "not-landed")?.currentDraftText)
     }
 
+    @Test
+    fun terminalPhasesCannotBeRewrittenButKeepAcceptingDraftUpdatesUntilConsumed() {
+        val store = ChatSendRecoveryStore()
+        val failure = IllegalStateException("enqueue")
+        assertTrue(store.start("c1", request("landed")))
+        assertTrue(store.markLanded("c1", "landed"))
+        assertFalse(store.markLanded("c1", "landed"))
+        assertFalse(store.markNotLanded("c1", "landed", failure, null))
+        assertEquals(ChatSendRequestPhase.LANDED, store.current("c1")?.phase)
+        assertTrue(store.updateCurrentDraft("c1", "landed", "B", null, "image/png"))
+        assertEquals("B", store.consumeTerminal("c1", "landed")?.currentDraftText)
+        assertFalse(store.updateCurrentDraft("c1", "landed", "C", null, "image/png"))
+
+        assertTrue(store.start("c1", request("not-landed")))
+        assertTrue(store.markNotLanded("c1", "not-landed", failure, null))
+        assertFalse(store.markLanded("c1", "not-landed"))
+        assertFalse(store.markNotLanded("c1", "not-landed", failure, null))
+        assertEquals(ChatSendRequestPhase.NOT_LANDED, store.current("c1")?.phase)
+    }
+
     private fun manager(
         dispatcher: TestDispatcher,
         store: ChatSendRecoveryStore,

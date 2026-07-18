@@ -72,7 +72,7 @@ class ChatSendRecoveryStore {
     ): Boolean = transitionIfRequest(
         conversationId = conversationId,
         expectedRequestId = expectedRequestId,
-        allowedPhases = ChatSendRequestPhase.entries.toSet(),
+        allowedPhases = setOf(ChatSendRequestPhase.IN_FLIGHT, ChatSendRequestPhase.UNKNOWN),
     ) { current ->
         current.copy(
             phase = ChatSendRequestPhase.LANDED,
