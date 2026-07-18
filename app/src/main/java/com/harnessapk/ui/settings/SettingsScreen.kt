@@ -40,6 +40,7 @@ fun SettingsScreen(
     onOpenVoice: () -> Unit,
     onOpenGit: () -> Unit,
     onOpenSkills: () -> Unit,
+    onOpenAgentPackages: () -> Unit,
     onOpenUpdates: () -> Unit,
     showUpdateBadge: Boolean = false,
 ) {
@@ -61,6 +62,7 @@ fun SettingsScreen(
                     "voice" -> onOpenVoice
                     "git" -> onOpenGit
                     "skills" -> onOpenSkills
+                    "agents" -> onOpenAgentPackages
                     "updates" -> onOpenUpdates
                     else -> ({})
                 },
@@ -116,6 +118,7 @@ private fun iconFor(id: String): ImageVector = when (id) {
     "voice" -> Icons.Outlined.Mic
     "git" -> Icons.Outlined.AccountTree
     "skills" -> Icons.Outlined.Extension
+    "agents" -> Icons.Outlined.Extension
     "updates" -> Icons.Outlined.SystemUpdate
     else -> Icons.Outlined.Settings
 }

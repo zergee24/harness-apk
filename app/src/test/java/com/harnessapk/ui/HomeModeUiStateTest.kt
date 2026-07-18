@@ -5,9 +5,9 @@ import org.junit.Test
 
 class HomeModeUiStateTest {
     @Test
-    fun homeModesKeepConversationAgentProjectOrder() {
+    fun homeOnlyContainsConversationAndProject() {
         assertEquals(
-            listOf(MainMode.SESSION, MainMode.AGENT, MainMode.PROJECT),
+            listOf(MainMode.SESSION, MainMode.PROJECT),
             MainMode.entries.toList(),
         )
     }
@@ -38,14 +38,12 @@ class HomeModeUiStateTest {
     fun topLevelTitleFallsBackWithoutProject() {
         assertEquals("会话", topLevelTitle(MainMode.SESSION, currentProjectName = null))
         assertEquals("项目", topLevelTitle(MainMode.PROJECT, currentProjectName = " "))
-        assertEquals("智能体", topLevelTitle(MainMode.AGENT, currentProjectName = "不应出现"))
     }
 
     @Test
     fun homePrimaryActionMatchesCurrentMode() {
         assertEquals(HomePrimaryAction.CREATE_CONVERSATION, homePrimaryAction(MainMode.SESSION))
         assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.PROJECT))
-        assertEquals(HomePrimaryAction.IMPORT_AGENT, homePrimaryAction(MainMode.AGENT))
     }
 
     @Test

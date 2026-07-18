@@ -10,6 +10,11 @@ import java.io.File
 
 class HarnessApkAppStateTest {
     @Test
+    fun externalBundleNavigatesDirectlyToPackageImport() {
+        assertEquals(Routes.AgentPackages, incomingAgentBundleDestination(hasUri = true))
+    }
+
+    @Test
     fun chatTopBarTitleUsesCurrentConversationTitle() {
         val conversations = listOf(
             conversation(id = "c1", title = "圆柱罐体讨论"),
@@ -49,6 +54,14 @@ class HarnessApkAppStateTest {
         assertFalse(modeSwitcherSource.contains("DropdownMenu"))
         assertFalse(modeSwitcherSource.contains("KeyboardArrowDown"))
         assertFalse(modeSwitcherSource.contains("切换模式"))
+    }
+
+    @Test
+    fun homeAndProjectConversationCreationUseSharedUseCase() {
+        val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
+
+        assertTrue(source.contains("container.newConversationUseCase.create("))
+        assertFalse(source.contains("container.chatRepository.createConversation("))
     }
 
     @Test

@@ -7,19 +7,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,22 +47,20 @@ import com.harnessapk.common.AppContainer
 import kotlinx.coroutines.launch
 
 @Composable
-fun AgentScreen(
+fun AgentPackagesScreen(
     container: AppContainer,
     contentPadding: PaddingValues,
-    importRequestKey: Int,
-    onImportRequestConsumed: () -> Unit,
-    onRequestImport: () -> Unit,
+    sourceProjectId: String?,
     externalImportUri: Uri?,
     onExternalImportConsumed: () -> Unit,
-    onCreateTopic: (Agent) -> Unit,
-    onOpenConversation: (String) -> Unit,
+    onStartConversation: (Agent) -> Unit,
+    onDone: () -> Unit,
 ) {
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
-    val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var importSession by remember { mutableStateOf<AgentImportSession?>(null) }
+    var installedAgent by remember { mutableStateOf<Agent?>(null) }
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
 
@@ -93,18 +87,15 @@ fun AgentScreen(
         uri?.let(::prepareImport)
     }
 
-    LaunchedEffect(importRequestKey) {
-        if (importRequestKey > 0) {
-            onImportRequestConsumed()
-            filePicker.launch(
-                arrayOf(
-                    H_BUNDLE_MIME_TYPE,
-                    "application/zip",
-                    "application/x-zip-compressed",
-                    "application/octet-stream",
-                ),
-            )
-        }
+    fun requestImport() {
+        filePicker.launch(
+            arrayOf(
+                H_BUNDLE_MIME_TYPE,
+                "application/zip",
+                "application/x-zip-compressed",
+                "application/octet-stream",
+            ),
+        )
     }
 
     LaunchedEffect(externalImportUri) {
@@ -119,38 +110,37 @@ fun AgentScreen(
             .fillMaxSize()
             .padding(contentPadding),
     ) {
-        when {
-            agents.isEmpty() && !isWorking -> {
-                AgentEmptyState(
-                    errorText = errorText,
-                    onRequestImport = onRequestImport,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            }
-            else -> {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                ) {
-                    errorText?.let { message ->
-                        item(key = "error") {
-                            Text(
-                                text = message,
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(vertical = 12.dp),
-                            )
-                        }
+        if (agents.isEmpty() && !isWorking) {
+            AgentPackagesEmptyState(
+                errorText = errorText,
+                onRequestImport = ::requestImport,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                item {
+                    Button(onClick = ::requestImport) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("导入智能体包")
                     }
-                    items(agents, key = Agent::id) { agent ->
-                        AgentRow(
-                            agent = agent,
-                            conversations = agentTopicConversations(agent, conversations),
-                            onCreateTopic = { onCreateTopic(agent) },
-                            onOpenConversation = onOpenConversation,
+                }
+                errorText?.let { message ->
+                    item(key = "error") {
+                        Text(
+                            text = message,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(vertical = 12.dp),
                         )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     }
+                }
+                items(agents, key = Agent::id) { agent ->
+                    AgentPackageRow(agent)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
             }
         }
@@ -172,9 +162,30 @@ fun AgentScreen(
                     isWorking = true
                     errorText = null
                     runCatching { container.agentRepository.install(session) }
-                        .onSuccess { importSession = null }
+                        .onSuccess { result ->
+                            importSession = null
+                            installedAgent = result.agent
+                        }
                         .onFailure { error -> errorText = error.message ?: "智能体安装失败" }
                     isWorking = false
+                }
+            },
+        )
+    }
+
+    installedAgent?.let { agent ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("智能体已安装") },
+            text = { Text("${agent.name} 已可用于新对话。") },
+            confirmButton = {
+                TextButton(onClick = { onStartConversation(agent) }) {
+                    Text("开始对话")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDone) {
+                    Text("完成")
                 }
             },
         )
@@ -182,7 +193,7 @@ fun AgentScreen(
 }
 
 @Composable
-internal fun AgentEmptyState(
+internal fun AgentPackagesEmptyState(
     errorText: String?,
     onRequestImport: () -> Unit,
     modifier: Modifier = Modifier,
@@ -193,17 +204,9 @@ internal fun AgentEmptyState(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         errorText?.let { message ->
-            Text(
-                text = message,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            Text(text = message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
         }
-        Text(
-            text = "还没有智能体",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-        )
+        Text(text = "还没有智能体包", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
             text = "从系统文件中选择 .hbundle 安装包，确认后即可开始对话。",
             style = MaterialTheme.typography.bodyMedium,
@@ -212,7 +215,7 @@ internal fun AgentEmptyState(
         Button(onClick = onRequestImport) {
             Icon(Icons.Filled.Add, contentDescription = null)
             Spacer(Modifier.width(6.dp))
-            Text("添加智能体")
+            Text("导入智能体包")
         }
     }
 }
@@ -225,106 +228,22 @@ internal fun agentTopicConversations(
     .sortedByDescending(Conversation::updatedAt)
 
 @Composable
-private fun AgentRow(
-    agent: Agent,
-    conversations: List<Conversation>,
-    onCreateTopic: () -> Unit,
-    onOpenConversation: (String) -> Unit,
-) {
-    var showAllTopics by remember(agent.id) { mutableStateOf(false) }
-    val visibleTopics = if (showAllTopics) conversations else conversations.take(MAX_VISIBLE_AGENT_TOPICS)
+private fun AgentPackageRow(agent: Agent) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = agent.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "基于资料模拟 · v${agent.activeVersion}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "${agentStatusLabel(agent.status)} · ${agentCorpusCoverage(agent)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (canStartAgent(agent)) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.error
-                    },
-                )
-            }
-            Button(
-                enabled = canStartAgent(agent),
-                onClick = onCreateTopic,
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text("新话题")
-            }
-        }
-        if (conversations.isNotEmpty()) {
-            Text(
-                text = "${conversations.size} 个话题",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontWeight = FontWeight.SemiBold,
-            )
-            visibleTopics.forEach { conversation ->
-                AgentTopicRow(
-                    conversation = conversation,
-                    onClick = { onOpenConversation(conversation.id) },
-                )
-            }
-            if (conversations.size > MAX_VISIBLE_AGENT_TOPICS) {
-                TextButton(onClick = { showAllTopics = !showAllTopics }) {
-                    Text(if (showAllTopics) "收起话题" else "查看全部话题")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AgentTopicRow(
-    conversation: Conversation,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(start = 12.dp, top = 10.dp, end = 8.dp, bottom = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = Icons.Outlined.ChatBubbleOutline,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Text(agent.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text("基于资料模拟 · v${agent.activeVersion}", style = MaterialTheme.typography.bodySmall)
         Text(
-            modifier = Modifier.weight(1f),
-            text = conversation.title,
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
+            text = "${agentStatusLabel(agent.status)} · ${agentCorpusCoverage(agent)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
-
-private const val MAX_VISIBLE_AGENT_TOPICS = 3
 
 @Composable
 private fun AgentImportDialog(

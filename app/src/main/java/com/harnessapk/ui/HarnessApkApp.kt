@@ -46,8 +46,9 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.harnessapk.HarnessApkApplication
+import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.chat.Conversation
-import com.harnessapk.ui.agent.AgentScreen
+import com.harnessapk.ui.agent.AgentPackagesScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.components.WarmSegmentedControl
 import com.harnessapk.ui.conversation.ConversationListScreen
@@ -76,6 +77,7 @@ object Routes {
     const val Voice = "voice"
     const val Git = "git"
     const val Skills = "skills"
+    const val AgentPackages = "agent-packages"
     const val Updates = "updates"
     const val ChatPattern = "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}"
 
@@ -89,6 +91,9 @@ object Routes {
         append(chatRouteQuery(projectId = projectId, focusInput = focusInput, encode = Uri::encode))
     }
 }
+
+internal fun incomingAgentBundleDestination(hasUri: Boolean): String? =
+    Routes.AgentPackages.takeIf { hasUri }
 
 internal fun chatRouteQuery(
     projectId: String?,
@@ -125,9 +130,10 @@ fun HarnessApkApp(
     val route = backStackEntry?.destination?.route
     val canGoBack = route != null && route != Routes.Conversations
     var mainMode by rememberSaveable { mutableStateOf(MainMode.SESSION) }
+    var currentProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
+    var agentImportSourceProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
-    var agentImportRequestKey by remember { mutableStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
     val isHomeRoute = route == Routes.Conversations || route == null
@@ -136,6 +142,10 @@ fun HarnessApkApp(
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
+
+    LaunchedEffect(route) {
+        if (route != Routes.AgentPackages) agentImportSourceProjectId = null
+    }
 
     LaunchedEffect(container) {
         val result = runCatching {
@@ -158,22 +168,23 @@ fun HarnessApkApp(
         Routes.Voice -> "语音能力"
         Routes.Git -> "Git / Gitee"
         Routes.Skills -> "技能 / 插件"
+        Routes.AgentPackages -> "智能体包"
         Routes.Updates -> "更新"
         Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
     }
     val scope = rememberCoroutineScope()
     LaunchedEffect(incomingAgentBundleUri) {
-        if (incomingAgentBundleUri != null) {
-            mainMode = MainMode.AGENT
-            navController.popBackStack(Routes.Conversations, inclusive = false)
+        incomingAgentBundleDestination(incomingAgentBundleUri != null)?.let { destination ->
+            agentImportSourceProjectId = currentProjectId.takeIf { mainMode == MainMode.PROJECT }
+            navController.navigate(destination)
         }
     }
     val onCreateConversation: () -> Unit = {
         scope.launch {
             navController.navigate(
                 Routes.chat(
-                    conversationId = container.chatRepository.createConversation(),
+                    conversationId = container.newConversationUseCase.create(),
                     focusInput = true,
                 ),
             )
@@ -203,7 +214,6 @@ fun HarnessApkApp(
                     primaryAction = homePrimaryAction(mainMode),
                     showUpdateBadge = showUpdateBadge,
                     onCreateConversation = onCreateConversation,
-                    onImportAgent = { agentImportRequestKey += 1 },
                     onOpenSettings = { navController.navigate(Routes.Settings) },
                 )
             } else {
@@ -242,14 +252,17 @@ fun HarnessApkApp(
                     MainMode.PROJECT -> ProjectScreen(
                         container = container,
                         contentPadding = padding,
-                        onCurrentProjectNameChange = { currentProjectName = it },
+                        onCurrentProjectChange = { project ->
+                            currentProjectId = project?.id
+                            currentProjectName = project?.name
+                        },
                         workbenchTarget = workbenchTarget,
                         onWorkbenchTargetConsumed = { requestKey ->
                             if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
                         },
                         onCreateSession = { project ->
                             scope.launch {
-                                val conversationId = container.chatRepository.createConversation(
+                                val conversationId = container.newConversationUseCase.create(
                                     title = projectSessionTitle(project.name, null),
                                     projectId = project.id,
                                 )
@@ -263,33 +276,6 @@ fun HarnessApkApp(
                             }
                         },
                         onOpenSession = { conversationId ->
-                            navController.navigate(Routes.chat(conversationId = conversationId))
-                        },
-                    )
-                    MainMode.AGENT -> AgentScreen(
-                        container = container,
-                        contentPadding = padding,
-                        importRequestKey = agentImportRequestKey,
-                        onImportRequestConsumed = { agentImportRequestKey = 0 },
-                        onRequestImport = { agentImportRequestKey += 1 },
-                        externalImportUri = incomingAgentBundleUri,
-                        onExternalImportConsumed = onIncomingAgentBundleUriConsumed,
-                        onCreateTopic = { agent ->
-                            scope.launch {
-                                val conversationId = container.chatRepository.createConversation(
-                                    title = agent.name,
-                                    agentId = agent.id,
-                                    agentVersion = agent.activeVersion,
-                                )
-                                navController.navigate(
-                                    Routes.chat(
-                                        conversationId = conversationId,
-                                        focusInput = true,
-                                    ),
-                                )
-                            }
-                        },
-                        onOpenConversation = { conversationId ->
                             navController.navigate(Routes.chat(conversationId = conversationId))
                         },
                     )
@@ -337,6 +323,7 @@ fun HarnessApkApp(
                     onOpenVoice = { navController.navigate(Routes.Voice) },
                     onOpenGit = { navController.navigate(Routes.Git) },
                     onOpenSkills = { navController.navigate(Routes.Skills) },
+                    onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
                     onOpenUpdates = { navController.navigate(Routes.Updates) },
                     showUpdateBadge = showUpdateBadge,
                 )
@@ -352,6 +339,37 @@ fun HarnessApkApp(
             }
             composable(Routes.Skills) {
                 SkillsScreen(container = container, contentPadding = padding)
+            }
+            composable(Routes.AgentPackages) {
+                AgentPackagesScreen(
+                    container = container,
+                    contentPadding = padding,
+                    sourceProjectId = agentImportSourceProjectId,
+                    externalImportUri = incomingAgentBundleUri,
+                    onExternalImportConsumed = onIncomingAgentBundleUriConsumed,
+                    onStartConversation = { agent ->
+                        scope.launch {
+                            val projectId = agentImportSourceProjectId
+                            agentImportSourceProjectId = null
+                            val conversationId = container.newConversationUseCase.create(
+                                title = agent.name,
+                                projectId = projectId,
+                                identity = InitialConversationIdentity.Agent(agent.id),
+                            )
+                            navController.navigate(
+                                Routes.chat(
+                                    conversationId = conversationId,
+                                    projectId = projectId,
+                                    focusInput = true,
+                                ),
+                            )
+                        }
+                    },
+                    onDone = {
+                        agentImportSourceProjectId = null
+                        navController.popBackStack()
+                    },
+                )
             }
             composable(Routes.Updates) {
                 UpdateSettingsScreen(
@@ -380,7 +398,6 @@ private fun HomeTopBar(
     primaryAction: HomePrimaryAction,
     showUpdateBadge: Boolean,
     onCreateConversation: () -> Unit,
-    onImportAgent: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     Row(
@@ -403,7 +420,6 @@ private fun HomeTopBar(
             primaryAction = primaryAction,
             showUpdateBadge = showUpdateBadge,
             onCreateConversation = onCreateConversation,
-            onImportAgent = onImportAgent,
             onOpenSettings = onOpenSettings,
         )
     }
@@ -428,7 +444,6 @@ private fun HomeTopBarActions(
     primaryAction: HomePrimaryAction,
     showUpdateBadge: Boolean,
     onCreateConversation: () -> Unit,
-    onImportAgent: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     Box {
@@ -445,11 +460,10 @@ private fun HomeTopBarActions(
         }
     }
     if (primaryAction != HomePrimaryAction.NONE) {
-        val isImport = primaryAction == HomePrimaryAction.IMPORT_AGENT
-        FilledIconButton(onClick = if (isImport) onImportAgent else onCreateConversation) {
+        FilledIconButton(onClick = onCreateConversation) {
             Icon(
                 Icons.Filled.Add,
-                contentDescription = if (isImport) "导入智能体" else "新建对话",
+                contentDescription = "新建对话",
             )
         }
     }
