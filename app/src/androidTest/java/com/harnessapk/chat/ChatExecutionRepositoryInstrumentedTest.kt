@@ -7,10 +7,24 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.harnessapk.agent.AgentStatus
 import com.harnessapk.agent.ConversationIdentityRepository
+import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.TimeProvider
+import com.harnessapk.network.OpenAiCompatibleClient
+import com.harnessapk.provider.ProviderRepository
+import com.harnessapk.security.EncryptedValue
+import com.harnessapk.security.StringCipher
 import com.harnessapk.storage.AgentEntity
 import com.harnessapk.storage.AppDatabase
+import com.harnessapk.ui.chat.ChatSendController
+import com.harnessapk.ui.chat.ChatSendSettlement
+import com.harnessapk.websearch.JinaWebSearchClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -85,6 +99,71 @@ class ChatExecutionRepositoryInstrumentedTest {
     }
 
     @Test
+    fun concurrentEnqueueOfOneRequestCreatesOneExecutionAndOneUserMessage() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val request = request(conversationId).copy(requestId = "concurrent-request")
+
+        coroutineScope {
+            listOf(
+                async(Dispatchers.IO) { repository.enqueue(request) },
+                async(Dispatchers.IO) { repository.enqueue(request) },
+            ).awaitAll()
+        }
+
+        assertEquals(1, database.chatExecutionEntryDao().listForConversation(conversationId).size)
+        assertEquals(1, database.messageDao().countUserMessages(conversationId))
+    }
+
+    @Test
+    fun preCommitFailureIsReportedForTheExactRequestWithoutAnEntry() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val request = request(conversationId).copy(requestId = "pre-commit-failure")
+        database.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER fail_exact_request
+            BEFORE INSERT ON chat_execution_entries
+            WHEN NEW.id = 'pre-commit-failure'
+            BEGIN
+                SELECT RAISE(ABORT, 'pre commit failure');
+            END
+            """.trimIndent(),
+        )
+        val controller = ChatSendController(
+            enqueue = repository::enqueue,
+            requestExists = { requestId -> repository.entry(requestId) != null },
+        )
+
+        val result = controller.submit(request)
+
+        assertTrue(result is ChatSendSettlement.Failed)
+        assertEquals(null, repository.entry(request.requestId))
+        assertEquals(0, database.messageDao().countUserMessages(conversationId))
+    }
+
+    @Test
+    fun coordinatorAcceptsFirstAndLaterRequestsWhenSchedulingThrowsAfterPersistence() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val coordinator = coordinatorThatFailsScheduling()
+        val controller = ChatSendController(
+            enqueue = coordinator::enqueue,
+            requestExists = { requestId -> repository.entry(requestId) != null },
+        )
+        try {
+            val first = controller.submit(request(conversationId).copy(requestId = "first-scheduled"))
+            val later = controller.submit(request(conversationId).copy(requestId = "later-scheduled"))
+
+            assertTrue(first is ChatSendSettlement.Accepted)
+            assertTrue(later is ChatSendSettlement.Accepted)
+            assertEquals("first-scheduled", first.requestId)
+            assertEquals("later-scheduled", later.requestId)
+            assertEquals(2, database.chatExecutionEntryDao().listForConversation(conversationId).size)
+            assertEquals(2, database.messageDao().countUserMessages(conversationId))
+        } finally {
+            coordinator.close()
+        }
+    }
+
+    @Test
     fun enqueueRollsBackPinnedIdentityAndUserMessageWhenQueueInsertFails() = runBlocking {
         database.agentDao().upsertAgent(readyAgent(id = "a1", activeVersion = 4))
         val conversationId = chatRepository.createConversation(agentId = "a1", agentVersion = 1)
@@ -120,6 +199,34 @@ class ChatExecutionRepositoryInstrumentedTest {
         requestContext = ChatExecutionRequestContext(),
     )
 
+    private fun coordinatorThatFailsScheduling(): ChatExecutionCoordinator {
+        val dispatchers = AppDispatchers(
+            io = Dispatchers.IO,
+            default = Dispatchers.IO,
+            main = Dispatchers.IO,
+        )
+        val providerRepository = ProviderRepository(
+            dao = database.providerProfileDao(),
+            cipher = TestCipher,
+            timeProvider = TimeProvider { 10L },
+        )
+        return ChatExecutionCoordinator(
+            executionRepository = repository,
+            sendMessageUseCase = SendMessageUseCase(
+                context = context,
+                chatRepository = chatRepository,
+                providerRepository = providerRepository,
+                client = OpenAiCompatibleClient(OkHttpClient(), Json {}),
+                dispatchers = dispatchers,
+            ),
+            providerRepository = providerRepository,
+            webSearchClient = JinaWebSearchClient(OkHttpClient()),
+            attachmentStore = QueuedAttachmentStore(context),
+            dispatchers = dispatchers,
+            onWorkScheduled = { throw IllegalStateException("schedule failure") },
+        )
+    }
+
     private fun readyAgent(id: String, activeVersion: Int) = AgentEntity(
         id = id,
         name = "李德胜",
@@ -134,4 +241,10 @@ class ChatExecutionRepositoryInstrumentedTest {
         createdAt = 1L,
         updatedAt = 1L,
     )
+
+    private object TestCipher : StringCipher {
+        override fun encrypt(plainText: String): EncryptedValue = EncryptedValue(byteArrayOf(), byteArrayOf())
+
+        override fun decrypt(value: EncryptedValue): String = ""
+    }
 }

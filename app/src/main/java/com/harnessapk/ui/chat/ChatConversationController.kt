@@ -6,12 +6,13 @@ import com.harnessapk.chat.EnqueueChatRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 
 data class ConversationIdentityControllerState(
@@ -26,11 +27,19 @@ class ConversationIdentityController(
     private val selectDraft: suspend (String?) -> Unit,
     private val reloadConversation: suspend () -> Conversation?,
 ) {
-    private val selectionMutex = Mutex()
     private var latestGeneration = 0L
     private val _state = MutableStateFlow(ConversationIdentityControllerState())
+    private val requests = Channel<IdentitySelectionRequest>(Channel.UNLIMITED)
 
     val state: StateFlow<ConversationIdentityControllerState> = _state.asStateFlow()
+
+    init {
+        scope.launch {
+            for (request in requests) {
+                process(request)
+            }
+        }
+    }
 
     fun canSend(): Boolean = !state.value.selectionPending
 
@@ -39,31 +48,40 @@ class ConversationIdentityController(
             ++latestGeneration
         }
         _state.value = _state.value.copy(selectionPending = true, failure = null)
-        scope.launch {
-            val result = selectionMutex.withLock {
-                runCatching {
-                    selectDraft(agentId)
-                    reloadConversation()
-                }
+        check(requests.trySend(IdentitySelectionRequest(generation, agentId)).isSuccess) {
+            "身份选择队列已关闭"
+        }
+    }
+
+    private suspend fun process(request: IdentitySelectionRequest) {
+        try {
+            selectDraft(request.agentId)
+            val refreshed = reloadConversation()
+            if (isLatest(request.generation)) {
+                _state.value = ConversationIdentityControllerState(
+                    refreshedConversation = refreshed,
+                    settledGeneration = request.generation,
+                )
             }
-            if (generation == synchronized(this@ConversationIdentityController) { latestGeneration }) {
-                _state.value = result.fold(
-                    onSuccess = { refreshed ->
-                        ConversationIdentityControllerState(
-                            refreshedConversation = refreshed,
-                            settledGeneration = generation,
-                        )
-                    },
-                    onFailure = { failure ->
-                        ConversationIdentityControllerState(
-                            failure = failure,
-                            settledGeneration = generation,
-                        )
-                    },
+        } catch (cancelled: CancellationException) {
+            if (!currentCoroutineContext().isActive) throw cancelled
+        } catch (failure: Throwable) {
+            if (isLatest(request.generation)) {
+                _state.value = ConversationIdentityControllerState(
+                    failure = failure,
+                    settledGeneration = request.generation,
                 )
             }
         }
     }
+
+    private fun isLatest(generation: Long): Boolean =
+        generation == synchronized(this) { latestGeneration }
+
+    private data class IdentitySelectionRequest(
+        val generation: Long,
+        val agentId: String?,
+    )
 }
 
 sealed interface ChatSendSettlement {

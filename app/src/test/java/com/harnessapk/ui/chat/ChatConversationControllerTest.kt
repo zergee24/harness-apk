@@ -10,13 +10,16 @@ import com.harnessapk.chat.Conversation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlin.coroutines.CoroutineContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -24,6 +27,29 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatConversationControllerTest {
+    @Test
+    fun synchronouslyAcceptedSelectionsPersistInFifoOrderEvenWhenWorkerDispatcherRunsLifo() {
+        val dispatcher = LifoDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val persisted = mutableListOf<String>()
+        val controller = ConversationIdentityController(
+            scope = scope,
+            selectDraft = { persisted += requireNotNull(it) },
+            reloadConversation = { conversation(agentId = persisted.last()) },
+        )
+
+        controller.selectIdentity("a")
+        controller.selectIdentity("b")
+        assertTrue(controller.state.value.selectionPending)
+
+        dispatcher.runAll()
+
+        assertEquals(listOf("a", "b"), persisted)
+        assertEquals("b", controller.state.value.refreshedConversation?.agentId)
+        assertFalse(controller.state.value.selectionPending)
+        scope.cancel()
+    }
+
     @Test
     fun latestAcceptedIdentitySelectionWinsAndBlocksSendUntilItSettles() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
@@ -73,6 +99,51 @@ class ChatConversationControllerTest {
         assertEquals("b", controller.state.value.refreshedConversation?.agentId)
         assertFalse(controller.state.value.selectionPending)
         assertTrue(controller.canSend())
+        scope.cancel()
+    }
+
+    @Test
+    fun cancelledStaleSelectionDoesNotPublishFailureOrUnlockNewerSelection() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val firstStarted = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
+        val releaseSecond = CompletableDeferred<Unit>()
+        val controller = ConversationIdentityController(
+            scope = scope,
+            selectDraft = { agentId ->
+                when (agentId) {
+                    "a" -> {
+                        firstStarted.complete(Unit)
+                        releaseFirst.await()
+                        throw CancellationException("stale request cancelled")
+                    }
+                    "b" -> {
+                        secondStarted.complete(Unit)
+                        releaseSecond.await()
+                    }
+                }
+            },
+            reloadConversation = { conversation(agentId = "b") },
+        )
+
+        controller.selectIdentity("a")
+        runCurrent()
+        firstStarted.await()
+        controller.selectIdentity("b")
+        releaseFirst.complete(Unit)
+        runCurrent()
+        secondStarted.await()
+
+        assertTrue(controller.state.value.selectionPending)
+        assertEquals(null, controller.state.value.failure)
+        assertFalse(controller.canSend())
+
+        releaseSecond.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("b", controller.state.value.refreshedConversation?.agentId)
+        assertEquals(null, controller.state.value.failure)
         scope.cancel()
     }
 
@@ -137,6 +208,29 @@ class ChatConversationControllerTest {
         assertEquals("", controller.settleText(currentText = submitted, submittedText = submitted))
     }
 
+    @Test
+    fun blockedSubmitRetainsReplacementDraftAndClearsUnchangedDraft() = runTest {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val controller = ChatSendController(
+            enqueue = {
+                started.complete(Unit)
+                release.await()
+                entryFor(it.requestId)
+            },
+            requestExists = { false },
+        )
+        var currentText = "A"
+        val submit = async { controller.submit(request(requestId = "blocked", content = currentText)) }
+
+        started.await()
+        currentText = "B"
+        release.complete(Unit)
+        assertTrue(submit.await() is ChatSendSettlement.Accepted)
+        assertEquals("B", controller.settleText(currentText, "A"))
+        assertEquals("", controller.settleText("A", "A"))
+    }
+
     private fun request(requestId: String, content: String = "A"): EnqueueChatRequest = EnqueueChatRequest(
         requestId = requestId,
         conversationId = "c1",
@@ -175,4 +269,18 @@ class ChatConversationControllerTest {
         promptFinal = "",
         agentId = agentId,
     )
+
+    private class LifoDispatcher : CoroutineDispatcher() {
+        private val tasks = mutableListOf<Runnable>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            tasks += block
+        }
+
+        fun runAll() {
+            while (tasks.isNotEmpty()) {
+                tasks.removeAt(tasks.lastIndex).run()
+            }
+        }
+    }
 }
