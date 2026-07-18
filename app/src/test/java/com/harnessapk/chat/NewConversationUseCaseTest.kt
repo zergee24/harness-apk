@@ -2,7 +2,7 @@ package com.harnessapk.chat
 
 import com.harnessapk.agent.AgentStatus
 import com.harnessapk.agent.ConversationIdentityRepository
-import com.harnessapk.agent.ConversationIdentitySelection
+import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AgentChunkEntity
 import com.harnessapk.storage.AgentChunkFtsEntity
@@ -58,6 +58,26 @@ class NewConversationUseCaseTest {
         assertEquals("p1", created.projectId)
         assertEquals("a1", created.agentId)
         assertEquals(2, created.agentVersion)
+    }
+
+    @Test
+    fun assistantConversationPersistsEmptyIdentity() = runTest {
+        val id = useCase.create(identity = InitialConversationIdentity.Assistant)
+
+        val created = chatRepository.conversation(id)!!
+        assertEquals(null, created.agentId)
+        assertEquals(null, created.agentVersion)
+    }
+
+    @Test
+    fun explicitReadyAgentConversationPersistsCurrentActiveVersion() = runTest {
+        agentDao.rows["a1"] = readyAgent("a1", activeVersion = 4)
+
+        val id = useCase.create(identity = InitialConversationIdentity.Agent("a1"))
+
+        val created = chatRepository.conversation(id)!!
+        assertEquals("a1", created.agentId)
+        assertEquals(4, created.agentVersion)
     }
 }
 

@@ -1,6 +1,7 @@
 package com.harnessapk.chat
 
 import android.content.Context
+import android.database.sqlite.SQLiteConstraintException
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -12,6 +13,8 @@ import com.harnessapk.storage.AppDatabase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -66,6 +69,42 @@ class ChatExecutionRepositoryInstrumentedTest {
         assertEquals(4, database.conversationDao().findById(conversationId)!!.agentVersion)
         assertEquals(1, database.messageDao().listForConversation(conversationId).count { it.role == "USER" })
     }
+
+    @Test
+    fun enqueueRollsBackPinnedIdentityAndUserMessageWhenQueueInsertFails() = runBlocking {
+        database.agentDao().upsertAgent(readyAgent(id = "a1", activeVersion = 4))
+        val conversationId = chatRepository.createConversation(agentId = "a1", agentVersion = 1)
+        database.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER fail_chat_execution_entry_insert
+            BEFORE INSERT ON chat_execution_entries
+            BEGIN
+                SELECT RAISE(ABORT, 'queue insert failure');
+            END
+            """.trimIndent(),
+        )
+
+        try {
+            repository.enqueue(request(conversationId))
+            fail("Expected queue insert to fail")
+        } catch (error: SQLiteConstraintException) {
+            assertTrue(error.message.orEmpty().contains("queue insert failure"))
+        }
+
+        assertEquals(1, database.conversationDao().findById(conversationId)!!.agentVersion)
+        assertEquals(0, database.messageDao().countUserMessages(conversationId))
+        assertEquals(0, database.chatExecutionEntryDao().listForConversation(conversationId).size)
+    }
+
+    private fun request(conversationId: String) = EnqueueChatRequest(
+        conversationId = conversationId,
+        content = "第一条消息",
+        attachments = emptyList(),
+        providerId = null,
+        model = null,
+        reasoningEffort = defaultReasoningEffort(),
+        requestContext = ChatExecutionRequestContext(),
+    )
 
     private fun readyAgent(id: String, activeVersion: Int) = AgentEntity(
         id = id,
