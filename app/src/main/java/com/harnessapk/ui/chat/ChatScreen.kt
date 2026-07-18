@@ -703,7 +703,11 @@ fun ChatScreen(
                     ),
                 )
             } catch (cancelled: CancellationException) {
-                val landing = withContext(NonCancellable) { firstUserMessageLanding() }
+                val landing = if (isFirstUserMessage) {
+                    withContext(NonCancellable) { firstUserMessageLanding() }
+                } else {
+                    FirstUserMessageLanding.NOT_LANDED
+                }
                 val disposition = enqueueExceptionDisposition(
                     pending = firstMessagePending,
                     isFirstUserMessage = isFirstUserMessage,
@@ -729,7 +733,11 @@ fun ChatScreen(
                 }
                 throw cancelled
             } catch (error: Throwable) {
-                val landing = firstUserMessageLanding()
+                val landing = if (isFirstUserMessage) {
+                    firstUserMessageLanding()
+                } else {
+                    FirstUserMessageLanding.NOT_LANDED
+                }
                 val disposition = enqueueExceptionDisposition(
                     pending = firstMessagePending,
                     isFirstUserMessage = isFirstUserMessage,

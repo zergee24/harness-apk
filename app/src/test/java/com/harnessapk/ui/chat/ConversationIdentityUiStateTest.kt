@@ -129,7 +129,6 @@ class ConversationIdentityUiStateTest {
 
         assertFalse(disposition.pending)
         assertFalse(disposition.settlePersistedSend)
-        assertFalse(disposition.clearDraft)
         assertEquals(EnqueueExceptionPresentation.SEND_FAILURE, disposition.presentation)
     }
 
@@ -143,7 +142,6 @@ class ConversationIdentityUiStateTest {
 
         assertTrue(disposition.pending)
         assertTrue(disposition.settlePersistedSend)
-        assertTrue(disposition.clearDraft)
         assertEquals(EnqueueExceptionPresentation.QUEUED_WARNING, disposition.presentation)
     }
 
@@ -157,8 +155,20 @@ class ConversationIdentityUiStateTest {
 
         assertTrue(disposition.pending)
         assertFalse(disposition.settlePersistedSend)
-        assertFalse(disposition.clearDraft)
         assertEquals(EnqueueExceptionPresentation.UNKNOWN_WARNING, disposition.presentation)
+    }
+
+    @Test
+    fun laterMessageFailureIgnoresHistoricalUserLandingAndKeepsDraft() {
+        val disposition = enqueueExceptionDisposition(
+            pending = false,
+            isFirstUserMessage = false,
+            landing = FirstUserMessageLanding.LANDED,
+        )
+
+        assertFalse(disposition.pending)
+        assertFalse(disposition.settlePersistedSend)
+        assertEquals(EnqueueExceptionPresentation.SEND_FAILURE, disposition.presentation)
     }
 
     @Test

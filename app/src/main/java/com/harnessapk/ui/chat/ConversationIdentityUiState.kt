@@ -55,7 +55,6 @@ internal enum class EnqueueExceptionPresentation {
 internal data class EnqueueExceptionDisposition(
     val pending: Boolean,
     val settlePersistedSend: Boolean,
-    val clearDraft: Boolean,
     val presentation: EnqueueExceptionPresentation,
 )
 
@@ -63,7 +62,15 @@ internal fun enqueueExceptionDisposition(
     pending: Boolean,
     isFirstUserMessage: Boolean,
     landing: FirstUserMessageLanding,
-): EnqueueExceptionDisposition = when (landing) {
+): EnqueueExceptionDisposition {
+    if (!isFirstUserMessage) {
+        return EnqueueExceptionDisposition(
+            pending = pending,
+            settlePersistedSend = false,
+            presentation = EnqueueExceptionPresentation.SEND_FAILURE,
+        )
+    }
+    return when (landing) {
     FirstUserMessageLanding.NOT_LANDED -> EnqueueExceptionDisposition(
         pending = reduceFirstMessagePending(
             pending = pending,
@@ -71,7 +78,6 @@ internal fun enqueueExceptionDisposition(
             event = FirstMessagePendingEvent.ENQUEUE_FAILED,
         ),
         settlePersistedSend = false,
-        clearDraft = false,
         presentation = EnqueueExceptionPresentation.SEND_FAILURE,
     )
     FirstUserMessageLanding.LANDED -> EnqueueExceptionDisposition(
@@ -82,15 +88,14 @@ internal fun enqueueExceptionDisposition(
             firstUserMessageLanded = true,
         ),
         settlePersistedSend = true,
-        clearDraft = true,
         presentation = EnqueueExceptionPresentation.QUEUED_WARNING,
     )
     FirstUserMessageLanding.UNKNOWN -> EnqueueExceptionDisposition(
         pending = pending || isFirstUserMessage,
         settlePersistedSend = false,
-        clearDraft = false,
         presentation = EnqueueExceptionPresentation.UNKNOWN_WARNING,
     )
+    }
 }
 
 internal suspend fun settlePersistedSendThenRethrowCancellation(
