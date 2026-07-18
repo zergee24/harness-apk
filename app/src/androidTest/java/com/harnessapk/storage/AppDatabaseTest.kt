@@ -128,6 +128,48 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun storesAllLegalProjectAndAgentIdentityCombinations() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val combinations = listOf(
+            Triple<String?, String?, Int?>(null, null, null),
+            Triple("p1", null, null),
+            Triple(null, "a1", 1),
+            Triple("p1", "a1", 1),
+        )
+
+        combinations.forEachIndexed { index, (projectId, agentId, agentVersion) ->
+            db.conversationDao().insert(
+                ConversationEntity(
+                    id = "combination-$index",
+                    title = "组合测试 $index",
+                    createdAt = index.toLong(),
+                    updatedAt = index.toLong(),
+                    defaultProviderId = null,
+                    defaultModel = null,
+                    isArchived = false,
+                    projectId = projectId,
+                    promptOriginal = "",
+                    promptOptimized = "",
+                    promptFinal = "",
+                    agentId = agentId,
+                    agentVersion = agentVersion,
+                ),
+            )
+        }
+
+        val stored = db.conversationDao().observeActive().first().associateBy { it.id }
+        assertEquals(4, stored.size)
+        combinations.forEachIndexed { index, (projectId, agentId, agentVersion) ->
+            val conversation = requireNotNull(stored["combination-$index"])
+            assertEquals(projectId, conversation.projectId)
+            assertEquals(agentId, conversation.agentId)
+            assertEquals(agentVersion, conversation.agentVersion)
+        }
+        db.close()
+    }
+
+    @Test
     fun rejectsIdentityUpdateWhenConversationAlreadyHasUserMessage() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
