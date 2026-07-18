@@ -46,7 +46,6 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.harnessapk.HarnessApkApplication
-import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.chat.Conversation
 import com.harnessapk.ui.agent.AgentPackagesScreen
 import com.harnessapk.ui.chat.ChatScreen
@@ -56,7 +55,6 @@ import com.harnessapk.ui.git.GitSettingsScreen
 import com.harnessapk.ui.project.ProjectWorkbenchDestination
 import com.harnessapk.ui.project.ProjectScreen
 import com.harnessapk.ui.project.ProjectWorkbenchTarget
-import com.harnessapk.ui.project.projectSessionTitle
 import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
 import com.harnessapk.ui.settings.SettingsScreen
@@ -91,9 +89,6 @@ object Routes {
         append(chatRouteQuery(projectId = projectId, focusInput = focusInput, encode = Uri::encode))
     }
 }
-
-internal fun incomingAgentBundleDestination(hasUri: Boolean): String? =
-    Routes.AgentPackages.takeIf { hasUri }
 
 internal fun chatRouteQuery(
     projectId: String?,
@@ -133,6 +128,7 @@ fun HarnessApkApp(
     var currentProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
     var agentImportSourceProjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    var consumedExternalAgentBundleUri by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
@@ -143,8 +139,23 @@ fun HarnessApkApp(
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
 
+    fun dispatchAgentPackageImport(event: AgentPackageImportEvent) {
+        val transition = reduceAgentPackageImport(
+            state = AgentPackageImportState(
+                sourceProjectId = agentImportSourceProjectId,
+                consumedExternalBundleUri = consumedExternalAgentBundleUri,
+            ),
+            event = event,
+        )
+        agentImportSourceProjectId = transition.state.sourceProjectId
+        consumedExternalAgentBundleUri = transition.state.consumedExternalBundleUri
+        if (transition.navigateToPackages) navController.navigate(Routes.AgentPackages)
+    }
+
     LaunchedEffect(route) {
-        if (route != Routes.AgentPackages) agentImportSourceProjectId = null
+        dispatchAgentPackageImport(
+            AgentPackageImportEvent.RouteChanged(route == Routes.AgentPackages),
+        )
     }
 
     LaunchedEffect(container) {
@@ -175,16 +186,24 @@ fun HarnessApkApp(
     }
     val scope = rememberCoroutineScope()
     LaunchedEffect(incomingAgentBundleUri) {
-        incomingAgentBundleDestination(incomingAgentBundleUri != null)?.let { destination ->
-            agentImportSourceProjectId = currentProjectId.takeIf { mainMode == MainMode.PROJECT }
-            navController.navigate(destination)
+        val uri = incomingAgentBundleUri?.toString()
+        if (uri == null) {
+            dispatchAgentPackageImport(AgentPackageImportEvent.ExternalBundleConsumed)
+        } else {
+            dispatchAgentPackageImport(
+                AgentPackageImportEvent.ExternalBundleReceived(
+                    uri = uri,
+                    mainMode = mainMode,
+                    currentProjectId = currentProjectId,
+                ),
+            )
         }
     }
     val onCreateConversation: () -> Unit = {
         scope.launch {
             navController.navigate(
                 Routes.chat(
-                    conversationId = container.newConversationUseCase.create(),
+                    conversationId = container.newConversationUseCase.create(homeConversationRequest()),
                     focusInput = true,
                 ),
             )
@@ -221,7 +240,16 @@ fun HarnessApkApp(
                     title = { Text(title) },
                     navigationIcon = {
                         if (canGoBack) {
-                            IconButton(onClick = { navController.popBackStack() }) {
+                            IconButton(
+                                onClick = {
+                                    if (route == Routes.AgentPackages) {
+                                        dispatchAgentPackageImport(
+                                            AgentPackageImportEvent.RouteChanged(isAgentPackagesRoute = false),
+                                        )
+                                    }
+                                    navController.popBackStack()
+                                },
+                            ) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                             }
                         }
@@ -262,10 +290,8 @@ fun HarnessApkApp(
                         },
                         onCreateSession = { project ->
                             scope.launch {
-                                val conversationId = container.newConversationUseCase.create(
-                                    title = projectSessionTitle(project.name, null),
-                                    projectId = project.id,
-                                )
+                                val request = projectConversationRequest(project.id, project.name)
+                                val conversationId = container.newConversationUseCase.create(request)
                                 navController.navigate(
                                     Routes.chat(
                                         conversationId = conversationId,
@@ -323,7 +349,10 @@ fun HarnessApkApp(
                     onOpenVoice = { navController.navigate(Routes.Voice) },
                     onOpenGit = { navController.navigate(Routes.Git) },
                     onOpenSkills = { navController.navigate(Routes.Skills) },
-                    onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
+                    onOpenAgentPackages = {
+                        dispatchAgentPackageImport(AgentPackageImportEvent.SettingsOpened)
+                        navController.navigate(Routes.AgentPackages)
+                    },
                     onOpenUpdates = { navController.navigate(Routes.Updates) },
                     showUpdateBadge = showUpdateBadge,
                 )
@@ -348,25 +377,21 @@ fun HarnessApkApp(
                     externalImportUri = incomingAgentBundleUri,
                     onExternalImportConsumed = onIncomingAgentBundleUriConsumed,
                     onStartConversation = { agent ->
+                        val request = installedAgentConversationRequest(agent, agentImportSourceProjectId)
+                        dispatchAgentPackageImport(AgentPackageImportEvent.StartConversation)
                         scope.launch {
-                            val projectId = agentImportSourceProjectId
-                            agentImportSourceProjectId = null
-                            val conversationId = container.newConversationUseCase.create(
-                                title = agent.name,
-                                projectId = projectId,
-                                identity = InitialConversationIdentity.Agent(agent.id),
-                            )
+                            val conversationId = container.newConversationUseCase.create(request)
                             navController.navigate(
                                 Routes.chat(
                                     conversationId = conversationId,
-                                    projectId = projectId,
+                                    projectId = request.projectId,
                                     focusInput = true,
                                 ),
                             )
                         }
                     },
                     onDone = {
-                        agentImportSourceProjectId = null
+                        dispatchAgentPackageImport(AgentPackageImportEvent.Done)
                         navController.popBackStack()
                     },
                 )

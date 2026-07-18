@@ -10,11 +10,6 @@ import java.io.File
 
 class HarnessApkAppStateTest {
     @Test
-    fun externalBundleNavigatesDirectlyToPackageImport() {
-        assertEquals(Routes.AgentPackages, incomingAgentBundleDestination(hasUri = true))
-    }
-
-    @Test
     fun chatTopBarTitleUsesCurrentConversationTitle() {
         val conversations = listOf(
             conversation(id = "c1", title = "圆柱罐体讨论"),
@@ -57,11 +52,19 @@ class HarnessApkAppStateTest {
     }
 
     @Test
-    fun homeAndProjectConversationCreationUseSharedUseCase() {
-        val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
+    fun homeConversationRequestUsesSuggestedIdentityWithoutProject() {
+        assertEquals(
+            NewConversationRequest(),
+            homeConversationRequest(),
+        )
+    }
 
-        assertTrue(source.contains("container.newConversationUseCase.create("))
-        assertFalse(source.contains("container.chatRepository.createConversation("))
+    @Test
+    fun projectConversationRequestUsesProjectTitleAndProjectId() {
+        assertEquals(
+            NewConversationRequest(title = "移动端 Harness · 项目会话", projectId = "project-1"),
+            projectConversationRequest(projectId = "project-1", projectName = "移动端 Harness"),
+        )
     }
 
     @Test
