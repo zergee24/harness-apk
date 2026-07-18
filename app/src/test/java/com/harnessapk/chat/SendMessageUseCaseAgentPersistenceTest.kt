@@ -94,11 +94,46 @@ class SendMessageUseCaseAgentPersistenceTest {
         }
     }
 
+    @Test
+    fun executeKeepsSourcesAndNonTextPartsWhenFinalSourceWriteFails() = runTest {
+        executeAndReadParts(
+            response = "最终回答[资料1]",
+            agentContext = agentContext(
+                evidence = listOf(AgentEvidence("chunk-1", "实践论", "第一章", "调查先于结论。", 8)),
+            ),
+            failureAfterSourceWrite = IllegalStateException("final source write failed"),
+            includeToolResult = true,
+        ).also { (status, parts) ->
+            assertEquals(MessageStatus.FAILED, status)
+            assertEquals("最终回答", parts.first { it.type == UiMessagePartType.TEXT }.content)
+            assertEquals("[资料9]", parts.first { it.type == UiMessagePartType.TOOL_RESULT }.content)
+            assertEquals(UiMessagePartType.AGENT_SOURCES, parts.last().type)
+        }
+    }
+
+    @Test
+    fun executeKeepsSourcesAndMarksCancelledWhenFinalSourceWriteCancels() = runTest {
+        executeAndReadParts(
+            response = "最终回答[资料1]",
+            agentContext = agentContext(
+                evidence = listOf(AgentEvidence("chunk-1", "实践论", "第一章", "调查先于结论。", 8)),
+            ),
+            failureAfterSourceWrite = CancellationException("final source write cancelled"),
+        ).also { (status, parts) ->
+            assertEquals(MessageStatus.CANCELLED, status)
+            assertEquals("最终回答", parts.first { it.type == UiMessagePartType.TEXT }.content)
+            assertEquals(UiMessagePartType.AGENT_SOURCES, parts.last().type)
+            assertTrue(parts.all { it.stable })
+        }
+    }
+
     private suspend fun executeAndReadParts(
         response: String,
         agentContext: AgentRuntimeContext?,
         malformedAfterText: Boolean = false,
         cancelAfterText: Boolean = false,
+        failureAfterSourceWrite: Throwable? = null,
+        includeToolResult: Boolean = false,
     ): Pair<MessageStatus, List<UiMessagePartDraft>> {
         val server = MockWebServer()
         server.enqueue(
@@ -111,7 +146,8 @@ class SendMessageUseCaseAgentPersistenceTest {
         )
         server.start()
         try {
-            val repository = inMemoryChatRepository()
+            val store = inMemoryChatStore(failureAfterSourceWrite)
+            val repository = store.repository
             val conversationId = repository.createConversation()
             val userMessageId = repository.insertUserMessage(conversationId, "怎么做", emptyList())
             val useCase = SendMessageUseCase(
@@ -128,7 +164,11 @@ class SendMessageUseCaseAgentPersistenceTest {
                                 if (cancelAfterText && event is StreamEvent.Finished) {
                                     throw CancellationException("test cancellation")
                                 }
-                                return listOf(event)
+                                return if (includeToolResult && event is StreamEvent.TextDelta) {
+                                    listOf(event, StreamEvent.ToolResult("tool-1", "[资料9]"))
+                                } else {
+                                    listOf(event)
+                                }
                             }
                         }),
                     )
@@ -162,7 +202,7 @@ class SendMessageUseCaseAgentPersistenceTest {
                 )
             }
 
-            if (!malformedAfterText && !cancelAfterText) {
+            if (!malformedAfterText && !cancelAfterText && failureAfterSourceWrite == null) {
                 assertEquals(ChatExecutionStatus.SUCCEEDED, result.status)
             }
             val assistantId = requireNotNull(result.assistantMessageId)
@@ -177,14 +217,23 @@ class SendMessageUseCaseAgentPersistenceTest {
         AgentRuntimeContext("agent-1", 1, "人格提示词", evidence)
 }
 
-private fun inMemoryChatRepository(): ChatRepository = ChatRepository(
-    conversationDao = ExecuteConversationDao(),
-    messageDao = ExecuteMessageDao(),
-    messagePartDao = ExecuteMessagePartDao(),
-    attachmentDao = ExecuteMessageAttachmentDao(),
-    memoryDao = ExecuteConversationMemoryDao(),
-    timeProvider = TimeProvider { 1L },
+private data class ExecuteChatStore(
+    val repository: ChatRepository,
 )
+
+private fun inMemoryChatStore(failureAfterSourceWrite: Throwable? = null): ExecuteChatStore {
+    val messagePartDao = ExecuteMessagePartDao(failureAfterSourceWrite)
+    return ExecuteChatStore(
+        repository = ChatRepository(
+            conversationDao = ExecuteConversationDao(),
+            messageDao = ExecuteMessageDao(),
+            messagePartDao = messagePartDao,
+            attachmentDao = ExecuteMessageAttachmentDao(),
+            memoryDao = ExecuteConversationMemoryDao(),
+            timeProvider = TimeProvider { 1L },
+        ),
+    )
+}
 
 private fun providerRepository(server: MockWebServer): ProviderRepository = ProviderRepository(
     dao = ExecuteProviderProfileDao().apply {
@@ -236,13 +285,25 @@ private class ExecuteMessageDao : MessageDao {
     override suspend fun deleteForConversation(conversationId: String) { rows.entries.removeIf { it.value.conversationId == conversationId } }
 }
 
-private class ExecuteMessagePartDao : MessagePartDao {
+private class ExecuteMessagePartDao(
+    private var failureAfterSourceWrite: Throwable? = null,
+) : MessagePartDao {
     private val rows = linkedMapOf<String, MessagePartEntity>()
     override fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>> = MutableStateFlow(rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex })
     override suspend fun listForMessage(messageId: String) = rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex }
     override suspend fun insertAll(parts: List<MessagePartEntity>) { parts.forEach { rows[it.id] = it } }
     override suspend fun deleteForMessage(messageId: String) { rows.entries.removeIf { it.value.messageId == messageId } }
     override suspend fun markStableForMessage(messageId: String, updatedAt: Long) { rows.replaceAll { _, value -> if (value.messageId == messageId) value.copy(stable = true, updatedAt = updatedAt) else value } }
+    override suspend fun replaceForMessage(messageId: String, parts: List<MessagePartEntity>) {
+        deleteForMessage(messageId)
+        insertAll(parts)
+        if (parts.any { it.type == UiMessagePartType.AGENT_SOURCES.name }) {
+            failureAfterSourceWrite?.let { failure ->
+                failureAfterSourceWrite = null
+                throw failure
+            }
+        }
+    }
 }
 
 private class ExecuteMessageAttachmentDao : MessageAttachmentDao {

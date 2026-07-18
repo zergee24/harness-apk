@@ -38,7 +38,7 @@ internal fun sanitizeAgentCitationMarkers(
 ): StreamingMessageSnapshot = snapshot.copy(
     parts = snapshot.parts.map { part ->
         if (part.type == UiMessagePartType.TEXT) {
-            part.copy(content = part.content.replace(Regex("""\s*\[资料\s*\d+\]"""), ""))
+            part.copy(content = part.content.replace(Regex("""\[资料\s*\d+\]"""), ""))
         } else {
             part
         }

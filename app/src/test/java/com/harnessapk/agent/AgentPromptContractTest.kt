@@ -64,6 +64,25 @@ class AgentPromptContractTest {
         assertEquals("[资料4]", sanitized.parts[2].content)
     }
 
+    @Test
+    fun sanitizerPreservesWhitespaceAroundMarkers() {
+        val snapshot = StreamingMessageSnapshot(
+            status = MessageStatus.SUCCEEDED,
+            parts = listOf(
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.TEXT,
+                    content = "First [资料1]second\n[资料 2]段二。[资料3][资料 4]",
+                    stable = true,
+                ),
+            ),
+        )
+
+        val sanitized = sanitizeAgentCitationMarkers(snapshot)
+
+        assertEquals("First second\n段二。", sanitized.legacyVisibleText())
+    }
+
     private fun version() = AgentVersionEntity(
         agentId = "agent-1",
         version = 1,

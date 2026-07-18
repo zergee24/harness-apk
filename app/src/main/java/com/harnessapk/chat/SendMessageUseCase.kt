@@ -136,6 +136,7 @@ class SendMessageUseCase(
         var streamClock: TimeMark? = null
         var agentContext: AgentRuntimeContext? = null
         var latestSnapshot: StreamingMessageSnapshot? = null
+        var streamCompleted = false
         val traceId = UUID.randomUUID().toString()
         val startedAtMillis = System.currentTimeMillis()
         var flushCount = 0
@@ -197,6 +198,7 @@ class SendMessageUseCase(
 
             var retriesUsed = 0
             while (true) {
+                streamCompleted = false
                 val activeStreamClock = TimeSource.Monotonic.markNow()
                 val activeAccumulator = StreamingMessageAccumulator()
                 streamClock = activeStreamClock
@@ -216,6 +218,7 @@ class SendMessageUseCase(
                             }
                         }
                     }
+                    streamCompleted = true
                     break
                 } catch (error: Throwable) {
                     if (!currentCoroutineContext().isActive ||
@@ -249,10 +252,14 @@ class SendMessageUseCase(
             )
         } catch (cancelled: CancellationException) {
             assistantId?.let { id ->
-                val cancelledSnapshot = cancelStreamingSnapshot(
-                    accumulator = accumulator,
-                    nowMillis = streamClock?.elapsedNow()?.inWholeMilliseconds ?: 0L,
-                )
+                val cancelledSnapshot = if (streamCompleted) {
+                    latestSnapshot?.toCancelledSnapshot()
+                } else {
+                    cancelStreamingSnapshot(
+                        accumulator = accumulator,
+                        nowMillis = streamClock?.elapsedNow()?.inWholeMilliseconds ?: 0L,
+                    )
+                }
                 if (cancelledSnapshot == null) {
                     chatRepository.markAssistantCancelled(id)
                 } else {
@@ -270,7 +277,11 @@ class SendMessageUseCase(
                 requestModel,
             )
             if (assistantId != null && agentContext != null) {
-                val failedSnapshot = accumulator?.snapshot() ?: latestSnapshot
+                val failedSnapshot = if (streamCompleted) {
+                    latestSnapshot
+                } else {
+                    accumulator?.snapshot() ?: latestSnapshot
+                }
                 failedSnapshot?.let {
                     chatRepository.replaceMessagePartsFromSnapshot(
                         failedAssistantId,
@@ -421,6 +432,11 @@ internal fun cancelStreamingSnapshot(
     nowMillis: Long,
 ): StreamingMessageSnapshot? =
     accumulator?.cancel(nowMillis)?.snapshot
+
+private fun StreamingMessageSnapshot.toCancelledSnapshot(): StreamingMessageSnapshot = copy(
+    status = MessageStatus.CANCELLED,
+    parts = parts.map { part -> part.copy(stable = true) },
+)
 
 data class ChatRuntimeDiagnostics(
     val traceId: String,
