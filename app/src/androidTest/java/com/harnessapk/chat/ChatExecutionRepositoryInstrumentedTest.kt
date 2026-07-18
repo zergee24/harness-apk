@@ -18,6 +18,7 @@ import com.harnessapk.storage.AppDatabase
 import com.harnessapk.ui.chat.ChatSendController
 import com.harnessapk.ui.chat.ChatSendSettlement
 import com.harnessapk.websearch.JinaWebSearchClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -164,6 +165,30 @@ class ChatExecutionRepositoryInstrumentedTest {
     }
 
     @Test
+    fun coordinatorPropagatesPostCommitSchedulingCancellationForExactRequestSettlement() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val originalCancellation = CancellationException("schedule cancelled")
+        val coordinator = coordinatorThatFailsScheduling { throw originalCancellation }
+        val controller = ChatSendController(
+            enqueue = coordinator::enqueue,
+            requestExists = { requestId -> repository.entry(requestId) != null },
+        )
+        val request = request(conversationId).copy(requestId = "cancelled-scheduled")
+        try {
+            val settlement = controller.submit(request)
+
+            assertTrue(settlement is ChatSendSettlement.Cancelled)
+            settlement as ChatSendSettlement.Cancelled
+            assertTrue(settlement.persisted)
+            assertTrue(settlement.cancellation === originalCancellation)
+            assertEquals(1, database.chatExecutionEntryDao().listForConversation(conversationId).size)
+            assertEquals(1, database.messageDao().countUserMessages(conversationId))
+        } finally {
+            coordinator.close()
+        }
+    }
+
+    @Test
     fun enqueueRollsBackPinnedIdentityAndUserMessageWhenQueueInsertFails() = runBlocking {
         database.agentDao().upsertAgent(readyAgent(id = "a1", activeVersion = 4))
         val conversationId = chatRepository.createConversation(agentId = "a1", agentVersion = 1)
@@ -199,7 +224,9 @@ class ChatExecutionRepositoryInstrumentedTest {
         requestContext = ChatExecutionRequestContext(),
     )
 
-    private fun coordinatorThatFailsScheduling(): ChatExecutionCoordinator {
+    private fun coordinatorThatFailsScheduling(
+        onWorkScheduled: () -> Unit = { throw IllegalStateException("schedule failure") },
+    ): ChatExecutionCoordinator {
         val dispatchers = AppDispatchers(
             io = Dispatchers.IO,
             default = Dispatchers.IO,
@@ -223,7 +250,7 @@ class ChatExecutionRepositoryInstrumentedTest {
             webSearchClient = JinaWebSearchClient(OkHttpClient()),
             attachmentStore = QueuedAttachmentStore(context),
             dispatchers = dispatchers,
-            onWorkScheduled = { throw IllegalStateException("schedule failure") },
+            onWorkScheduled = onWorkScheduled,
         )
     }
 

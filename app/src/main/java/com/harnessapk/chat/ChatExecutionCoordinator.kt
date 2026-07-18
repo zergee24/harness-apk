@@ -48,9 +48,12 @@ class ChatExecutionCoordinator(
         val persistedAttachments = request.attachments.map(attachmentStore::persist)
         val entry = executionRepository.enqueue(request.copy(attachments = persistedAttachments))
         withContext(NonCancellable) {
-            runCatching {
+            try {
                 ensureRunner(entry.conversationId)
                 onWorkScheduled()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
             }
         }
         entry
