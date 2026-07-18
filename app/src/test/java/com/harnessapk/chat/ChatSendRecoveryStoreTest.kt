@@ -59,7 +59,7 @@ class ChatSendRecoveryStoreTest {
         val screenBRequest = store.observe("c1").first()
         assertEquals("r1", screenBRequest?.requestId)
         assertEquals(ChatSendRequestPhase.LANDED, screenBRequest?.phase)
-        assertTrue(store.acknowledgeTerminal("c1", "r1"))
+        assertEquals("r1", store.consumeTerminal("c1", "r1")?.requestId)
         assertNull(store.current("c1"))
         managerScope.cancel()
     }
@@ -101,15 +101,15 @@ class ChatSendRecoveryStoreTest {
     }
 
     @Test
-    fun oldTerminalRequestCannotOverwriteOrClearNewerRequest() {
+    fun oldTerminalRequestCannotConsumeNewerRequest() {
         val store = ChatSendRecoveryStore()
         assertTrue(store.start("c1", request("old")))
         assertTrue(store.markLanded("c1", "old"))
-        assertTrue(store.acknowledgeTerminal("c1", "old"))
+        assertEquals("old", store.consumeTerminal("c1", "old")?.requestId)
         assertTrue(store.start("c1", request("new")))
 
         assertFalse(store.markNotLanded("c1", "old", IllegalStateException("old"), null))
-        assertFalse(store.acknowledgeTerminal("c1", "old"))
+        assertNull(store.consumeTerminal("c1", "old"))
         assertEquals("new", store.current("c1")?.requestId)
         assertEquals(ChatSendRequestPhase.IN_FLIGHT, store.current("c1")?.phase)
     }
@@ -136,27 +136,33 @@ class ChatSendRecoveryStoreTest {
     }
 
     @Test
-    fun acknowledgeRejectsInFlightAndUnknownButAcceptsOnlyTheExactTerminalRequest() {
+    fun consumeRejectsInFlightAndUnknownButAcceptsOnlyTheExactTerminalRequest() {
         val store = ChatSendRecoveryStore()
         val failure = IllegalStateException("enqueue")
         assertTrue(store.start("c1", request("in-flight")))
-        assertFalse(store.acknowledgeTerminal("c1", "in-flight"))
+        assertNull(store.consumeTerminal("c1", "in-flight"))
         assertTrue(store.markUnknown("c1", "in-flight", failure, null, IllegalStateException("lookup")))
-        assertFalse(store.acknowledgeTerminal("c1", "in-flight"))
+        assertNull(store.consumeTerminal("c1", "in-flight"))
         assertTrue(store.markNotLanded("c1", "in-flight", failure, null))
-        assertFalse(store.acknowledgeTerminal("c1", "other"))
-        assertTrue(store.acknowledgeTerminal("c1", "in-flight"))
+        assertNull(store.consumeTerminal("c1", "other"))
+        assertEquals("in-flight", store.consumeTerminal("c1", "in-flight")?.requestId)
     }
 
     @Test
-    fun currentDraftSnapshotUpdatesOnlyWhileTheExactRequestIsActive() {
+    fun terminalConsumeReturnsTheLatestTextSnapshotAndRejectsOldOrNonTerminalRequests() {
         val store = ChatSendRecoveryStore()
         assertTrue(store.start("c1", request("request")))
         assertTrue(store.updateCurrentDraft("c1", "request", "B", null, "image/png"))
         assertEquals("B", store.current("c1")?.currentDraftText)
         assertTrue(store.markLanded("c1", "request"))
-        assertFalse(store.updateCurrentDraft("c1", "request", "C", null, "image/png"))
-        assertEquals("B", store.current("c1")?.currentDraftText)
+        assertTrue(store.updateCurrentDraft("c1", "request", "C", null, "image/png"))
+        assertEquals("C", store.consumeTerminal("c1", "request")?.currentDraftText)
+        assertNull(store.consumeTerminal("c1", "request"))
+
+        assertTrue(store.start("c1", request("not-landed")))
+        assertTrue(store.markNotLanded("c1", "not-landed", IllegalStateException("enqueue"), null))
+        assertTrue(store.updateCurrentDraft("c1", "not-landed", "B", null, "image/png"))
+        assertEquals("B", store.consumeTerminal("c1", "not-landed")?.currentDraftText)
     }
 
     private fun manager(

@@ -72,7 +72,7 @@ class ChatSendRecoveryStore {
     ): Boolean = transitionIfRequest(
         conversationId = conversationId,
         expectedRequestId = expectedRequestId,
-        allowedPhases = setOf(ChatSendRequestPhase.IN_FLIGHT, ChatSendRequestPhase.UNKNOWN),
+        allowedPhases = ChatSendRequestPhase.entries.toSet(),
     ) { current ->
         current.copy(
             phase = ChatSendRequestPhase.LANDED,
@@ -107,7 +107,7 @@ class ChatSendRecoveryStore {
     ): Boolean = transitionIfRequest(
         conversationId = conversationId,
         expectedRequestId = expectedRequestId,
-        allowedPhases = setOf(ChatSendRequestPhase.IN_FLIGHT, ChatSendRequestPhase.UNKNOWN),
+        allowedPhases = ChatSendRequestPhase.entries.toSet(),
     ) { current ->
         current.copy(
             currentDraftText = text,
@@ -116,14 +116,14 @@ class ChatSendRecoveryStore {
         )
     }
 
-    fun acknowledgeTerminal(conversationId: String, expectedRequestId: String): Boolean = synchronized(lock) {
-        val current = states.value[conversationId] ?: return@synchronized false
+    fun consumeTerminal(conversationId: String, expectedRequestId: String): ChatSendRequestState? = synchronized(lock) {
+        val current = states.value[conversationId] ?: return@synchronized null
         if (
             current.requestId != expectedRequestId ||
             current.phase !in setOf(ChatSendRequestPhase.LANDED, ChatSendRequestPhase.NOT_LANDED)
-        ) return@synchronized false
+        ) return@synchronized null
         states.value = states.value - conversationId
-        true
+        current
     }
 
     private fun transitionIfRequest(

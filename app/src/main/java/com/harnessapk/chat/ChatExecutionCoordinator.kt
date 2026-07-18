@@ -14,6 +14,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -87,8 +88,8 @@ class ChatExecutionCoordinator(
         }
     }
 
-    fun close() {
-        scope.cancel()
+    suspend fun close() {
+        scope.coroutineContext[Job]?.cancelAndJoin()
     }
 
     private suspend fun restartConversation(conversationId: String) {

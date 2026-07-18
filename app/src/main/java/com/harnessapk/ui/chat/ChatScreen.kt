@@ -788,17 +788,16 @@ fun ChatScreen(
             ChatSendRequestPhase.IN_FLIGHT -> Unit
             ChatSendRequestPhase.UNKNOWN -> sessionStatus = "消息状态待确认，请勿重复发送"
             ChatSendRequestPhase.LANDED -> {
-                if (container.chatSendRecoveryStore.current(conversationId)?.requestId != request.requestId) {
-                    return@LaunchedEffect
-                }
+                val consumed = container.chatSendRecoveryStore.consumeTerminal(conversationId, request.requestId)
+                    ?: return@LaunchedEffect
                 val terminalDraft = reduceTerminalDraft(
-                    phase = request.phase,
-                    submittedText = request.submittedText,
-                    submittedImage = request.submittedImage,
-                    submittedMimeType = request.submittedMimeType,
-                    currentText = request.currentDraftText,
-                    currentImage = request.currentDraftImage,
-                    currentMimeType = request.currentDraftMimeType,
+                    phase = consumed.phase,
+                    submittedText = consumed.submittedText,
+                    submittedImage = consumed.submittedImage,
+                    submittedMimeType = consumed.submittedMimeType,
+                    currentText = consumed.currentDraftText,
+                    currentImage = consumed.currentDraftImage,
+                    currentMimeType = consumed.currentDraftMimeType,
                 )
                 text = terminalDraft.text
                 selectedImage = terminalDraft.image
@@ -806,48 +805,45 @@ fun ChatScreen(
                 persistedUserMessage = true
                 firstMessagePending = reduceFirstMessagePending(
                     pending = firstMessagePending,
-                    isFirstUserMessage = request.isFirstUserMessage,
+                    isFirstUserMessage = consumed.isFirstUserMessage,
                     event = FirstMessagePendingEvent.USER_OBSERVED,
                 )
                 sessionStatus = null
-                val problems = settlePersistedSend(request.submittedImage)
+                val problems = settlePersistedSend(consumed.submittedImage)
                 reportPostPersistProblems(
-                    prefix = if (request.originalFailure == null) "消息已发送"
+                    prefix = if (consumed.originalFailure == null) "消息已发送"
                     else "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
                     problems = problems,
-                    alwaysReport = request.originalFailure != null,
+                    alwaysReport = consumed.originalFailure != null,
                 )
-                container.chatSendRecoveryStore.acknowledgeTerminal(conversationId, request.requestId)
             }
             ChatSendRequestPhase.NOT_LANDED -> {
-                if (container.chatSendRecoveryStore.current(conversationId)?.requestId != request.requestId) {
-                    return@LaunchedEffect
-                }
+                val consumed = container.chatSendRecoveryStore.consumeTerminal(conversationId, request.requestId)
+                    ?: return@LaunchedEffect
                 val terminalDraft = reduceTerminalDraft(
-                    phase = request.phase,
-                    submittedText = request.submittedText,
-                    submittedImage = request.submittedImage,
-                    submittedMimeType = request.submittedMimeType,
-                    currentText = request.currentDraftText,
-                    currentImage = request.currentDraftImage,
-                    currentMimeType = request.currentDraftMimeType,
+                    phase = consumed.phase,
+                    submittedText = consumed.submittedText,
+                    submittedImage = consumed.submittedImage,
+                    submittedMimeType = consumed.submittedMimeType,
+                    currentText = consumed.currentDraftText,
+                    currentImage = consumed.currentDraftImage,
+                    currentMimeType = consumed.currentDraftMimeType,
                 )
                 text = terminalDraft.text
                 selectedImage = terminalDraft.image
                 selectedMimeType = terminalDraft.mimeType
-                if (request.submittedImage != null && request.currentDraftImage != request.submittedImage) {
-                    scope.launch { container.chatImageStore.deleteIfManaged(request.submittedImage) }
+                if (consumed.submittedImage != null && consumed.currentDraftImage != consumed.submittedImage) {
+                    scope.launch { container.chatImageStore.deleteIfManaged(consumed.submittedImage) }
                 }
                 firstMessagePending = reduceFirstMessagePending(
                     pending = firstMessagePending,
-                    isFirstUserMessage = request.isFirstUserMessage,
+                    isFirstUserMessage = consumed.isFirstUserMessage,
                     event = FirstMessagePendingEvent.ENQUEUE_FAILED,
                 )
-                errorText = request.cancellation?.let { "消息未发送，已取消" }
-                    ?: request.originalFailure?.toUserMessage()
+                errorText = consumed.cancellation?.let { "消息未发送，已取消" }
+                    ?: consumed.originalFailure?.toUserMessage()
                     ?: "消息发送失败"
                 sessionStatus = null
-                container.chatSendRecoveryStore.acknowledgeTerminal(conversationId, request.requestId)
             }
         }
     }

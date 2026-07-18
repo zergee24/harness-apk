@@ -438,6 +438,22 @@ class ChatConversationControllerTest {
         )
     }
 
+    @Test
+    fun consumedTerminalDraftDoesNotOverwriteLaterLocalEdit() {
+        var localText = terminalDraft(
+            phase = ChatSendRequestPhase.LANDED,
+            submittedText = "A",
+            submittedImage = null,
+            currentText = "A",
+            currentImage = null,
+            currentMimeType = "image/png",
+        ).text
+
+        localText = "B"
+
+        assertEquals("B", localText)
+    }
+
     private fun request(requestId: String, content: String = "A"): EnqueueChatRequest = EnqueueChatRequest(
         requestId = requestId,
         conversationId = "c1",
