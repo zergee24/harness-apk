@@ -39,6 +39,24 @@ interface ConversationDao {
     @Update
     suspend fun update(entity: ConversationEntity)
 
+    @Query(
+        """
+        UPDATE conversations
+        SET agentId = :agentId, agentVersion = :agentVersion, updatedAt = :updatedAt
+        WHERE id = :id
+          AND NOT EXISTS (
+              SELECT 1 FROM messages
+              WHERE conversationId = :id AND role = 'USER'
+          )
+        """,
+    )
+    suspend fun updateIdentityIfNoUserMessages(
+        id: String,
+        agentId: String?,
+        agentVersion: Int?,
+        updatedAt: Long,
+    ): Int
+
     @Query("UPDATE conversations SET isArchived = 1, updatedAt = :updatedAt WHERE id = :id")
     suspend fun archive(id: String, updatedAt: Long)
 }

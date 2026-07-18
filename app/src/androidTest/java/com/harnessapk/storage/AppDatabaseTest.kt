@@ -128,6 +128,55 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun rejectsIdentityUpdateWhenConversationAlreadyHasUserMessage() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val conversation = ConversationEntity(
+            id = "identity-locked",
+            title = "身份锁定测试",
+            createdAt = 1L,
+            updatedAt = 1L,
+            defaultProviderId = null,
+            defaultModel = null,
+            isArchived = false,
+            projectId = null,
+            promptOriginal = "",
+            promptOptimized = "",
+            promptFinal = "",
+            agentId = "agent-1",
+            agentVersion = 1,
+        )
+        db.conversationDao().insert(conversation)
+        db.messageDao().insert(
+            MessageEntity(
+                id = "user-1",
+                conversationId = conversation.id,
+                role = MessageRole.USER.name,
+                content = "你好",
+                status = MessageStatus.SUCCEEDED.name,
+                providerId = null,
+                model = null,
+                createdAt = 2L,
+                updatedAt = 2L,
+                errorCode = null,
+                errorMessage = null,
+            ),
+        )
+
+        val updated = db.conversationDao().updateIdentityIfNoUserMessages(
+            id = conversation.id,
+            agentId = "agent-2",
+            agentVersion = 2,
+            updatedAt = 3L,
+        )
+
+        assertEquals(0, updated)
+        assertEquals("agent-1", db.conversationDao().findById(conversation.id)!!.agentId)
+        assertEquals(1, db.conversationDao().findById(conversation.id)!!.agentVersion)
+        db.close()
+    }
+
+    @Test
     fun storesConversationMemory() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()

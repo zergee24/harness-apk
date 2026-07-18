@@ -128,6 +128,16 @@ private class NewConversationFakeConversationDao : ConversationDao {
         rows.values.filter { it.projectId == projectId && it.agentId != null }.maxByOrNull { it.updatedAt }
     override suspend fun insert(entity: ConversationEntity) { rows[entity.id] = entity }
     override suspend fun update(entity: ConversationEntity) { rows[entity.id] = entity }
+    override suspend fun updateIdentityIfNoUserMessages(
+        id: String,
+        agentId: String?,
+        agentVersion: Int?,
+        updatedAt: Long,
+    ): Int {
+        val conversation = rows[id] ?: return 0
+        rows[id] = conversation.copy(agentId = agentId, agentVersion = agentVersion, updatedAt = updatedAt)
+        return 1
+    }
     override suspend fun archive(id: String, updatedAt: Long) = Unit
 }
 

@@ -46,6 +46,38 @@ class ConversationIdentityUiStateTest {
         assertEquals(listOf(null, "ready"), state.options.map { it.agentId })
     }
 
+    @Test
+    fun pendingFirstMessageLocksIdentityBeforeMessagesFlowUpdates() {
+        val state = conversationIdentityUiState(
+            conversation(agentId = "a1"),
+            emptyList(),
+            listOf(agent("a1")),
+            firstMessagePending = true,
+        )
+
+        assertFalse(state.mutable)
+        assertEquals("a1", state.selectedAgentId)
+    }
+
+    @Test
+    fun lockedIdentityKeepsPinnedAgentWhenAgentIsMissingOrNotReady() {
+        val missing = conversationIdentityUiState(
+            conversation(agentId = "missing"),
+            listOf(userMessage("m1")),
+            emptyList(),
+        )
+        val disabled = conversationIdentityUiState(
+            conversation(agentId = "disabled"),
+            listOf(userMessage("m1")),
+            listOf(agent("disabled", status = AgentStatus.DRAFT)),
+        )
+
+        assertEquals("missing", missing.selectedAgentId)
+        assertEquals("已安装人物", missing.selectedName)
+        assertEquals("disabled", disabled.selectedAgentId)
+        assertEquals("李德胜", disabled.selectedName)
+    }
+
     private fun conversation(agentId: String? = null): Conversation = Conversation(
         id = "c1",
         title = "会话",

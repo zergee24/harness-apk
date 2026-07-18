@@ -23,16 +23,27 @@ internal fun conversationIdentityUiState(
     conversation: Conversation?,
     messages: List<ChatMessage>,
     agents: List<Agent>,
+    firstMessagePending: Boolean = false,
 ): ConversationIdentityUiState {
     val options = listOf(ConversationIdentityOption(null, "普通助手", null)) +
         agents.filter { it.status == AgentStatus.READY }.map {
             ConversationIdentityOption(it.id, it.name, it.activeVersion)
         }
-    val selected = options.firstOrNull { it.agentId == conversation?.agentId } ?: options.first()
+    val mutable = !firstMessagePending && messages.none { it.role == MessageRole.USER }
+    val selected = if (!mutable && conversation?.agentId != null) {
+        val installedAgent = agents.firstOrNull { it.id == conversation.agentId }
+        ConversationIdentityOption(
+            agentId = conversation.agentId,
+            name = installedAgent?.name ?: "已安装人物",
+            version = conversation.agentVersion,
+        )
+    } else {
+        options.firstOrNull { it.agentId == conversation?.agentId } ?: options.first()
+    }
     return ConversationIdentityUiState(
         selectedAgentId = selected.agentId,
         selectedName = selected.name,
-        mutable = messages.none { it.role == MessageRole.USER },
+        mutable = mutable,
         options = options,
     )
 }

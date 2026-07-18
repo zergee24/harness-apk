@@ -254,6 +254,7 @@ fun ChatScreen(
     var webSearchEnabled by remember { mutableStateOf(false) }
     var conversation by remember(conversationId) { mutableStateOf<Conversation?>(null) }
     var isAgentConversation by remember(conversationId) { mutableStateOf(false) }
+    var firstMessagePending by remember(conversationId) { mutableStateOf(false) }
     var showIdentityDetails by remember { mutableStateOf(false) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
@@ -320,16 +321,8 @@ fun ChatScreen(
     )
     val assistantActivityText = assistantActivityLabel(messages)
     val isAssistantBusy = assistantActivityText != null
-    val identityState = remember(conversation, messages, agents) {
-        conversationIdentityUiState(conversation, messages, agents)
-    }
-    val displayedIdentityState = if (!identityState.mutable && conversation?.agentId != null) {
-        identityState.copy(
-            selectedAgentId = conversation?.agentId,
-            selectedName = agents.firstOrNull { it.id == conversation?.agentId }?.name ?: "已安装人物",
-        )
-    } else {
-        identityState
+    val identityState = remember(conversation, messages, agents, firstMessagePending) {
+        conversationIdentityUiState(conversation, messages, agents, firstMessagePending)
     }
     val executionByUserMessageId = remember(executionEntries) {
         executionEntries.associateBy(ChatExecutionEntry::userMessageId)
@@ -415,6 +408,10 @@ fun ChatScreen(
         if (!initialProjectId.isNullOrBlank()) {
             container.chatRepository.updateConversationProject(conversationId, initialProjectId)
         }
+    }
+
+    LaunchedEffect(messages) {
+        if (messages.any { it.role == MessageRole.USER }) firstMessagePending = false
     }
 
     LaunchedEffect(providers, defaultModelPreference, selectableModelsByProviderId) {
@@ -603,6 +600,9 @@ fun ChatScreen(
     fun sendNow() {
         val body = text.trim()
         if (body.isEmpty() && selectedImage == null) return
+        if (firstMessagePending) return
+        val isFirstUserMessage = messages.none { it.role == MessageRole.USER }
+        if (isFirstUserMessage) firstMessagePending = true
         val sessionRequestContext = sessionRequestContext(
             finalPrompt = finalSessionPrompt.ifBlank { optimizedSessionPrompt.ifBlank { rawSessionPrompt } },
             project = projects.firstOrNull { it.id == selectedProjectId },
@@ -631,6 +631,9 @@ fun ChatScreen(
                         ),
                     ),
                 )
+                conversation = container.chatRepository.conversation(conversationId)
+                isAgentConversation = conversation?.agentId != null
+                if (isAgentConversation) webSearchEnabled = false
                 text = ""
                 if (selectedImage == draftImage) {
                     selectedImage = null
@@ -638,8 +641,10 @@ fun ChatScreen(
                 }
                 draftImage?.let { sentUri -> container.chatImageStore.deleteIfManaged(sentUri) }
             } catch (cancelled: CancellationException) {
+                if (isFirstUserMessage) firstMessagePending = false
                 throw cancelled
             } catch (error: Throwable) {
+                if (isFirstUserMessage) firstMessagePending = false
                 errorText = error.toUserMessage()
             }
         }
@@ -1234,10 +1239,10 @@ fun ChatScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),
     ) {
-        if (!displayedIdentityState.mutable && displayedIdentityState.selectedAgentId != null) {
+        if (!identityState.mutable && identityState.selectedAgentId != null) {
             ResponsiveChatContentRail {
                 ConversationIdentityPicker(
-                    state = displayedIdentityState,
+                    state = identityState,
                     onSelectAgentId = {},
                     onShowDetails = { showIdentityDetails = true },
                 )

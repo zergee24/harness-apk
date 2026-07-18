@@ -66,10 +66,29 @@ class ConversationIdentityRepositoryTest {
     }
 
     @Test
-    fun selectDraftRejectsChangesAfterFirstUserMessage() {
+    fun selectDraftRejectsChangesAfterFirstUserMessage() = runTest {
+        conversationDao.rows += conversation("c1", agentId = "a1", agentVersion = 1)
         messageDao.userMessageCount = 1
+        conversationDao.rejectIdentityUpdate = true
 
-        assertThrows(IllegalStateException::class.java) { runTest { repository.selectDraft("c1", "a1") } }
+        val failure = runCatching { repository.selectDraft("c1", "a1") }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals("a1", conversationDao.findById("c1")!!.agentId)
+        assertEquals(1, conversationDao.atomicIdentityUpdateCalls)
+    }
+
+    @Test
+    fun selectDraftRejectsAtomicUpdateWhenUserMessageArrivesAfterSelection() = runTest {
+        conversationDao.rows += conversation("c1", agentId = "a1", agentVersion = 1)
+        agentDao.rows["a2"] = readyAgent("a2", activeVersion = 2)
+        conversationDao.rejectIdentityUpdate = true
+
+        val failure = runCatching { repository.selectDraft("c1", "a2") }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals("a1", conversationDao.findById("c1")!!.agentId)
+        assertEquals(1, conversationDao.atomicIdentityUpdateCalls)
     }
 
     @Test
@@ -143,6 +162,8 @@ private fun readyAgent(id: String, activeVersion: Int) = AgentEntity(
 
 private class FakeConversationDao : ConversationDao {
     val rows = mutableListOf<ConversationEntity>()
+    var rejectIdentityUpdate = false
+    var atomicIdentityUpdateCalls = 0
 
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(rows)
     override suspend fun findById(id: String): ConversationEntity? = rows.firstOrNull { it.id == id }
@@ -151,6 +172,20 @@ private class FakeConversationDao : ConversationDao {
         rows.filter { !it.isArchived && it.projectId == projectId && it.agentId != null }.maxByOrNull { it.updatedAt }
     override suspend fun insert(entity: ConversationEntity) { rows += entity }
     override suspend fun update(entity: ConversationEntity) { rows.replaceAll { if (it.id == entity.id) entity else it } }
+    override suspend fun updateIdentityIfNoUserMessages(
+        id: String,
+        agentId: String?,
+        agentVersion: Int?,
+        updatedAt: Long,
+    ): Int {
+        atomicIdentityUpdateCalls += 1
+        if (rejectIdentityUpdate) return 0
+        val existing = rows.firstOrNull { it.id == id } ?: return 0
+        rows.replaceAll {
+            if (it.id == id) it.copy(agentId = agentId, agentVersion = agentVersion, updatedAt = updatedAt) else it
+        }
+        return 1
+    }
     override suspend fun archive(id: String, updatedAt: Long) = Unit
 }
 

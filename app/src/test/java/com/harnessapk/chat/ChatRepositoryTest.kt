@@ -472,6 +472,18 @@ private class FakeConversationDao : ConversationDao {
         refresh()
     }
 
+    override suspend fun updateIdentityIfNoUserMessages(
+        id: String,
+        agentId: String?,
+        agentVersion: Int?,
+        updatedAt: Long,
+    ): Int {
+        val conversation = rows[id] ?: return 0
+        rows[id] = conversation.copy(agentId = agentId, agentVersion = agentVersion, updatedAt = updatedAt)
+        refresh()
+        return 1
+    }
+
     override suspend fun archive(id: String, updatedAt: Long) {
         rows[id]?.let { rows[id] = it.copy(isArchived = true, updatedAt = updatedAt) }
         refresh()

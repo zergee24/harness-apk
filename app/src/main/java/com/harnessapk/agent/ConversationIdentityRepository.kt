@@ -22,16 +22,16 @@ class ConversationIdentityRepository(
     }
 
     suspend fun selectDraft(conversationId: String, agentId: String?): ConversationIdentitySelection {
-        check(messageDao.countUserMessages(conversationId) == 0) { "首条消息发送后不能切换身份" }
         val conversation = requireNotNull(conversationDao.findById(conversationId)) { "会话不存在" }
         val selected = selectionFor(agentId, locked = false)
-        conversationDao.update(
-            conversation.copy(
+        check(
+            conversationDao.updateIdentityIfNoUserMessages(
+                id = conversation.id,
                 agentId = selected.agentId,
                 agentVersion = selected.agentVersion,
                 updatedAt = timeProvider.nowMillis(),
-            ),
-        )
+            ) == 1,
+        ) { "首条消息发送后不能切换身份" }
         return selected
     }
 
