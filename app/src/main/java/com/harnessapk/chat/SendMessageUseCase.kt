@@ -134,13 +134,15 @@ class SendMessageUseCase(
         var requestDiagnostics: ModelAwareRequestDiagnostics? = null
         var accumulator: StreamingMessageAccumulator? = null
         var streamClock: TimeMark? = null
+        var agentContext: AgentRuntimeContext? = null
+        var latestSnapshot: StreamingMessageSnapshot? = null
         val traceId = UUID.randomUUID().toString()
         val startedAtMillis = System.currentTimeMillis()
         var flushCount = 0
         var receivedChars = 0
 
         try {
-            val agentContext = agentContextProvider(entry.conversationId, text)
+            agentContext = agentContextProvider(entry.conversationId, text)
             val effectiveSearchContexts = effectiveAgentSearchContexts(
                 agentContext = agentContext,
                 webSearchContext = webSearchContext,
@@ -173,7 +175,7 @@ class SendMessageUseCase(
             )
             onAssistantCreated(nextAssistantId)
             assistantId = nextAssistantId
-            var latestSnapshot = StreamingMessageSnapshot(
+            latestSnapshot = StreamingMessageSnapshot(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
             )
@@ -210,7 +212,7 @@ class SendMessageUseCase(
                             )?.let { flush ->
                                 flushCount += 1
                                 latestSnapshot = flush.snapshot
-                                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+                                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, flush.snapshot)
                             }
                         }
                     }
@@ -226,18 +228,18 @@ class SendMessageUseCase(
                         status = MessageStatus.PENDING,
                         parts = emptyList(),
                     )
-                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
                     delay(STREAM_TRANSPORT_RETRY_DELAY_MILLIS)
                 }
             }
             effectiveSearchContexts.webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
-                latestSnapshot = appendVisibleTextPart(latestSnapshot, it)
-                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+                latestSnapshot = appendVisibleTextPart(requireNotNull(latestSnapshot), it)
+                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
             }
-            latestSnapshot = sanitizeAgentSnapshotIfNeeded(latestSnapshot, agentContext)
-            latestSnapshot = appendAgentSourcesPart(latestSnapshot, agentContext?.evidence.orEmpty())
-            if (latestSnapshot.parts.lastOrNull()?.type == UiMessagePartType.AGENT_SOURCES) {
-                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+            if (agentContext != null) {
+                latestSnapshot = sanitizeAgentCitationMarkers(requireNotNull(latestSnapshot))
+                latestSnapshot = appendAgentSourcesPart(requireNotNull(latestSnapshot), agentContext.evidence)
+                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
             }
             chatRepository.markAssistantSucceeded(nextAssistantId)
             ChatExecutionResult(
@@ -254,7 +256,10 @@ class SendMessageUseCase(
                 if (cancelledSnapshot == null) {
                     chatRepository.markAssistantCancelled(id)
                 } else {
-                    chatRepository.replaceMessagePartsFromSnapshot(id, cancelledSnapshot)
+                    chatRepository.replaceMessagePartsFromSnapshot(
+                        id,
+                        sanitizeAgentSnapshotIfNeeded(cancelledSnapshot, agentContext),
+                    )
                 }
             }
             throw cancelled
@@ -264,6 +269,15 @@ class SendMessageUseCase(
                 provider.profile.id,
                 requestModel,
             )
+            if (assistantId != null && agentContext != null) {
+                val failedSnapshot = accumulator?.snapshot() ?: latestSnapshot
+                failedSnapshot?.let {
+                    chatRepository.replaceMessagePartsFromSnapshot(
+                        failedAssistantId,
+                        sanitizeAgentCitationMarkers(it),
+                    )
+                }
+            }
             chatRepository.markAssistantFailed(
                 failedAssistantId,
                 buildChatErrorLog(

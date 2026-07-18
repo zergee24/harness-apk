@@ -1,0 +1,268 @@
+package com.harnessapk.chat
+
+import android.content.ContextWrapper
+import com.harnessapk.agent.AgentEvidence
+import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.common.AppDispatchers
+import com.harnessapk.common.TimeProvider
+import com.harnessapk.network.OpenAiCompatibleClient
+import com.harnessapk.provider.ProviderRepository
+import com.harnessapk.security.EncryptedValue
+import com.harnessapk.security.StringCipher
+import com.harnessapk.storage.ConversationDao
+import com.harnessapk.storage.ConversationEntity
+import com.harnessapk.storage.ConversationMemoryDao
+import com.harnessapk.storage.ConversationMemoryEntity
+import com.harnessapk.storage.MessageAttachmentDao
+import com.harnessapk.storage.MessageAttachmentEntity
+import com.harnessapk.storage.MessageDao
+import com.harnessapk.storage.MessageEntity
+import com.harnessapk.storage.MessagePartDao
+import com.harnessapk.storage.MessagePartEntity
+import com.harnessapk.storage.ProviderProfileDao
+import com.harnessapk.storage.ProviderProfileEntity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class SendMessageUseCaseAgentPersistenceTest {
+    @Test
+    fun executeReplacesPersistedAgentTextWhenEmptyEvidenceLeavesOnlyCitationMarker() = runTest {
+        executeAndReadParts(
+            response = "[资料1]",
+            agentContext = agentContext(evidence = emptyList()),
+        ).also { (_, parts) ->
+            assertEquals(listOf(UiMessagePartType.TEXT), parts.map { it.type })
+            assertEquals("", parts.single().content)
+        }
+    }
+
+    @Test
+    fun executePersistsSanitizedAgentTextAndSeparateSources() = runTest {
+        executeAndReadParts(
+            response = "先调查。[资料 1]再决定。",
+            agentContext = agentContext(
+                evidence = listOf(AgentEvidence("chunk-1", "实践论", "第一章", "调查先于结论。", 8)),
+            ),
+        ).also { (_, parts) ->
+            assertEquals("先调查。再决定。", parts.first { it.type == UiMessagePartType.TEXT }.content)
+            assertEquals(UiMessagePartType.AGENT_SOURCES, parts.last().type)
+            assertTrue(parts.last().content.contains("资料 1 · 实践论 · 第一章"))
+        }
+    }
+
+    @Test
+    fun executeKeepsCitationMarkerForOrdinaryConversation() = runTest {
+        executeAndReadParts(
+            response = "先调查。[资料1]再决定。",
+            agentContext = null,
+        ).also { (_, parts) ->
+            assertEquals("先调查。[资料1]再决定。", parts.single().content)
+        }
+    }
+
+    @Test
+    fun executeSanitizesPersistedAgentTextBeforeMarkingFailure() = runTest {
+        executeAndReadParts(
+            response = "中途结果[资料1]",
+            agentContext = agentContext(evidence = emptyList()),
+            malformedAfterText = true,
+        ).also { (status, parts) ->
+            assertEquals(MessageStatus.FAILED, status)
+            assertEquals("中途结果", parts.single().content)
+        }
+    }
+
+    @Test
+    fun executeSanitizesPersistedAgentTextBeforeMarkingCancellation() = runTest {
+        executeAndReadParts(
+            response = "中途结果[资料1]",
+            agentContext = agentContext(evidence = emptyList()),
+            cancelAfterText = true,
+        ).also { (status, parts) ->
+            assertEquals(MessageStatus.CANCELLED, status)
+            assertEquals("中途结果", parts.single().content)
+        }
+    }
+
+    private suspend fun executeAndReadParts(
+        response: String,
+        agentContext: AgentRuntimeContext?,
+        malformedAfterText: Boolean = false,
+        cancelAfterText: Boolean = false,
+    ): Pair<MessageStatus, List<UiMessagePartDraft>> {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                data: {"choices":[{"delta":{"content":"$response"}}]}
+                ${if (malformedAfterText) "data: {not-json}" else "data: [DONE]"}
+                """.trimIndent(),
+            ),
+        )
+        server.start()
+        try {
+            val repository = inMemoryChatRepository()
+            val conversationId = repository.createConversation()
+            val userMessageId = repository.insertUserMessage(conversationId, "怎么做", emptyList())
+            val useCase = SendMessageUseCase(
+                context = ContextWrapper(null),
+                chatRepository = repository,
+                providerRepository = providerRepository(server),
+                client = OpenAiCompatibleClient(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+                dispatchers = AppDispatchers(Dispatchers.Unconfined, Dispatchers.Unconfined, Dispatchers.Unconfined),
+                agentContextProvider = { _, _ -> agentContext },
+                outputTransformerPipelineFactory = {
+                    StreamEventTransformerPipeline(
+                        listOf(object : StreamEventTransformer {
+                            override fun transform(event: StreamEvent): List<StreamEvent> {
+                                if (cancelAfterText && event is StreamEvent.Finished) {
+                                    throw CancellationException("test cancellation")
+                                }
+                                return listOf(event)
+                            }
+                        }),
+                    )
+                },
+            )
+
+            val entry = ChatExecutionEntry(
+                    id = "entry-1",
+                    conversationId = conversationId,
+                    userMessageId = userMessageId,
+                    assistantMessageId = null,
+                    targetAssistantMessageId = null,
+                    sequence = 1L,
+                    type = ChatExecutionType.NORMAL,
+                    status = ChatExecutionStatus.RUNNING,
+                    providerId = null,
+                    model = null,
+                    reasoningEffort = defaultReasoningEffort(),
+                    requestContext = ChatExecutionRequestContext(),
+                    errorMessage = null,
+                    createdAt = 0L,
+                    updatedAt = 0L,
+            )
+            val result = try {
+                useCase.execute(entry, repository.listMessages(conversationId))
+            } catch (cancelled: CancellationException) {
+                ChatExecutionResult(
+                    status = ChatExecutionStatus.CANCELLED,
+                    assistantMessageId = repository.listMessages(conversationId).last().id,
+                    errorMessage = null,
+                )
+            }
+
+            if (!malformedAfterText && !cancelAfterText) {
+                assertEquals(ChatExecutionStatus.SUCCEEDED, result.status)
+            }
+            val assistantId = requireNotNull(result.assistantMessageId)
+            val persisted = repository.listMessages(conversationId).last { it.id == assistantId }
+            return persisted.status to repository.listMessageParts(assistantId)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    private fun agentContext(evidence: List<AgentEvidence>) =
+        AgentRuntimeContext("agent-1", 1, "人格提示词", evidence)
+}
+
+private fun inMemoryChatRepository(): ChatRepository = ChatRepository(
+    conversationDao = ExecuteConversationDao(),
+    messageDao = ExecuteMessageDao(),
+    messagePartDao = ExecuteMessagePartDao(),
+    attachmentDao = ExecuteMessageAttachmentDao(),
+    memoryDao = ExecuteConversationMemoryDao(),
+    timeProvider = TimeProvider { 1L },
+)
+
+private fun providerRepository(server: MockWebServer): ProviderRepository = ProviderRepository(
+    dao = ExecuteProviderProfileDao().apply {
+        row = ProviderProfileEntity(
+            id = "provider-1",
+            name = "Test",
+            baseUrl = server.url("/v1").toString(),
+            apiKeyAlias = "provider:provider-1",
+            encryptedApiKey = "secret".encodeToByteArray(),
+            apiKeyIv = "iv".encodeToByteArray(),
+            defaultModel = "test-model",
+            availableModels = "test-model",
+            defaultVisionModel = null,
+            supportsVision = false,
+            nativeWebSearchMode = "NONE",
+            enabled = true,
+            createdAt = 1L,
+            updatedAt = 1L,
+        )
+    },
+    cipher = object : StringCipher {
+        override fun encrypt(plainText: String) = EncryptedValue(plainText.encodeToByteArray(), byteArrayOf())
+        override fun decrypt(value: EncryptedValue) = value.cipherText.decodeToString()
+    },
+    timeProvider = TimeProvider { 1L },
+)
+
+private class ExecuteConversationDao : ConversationDao {
+    private val rows = linkedMapOf<String, ConversationEntity>()
+    override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(rows.values.toList())
+    override suspend fun findById(id: String) = rows[id]
+    override suspend fun findLatestWithAgent() = rows.values.lastOrNull { it.agentId != null }
+    override suspend fun findLatestWithAgentInProject(projectId: String) = rows.values.lastOrNull { it.projectId == projectId && it.agentId != null }
+    override suspend fun insert(entity: ConversationEntity) { rows[entity.id] = entity }
+    override suspend fun update(entity: ConversationEntity) { rows[entity.id] = entity }
+    override suspend fun updateIdentityIfNoUserMessages(id: String, agentId: String?, agentVersion: Int?, updatedAt: Long): Int = 0
+    override suspend fun archive(id: String, updatedAt: Long) = Unit
+}
+
+private class ExecuteMessageDao : MessageDao {
+    private val rows = linkedMapOf<String, MessageEntity>()
+    override fun observeForConversation(conversationId: String): Flow<List<MessageEntity>> = MutableStateFlow(rows.values.filter { it.conversationId == conversationId })
+    override suspend fun listForConversation(conversationId: String) = rows.values.filter { it.conversationId == conversationId }
+    override suspend fun findById(id: String) = rows[id]
+    override suspend fun countUserMessages(conversationId: String) = rows.values.count { it.conversationId == conversationId && it.role == "USER" }
+    override suspend fun insert(entity: MessageEntity) { rows[entity.id] = entity }
+    override suspend fun update(entity: MessageEntity) { rows[entity.id] = entity }
+    override suspend fun deleteById(id: String) { rows.remove(id) }
+    override suspend fun deleteForConversation(conversationId: String) { rows.entries.removeIf { it.value.conversationId == conversationId } }
+}
+
+private class ExecuteMessagePartDao : MessagePartDao {
+    private val rows = linkedMapOf<String, MessagePartEntity>()
+    override fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>> = MutableStateFlow(rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex })
+    override suspend fun listForMessage(messageId: String) = rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex }
+    override suspend fun insertAll(parts: List<MessagePartEntity>) { parts.forEach { rows[it.id] = it } }
+    override suspend fun deleteForMessage(messageId: String) { rows.entries.removeIf { it.value.messageId == messageId } }
+    override suspend fun markStableForMessage(messageId: String, updatedAt: Long) { rows.replaceAll { _, value -> if (value.messageId == messageId) value.copy(stable = true, updatedAt = updatedAt) else value } }
+}
+
+private class ExecuteMessageAttachmentDao : MessageAttachmentDao {
+    override fun observeForMessage(messageId: String): Flow<List<MessageAttachmentEntity>> = MutableStateFlow(emptyList())
+    override suspend fun listForMessage(messageId: String): List<MessageAttachmentEntity> = emptyList()
+    override suspend fun insert(entity: MessageAttachmentEntity) = Unit
+}
+
+private class ExecuteConversationMemoryDao : ConversationMemoryDao {
+    override suspend fun findByConversationId(conversationId: String): ConversationMemoryEntity? = null
+    override fun observeForConversation(conversationId: String): Flow<ConversationMemoryEntity?> = MutableStateFlow(null)
+    override suspend fun upsert(entity: ConversationMemoryEntity) = Unit
+}
+
+private class ExecuteProviderProfileDao : ProviderProfileDao {
+    var row: ProviderProfileEntity? = null
+    override fun observeEnabled(): Flow<List<ProviderProfileEntity>> = MutableStateFlow(listOfNotNull(row))
+    override suspend fun findById(id: String) = row?.takeIf { it.id == id }
+    override suspend fun firstEnabled() = row?.takeIf { it.enabled }
+    override suspend fun insert(entity: ProviderProfileEntity) { row = entity }
+    override suspend fun update(entity: ProviderProfileEntity) { row = entity }
+    override suspend fun delete(entity: ProviderProfileEntity) { if (row?.id == entity.id) row = null }
+}

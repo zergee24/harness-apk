@@ -42,7 +42,13 @@ class AgentPromptContractTest {
         val snapshot = StreamingMessageSnapshot(
             status = MessageStatus.SUCCEEDED,
             parts = listOf(
-                UiMessagePartDraft(0, UiMessagePartType.TEXT, "先调查。[资料 1]再决定。[资料2][资料 3]", stable = true),
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.TEXT,
+                    content = "先调查。[资料 1]再决定。[资料2][资料 3]",
+                    metadata = mapOf("origin" to "stream"),
+                    stable = true,
+                ),
                 sourcePart,
                 UiMessagePartDraft(2, UiMessagePartType.TOOL_RESULT, "[资料4]", stable = true),
             ),
@@ -51,6 +57,9 @@ class AgentPromptContractTest {
         val sanitized = sanitizeAgentCitationMarkers(snapshot)
 
         assertEquals("先调查。再决定。", sanitized.legacyVisibleText())
+        assertEquals(MessageStatus.SUCCEEDED, sanitized.status)
+        assertEquals(0, sanitized.parts[0].index)
+        assertEquals(mapOf("origin" to "stream"), sanitized.parts[0].metadata)
         assertEquals(sourcePart, sanitized.parts[1])
         assertEquals("[资料4]", sanitized.parts[2].content)
     }
