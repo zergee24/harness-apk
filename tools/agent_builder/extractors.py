@@ -2,6 +2,7 @@ import hashlib
 import html
 import codecs
 import re
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -76,28 +77,67 @@ def iter_v2_plain_text_sections(
     source = Path(path)
     if read_chars < 1 or max_section_chars < 128:
         raise BuildError("V2 文本窗口必须为正数")
-    encoding = _v2_detect_text_encoding(source, read_chars)
+    with source.open("rb") as stream:
+        yield from _iter_v2_plain_text_sections_stream(stream, read_chars, max_section_chars)
+
+
+def iter_v2_source_sections_stream(
+    stream,
+    suffix: str,
+    display_name: str,
+    *,
+    read_chars: int = V2_TEXT_READ_BYTES,
+    max_section_chars: int = V2_MAX_SECTION_CHARS,
+):
+    """Extract a V2 source from an already-open, descriptor-anchored stream."""
+    normalized_suffix = suffix.lower()
+    if normalized_suffix in {".txt", ".md", ".markdown"}:
+        yield from _iter_v2_plain_text_sections_stream(stream, read_chars, max_section_chars)
+        return
+    if normalized_suffix == ".epub":
+        yield from _extract_epub_stream(stream, display_name)
+        return
+    if normalized_suffix == ".pdf":
+        yield from _extract_pdf_stream(stream, display_name)
+        return
+    raise BuildError(f"不支持的输入格式：{display_name}")
+
+
+def _iter_v2_plain_text_sections_stream(stream, read_chars: int, max_section_chars: int):
+    if read_chars < 1 or max_section_chars < 128:
+        raise BuildError("V2 文本窗口必须为正数")
+    encoding = _v2_detect_text_encoding_stream(stream, read_chars)
     yield from _iter_v2_sections_from_decoded_lines(
-        _iter_decoded_lines(source, encoding, read_chars, max_section_chars),
+        _iter_decoded_lines_stream(stream, encoding, read_chars, max_section_chars),
         max_section_chars,
     )
 
 
 def _v2_detect_text_encoding(path: Path, buffer_size: int) -> str:
+    with Path(path).open("rb") as stream:
+        return _v2_detect_text_encoding_stream(stream, buffer_size)
+
+
+def _v2_detect_text_encoding_stream(stream, buffer_size: int) -> str:
     for encoding in ("utf-8-sig", "gb18030"):
         decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
         try:
-            with path.open("rb") as stream:
-                while block := stream.read(buffer_size):
-                    decoder.decode(block)
-                decoder.decode(b"", final=True)
+            stream.seek(0)
+            while block := stream.read(buffer_size):
+                decoder.decode(block)
+            decoder.decode(b"", final=True)
             return encoding
         except UnicodeDecodeError:
             continue
-    raise BuildError(f"文本编码无法识别：{path.name}")
+    raise BuildError("文本编码无法识别")
 
 
 def _iter_decoded_lines(path: Path, encoding: str, buffer_size: int, max_line_chars: int):
+    with Path(path).open("rb") as stream:
+        yield from _iter_decoded_lines_stream(stream, encoding, buffer_size, max_line_chars)
+
+
+def _iter_decoded_lines_stream(stream, encoding: str, buffer_size: int, max_line_chars: int):
     decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
     pending = ""
     starts_line = True
@@ -142,11 +182,11 @@ def _iter_decoded_lines(path: Path, encoding: str, buffer_size: int, max_line_ch
                 pending = ""
             break
 
-    with path.open("rb") as stream:
-        while block := stream.read(buffer_size):
-            pending += decoder.decode(block)
-            yield from drain(final=False)
-        pending += decoder.decode(b"", final=True)
+    stream.seek(0)
+    while block := stream.read(buffer_size):
+        pending += decoder.decode(block)
+        yield from drain(final=False)
+    pending += decoder.decode(b"", final=True)
     yield from drain(final=True)
 
 
@@ -154,17 +194,19 @@ def _iter_v2_sections_from_decoded_lines(lines, max_section_chars: int):
     headings: list[str] = []
     location = "正文"
     buffer = ""
+    normalizer = _StreamingSectionNormalizer()
 
-    def normalized(value: str) -> str:
-        return _normalize_text(value)
-
-    def flush():
+    def flush_window():
         nonlocal buffer
-        value = normalized(buffer)
+        value = buffer
         buffer = ""
         if value:
             return ExtractedSection(location, value)
         return None
+
+    def finish_section():
+        normalizer.finish()
+        return flush_window()
 
     def append(value: str):
         nonlocal buffer
@@ -172,39 +214,109 @@ def _iter_v2_sections_from_decoded_lines(lines, max_section_chars: int):
         while pending:
             available = max_section_chars - len(buffer)
             if available <= 0:
-                emitted = flush()
+                emitted = flush_window()
                 if emitted is not None:
                     yield emitted
                 available = max_section_chars
             buffer += pending[:available]
             pending = pending[available:]
             if pending:
-                emitted = flush()
+                emitted = flush_window()
                 if emitted is not None:
                     yield emitted
 
-    for part in lines:
-        line = part.text
-        heading = (
-            re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-            if part.starts_line and not part.continues_line
-            else None
+    try:
+        for part in lines:
+            line = part.text
+            heading = (
+                re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+                if part.starts_line and not part.continues_line
+                else None
+            )
+            if heading:
+                emitted = finish_section()
+                if emitted is not None:
+                    yield emitted
+                level = len(heading.group(1))
+                title = heading.group(2).strip()
+                headings[:] = headings[: level - 1]
+                headings.append(title)
+                location = " / ".join(headings)
+            for value in (line, "\n" if part.ends_line else ""):
+                for fragment in normalizer.feed(value):
+                    yield from append(fragment)
+        emitted = finish_section()
+        if emitted is not None:
+            yield emitted
+    finally:
+        normalizer.close()
+
+
+class _StreamingSectionNormalizer:
+    """Bounded, boundary-stable form of the V2 whitespace normalization."""
+
+    def __init__(self):
+        self._pending = tempfile.SpooledTemporaryFile(
+            max_size=V2_MAX_SECTION_CHARS,
+            mode="w+t",
+            encoding="utf-8",
+            newline="",
         )
-        if heading:
-            emitted = flush()
-            if emitted is not None:
-                yield emitted
-            level = len(heading.group(1))
-            title = heading.group(2).strip()
-            headings[:] = headings[: level - 1]
-            headings.append(title)
-            location = " / ".join(headings)
-        yield from append(line)
-        if part.ends_line:
-            yield from append("\n")
-    emitted = flush()
-    if emitted is not None:
-        yield emitted
+        self._has_content = False
+        self._previous_horizontal_space = False
+        self._newline_run = 0
+
+    def feed(self, value: str):
+        output: list[str] = []
+        for character in value:
+            if character == "\u00a0":
+                character = " "
+            if character in " \t":
+                if not self._has_content:
+                    continue
+                if not self._previous_horizontal_space:
+                    self._pending.write(" ")
+                self._previous_horizontal_space = True
+                self._newline_run = 0
+                continue
+            if character == "\n":
+                if not self._has_content:
+                    continue
+                if self._newline_run < 2:
+                    self._pending.write("\n")
+                self._previous_horizontal_space = False
+                self._newline_run += 1
+                continue
+            if self._has_content:
+                if output:
+                    yield "".join(output)
+                    output = []
+                yield from self._drain_pending()
+            self._has_content = True
+            self._previous_horizontal_space = False
+            self._newline_run = 0
+            output.append(character)
+        if output:
+            yield "".join(output)
+
+    def finish(self) -> None:
+        self._discard_pending()
+        self._has_content = False
+        self._previous_horizontal_space = False
+        self._newline_run = 0
+
+    def close(self) -> None:
+        self._pending.close()
+
+    def _drain_pending(self):
+        self._pending.seek(0)
+        while fragment := self._pending.read(V2_MAX_SECTION_CHARS):
+            yield fragment
+        self._discard_pending()
+
+    def _discard_pending(self) -> None:
+        self._pending.seek(0)
+        self._pending.truncate(0)
 
 
 def _extract_plain_text(path: Path) -> list[ExtractedSection]:
@@ -225,8 +337,13 @@ def _extract_plain_text(path: Path) -> list[ExtractedSection]:
 
 
 def _extract_epub(path: Path) -> list[ExtractedSection]:
+    with Path(path).open("rb") as stream:
+        return list(_extract_epub_stream(stream, Path(path).name))
+
+
+def _extract_epub_stream(stream, display_name: str):
     try:
-        with zipfile.ZipFile(path) as archive:
+        with zipfile.ZipFile(stream) as archive:
             container_root = ElementTree.fromstring(archive.read("META-INF/container.xml"))
             rootfile = next(
                 element for element in container_root.iter() if element.tag.endswith("rootfile")
@@ -257,19 +374,24 @@ def _extract_epub(path: Path) -> list[ExtractedSection]:
                     sections.append(ExtractedSection(f"spine-{index}", text))
             return sections
     except (KeyError, StopIteration, zipfile.BadZipFile, ElementTree.ParseError) as error:
-        raise BuildError(f"EPUB 解析失败：{path.name}：{error}") from error
+        raise BuildError(f"EPUB 解析失败：{display_name}：{error}") from error
 
 
 def _extract_pdf(path: Path) -> list[ExtractedSection]:
+    with Path(path).open("rb") as stream:
+        return list(_extract_pdf_stream(stream, Path(path).name))
+
+
+def _extract_pdf_stream(stream, display_name: str):
     try:
-        reader = PdfReader(str(path))
+        reader = PdfReader(stream)
         return [
             ExtractedSection(f"page-{index}", text)
             for index, page in enumerate(reader.pages, start=1)
             if (text := _normalize_text(page.extract_text() or ""))
         ]
     except Exception as error:
-        raise BuildError(f"PDF 解析失败：{path.name}：{error}") from error
+        raise BuildError(f"PDF 解析失败：{display_name}：{error}") from error
 
 
 def _split_markdown_sections(text: str) -> list[ExtractedSection]:

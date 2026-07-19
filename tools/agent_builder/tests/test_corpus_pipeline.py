@@ -15,6 +15,7 @@ from tools.agent_builder import corpus_pipeline
 from tools.agent_builder import builder as builder_module
 from tools.agent_builder.corpus_pipeline import build_corpus_index, write_corpus_index
 from tools.agent_builder.builder import prepare_workspace_v2
+from tools.agent_builder import extractors as extractors_module
 from tools.agent_builder.extractors import iter_v2_plain_text_sections
 from tools.agent_builder.models import ExtractedDocument, ExtractedSection
 from tools.agent_builder.schema_v2 import Authorship, SourceGenre, SourceRecord
@@ -56,9 +57,9 @@ class CorpusPipelineTest(unittest.TestCase):
 
         self.assertEqual(("a",), result.chunks[0].source_aliases)
 
-    def test_near_duplicates_merge_and_remain_auditable(self):
-        first = "调查研究必须从事实出发，先摸清情况再作决定。"
-        second = "调查研究应从事实出发，先摸清情况再作决定。"
+    def test_explicit_safe_wording_variant_merges_as_near_and_remains_auditable(self):
+        first = "调查以后再下结论。"
+        second = "调查之后，再下结论。"
         result = build_corpus_index(
             [self._document("a", first), self._document("b", second)],
             [self._source("a", period="1926"), self._source("b", period="1926")],
@@ -67,6 +68,91 @@ class CorpusPipelineTest(unittest.TestCase):
         self.assertEqual(1, len(result.chunks))
         self.assertEqual(1, result.stats.near_duplicate_count)
         self.assertEqual("near", result.duplicates[0].match_type)
+
+    def test_safe_near_duplicate_group_uses_safe_canonical_and_semantic_guard(self):
+        source = self._source("a", period="1926")
+        first = corpus_pipeline._contextual_chunk(
+            source,
+            ExtractedSection("正文", "调查以后再下结论。"),
+            "调查以后再下结论。",
+            (),
+            "",
+            0,
+            0,
+        )
+        safe_variant = corpus_pipeline._contextual_chunk(
+            source,
+            ExtractedSection("正文", "调查之后，再下结论。"),
+            "调查之后，再下结论。",
+            (),
+            "",
+            0,
+            1,
+        )
+        negation_boundary = corpus_pipeline._contextual_chunk(
+            source,
+            ExtractedSection("正文", "不，以后再做。"),
+            "不，以后再做。",
+            (),
+            "",
+            0,
+            2,
+        )
+        attached_negation = corpus_pipeline._contextual_chunk(
+            source,
+            ExtractedSection("正文", "不之后再做。"),
+            "不之后再做。",
+            (),
+            "",
+            0,
+            3,
+        )
+
+        self.assertEqual(first.duplicate_group, safe_variant.duplicate_group)
+        self.assertNotEqual(negation_boundary.duplicate_group, attached_negation.duplicate_group)
+
+    def test_semantic_guard_blocks_punctuation_candidate_collisions(self):
+        cases = (
+            ("不，应该这样做", "不应该这样做"),
+            ("not able", "notable"),
+        )
+
+        for index, (first, second) in enumerate(cases):
+            with self.subTest(first=first, second=second):
+                self.assertEqual(
+                    corpus_pipeline.normalize_for_dedup(first),
+                    corpus_pipeline.normalize_for_dedup(second),
+                )
+                result = build_corpus_index(
+                    [self._document(f"guard-a-{index}", first), self._document(f"guard-b-{index}", second)],
+                    [
+                        self._source(f"guard-a-{index}", period="1926"),
+                        self._source(f"guard-b-{index}", period="1926"),
+                    ],
+                )
+                self.assertEqual(2, len(result.chunks))
+                self.assertEqual(0, result.stats.exact_duplicate_count)
+                self.assertEqual(0, result.stats.near_duplicate_count)
+
+    def test_semantic_guard_never_merges_opposition_numbers_or_subject_changes(self):
+        cases = (
+            ("赞成尽快采取这一行动。", "反对尽快采取这一行动。"),
+            ("调查 3 次以后再下结论。", "调查 4 次之后再下结论。"),
+            ("甲方以后再下结论。", "乙方之后再下结论。"),
+            ("不，以后再做。", "不之后再做。"),
+        )
+
+        for index, (first, second) in enumerate(cases):
+            with self.subTest(first=first, second=second):
+                result = build_corpus_index(
+                    [self._document(f"boundary-a-{index}", first), self._document(f"boundary-b-{index}", second)],
+                    [
+                        self._source(f"boundary-a-{index}", period="1926"),
+                        self._source(f"boundary-b-{index}", period="1926"),
+                    ],
+                )
+                self.assertEqual(2, len(result.chunks))
+                self.assertEqual(0, result.stats.near_duplicate_count)
 
     def test_distinct_punctuation_only_chunks_do_not_collapse_to_one_exact_duplicate(self):
         result = build_corpus_index(
@@ -143,10 +229,10 @@ class CorpusPipelineTest(unittest.TestCase):
         chunks = (root / "corpora" / "index" / "chunks.jsonl").read_text("utf-8").splitlines()
         self.assertEqual(2, len(chunks))
 
-    def test_streaming_index_recalls_representative_near_pair_with_strict_verification(self):
+    def test_streaming_index_recalls_explicit_safe_wording_variant(self):
         root = self.root / "streaming-near"
-        first = "调查研究必须从事实出发，先摸清情况再作决定。"
-        second = "调查研究应从事实出发，先摸清情况再作决定。"
+        first = "调查以后再下结论。"
+        second = "调查之后，再下结论。"
         sources = [self._source("a", period="1926"), self._source("b", period="1926")]
 
         stats = corpus_pipeline.build_corpus_index_streaming(
@@ -162,95 +248,19 @@ class CorpusPipelineTest(unittest.TestCase):
         self.assertEqual(1, stats.near_duplicate_count)
         self.assertEqual(["a", "b"], json.loads(chunks[0])["sourceAliases"])
 
-    def test_streaming_near_candidate_still_requires_simhash_and_jaccard_match(self):
-        base = build_corpus_index(
-            [self._document("a", "调查研究必须从事实出发，先摸清情况再作决定。")],
-            [self._source("a", period="1926")],
-        ).chunks[0]
-        primary = replace(base, simhash=0)
-        candidate = replace(
-            base,
-            id="chunk-different-anchor-collision",
-            source_id="b",
-            source_hash="hash-b",
-            source_aliases=("b",),
-            text="完全不同的资料内容，不应该仅因索引锚点而合并。",
-            normalized_hash="different",
-            simhash=0,
-        )
-        database = sqlite3.connect(self.root / "strict-near.sqlite3")
-        database.row_factory = sqlite3.Row
-        try:
-            corpus_pipeline._create_streaming_schema(database)
-            corpus_pipeline._insert_physical_chunk(
-                database,
-                primary,
-                corpus_pipeline._stream_sort_key(primary),
-            )
-            found = corpus_pipeline._find_near_streaming_match(database, candidate)
-        finally:
-            database.close()
-
-        self.assertIsNone(found)
-
-    def test_streaming_near_candidate_index_has_a_constant_collision_bound(self):
-        base = build_corpus_index(
-            [self._document("a", "调查研究必须从事实出发，先摸清情况再作决定。")],
-            [self._source("a", period="1926")],
-        ).chunks[0]
-        candidate = replace(
-            base,
-            id="chunk-collision-candidate",
-            source_id="b",
-            source_hash="hash-b",
-            source_aliases=("b",),
-            simhash=0,
-        )
-        database = sqlite3.connect(self.root / "bands.sqlite3")
-        database.row_factory = sqlite3.Row
-        try:
-            corpus_pipeline._create_streaming_schema(database)
-            band_index, band_value = corpus_pipeline._simhash_bands(candidate.simhash)[0]
-            database.executemany(
-                """
-                INSERT INTO simhash_bands(
-                    physical_chunk_id, band_index, band_value, period, conflict_key,
-                    genre, authorship, source_id, source_hash, location, sort_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    (
-                        f"collision-{index:06d}",
-                        band_index,
-                        band_value,
-                        candidate.period,
-                        candidate.conflict_key,
-                        candidate.genre,
-                        candidate.authorship,
-                        candidate.source_id,
-                        candidate.source_hash,
-                        candidate.location,
-                        f"collision-{index:06d}",
-                    )
-                    for index in range(100_000)
-                ),
-            )
-            database.commit()
-            started = time.monotonic()
-            identifiers = list(corpus_pipeline._bounded_near_candidate_ids(database, candidate))
-            elapsed = time.monotonic() - started
-        finally:
-            database.close()
-
+    def test_simhash_remains_deterministic_but_does_not_authorize_a_merge(self):
         self.assertEqual(
-            [f"collision-{index:06d}" for index in range(corpus_pipeline.NEAR_CANDIDATE_LIMIT)],
-            identifiers,
+            corpus_pipeline.simhash64("调查以后再下结论。"),
+            corpus_pipeline.simhash64("调查以后再下结论。"),
         )
-        self.assertLessEqual(
-            len(identifiers),
-            corpus_pipeline.NEAR_CANDIDATE_LIMIT * len(corpus_pipeline._simhash_bands(candidate.simhash)),
+        result = build_corpus_index(
+            [
+                self._document("support", "赞成尽快采取这一行动。"),
+                self._document("oppose", "反对尽快采取这一行动。"),
+            ],
+            [self._source("support", period="1926"), self._source("oppose", period="1926")],
         )
-        self.assertLess(elapsed, 5.0)
+        self.assertEqual(2, len(result.chunks))
 
     def test_unknown_period_exact_query_uses_source_scoped_exact_index(self):
         candidate = build_corpus_index(
@@ -279,6 +289,39 @@ class CorpusPipelineTest(unittest.TestCase):
             [row[3] for row in plan],
         )
 
+    def test_safe_near_query_uses_indexed_safe_canonical_hash(self):
+        candidate = build_corpus_index(
+            [self._document("near", "调查之后，再下结论。")],
+            [self._source("near", period="1926")],
+        ).chunks[0]
+        database = sqlite3.connect(self.root / "safe-near.sqlite3")
+        database.row_factory = sqlite3.Row
+        try:
+            corpus_pipeline._create_streaming_schema(database)
+            where, params = corpus_pipeline._streaming_match_constraints(
+                candidate,
+                "physical_chunks",
+            )
+            plan = database.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM physical_chunks WHERE "
+                + where
+                + " AND safe_near_hash = ? AND semantic_guard_hash = ? "
+                "AND normalized_hash != ? ORDER BY sort_key LIMIT 1",
+                (
+                    *params,
+                    candidate.safe_near_hash,
+                    candidate.semantic_guard_hash,
+                    candidate.normalized_hash,
+                ),
+            ).fetchall()
+        finally:
+            database.close()
+
+        self.assertTrue(
+            any("physical_safe_near_index" in row[3] for row in plan),
+            [row[3] for row in plan],
+        )
+
     def test_streaming_index_does_not_publish_partial_files_when_writing_fails(self):
         root = self.root / "atomic-index"
         source = self._source("a", period="1926")
@@ -298,6 +341,27 @@ class CorpusPipelineTest(unittest.TestCase):
         index_parent = root / "corpora"
         self.assertFalse((index_parent / "index").exists())
         self.assertFalse(any(path.name.startswith(".index-staging-") for path in index_parent.iterdir()))
+
+    def test_streaming_index_cleans_temp_files_when_sqlite_connect_fails(self):
+        root = self.root / "sqlite-connect-failure"
+        source = self._source("a", period="1926")
+
+        with mock.patch.object(
+            corpus_pipeline.sqlite3,
+            "connect",
+            side_effect=OSError("injected sqlite connect failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "injected sqlite connect failure"):
+                corpus_pipeline.build_corpus_index_streaming(
+                    root,
+                    [source],
+                    lambda _: [ExtractedSection("正文", "调查以后再下结论。")],
+                )
+
+        index_parent = root / "corpora"
+        self.assertFalse((index_parent / "index").exists())
+        self.assertFalse(any(path.name.startswith(".index-staging-") for path in index_parent.iterdir()))
+        self.assertFalse(any(root.glob(".corpus-index-*.sqlite3")))
 
     def test_chunks_include_bounded_context_and_hierarchy(self):
         result = build_corpus_index(
@@ -421,6 +485,51 @@ class CorpusPipelineTest(unittest.TestCase):
 
         self.assertEqual(original, "".join(section.text for section in sections))
 
+    def test_v2_plain_text_reader_normalizes_whitespace_stably_across_windows(self):
+        source = self.root / "whitespace-boundary.md"
+        original = (
+            "# 第一章\r\n"
+            + ("甲" * 120)
+            + " \t 乙\r\n\r\n\r\n丙\r\n"
+            + "## 第二节\r\n"
+            + "丁\t\t戊"
+        )
+        source.write_text(original, encoding="utf-8", newline="")
+
+        small = list(iter_v2_plain_text_sections(source, read_chars=1, max_section_chars=128))
+        large = list(iter_v2_plain_text_sections(source, read_chars=4096, max_section_chars=128))
+
+        self.assertEqual(small, large)
+        self.assertEqual(
+            ["第一章", "第一章 / 第二节"],
+            list(dict.fromkeys(section.location for section in small)),
+        )
+        self.assertEqual(
+            extractors_module._normalize_text(original),
+            self._reconstruct_streamed_sections(small),
+        )
+
+    def test_v2_plain_text_reader_keeps_whitespace_across_multiple_manual_flushes(self):
+        source = self.root / "manual-flush-whitespace.txt"
+        original = (
+            ("甲" * 128)
+            + "乙 \t  丙"
+            + ("丁" * 128)
+            + "戊\t\t己"
+            + ("庚" * 128)
+            + "辛"
+        )
+        source.write_text(original, encoding="utf-8")
+
+        sections = list(iter_v2_plain_text_sections(source, read_chars=1, max_section_chars=128))
+
+        self.assertGreaterEqual(len(sections), 4)
+        self.assertTrue(all(section.location == "正文" for section in sections))
+        self.assertEqual(
+            extractors_module._normalize_text(original),
+            "".join(section.text for section in sections),
+        )
+
     def test_index_bytes_are_identical_across_fresh_python_processes(self):
         script = textwrap.dedent(
             """
@@ -494,10 +603,43 @@ class CorpusPipelineTest(unittest.TestCase):
             "build_corpus_index_streaming",
             side_effect=replace_before_index,
         ):
-            with self.assertRaisesRegex(Exception, "来源文件.*不匹配|来源文件在读取期间发生变化"):
+            with self.assertRaisesRegex(
+                Exception,
+                "来源文件在索引前发生变化|来源文件.*不匹配|来源文件在读取期间发生变化",
+            ):
                 prepare_workspace_v2(
                     [source],
                     self.root / "replaced-workspace",
+                    agent_id="person.researcher",
+                    name="资料研究者",
+                    version=2,
+                )
+
+    def test_prepare_v2_rejects_source_changed_between_index_hash_and_parse(self):
+        source = self.root / "replace-during-index.md"
+        source.write_text("# 原始\n\n原始资料。", encoding="utf-8")
+        replacement = "# 替换\n\n替换后的索引内容。".encode("utf-8")
+        real_iter = builder_module.iter_v2_source_sections_stream
+        replaced = False
+
+        def replace_after_hash(stream, suffix, display_name, **kwargs):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                staging = next(self.root.glob(".source-index-workspace.staging-*"))
+                staged_source = next((staging / "sources").iterdir())
+                staged_source.write_bytes(replacement)
+            yield from real_iter(stream, suffix, display_name, **kwargs)
+
+        with mock.patch.object(
+            builder_module,
+            "iter_v2_source_sections_stream",
+            side_effect=replace_after_hash,
+        ):
+            with self.assertRaisesRegex(Exception, "来源文件在读取期间发生变化"):
+                prepare_workspace_v2(
+                    [source],
+                    self.root / "source-index-workspace",
                     agent_id="person.researcher",
                     name="资料研究者",
                     version=2,
@@ -591,6 +733,17 @@ class CorpusPipelineTest(unittest.TestCase):
             raw_size_bytes=10,
             extracted_chars=0,
         )
+
+    @staticmethod
+    def _reconstruct_streamed_sections(sections: list[ExtractedSection]) -> str:
+        result: list[str] = []
+        previous_location: str | None = None
+        for section in sections:
+            if previous_location is not None and section.location != previous_location:
+                result.append("\n")
+            result.append(section.text)
+            previous_location = section.location
+        return "".join(result)
 
 
 if __name__ == "__main__":

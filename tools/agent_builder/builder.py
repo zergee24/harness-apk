@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_private_key
 
 from .corpus_pipeline import build_corpus_index_streaming
-from .extractors import extract_document, iter_v2_plain_text_sections
+from .extractors import extract_document, iter_v2_source_sections_stream
 from .models import BuildError, BuildReport, ExtractedDocument, PackResult
 from .schema_v2 import (
     AgentAssetPaths,
@@ -212,26 +212,31 @@ def prepare_workspace_v2(
             snapshot.snapshot_path.replace(source_dir / source.stored_name)
         shutil.rmtree(staging / ".incoming", ignore_errors=True)
 
-        index_snapshot_dir = staging / ".index-input"
-        index_snapshot_paths = _snapshot_v2_index_inputs(source_dir, sources, index_snapshot_dir)
         extracted_chars_by_source: dict[str, int] = {}
+        root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        source_root_descriptor = os.open(source_dir, root_flags)
+        try:
+            root_info = os.fstat(source_root_descriptor)
+            if not stat.S_ISDIR(root_info.st_mode):
+                raise BuildError("来源目录不是目录")
 
-        def sections_for_index(source: SourceRecord):
-            extracted_chars = 0
-            for section in _iter_v2_source_sections(index_snapshot_paths[source.source_id]):
-                if section.text.strip():
-                    extracted_chars += len(section.text)
-                yield section
-            if not extracted_chars:
-                raise BuildError(f"没有可提取文本：{source.file_name}")
-            extracted_chars_by_source[source.source_id] = extracted_chars
+            def sections_for_index(source: SourceRecord):
+                extracted_chars = 0
+                for section in _iter_v2_source_sections_at(source_root_descriptor, source):
+                    if section.text.strip():
+                        extracted_chars += len(section.text)
+                    yield section
+                if not extracted_chars:
+                    raise BuildError(f"没有可提取文本：{source.file_name}")
+                extracted_chars_by_source[source.source_id] = extracted_chars
 
-        build_corpus_index_streaming(staging, sources, sections_for_index)
+            build_corpus_index_streaming(staging, sources, sections_for_index)
+        finally:
+            os.close(source_root_descriptor)
         sources = [
             replace(source, extracted_chars=extracted_chars_by_source[source.source_id])
             for source in sources
         ]
-        shutil.rmtree(index_snapshot_dir, ignore_errors=True)
         manifest = WorkspaceV2(
             agent_id=agent_id,
             name=name,
@@ -418,32 +423,43 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _iter_v2_source_sections(path: Path):
-    suffix = path.suffix.lower()
-    if suffix in {".txt", ".md", ".markdown"}:
-        yield from iter_v2_plain_text_sections(path)
-        return
-    yield from extract_document(path).sections
-
-
-def _snapshot_v2_index_inputs(
-    source_dir: Path,
-    sources: Iterable[SourceRecord],
-    snapshot_dir: Path,
-) -> dict[str, Path]:
-    """Freeze each staged source before the single index/extraction pass."""
-    snapshot_dir.mkdir()
-    snapshots: dict[str, Path] = {}
-    for source in sources:
-        snapshot_path = snapshot_dir / source.stored_name
-        source_hash, raw_size_bytes = _copy_v2_source(
-            source_dir / source.stored_name,
-            snapshot_path,
-        )
+def _iter_v2_source_sections_at(root_descriptor: int, source: SourceRecord):
+    """Hash and parse one staged source through the same no-follow descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source.stored_name, flags, dir_fd=root_descriptor)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise BuildError(f"来源文件必须是普通文件：{source.stored_name}")
+        source_hash, raw_size_bytes = _sha256_and_size_descriptor(descriptor)
         if source_hash != source.source_hash or raw_size_bytes != source.raw_size_bytes:
             raise BuildError(f"来源文件在索引前发生变化：{source.stored_name}")
-        snapshots[source.source_id] = snapshot_path
-    return snapshots
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            yield from iter_v2_source_sections_stream(
+                stream,
+                Path(source.stored_name).suffix,
+                source.file_name,
+            )
+        after = os.fstat(descriptor)
+        if not _same_file_identity(before, after):
+            raise BuildError(f"来源文件在读取期间发生变化：{source.stored_name}")
+    except OSError as error:
+        raise BuildError(f"来源文件无法读取：{source.stored_name}：{error}") from error
+    finally:
+        os.close(descriptor)
+
+
+def _sha256_and_size_descriptor(descriptor: int) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    raw_size_bytes = 0
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    with os.fdopen(os.dup(descriptor), "rb") as stream:
+        while block := stream.read(SOURCE_HASH_BUFFER_SIZE):
+            digest.update(block)
+            raw_size_bytes += len(block)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return digest.hexdigest(), raw_size_bytes
 
 
 def _verify_staged_v2_sources(workspace: Path, sources: tuple[SourceRecord, ...]) -> None:

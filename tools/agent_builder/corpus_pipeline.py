@@ -23,10 +23,7 @@ from .schema_v2 import SourceRecord
 CHUNK_TARGET_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 120
 MAX_CONTEXT_CHARS = 320
-NEAR_DUPLICATE_DISTANCE = 16
-NEAR_ANCHOR_WIDTH = 15
-NEAR_ANCHOR_COUNT = 4
-NEAR_CANDIDATE_LIMIT = 32
+SAFE_NEAR_REPLACEMENTS = (("以后", "之后"),)
 
 
 @dataclass(frozen=True)
@@ -70,6 +67,8 @@ class ContextualChunk:
     duplicate_group: str
     source_aliases: tuple[str, ...]
     normalized_hash: str
+    safe_near_hash: str
+    semantic_guard_hash: str
     simhash: int
 
     def to_dict(self) -> dict[str, object]:
@@ -90,6 +89,7 @@ class ContextualChunk:
             "sourceId": self.source_id,
             "sourceTitle": self.source_title,
             "text": self.text,
+            "simHash": f"{self.simhash:016x}",
         }
 
 
@@ -264,19 +264,24 @@ def build_corpus_index_streaming(
     output_parent.mkdir(parents=True, exist_ok=True)
     if output_root.exists():
         raise BuildError(f"语料索引输出目录已存在：{output_root}")
-    temporary_output_root = Path(
-        tempfile.mkdtemp(prefix=".index-staging-", dir=output_parent)
-    )
-    descriptor, database_name = tempfile.mkstemp(prefix=".corpus-index-", suffix=".sqlite3", dir=workspace)
-    os.close(descriptor)
-    database_path = Path(database_name)
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
+    temporary_output_root: Path | None = None
+    database_path: Path | None = None
+    connection: sqlite3.Connection | None = None
     extracted_characters = 0
     chunks_before = 0
     exact_count = 0
     near_count = 0
     try:
+        temporary_output_root = Path(
+            tempfile.mkdtemp(prefix=".index-staging-", dir=output_parent)
+        )
+        descriptor, database_name = tempfile.mkstemp(
+            prefix=".corpus-index-", suffix=".sqlite3", dir=workspace
+        )
+        os.close(descriptor)
+        database_path = Path(database_name)
+        connection = sqlite3.connect(database_path)
+        connection.row_factory = sqlite3.Row
         _create_streaming_schema(connection)
         for source in records:
             source_node = _source_node(source)
@@ -333,9 +338,11 @@ def build_corpus_index_streaming(
         temporary_output_root.replace(output_root)
         return stats
     finally:
-        connection.close()
-        database_path.unlink(missing_ok=True)
-        if temporary_output_root.exists():
+        if connection is not None:
+            connection.close()
+        if database_path is not None:
+            database_path.unlink(missing_ok=True)
+        if temporary_output_root is not None and temporary_output_root.exists():
             shutil.rmtree(temporary_output_root)
 
 
@@ -354,6 +361,8 @@ def _create_streaming_schema(connection: sqlite3.Connection) -> None:
             genre TEXT NOT NULL,
             authorship TEXT NOT NULL,
             normalized_hash TEXT NOT NULL,
+            safe_near_hash TEXT NOT NULL,
+            semantic_guard_hash TEXT NOT NULL,
             simhash TEXT NOT NULL,
             source_id TEXT NOT NULL,
             source_hash TEXT NOT NULL,
@@ -362,36 +371,26 @@ def _create_streaming_schema(connection: sqlite3.Connection) -> None:
             payload TEXT NOT NULL
         );
         CREATE INDEX physical_exact_index
-            ON physical_chunks(period, conflict_key, genre, authorship, normalized_hash);
+            ON physical_chunks(
+                period, conflict_key, genre, authorship,
+                normalized_hash, semantic_guard_hash, sort_key
+            );
         CREATE INDEX physical_exact_unknown_index
             ON physical_chunks(
                 period, conflict_key, genre, authorship,
-                source_id, source_hash, location, normalized_hash, sort_key
+                source_id, source_hash, location,
+                normalized_hash, semantic_guard_hash, sort_key
             );
-        CREATE TABLE simhash_bands (
-            physical_chunk_id TEXT NOT NULL,
-            band_index INTEGER NOT NULL,
-            band_value INTEGER NOT NULL,
-            period TEXT NOT NULL,
-            conflict_key TEXT NOT NULL,
-            genre TEXT NOT NULL,
-            authorship TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            source_hash TEXT NOT NULL,
-            location TEXT NOT NULL,
-            sort_key TEXT NOT NULL,
-            PRIMARY KEY (physical_chunk_id, band_index)
-        );
-        CREATE INDEX simhash_candidate_index
-            ON simhash_bands(
+        CREATE INDEX physical_safe_near_index
+            ON physical_chunks(
                 period, conflict_key, genre, authorship,
-                band_index, band_value, sort_key, physical_chunk_id
+                safe_near_hash, semantic_guard_hash, sort_key
             );
-        CREATE INDEX simhash_unknown_candidate_index
-            ON simhash_bands(
+        CREATE INDEX physical_safe_near_unknown_index
+            ON physical_chunks(
                 period, conflict_key, genre, authorship,
                 source_id, source_hash, location,
-                band_index, band_value, sort_key, physical_chunk_id
+                safe_near_hash, semantic_guard_hash, sort_key
             );
         CREATE TABLE duplicates (
             duplicate_chunk_id TEXT PRIMARY KEY,
@@ -416,8 +415,9 @@ def _find_exact_streaming_match(
     row = connection.execute(
         "SELECT * FROM physical_chunks WHERE "
         + where
-        + " AND normalized_hash = ? ORDER BY sort_key LIMIT 1",
-        (*params, candidate.normalized_hash),
+        + " AND normalized_hash = ? AND semantic_guard_hash = ? "
+        "ORDER BY sort_key LIMIT 1",
+        (*params, candidate.normalized_hash, candidate.semantic_guard_hash),
     ).fetchone()
     return _chunk_from_streaming_row(row) if row is not None else None
 
@@ -425,46 +425,21 @@ def _find_exact_streaming_match(
 def _find_near_streaming_match(
     connection: sqlite3.Connection, candidate: ContextualChunk
 ) -> ContextualChunk | None:
-    best: ContextualChunk | None = None
-    best_sort_key: str | None = None
-    for chunk_id in _bounded_near_candidate_ids(connection, candidate):
-        row = connection.execute(
-            "SELECT * FROM physical_chunks WHERE id = ?", (chunk_id,)
-        ).fetchone()
-        if row is None or (best_sort_key is not None and row["sort_key"] >= best_sort_key):
-            continue
-        stored = _chunk_from_streaming_row(row)
-        if _near_duplicate(stored, candidate):
-            best = stored
-            best_sort_key = row["sort_key"]
-    return best
-
-
-def _bounded_near_candidate_ids(
-    connection: sqlite3.Connection, candidate: ContextualChunk
-) -> Iterable[str]:
-    """Return a deterministic, bounded high-recall candidate set.
-
-    Exact normalized hashes are complete. Near duplicate recall intentionally uses
-    only long SimHash anchors, so adversarial SimHash collisions cannot turn the
-    disk-backed index into a quadratic scan. Every returned row still passes the
-    strict SimHash and Jaccard check in ``_near_duplicate``.
-    """
-    where, params = _streaming_match_constraints(candidate, "simhash_bands")
-    seen: set[str] = set()
-    for band_index, band_value in _simhash_bands(candidate.simhash):
-        rows = connection.execute(
-            "SELECT physical_chunk_id FROM simhash_bands WHERE "
-            + where
-            + " AND band_index = ? AND band_value = ? "
-            "ORDER BY sort_key, physical_chunk_id LIMIT ?",
-            (*params, band_index, band_value, NEAR_CANDIDATE_LIMIT),
-        )
-        for row in rows:
-            chunk_id = str(row["physical_chunk_id"])
-            if chunk_id not in seen:
-                seen.add(chunk_id)
-                yield chunk_id
+    """Merge only explicit safe wording equivalents, never fuzzy rewrites."""
+    where, params = _streaming_match_constraints(candidate, "physical_chunks")
+    row = connection.execute(
+        "SELECT * FROM physical_chunks WHERE "
+        + where
+        + " AND safe_near_hash = ? AND semantic_guard_hash = ? "
+        "AND normalized_hash != ? ORDER BY sort_key LIMIT 1",
+        (
+            *params,
+            candidate.safe_near_hash,
+            candidate.semantic_guard_hash,
+            candidate.normalized_hash,
+        ),
+    ).fetchone()
+    return _chunk_from_streaming_row(row) if row is not None else None
 
 
 def _streaming_match_constraints(
@@ -496,9 +471,10 @@ def _insert_physical_chunk(
     connection.execute(
         """
         INSERT INTO physical_chunks(
-            id, sort_key, period, conflict_key, genre, authorship, normalized_hash, simhash,
+            id, sort_key, period, conflict_key, genre, authorship, normalized_hash,
+            safe_near_hash, semantic_guard_hash, simhash,
             source_id, source_hash, location, aliases, payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             chunk.id,
@@ -508,6 +484,8 @@ def _insert_physical_chunk(
             chunk.genre,
             chunk.authorship,
             chunk.normalized_hash,
+            chunk.safe_near_hash,
+            chunk.semantic_guard_hash,
             f"{chunk.simhash:016x}",
             chunk.source_id,
             chunk.source_hash,
@@ -516,32 +494,6 @@ def _insert_physical_chunk(
             _canonical_json_text(chunk.to_dict()),
         ),
     )
-    connection.executemany(
-        """
-        INSERT INTO simhash_bands(
-            physical_chunk_id, band_index, band_value, period, conflict_key,
-            genre, authorship, source_id, source_hash, location, sort_key
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            (
-                chunk.id,
-                band_index,
-                band_value,
-                chunk.period,
-                chunk.conflict_key,
-                chunk.genre,
-                chunk.authorship,
-                chunk.source_id,
-                chunk.source_hash,
-                chunk.location,
-                sort_key,
-            )
-            for band_index, band_value in _simhash_bands(chunk.simhash)
-        ),
-    )
-
-
 def _merge_streaming_chunk(
     connection: sqlite3.Connection, primary: ContextualChunk, duplicate: ContextualChunk
 ) -> None:
@@ -584,15 +536,9 @@ def _chunk_from_streaming_row(row: sqlite3.Row) -> ContextualChunk:
         duplicate_group=payload["duplicateGroup"],
         source_aliases=tuple(json.loads(row["aliases"])),
         normalized_hash=row["normalized_hash"],
+        safe_near_hash=row["safe_near_hash"],
+        semantic_guard_hash=row["semantic_guard_hash"],
         simhash=int(row["simhash"], 16),
-    )
-
-
-def _simhash_bands(value: int) -> tuple[tuple[int, int], ...]:
-    mask = (1 << NEAR_ANCHOR_WIDTH) - 1
-    return tuple(
-        (index, (value >> (index * NEAR_ANCHOR_WIDTH)) & mask)
-        for index in range(NEAR_ANCHOR_COUNT)
     )
 
 
@@ -635,6 +581,53 @@ def normalize_for_dedup(text: str) -> str:
     # A punctuation-only chunk has no lexical feature. Preserve a deterministic
     # fallback so distinct source evidence never shares an empty exact-hash key.
     return normalized or "\x00" + folded
+
+
+def safe_near_canonical(text: str) -> str:
+    """Canonicalize only explicitly approved wording variants for physical merge."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    for source, replacement in SAFE_NEAR_REPLACEMENTS:
+        folded = folded.replace(source, replacement)
+    normalized = re.sub(r"[\W_]+", "", folded)
+    return normalized or "\x00" + folded
+
+
+def semantic_guard_canonical(text: str) -> str:
+    """Keep evidence-significant lexical boundaries out of punctuation-only merges."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    latin_tokens = tuple(re.findall(r"[a-z]+(?:[0-9]+)?|[0-9]+(?:\.[0-9]+)?", folded))
+    digits = tuple(re.findall(r"\d+(?:\.\d+)?", folded))
+    negations = tuple(
+        f"{character}:{_semantic_boundary_kind(folded[index + 1:index + 2])}"
+        for index, character in enumerate(folded)
+        if character in "不非无未莫勿"
+    )
+    stances = tuple(
+        match.group(0)
+        for match in re.finditer(
+            r"不赞成|不支持|不同意|不应该|不应|反对|赞成|支持|拥护|同意|拒绝|抵制|否定|主张",
+            folded,
+        )
+    )
+    return _canonical_json_text(
+        {
+            "digits": digits,
+            "latinTokens": latin_tokens,
+            "negationForms": negations,
+            "stances": stances,
+        }
+    )
+
+
+def _semantic_boundary_kind(value: str) -> str:
+    if not value:
+        return "end"
+    character = value[0]
+    if "\u3400" <= character <= "\u9fff":
+        return "cjk"
+    if character.isalnum():
+        return "word"
+    return "boundary"
 
 
 def simhash64(text: str) -> int:
@@ -765,6 +758,8 @@ def _contextual_chunk(
     chunk_index: int,
 ) -> ContextualChunk:
     normalized = normalize_for_dedup(text)
+    safe_near = safe_near_canonical(text)
+    semantic_guard = semantic_guard_canonical(text)
     candidate_id = _stable_id(
         "chunk",
         source.source_id,
@@ -789,9 +784,17 @@ def _contextual_chunk(
         keywords=tuple(_keywords(text)),
         ngrams=tuple(_ngrams(text)),
         conflict_key=section.conflict_key.strip(),
-        duplicate_group=_stable_id("duplicate", normalized, source.period, section.conflict_key.strip()),
+        duplicate_group=_stable_id(
+            "duplicate",
+            safe_near,
+            semantic_guard,
+            source.period,
+            section.conflict_key.strip(),
+        ),
         source_aliases=(source.source_id,),
         normalized_hash=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+        safe_near_hash=hashlib.sha256(safe_near.encode("utf-8")).hexdigest(),
+        semantic_guard_hash=hashlib.sha256(semantic_guard.encode("utf-8")).hexdigest(),
         simhash=simhash64(text),
     )
 
@@ -806,13 +809,13 @@ def _deduplicate(
     for candidate in sorted(candidates, key=lambda item: item.sort_key):
         chunk = candidate.chunk
         matches = [stored for stored in physical if _eligible_for_merge(stored, chunk)]
-        exact = next((stored for stored in matches if stored.normalized_hash == chunk.normalized_hash), None)
+        exact = next((stored for stored in matches if _is_exact_duplicate(stored, chunk)), None)
         if exact is not None:
             physical = _merge_chunk(physical, exact, chunk)
             duplicates.append(_duplicate_record(chunk, exact, "exact"))
             exact_count += 1
             continue
-        near = next((stored for stored in matches if _near_duplicate(stored, chunk)), None)
+        near = next((stored for stored in matches if _is_safe_near_duplicate(stored, chunk)), None)
         if near is not None:
             physical = _merge_chunk(physical, near, chunk)
             duplicates.append(_duplicate_record(chunk, near, "near"))
@@ -839,18 +842,21 @@ def _eligible_for_merge(left: ContextualChunk, right: ContextualChunk) -> bool:
     return True
 
 
-def _near_duplicate(left: ContextualChunk, right: ContextualChunk) -> bool:
-    normalized_left = normalize_for_dedup(left.text)
-    normalized_right = normalize_for_dedup(right.text)
-    if min(len(normalized_left), len(normalized_right)) < 8:
-        return False
-    distance = (left.simhash ^ right.simhash).bit_count()
-    if distance > NEAR_DUPLICATE_DISTANCE:
-        return False
-    left_features = set(_character_shingles(normalized_left, 4))
-    right_features = set(_character_shingles(normalized_right, 4))
-    overlap = len(left_features & right_features) / len(left_features | right_features)
-    return overlap >= 0.5
+def _is_exact_duplicate(left: ContextualChunk, right: ContextualChunk) -> bool:
+    """Treat punctuation/spacing hashes as candidates, never as semantic proof."""
+    return (
+        left.normalized_hash == right.normalized_hash
+        and left.semantic_guard_hash == right.semantic_guard_hash
+    )
+
+
+def _is_safe_near_duplicate(left: ContextualChunk, right: ContextualChunk) -> bool:
+    """Only merge an allow-listed wording equivalent after the semantic guard."""
+    return (
+        left.normalized_hash != right.normalized_hash
+        and left.safe_near_hash == right.safe_near_hash
+        and left.semantic_guard_hash == right.semantic_guard_hash
+    )
 
 
 def _merge_chunk(
