@@ -4,6 +4,8 @@ import android.content.ContextWrapper
 import com.harnessapk.agent.AgentEvidence
 import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.agent.AgentTransactionRunner
+import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.FakeAgentDao
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.TimeProvider
@@ -225,6 +227,59 @@ class SendMessageUseCaseAgentPersistenceTest {
         }
     }
 
+    @Test
+    fun finalAgentSourcesWriteDropsChunkDeletedAfterRetrievalBeforePersistence() = runTest {
+        val store = inMemoryChatStore()
+        val conversationId = store.repository.createConversation(agentId = "agent-1", agentVersion = 1)
+        val assistantId = store.repository.insertAssistantPending(conversationId, "provider-1", "model-1")
+        val selectedAfterRetrieval = agentContext(
+            evidence = listOf(
+                AgentEvidence(
+                    "chunk-1",
+                    "实践论",
+                    "第一章",
+                    "调查先于结论。",
+                    8,
+                    chunkKey = "source-hash:chunk-1",
+                ),
+            ),
+        )
+        val dao = FakeAgentDao().apply {
+            persistableChunkKeys += "source-hash:chunk-1"
+        }
+        val writer = AgentSourcePartWriter(
+            dao = dao,
+            chatRepository = store.repository,
+            transactionRunner = AgentTransactionRunner { block -> block() },
+            lifecycleCoordinator = AgentLifecycleCoordinator(),
+        )
+        dao.persistableChunkKeys.clear()
+
+        val persisted = writer.persist(
+            messageId = assistantId,
+            snapshot = StreamingMessageSnapshot(
+                status = MessageStatus.PENDING,
+                parts = listOf(
+                    UiMessagePartDraft(
+                        index = 0,
+                        type = UiMessagePartType.TEXT,
+                        content = "先调查。[资料1]",
+                        stable = true,
+                    ),
+                ),
+            ),
+            context = selectedAfterRetrieval,
+        )
+
+        assertEquals("先调查。", persisted.parts.single().content)
+        assertTrue(persisted.parts.none { it.type == UiMessagePartType.AGENT_SOURCES })
+        assertTrue(
+            store.repository.listMessageParts(assistantId).none {
+                it.metadata["chunkKeys"]?.contains("source-hash:chunk-1") == true
+            },
+        )
+    }
+
     private suspend fun executeAndReadParts(
         response: String,
         agentContext: AgentRuntimeContext?,
@@ -271,6 +326,14 @@ class SendMessageUseCaseAgentPersistenceTest {
                 client = OpenAiCompatibleClient(OkHttpClient(), Json { ignoreUnknownKeys = true }),
                 dispatchers = AppDispatchers(Dispatchers.Unconfined, Dispatchers.Unconfined, Dispatchers.Unconfined),
                 agentContextProvider = agentContextProvider,
+                agentSourcePartWriter = AgentSourcePartWriter(
+                    dao = FakeAgentDao().apply {
+                        persistableChunkKeys += agentContext?.evidence.orEmpty().map(AgentEvidence::chunkKey)
+                    },
+                    chatRepository = repository,
+                    transactionRunner = AgentTransactionRunner { block -> block() },
+                    lifecycleCoordinator = AgentLifecycleCoordinator(),
+                ),
                 outputTransformerPipelineFactory = {
                     StreamEventTransformerPipeline(
                         listOf(object : StreamEventTransformer {

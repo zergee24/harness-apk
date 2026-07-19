@@ -37,6 +37,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
 import java.io.InputStream
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
@@ -309,8 +311,10 @@ class AgentRepository(
     private suspend fun snapshotOwnedPackageUnlocked(owned: OwnedPackageSession): ConsumedPackageSnapshot {
         val snapshotDirectory = File(cacheDir, INSTALL_SNAPSHOT_DIRECTORY).also(fileOps::createDirectories)
         val snapshot = File(snapshotDirectory, "${UUID.randomUUID()}.package")
+        val stagedFile = owned.session.stagedFile
+        val sourceFileKey = stagedFile.fileKeyOrNull()
         try {
-            owned.session.stagedFile.inputStream().use { input ->
+            stagedFile.inputStream().use { input ->
                 fileOps.copyBounded(input, snapshot, MAX_IMPORT_BUNDLE_BYTES)
             }
             val packageBytes = snapshot.length()
@@ -326,10 +330,20 @@ class AgentRepository(
             ) {
                 throw AgentBundleException("导入会话快照与签发内容不匹配")
             }
+            if (stagedFile.fileKeyOrNull() == sourceFileKey &&
+                (!stagedFile.isFile ||
+                    stagedFile.length() != owned.session.packageBytes ||
+                    stagedFile.sha256Hex() != owned.session.packageSha256)
+            ) {
+                throw AgentBundleException("导入会话在创建私有快照期间被原地修改")
+            }
             return ConsumedPackageSnapshot(snapshot, parsed, preview)
         } catch (error: Throwable) {
             deleteOrRecordOrphan(snapshot)
-            throw error
+            throw when (error) {
+                is CancellationException, is AgentBundleException -> error
+                else -> AgentBundleException("无法验证导入会话快照", error)
+            }
         } finally {
             deleteOrRecordOrphan(owned.session.stagedFile)
         }
@@ -1000,7 +1014,7 @@ class AgentRepository(
         }
         val chunkKeys = dao.listCorpusChunkKeys(reference.corpusId, reference.sourceHash)
         if (
-            dao.countLegacyAgentSourceParts() > 0 ||
+            dao.countLegacyAgentSourceParts(agentId, version) > 0 ||
             chunkKeys.any { dao.countAgentSourcePartsReferencingChunkKey(it) > 0 }
         ) {
             return@serialized AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.REFERENCED)
@@ -1338,29 +1352,34 @@ class AgentRepository(
                 .filter(String::isNotBlank)
                 .map { File(it).canonicalFile }
                 .distinctBy(File::getAbsolutePath)
-            installedFiles.forEach { file ->
+            val legacyFiles = installedFiles.filter { it != canonical }
+            val canonicalIsValid = canonical.isFile &&
+                canonical.length() == expectedBytes.single() &&
+                canonical.sha256Hex() == sourceHash
+            if (canonical.exists() && !canonicalIsValid) {
+                throw AgentBundleException("canonical source payload 被修改：$sourceHash")
+            }
+            legacyFiles.filter(File::isFile).forEach { file ->
                 if (
-                    !file.isFile ||
                     file.length() != expectedBytes.single() ||
                     file.sha256Hex() != sourceHash
                 ) {
                     throw AgentBundleException("已安装 source descriptor/hash/bytes 不一致：$sourceHash")
                 }
             }
+            if (legacyFiles.any { !it.isFile } && !canonicalIsValid) {
+                throw AgentBundleException("source payload 文件缺失：$sourceHash")
+            }
             if (installedFiles.all { it == canonical }) return@forEach
 
             var movedFrom: File? = null
-            if (canonical.isFile) {
-                if (canonical.length() != expectedBytes.single() || canonical.sha256Hex() != sourceHash) {
-                    throw AgentBundleException("canonical source payload 被修改：$sourceHash")
-                }
-            } else {
-                val source = installedFiles.firstOrNull()
+            if (!canonicalIsValid) {
+                val source = legacyFiles.firstOrNull(File::isFile)
                     ?: throw AgentBundleException("source payload 文件缺失：$sourceHash")
                 fileOps.moveAtomically(source, canonical)
                 movedFrom = source
             }
-            val duplicates = installedFiles.filter { it != canonical && it != movedFrom }
+            val duplicates = legacyFiles.filter { it.isFile && it != movedFrom }
             val tombstones = stageFilesForDeletion(duplicates.map(File::getAbsolutePath))
             try {
                 transactionRunner.run {
@@ -1474,6 +1493,10 @@ class AgentRepository(
         private const val TOMBSTONE_DATA_SUFFIX = ".data"
     }
 }
+
+private fun File.fileKeyOrNull(): Any? = runCatching {
+    Files.readAttributes(toPath(), BasicFileAttributes::class.java).fileKey()
+}.getOrNull()
 
 internal fun buildAgentFtsQuery(query: String): String = agentQueryTerms(query)
     .take(MAX_QUERY_TERM_COUNT)

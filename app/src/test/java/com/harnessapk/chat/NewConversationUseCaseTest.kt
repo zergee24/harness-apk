@@ -229,7 +229,8 @@ private class NewConversationFakeAgentDao : AgentDao {
     override suspend fun countVersionCorpusReferences(corpusId: String, sourceHash: String) = 0
     override suspend fun listCorpusChunkKeys(corpusId: String, corpusHash: String) = emptyList<String>()
     override suspend fun countAgentSourcePartsReferencingChunkKey(chunkKey: String) = 0
-    override suspend fun countLegacyAgentSourceParts() = 0
+    override suspend fun countLegacyAgentSourceParts(agentId: String, version: Int) = 0
+    override suspend fun listInstalledVersionChunkKeys(agentId: String, version: Int, chunkKeys: List<String>) = emptyList<String>()
     override suspend fun findSource(sourceId: String, sourceHash: String): AgentSourceFileEntity? = null
     override suspend fun listVersionSources(agentId: String, version: Int): List<AgentSourceFileEntity> = emptyList()
     override suspend fun upsertAgent(entity: AgentEntity) = Unit

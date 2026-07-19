@@ -21,6 +21,7 @@ import com.harnessapk.storage.ConversationEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
@@ -35,6 +36,7 @@ import org.junit.Test
 import java.io.File
 import java.io.InputStream
 import java.nio.file.Files
+import java.util.concurrent.Executors
 
 class AgentRetrievalTest {
     @Test
@@ -108,6 +110,185 @@ class AgentRetrievalTest {
         assertTrue(failure is AgentBundleException)
         assertTrue(fixture.dao.findAgent("agent-v2") == null)
         assertFalse(session.stagedFile.exists())
+    }
+
+    @Test
+    fun installAndVersionDeleteAreSerializedAcrossFileAndDatabaseLifecycle() = runTest {
+        val coordinator = AgentLifecycleCoordinator()
+        val fileOps = BlockingFinalMoveAgentFileOps("agent.hagent")
+        val fixture = v2InstallFixture(
+            fileOps = fileOps,
+            lifecycleCoordinator = coordinator,
+            conversationDao = RemovalConversationDao(referenceCount = 0),
+        )
+        val session = fixture.repository.preparePackageImport("agent.hagent") {
+            "agent".byteInputStream()
+        }
+
+        val install = async { fixture.repository.installPackage(session) }
+        fileOps.moveEntered.await()
+        val removal = async { fixture.repository.removeVersion("agent-v2", 2) }
+        val removalCompletedBeforeInstall = removal.isCompleted
+        fileOps.releaseMove.complete(Unit)
+
+        assertEquals(AgentInstallOutcome.INSTALLED, install.await().outcome)
+        assertFalse(removalCompletedBeforeInstall)
+        assertEquals(AgentVersionRemovalOutcome.REMOVED, removal.await().outcome)
+        assertTrue(fixture.dao.findAgent("agent-v2") == null)
+    }
+
+    @Test
+    fun discardAndInstallCompareOwnedIdentityInsideTheSameLifecycleBoundary() = runTest {
+        val coordinator = AgentLifecycleCoordinator()
+        val fileOps = BlockingFinalMoveAgentFileOps("agent.hagent")
+        val fixture = v2InstallFixture(
+            fileOps = fileOps,
+            lifecycleCoordinator = coordinator,
+        )
+        val session = fixture.repository.preparePackageImport("agent.hagent") {
+            "agent".byteInputStream()
+        }
+
+        val install = async { fixture.repository.installPackage(session) }
+        fileOps.moveEntered.await()
+        val discard = async {
+            runCatching { fixture.repository.discardPackageImport(session) }.exceptionOrNull()
+        }
+        val discardCompletedBeforeInstall = discard.isCompleted
+        fileOps.releaseMove.complete(Unit)
+
+        assertEquals(AgentInstallOutcome.INSTALLED, install.await().outcome)
+        assertFalse(discardCompletedBeforeInstall)
+        assertTrue(discard.await() is AgentBundleException)
+        assertEquals(AgentStatus.WAITING_FOR_CORPUS, fixture.repository.agent("agent-v2")!!.status)
+    }
+
+    @Test
+    fun setEnabledWaitsForTheSharedLifecycleBoundary() = runTest {
+        val coordinator = AgentLifecycleCoordinator()
+        val fixture = optionalRemovalFixture(required = false, lifecycleCoordinator = coordinator)
+        val lockEntered = CompletableDeferred<Unit>()
+        val releaseLock = CompletableDeferred<Unit>()
+        val holder = launch {
+            coordinator.serialized {
+                lockEntered.complete(Unit)
+                releaseLock.await()
+            }
+        }
+        lockEntered.await()
+
+        val enabling = async { fixture.repository.setAgentEnabled("agent-remove", enabled = false) }
+        val completedWhileLifecycleBusy = enabling.isCompleted
+        releaseLock.complete(Unit)
+        holder.join()
+        enabling.await()
+
+        assertFalse(completedWhileLifecycleBusy)
+        assertEquals(AgentStatus.DISABLED, fixture.repository.agent("agent-remove")!!.status)
+    }
+
+    @Test
+    fun discardFailsClosedForCopiesUnknownSessionsAndConsumedSessionsWithoutDeletingCallerPaths() = runTest {
+        val fixture = v2InstallFixture()
+        val session = fixture.repository.preparePackageImport("agent.hagent") {
+            "agent".byteInputStream()
+        }
+        val forgedPath = fixture.repositoryRoot.resolve("forged.package").apply { writeText("caller-owned") }
+        val copied = session.copy(stagedFile = forgedPath)
+
+        assertTrue(
+            runCatching { fixture.repository.discardPackageImport(copied) }.exceptionOrNull() is AgentBundleException,
+        )
+        assertTrue(forgedPath.isFile)
+        assertTrue(session.stagedFile.isFile)
+
+        val unknownPath = fixture.repositoryRoot.resolve("unknown.package").apply { writeText("caller-owned") }
+        assertTrue(
+            runCatching {
+                fixture.repository.discardPackageImport(session.copy(id = "unknown", stagedFile = unknownPath))
+            }.exceptionOrNull() is AgentBundleException,
+        )
+        assertTrue(unknownPath.isFile)
+
+        fixture.repository.installPackage(session)
+        val consumedPath = fixture.repositoryRoot.resolve("consumed.package").apply { writeText("caller-owned") }
+        assertTrue(
+            runCatching {
+                fixture.repository.discardPackageImport(session.copy(stagedFile = consumedPath))
+            }.exceptionOrNull() is AgentBundleException,
+        )
+        assertTrue(consumedPath.isFile)
+    }
+
+    @Test
+    fun consumedSessionInstallsOnlyFromPrivateSnapshotWhenOriginalPathIsReplaced() = runTest {
+        val fileOps = StagedMutationAgentFileOps(StagedMutationMode.REPLACE_PATH)
+        val fixture = v2InstallFixture(fileOps = fileOps)
+        val session = fixture.repository.preparePackageImport("agent.hagent") {
+            "agent".byteInputStream()
+        }
+        fileOps.stagedFile = session.stagedFile
+
+        val result = fixture.repository.installPackage(session)
+
+        assertEquals(AgentInstallOutcome.INSTALLED, result.outcome)
+        assertEquals(
+            "agent",
+            fixture.repositoryRoot.resolve("files/agents/agent-v2/2/agent.hagent").readText(),
+        )
+        assertFalse(session.stagedFile.exists())
+    }
+
+    @Test
+    fun consumedSessionRejectsInPlaceOverwriteObservedWhileBuildingPrivateSnapshot() = runTest {
+        val fileOps = StagedMutationAgentFileOps(StagedMutationMode.OVERWRITE_IN_PLACE)
+        val fixture = v2InstallFixture(fileOps = fileOps)
+        val session = fixture.repository.preparePackageImport("agent.hagent") {
+            "agent".byteInputStream()
+        }
+        fileOps.stagedFile = session.stagedFile
+
+        val failure = runCatching { fixture.repository.installPackage(session) }.exceptionOrNull()
+
+        assertTrue(failure is AgentBundleException)
+        assertTrue(fixture.dao.findAgent("agent-v2") == null)
+        assertFalse(session.stagedFile.exists())
+        assertTrue(
+            fixture.repositoryRoot.resolve("cache/agent-install-snapshots")
+                .listFiles().orEmpty().none(File::isFile),
+        )
+    }
+
+    @Test
+    fun v1CompatibilityInstallConsumesValidatesAndCleansUpOnIoDispatcher() = runTest {
+        val root = Files.createTempDirectory("agent-v1-dispatcher-test").toFile().apply { deleteOnExit() }
+        val source = root.resolve("source.hbundle").apply { writeText("validated package") }
+        val dispatcher = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "agent-v1-io")
+        }.asCoroutineDispatcher()
+        val observedThreads = mutableListOf<String>()
+        try {
+            val repository = AgentRepository(
+                filesDir = root.resolve("files"),
+                cacheDir = root.resolve("cache"),
+                dao = FakeAgentDao(),
+                reader = FakeAgentBundleAccess(parsedBundle = v1ParsedBundle(source)),
+                timeProvider = TimeProvider {
+                    observedThreads += Thread.currentThread().name
+                    10L
+                },
+                ioDispatcher = dispatcher,
+            )
+            val session = repository.prepareImport("source.hbundle") { source.inputStream() }
+            observedThreads.clear()
+
+            repository.install(session)
+
+            assertTrue(observedThreads.isNotEmpty())
+            assertTrue(observedThreads.all { it == "agent-v1-io" })
+        } finally {
+            dispatcher.close()
+        }
     }
 
     @Test
@@ -258,12 +439,22 @@ class AgentRetrievalTest {
     @Test
     fun legacyAgentSourcesMetadataConservativelyBlocksOptionalRemoval() = runTest {
         val fixture = optionalRemovalFixture(required = false)
-        fixture.dao.hasLegacyAgentSources = true
+        fixture.dao.legacyAgentSourceVersions += "agent-remove:1"
 
         val result = fixture.repository.removeOptionalCorpus("agent-remove", 1, "corpus-extra")
 
         assertEquals(AgentCorpusRemovalOutcome.REFERENCED, result.outcome)
         assertEquals(1, fixture.dao.corpusChunkRefs.size)
+    }
+
+    @Test
+    fun legacyAgentSourcesFromUnrelatedAgentVersionDoNotBlockOptionalRemoval() = runTest {
+        val fixture = optionalRemovalFixture(required = false)
+        fixture.dao.legacyAgentSourceVersions += "agent-other:9"
+
+        val result = fixture.repository.removeOptionalCorpus("agent-remove", 1, "corpus-extra")
+
+        assertEquals(AgentCorpusRemovalOutcome.REMOVED, result.outcome)
     }
 
     @Test
@@ -383,6 +574,86 @@ class AgentRetrievalTest {
         assertTrue(canonical.isFile)
         assertFalse(legacy.exists())
         assertEquals(canonical.canonicalPath, fixture.dao.sources.values.single().filePath)
+    }
+
+    @Test
+    fun recoveryRepairsDatabaseWhenLegacyMoveCompletedBeforeDatabaseCommit() = runTest {
+        val fixture = v2InstallFixture()
+        val sourceDirectory = fixture.repositoryRoot.resolve("files/agents/sources/$V2_SOURCE_HASH").apply {
+            mkdirs()
+        }
+        val missingLegacy = sourceDirectory.resolve("legacy-name.txt")
+        val canonical = sourceDirectory.resolve("payload").apply { writeText("raw-source") }
+        fixture.dao.sources["source-1:$V2_SOURCE_HASH"] = AgentSourceFileEntity(
+            sourceId = "source-1",
+            sourceHash = V2_SOURCE_HASH,
+            title = "来源",
+            fileName = "source.txt",
+            storedName = "legacy-name.txt",
+            format = "txt",
+            genre = "essay",
+            authorship = "direct",
+            period = "test",
+            rawSizeBytes = canonical.length(),
+            filePath = missingLegacy.absolutePath,
+            packageSha256 = "package",
+            installedAt = 1L,
+        )
+
+        fixture.repository.recoverFileLifecycle()
+
+        assertFalse(missingLegacy.exists())
+        assertTrue(canonical.isFile)
+        assertEquals(canonical.canonicalPath, fixture.dao.sources.values.single().filePath)
+    }
+
+    @Test
+    fun installingNewV1OrV2ContentNeverImplicitlyEnablesDisabledAgent() = runTest {
+        val v1Root = Files.createTempDirectory("agent-v1-disabled-test").toFile().apply { deleteOnExit() }
+        val v1Source = v1Root.resolve("source.hbundle").apply { writeText("validated package") }
+        val v1Dao = FakeAgentDao().apply {
+            upsertAgent(
+                AgentEntity(
+                    "agent-v1-session", "V1 Session", "", 0, byteArrayOf(1), "publisher-fingerprint",
+                    "LOCAL_FILE", AgentStatus.DISABLED.name, 0, 0, 1L, 1L,
+                ),
+            )
+        }
+        val v1Repository = AgentRepository(
+            filesDir = v1Root.resolve("files"),
+            cacheDir = v1Root.resolve("cache"),
+            dao = v1Dao,
+            reader = FakeAgentBundleAccess(parsedBundle = v1ParsedBundle(v1Source)),
+            timeProvider = TimeProvider { 10L },
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+
+        v1Repository.install(v1Repository.prepareImport("source.hbundle") { v1Source.inputStream() })
+
+        assertEquals(AgentStatus.DISABLED, v1Repository.agent("agent-v1-session")!!.status)
+        assertEquals(AgentStatus.READY.name, v1Dao.version!!.state)
+
+        listOf("agent", "bundle").forEach { marker ->
+            val fixture = v2InstallFixture()
+            fixture.dao.upsertAgent(
+                AgentEntity(
+                    "agent-v2", "V2 人格", "", 1, byteArrayOf(1), "publisher-v2",
+                    "LOCAL_FILE", AgentStatus.DISABLED.name, 0, 0, 1L, 1L,
+                ),
+            )
+
+            fixture.repository.installPackage(
+                fixture.repository.preparePackageImport("$marker.package") {
+                    marker.byteInputStream()
+                },
+            )
+
+            assertEquals(AgentStatus.DISABLED, fixture.repository.agent("agent-v2")!!.status)
+            val versionState = fixture.dao.version!!.state
+            assertTrue(versionState != AgentStatus.DISABLED.name)
+            fixture.repository.setAgentEnabled("agent-v2", enabled = true)
+            assertEquals(AgentStatus.valueOf(versionState), fixture.repository.agent("agent-v2")!!.status)
+        }
     }
 
     @Test
@@ -1041,7 +1312,8 @@ internal class FakeAgentDao : AgentDao {
     var lastCorpusKeys: List<String> = emptyList()
     var maxChunkBatchSize: Int = 0
     val referencedChunkKeys = mutableSetOf<String>()
-    var hasLegacyAgentSources: Boolean = false
+    val legacyAgentSourceVersions = mutableSetOf<String>()
+    val persistableChunkKeys = mutableSetOf<String>()
     var failChunkInsertCall: Int? = null
     var failEvidenceCheck: Boolean = false
     var failReadyTransition: Boolean = false
@@ -1075,7 +1347,13 @@ internal class FakeAgentDao : AgentDao {
         .map(AgentCorpusChunkCrossRef::chunkKey)
     override suspend fun countAgentSourcePartsReferencingChunkKey(chunkKey: String) =
         if (chunkKey in referencedChunkKeys) 1 else 0
-    override suspend fun countLegacyAgentSourceParts() = if (hasLegacyAgentSources) 1 else 0
+    override suspend fun countLegacyAgentSourceParts(agentId: String, version: Int) =
+        if ("$agentId:$version" in legacyAgentSourceVersions) 1 else 0
+    override suspend fun listInstalledVersionChunkKeys(
+        agentId: String,
+        version: Int,
+        chunkKeys: List<String>,
+    ): List<String> = chunkKeys.filter { it in persistableChunkKeys || it in chunks }
     override suspend fun findSource(sourceId: String, sourceHash: String): AgentSourceFileEntity? =
         sources["$sourceId:$sourceHash"]
     override suspend fun listVersionSources(agentId: String, version: Int): List<AgentSourceFileEntity> =
@@ -1335,6 +1613,8 @@ private fun v2InstallFixture(
     existingCorpusTransform: (V2Corpus) -> V2Corpus = { it },
     failure: V2InstallFailure = V2InstallFailure.NONE,
     fileOps: AgentFileOps = DefaultAgentFileOps(),
+    lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
+    conversationDao: ConversationDao? = null,
 ): V2InstallFixture {
     val root = Files.createTempDirectory("agent-v2-install-test").toFile().apply { deleteOnExit() }
     val packageFile = root.resolve("template.zip").apply { writeText("template") }
@@ -1494,6 +1774,7 @@ private fun v2InstallFixture(
             filesDir = root.resolve("files"),
             cacheDir = root.resolve("cache"),
             dao = dao,
+            conversationDao = conversationDao,
             reader = reader,
             transactionRunner = AgentTransactionRunner { block ->
                 try {
@@ -1503,6 +1784,7 @@ private fun v2InstallFixture(
                     throw error
                 }
             },
+            lifecycleCoordinator = lifecycleCoordinator,
             fileOps = fileOps,
             timeProvider = TimeProvider { 20L },
             ioDispatcher = Dispatchers.Unconfined,
@@ -1673,4 +1955,59 @@ private class FailingAgentFileOps(
     }
 
     override fun delete(file: File): Boolean = if (failDelete && file.exists()) false else delegate.delete(file)
+}
+
+private class BlockingFinalMoveAgentFileOps(
+    private val destinationName: String,
+    private val delegate: AgentFileOps = DefaultAgentFileOps(),
+) : AgentFileOps by delegate {
+    val moveEntered = CompletableDeferred<Unit>()
+    val releaseMove = CompletableDeferred<Unit>()
+
+    override suspend fun moveAtomically(source: File, destination: File) {
+        if (destination.name == destinationName) {
+            moveEntered.complete(Unit)
+            releaseMove.await()
+        }
+        delegate.moveAtomically(source, destination)
+    }
+}
+
+private enum class StagedMutationMode {
+    REPLACE_PATH,
+    OVERWRITE_IN_PLACE,
+}
+
+private class StagedMutationAgentFileOps(
+    private val mode: StagedMutationMode,
+    private val delegate: AgentFileOps = DefaultAgentFileOps(),
+) : AgentFileOps by delegate {
+    lateinit var stagedFile: File
+    private var mutated = false
+
+    override suspend fun copyBounded(input: InputStream, target: File, maxBytes: Long): Long {
+        if (!mutated && target.parentFile?.name == "agent-install-snapshots") {
+            mutateOriginal()
+        }
+        return delegate.copyBounded(input, target, maxBytes)
+    }
+
+    override suspend fun moveAtomically(source: File, destination: File) {
+        if (!mutated && destination.name == "agent.hagent" && source == stagedFile) {
+            mutateOriginal()
+        }
+        delegate.moveAtomically(source, destination)
+    }
+
+    private fun mutateOriginal() {
+        mutated = true
+        when (mode) {
+            StagedMutationMode.REPLACE_PATH -> {
+                val moved = stagedFile.resolveSibling("${stagedFile.name}.original")
+                check(stagedFile.renameTo(moved))
+                stagedFile.writeText("evil")
+            }
+            StagedMutationMode.OVERWRITE_IN_PLACE -> stagedFile.writeText("evil")
+        }
+    }
 }

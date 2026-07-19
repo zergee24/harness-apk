@@ -53,6 +53,7 @@ class SendMessageUseCase(
     private val outputTransformerPipelineFactory: () -> StreamEventTransformerPipeline = {
         StreamEventTransformerPipeline(listOf(ThinkTagStreamTransformer()))
     },
+    private val agentSourcePartWriter: AgentSourcePartWriter? = null,
     private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
 ) {
     suspend fun send(
@@ -247,9 +248,15 @@ class SendMessageUseCase(
             }
             if (agentContext != null) {
                 lifecycleCoordinator.serialized {
-                    latestSnapshot = sanitizeAgentCitationMarkers(requireNotNull(latestSnapshot))
-                    latestSnapshot = appendAgentSourcesPart(requireNotNull(latestSnapshot), agentContext.evidence)
-                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
+                    val snapshot = requireNotNull(latestSnapshot)
+                    latestSnapshot = agentSourcePartWriter?.persist(
+                        nextAssistantId,
+                        snapshot,
+                        agentContext,
+                    ) { latestSnapshot = it }
+                        ?: sanitizeAgentCitationMarkers(snapshot).also {
+                            chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, it)
+                        }
                 }
             }
             currentCoroutineContext().ensureActive()
@@ -274,10 +281,13 @@ class SendMessageUseCase(
                         if (cancelledSnapshot == null) {
                             chatRepository.markAssistantCancelled(id)
                         } else {
-                            chatRepository.replaceMessagePartsFromSnapshot(
-                                id,
-                                sanitizeAgentSnapshotIfNeeded(cancelledSnapshot, agentContext),
-                            )
+                            val sanitized = sanitizeAgentSnapshotIfNeeded(cancelledSnapshot, agentContext)
+                            if (agentContext != null && sanitized.hasAgentSources()) {
+                                agentSourcePartWriter?.persist(id, sanitized, agentContext)
+                                    ?: chatRepository.replaceMessagePartsFromSnapshot(id, sanitized)
+                            } else {
+                                chatRepository.replaceMessagePartsFromSnapshot(id, sanitized)
+                            }
                         }
                     }
                 }
@@ -298,10 +308,13 @@ class SendMessageUseCase(
                     accumulator?.snapshot() ?: latestSnapshot
                 }
                 failedSnapshot?.let {
-                    chatRepository.replaceMessagePartsFromSnapshot(
-                        failedAssistantId,
-                        sanitizeAgentCitationMarkers(it),
-                    )
+                    val sanitized = sanitizeAgentCitationMarkers(it)
+                    if (sanitized.hasAgentSources()) {
+                        agentSourcePartWriter?.persist(failedAssistantId, sanitized, agentContext)
+                            ?: chatRepository.replaceMessagePartsFromSnapshot(failedAssistantId, sanitized)
+                    } else {
+                        chatRepository.replaceMessagePartsFromSnapshot(failedAssistantId, sanitized)
+                    }
                 }
             }
             chatRepository.markAssistantFailed(
@@ -444,6 +457,9 @@ internal fun appendAgentSourcesPart(
         ),
     )
 }
+
+private fun StreamingMessageSnapshot.hasAgentSources(): Boolean =
+    parts.any { it.type == UiMessagePartType.AGENT_SOURCES }
 
 internal fun cancelStreamingSnapshot(
     accumulator: StreamingMessageAccumulator?,

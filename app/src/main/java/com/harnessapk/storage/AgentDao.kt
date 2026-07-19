@@ -72,12 +72,33 @@ interface AgentDao {
 
     @Query(
         """
-        SELECT COUNT(*) FROM message_parts
-        WHERE type = 'AGENT_SOURCES'
-          AND (metadataJson = '' OR metadataJson NOT LIKE '%chunkKeys%')
+        SELECT COUNT(*) FROM message_parts AS part
+        INNER JOIN messages AS message ON message.id = part.messageId
+        INNER JOIN conversations AS conversation ON conversation.id = message.conversationId
+        WHERE part.type = 'AGENT_SOURCES'
+          AND conversation.agentId = :agentId
+          AND conversation.agentVersion = :version
+          AND (part.metadataJson = '' OR part.metadataJson NOT LIKE '%chunkKeys%')
         """,
     )
-    suspend fun countLegacyAgentSourceParts(): Int
+    suspend fun countLegacyAgentSourceParts(agentId: String, version: Int): Int
+
+    @Query(
+        """
+        SELECT DISTINCT chunkRef.chunkKey FROM agent_version_corpora AS versionCorpus
+        INNER JOIN agent_corpus_chunks AS chunkRef
+            ON chunkRef.corpusId = versionCorpus.corpusId
+           AND chunkRef.corpusHash = versionCorpus.sourceHash
+        WHERE versionCorpus.agentId = :agentId
+          AND versionCorpus.version = :version
+          AND chunkRef.chunkKey IN (:chunkKeys)
+        """,
+    )
+    suspend fun listInstalledVersionChunkKeys(
+        agentId: String,
+        version: Int,
+        chunkKeys: List<String>,
+    ): List<String>
 
     @Query("SELECT * FROM agent_source_files WHERE sourceId = :sourceId AND sourceHash = :sourceHash LIMIT 1")
     suspend fun findSource(sourceId: String, sourceHash: String): AgentSourceFileEntity?

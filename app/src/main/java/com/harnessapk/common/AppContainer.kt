@@ -9,6 +9,7 @@ import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.BuildConfig
 import com.harnessapk.chat.ChatImageStore
+import com.harnessapk.chat.AgentSourcePartWriter
 import com.harnessapk.chat.ChatRepository
 import com.harnessapk.chat.ChatExecutionCoordinator
 import com.harnessapk.chat.ChatExecutionRepository
@@ -160,6 +161,12 @@ class AppContainer(context: Context) {
                 agentRepository.runtimeContext(agentId, agentVersion, query)
             }
         },
+        agentSourcePartWriter = AgentSourcePartWriter(
+            dao = database.agentDao(),
+            chatRepository = chatRepository,
+            transactionRunner = AgentTransactionRunner { block -> database.withTransaction { block() } },
+            lifecycleCoordinator = agentLifecycleCoordinator,
+        ),
         lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val chatExecutionRepository = ChatExecutionRepository(

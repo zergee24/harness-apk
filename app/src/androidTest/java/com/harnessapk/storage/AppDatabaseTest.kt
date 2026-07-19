@@ -13,11 +13,19 @@ import com.harnessapk.agent.AgentImportPreview
 import com.harnessapk.agent.AgentImportSession
 import com.harnessapk.agent.AgentPackageManifest
 import com.harnessapk.agent.AgentRepository
+import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.agent.AgentEvidence
+import com.harnessapk.agent.AgentLifecycleCoordinator
+import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agent.ParsedAgentBundle
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.chat.AgentSourcePartWriter
+import com.harnessapk.chat.ChatRepository
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
+import com.harnessapk.chat.StreamingMessageSnapshot
+import com.harnessapk.chat.UiMessagePartDraft
 import com.harnessapk.chat.UiMessagePartType
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Dispatchers
@@ -156,6 +164,140 @@ class AppDatabaseTest {
         assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
         assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
         assertEquals(2, db.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
+        assertEquals(
+            listOf("source-hash:chunk-1"),
+            dao.listInstalledVersionChunkKeys(
+                agentId = "agent-1",
+                version = 1,
+                chunkKeys = listOf("source-hash:chunk-1", "missing:chunk"),
+            ),
+        )
+        db.close()
+    }
+
+    @Test
+    fun legacyAgentSourcesAreScopedByMessageConversationAgentAndVersion() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val conversationDao = db.conversationDao()
+        val messageDao = db.messageDao()
+        val partDao = db.messagePartDao()
+        listOf(
+            ConversationEntity(
+                "target-conversation", "target", 1L, 1L, null, null, false, null,
+                "", "", "", "agent-target", 2,
+            ),
+            ConversationEntity(
+                "other-conversation", "other", 1L, 1L, null, null, false, null,
+                "", "", "", "agent-other", 9,
+            ),
+        ).forEach { conversationDao.insert(it) }
+        listOf(
+            MessageEntity(
+                "target-message", "target-conversation", MessageRole.ASSISTANT.name, "answer",
+                MessageStatus.SUCCEEDED.name, null, null, 1L, 1L, null, null,
+            ),
+            MessageEntity(
+                "other-message", "other-conversation", MessageRole.ASSISTANT.name, "answer",
+                MessageStatus.SUCCEEDED.name, null, null, 1L, 1L, null, null,
+            ),
+        ).forEach { messageDao.insert(it) }
+        partDao.insertAll(
+            listOf(
+                MessagePartEntity(
+                    "target-part", "target-message", 0, UiMessagePartType.AGENT_SOURCES.name,
+                    "legacy", "", true, 1L, 1L,
+                ),
+                MessagePartEntity(
+                    "other-part", "other-message", 0, UiMessagePartType.AGENT_SOURCES.name,
+                    "legacy", "{}", true, 1L, 1L,
+                ),
+            ),
+        )
+
+        assertEquals(1, db.agentDao().countLegacyAgentSourceParts("agent-target", 2))
+        assertEquals(0, db.agentDao().countLegacyAgentSourceParts("agent-target", 1))
+        assertEquals(1, db.agentDao().countLegacyAgentSourceParts("agent-other", 9))
+        db.close()
+    }
+
+    @Test
+    fun agentSourceWriterRevalidatesFixedVersionAfterRetrievalAndPersistsInRoomTransaction() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val dao = db.agentDao()
+        dao.upsertAgent(
+            AgentEntity(
+                "agent-1", "agent", "", 1, byteArrayOf(1), "publisher", "LOCAL_FILE",
+                "READY", 0, 1, 1L, 1L,
+            ),
+        )
+        dao.insertVersion(
+            AgentVersionEntity(
+                "agent-1", 1, 2, "/tmp/agent.hagent", "sha", "{}", "persona", "",
+                1L, "READY",
+            ),
+        )
+        dao.insertCorpus(AgentCorpusEntity("corpus-1", "corpus-hash", "corpus", 1L, 1L))
+        dao.insertVersionCorpus(
+            AgentVersionCorpusCrossRef("agent-1", 1, "corpus-1", "corpus-hash", false),
+        )
+        dao.insertChunks(
+            listOf(
+                AgentChunkEntity(
+                    "source-hash:chunk-1", "source-1", "source-hash", "chunk-1", "source",
+                    location = "section", text = "evidence", keywordsText = "evidence",
+                ),
+            ),
+        )
+        dao.insertCorpusChunkRefs(
+            listOf(AgentCorpusChunkCrossRef("corpus-1", "corpus-hash", "source-hash:chunk-1")),
+        )
+        val repository = ChatRepository(
+            db.conversationDao(),
+            db.messageDao(),
+            db.messagePartDao(),
+            db.messageAttachmentDao(),
+            db.conversationMemoryDao(),
+            TimeProvider { 1L },
+        )
+        val conversationId = repository.createConversation(agentId = "agent-1", agentVersion = 1)
+        val messageId = repository.insertAssistantPending(conversationId, "provider", "model")
+        val selected = AgentRuntimeContext(
+            "agent-1",
+            1,
+            "prompt",
+            listOf(
+                AgentEvidence(
+                    "chunk-1", "source", "section", "evidence", 1,
+                    chunkKey = "source-hash:chunk-1",
+                ),
+            ),
+        )
+        dao.deleteVersionCorpus("agent-1", 1, "corpus-1")
+        val writer = AgentSourcePartWriter(
+            dao = dao,
+            chatRepository = repository,
+            transactionRunner = AgentTransactionRunner { block -> db.withTransaction { block() } },
+            lifecycleCoordinator = AgentLifecycleCoordinator(),
+        )
+
+        writer.persist(
+            messageId,
+            StreamingMessageSnapshot(
+                MessageStatus.PENDING,
+                listOf(UiMessagePartDraft(0, UiMessagePartType.TEXT, "answer[资料1]", stable = true)),
+            ),
+            selected,
+        )
+
+        assertEquals(0, db.scalarInt("SELECT COUNT(*) FROM message_parts WHERE type = 'AGENT_SOURCES'"))
+        assertEquals(
+            0,
+            db.scalarInt(
+                "SELECT COUNT(*) FROM message_parts WHERE metadataJson LIKE '%source-hash:chunk-1%'",
+            ),
+        )
         db.close()
     }
 
@@ -359,6 +501,7 @@ class AppDatabaseTest {
         assertEquals("", sqlite.string("SELECT simHash FROM agent_chunks LIMIT 1"))
         assertEquals("conversation-1", sqlite.string("SELECT id FROM conversations"))
         assertEquals("message-part-1", sqlite.string("SELECT id FROM message_parts"))
+        assertEquals(1, db.agentDao().countLegacyAgentSourceParts("agent-1", 1))
         assertEquals("notes/fixture.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
         assertEquals("provider-1", sqlite.string("SELECT id FROM provider_profiles"))
         assertEquals("V1 persona", db.agentDao().findVersion("agent-1", 1)?.persona)
@@ -816,6 +959,13 @@ class AppDatabaseTest {
             INSERT INTO message_parts (
                 id, messageId, partIndex, type, content, metadataJson, stable, createdAt, updatedAt
             ) VALUES ('message-part-1', 'message-1', 0, 'TEXT', '保留分片', '{}', 1, 2, 3)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO message_parts (
+                id, messageId, partIndex, type, content, metadataJson, stable, createdAt, updatedAt
+            ) VALUES ('message-part-legacy-source', 'message-1', 1, 'AGENT_SOURCES', '旧资料', '', 1, 2, 3)
             """.trimIndent(),
         )
         db.execSQL(
