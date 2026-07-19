@@ -119,8 +119,8 @@ class SourceRecord:
         return cls(
             source_id=_string(source.get("sourceId"), "source.sourceId"),
             title=_string(source.get("title"), "source.title"),
-            file_name=_workspace_path(source.get("fileName"), "source.fileName"),
-            stored_name=_workspace_path(source.get("storedName"), "source.storedName"),
+            file_name=_display_file_name(source.get("fileName"), "source.fileName"),
+            stored_name=_stored_file_name(source.get("storedName"), "source.storedName"),
             source_hash=_string(source.get("sourceHash"), "source.sourceHash"),
             format=_string(source.get("format"), "source.format"),
             genre=genre,
@@ -203,6 +203,19 @@ def _workspace_path(value: Any, label: str) -> str:
     ):
         raise BuildError(f"不安全的工作区路径：{raw}")
     return str(path)
+
+
+def _display_file_name(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value or value in {".", ".."} or "/" in value or "\x00" in value:
+        raise BuildError(f"{label} 必须是非空文件名")
+    return value
+
+
+def _stored_file_name(value: Any, label: str) -> str:
+    path = _workspace_path(value, label)
+    if len(PurePosixPath(path).parts) != 1:
+        raise BuildError(f"{label} 必须是单一文件名")
+    return path
 
 
 def _non_negative_int(value: Any, label: str) -> int:

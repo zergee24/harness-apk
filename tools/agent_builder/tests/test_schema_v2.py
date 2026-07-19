@@ -137,6 +137,25 @@ class WorkspaceV2Test(unittest.TestCase):
         self.assertEqual(len(self.source.read_bytes()), loaded.sources[0].raw_size_bytes)
         self.assertGreater(loaded.sources[0].extracted_chars, 0)
 
+    def test_prepare_v2_round_trips_macos_display_file_names(self):
+        for index, file_name in enumerate(("C:portable.md", r"notes\\draft.md")):
+            with self.subTest(file_name=file_name):
+                source = self.root / file_name
+                source.write_text("# 资料\n\n可被读取。", encoding="utf-8")
+
+                workspace = prepare_workspace_v2(
+                    [source],
+                    self.root / f"workspace-{index}",
+                    agent_id="person.researcher",
+                    name="资料研究者",
+                    version=2,
+                )
+                loaded = load_workspace_v2(workspace)
+
+                self.assertEqual(file_name, loaded.sources[0].file_name)
+                self.assertEqual(1, len(Path(loaded.sources[0].stored_name).parts))
+                self.assertTrue((workspace / "sources" / loaded.sources[0].stored_name).is_file())
+
     def test_load_rejects_absolute_and_traversal_asset_or_source_paths(self):
         workspace = self._prepare()
         manifest_path = workspace / "workspace.json"
@@ -154,6 +173,12 @@ class WorkspaceV2Test(unittest.TestCase):
         manifest["sources"][0]["storedName"] = "sources/../escape.txt"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(BuildError, "不安全"):
+            load_workspace_v2(workspace)
+
+        manifest = json.loads(json.dumps(base_manifest))
+        manifest["sources"][0]["storedName"] = "nested/escape.txt"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(BuildError, "单一文件名"):
             load_workspace_v2(workspace)
 
     def test_load_rejects_windows_asset_and_source_paths(self):
@@ -325,6 +350,120 @@ class WorkspaceV2Test(unittest.TestCase):
 
                 self.assertFalse(report.publishable)
                 self.assertTrue(any(f"agent/{asset}" in error for error in report.errors))
+
+    def test_validate_v2_rejects_asset_leaf_symlink_or_non_regular_file(self):
+        workspace = self._prepare_publishable("asset-leaf")
+        identity = workspace / "agent" / "identity.json"
+        outside = self.root / "outside-identity.json"
+        outside.write_text('{"selfNames":["外部"]}', encoding="utf-8")
+        identity.unlink()
+        identity.symlink_to(outside)
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("符号链接" in error for error in report.errors))
+
+        workspace = self._prepare_publishable("asset-directory")
+        identity = workspace / "agent" / "identity.json"
+        identity.unlink()
+        identity.mkdir()
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("普通文件" in error for error in report.errors))
+
+    def test_validate_v2_rejects_blank_persona(self):
+        workspace = self._prepare_publishable("blank-persona")
+        (workspace / "agent" / "persona.md").write_text(" \n\t", encoding="utf-8")
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("persona.md" in error and "不能为空" in error for error in report.errors))
+
+    def test_validate_v2_rejects_asset_parent_symlink_outside_workspace(self):
+        workspace = self._prepare_publishable("asset-parent")
+        outside = self.root / "outside-agent"
+        outside.mkdir()
+        (outside / "identity.json").write_text('{"selfNames":["外部"]}', encoding="utf-8")
+        linked_parent = workspace / "agent" / "linked"
+        linked_parent.symlink_to(outside, target_is_directory=True)
+        manifest_path = workspace / "workspace.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["assets"]["identity"] = "agent/linked/identity.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("符号链接" in error for error in report.errors))
+
+    def test_validate_v2_rejects_symlinked_agent_root(self):
+        workspace = self._prepare_publishable("agent-root")
+        agent_root = workspace / "agent"
+        outside = self.root / "outside-agent-root"
+        agent_root.rename(outside)
+        agent_root.symlink_to(outside, target_is_directory=True)
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("不安全" in error for error in report.errors))
+
+    def test_validate_v2_requires_structured_assets_to_be_objects(self):
+        json_assets = ("identity.json", "voice.json", "concepts.json", "openers.json")
+        jsonl_assets = ("worldview.jsonl", "episodes.jsonl", "examples.jsonl", "eval.jsonl")
+
+        for asset in json_assets:
+            for payload in ('"scalar"', "[]"):
+                with self.subTest(asset=asset, payload=payload):
+                    workspace = self._prepare_publishable(f"json-shape-{asset}-{len(payload)}")
+                    (workspace / "agent" / asset).write_text(payload, encoding="utf-8")
+
+                    report = validate_workspace_v2(workspace)
+
+                    self.assertFalse(report.publishable)
+                    self.assertTrue(any("JSON 对象" in error for error in report.errors))
+
+        for asset in jsonl_assets:
+            for payload in ('"scalar"\n', "[]\n"):
+                with self.subTest(asset=asset, payload=payload):
+                    workspace = self._prepare_publishable(f"jsonl-shape-{asset}-{len(payload)}")
+                    (workspace / "agent" / asset).write_text(payload, encoding="utf-8")
+
+                    report = validate_workspace_v2(workspace)
+
+                    self.assertFalse(report.publishable)
+                    self.assertTrue(any("JSON 对象" in error for error in report.errors))
+
+    def test_validate_v2_converts_deep_json_recursion_errors_to_reports_and_cli_exit_two(self):
+        deep_value = "[" * 2000 + "0" + "]" * 2000
+        cases = (
+            ("deep-json", "identity.json", deep_value),
+            ("deep-jsonl", "worldview.jsonl", deep_value + "\n"),
+        )
+        for name, asset, payload in cases:
+            with self.subTest(name=name):
+                workspace = self._prepare_publishable(name)
+                (workspace / "agent" / asset).write_text(payload, encoding="utf-8")
+
+                report = validate_workspace_v2(workspace)
+
+                self.assertFalse(report.publishable)
+                self.assertTrue(any(f"agent/{asset}" in error for error in report.errors))
+                self.assertEqual(2, main(["validate-v2", str(workspace)]))
+
+    def test_validate_v2_converts_deep_manifest_recursion_error_to_report_and_cli_exit_two(self):
+        workspace = self._prepare_publishable("deep-manifest")
+        (workspace / "workspace.json").write_text("[" * 2000 + "0" + "]" * 2000, encoding="utf-8")
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("workspace.json" in error for error in report.errors))
+        self.assertEqual(2, main(["validate-v2", str(workspace)]))
 
     def test_cli_prepare_v2_writes_source_catalog_for_one_batch_clarification(self):
         output = self.root / "cli-workspace"

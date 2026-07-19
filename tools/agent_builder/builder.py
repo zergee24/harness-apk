@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import shutil
+import stat
 import tempfile
 import zipfile
 from collections import Counter
@@ -191,7 +192,7 @@ def load_workspace_v2(workspace: Path) -> WorkspaceV2:
     workspace = Path(workspace).expanduser().resolve()
     try:
         return WorkspaceV2.from_dict(_read_json(workspace / "workspace.json"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, json.JSONDecodeError, RecursionError) as error:
         raise BuildError(f"workspace.json 无法读取：{error}") from error
 
 
@@ -211,8 +212,8 @@ def validate_workspace_v2(workspace: Path) -> BuildReport:
     ):
         errors.append("来源元数据仍有未确认项")
     _validate_v2_source_files(workspace, manifest.sources, errors)
-    _validate_v2_asset_files(workspace, manifest.assets, errors)
-    if _v2_semantic_assets_are_empty(workspace, manifest.assets):
+    semantic_assets = _validate_v2_asset_files(workspace, manifest.assets, errors)
+    if semantic_assets is not None and _v2_semantic_assets_are_empty(*semantic_assets):
         errors.append("人物语义资产尚未完成")
     return BuildReport(
         publishable=not errors,
@@ -398,56 +399,128 @@ def _sha256_and_size(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), raw_size_bytes
 
 
-def _validate_v2_asset_files(workspace: Path, assets: AgentAssetPaths, errors: list[str]) -> None:
-    json_assets = (assets.identity, assets.voice, assets.concepts, assets.openers)
-    jsonl_assets = (assets.worldview, assets.episodes, assets.examples, assets.eval)
-    for path in assets.to_dict().values():
-        if not (workspace / path).is_file():
-            errors.append(f"人物资产缺失：{path}")
-    for path in json_assets:
-        _validate_v2_json_asset(workspace, path, errors)
-    for path in jsonl_assets:
-        _validate_v2_jsonl_asset(workspace, path, errors)
+def _validate_v2_asset_files(
+    workspace: Path,
+    assets: AgentAssetPaths,
+    errors: list[str],
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]] | None:
+    agent_root = _v2_agent_root(workspace, errors)
+    if agent_root is None:
+        return None
 
-
-def _validate_v2_json_asset(workspace: Path, path: str, errors: list[str]) -> None:
-    try:
-        _read_json(workspace / path)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        errors.append(f"人物资产无法读取：{path}：{error}")
-
-
-def _validate_v2_jsonl_asset(workspace: Path, path: str, errors: list[str]) -> None:
-    try:
-        _read_jsonl(workspace / path)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        errors.append(f"人物资产无法读取：{path}：{error}")
-
-
-def _v2_semantic_assets_are_empty(workspace: Path, assets: AgentAssetPaths) -> bool:
-    json_assets = (assets.identity, assets.voice, assets.concepts, assets.openers)
-    jsonl_assets = (assets.worldview, assets.episodes, assets.examples, assets.eval)
-    for path in jsonl_assets:
+    json_asset_names = {"identity", "voice", "concepts", "openers"}
+    jsonl_asset_names = {"worldview", "episodes", "examples", "eval"}
+    json_assets: dict[str, Any] = {}
+    jsonl_assets: dict[str, list[dict[str, Any]]] = {}
+    valid = True
+    for name, path in assets.to_dict().items():
         try:
-            if (workspace / path).read_text("utf-8").strip():
-                return False
-        except OSError:
-            return False
-    for path in json_assets:
-        try:
-            if _json_has_content(_read_json(workspace / path)):
-                return False
-        except (OSError, json.JSONDecodeError):
-            return False
-    return True
+            content = _read_v2_asset_text(agent_root, path)
+        except (BuildError, OSError, UnicodeDecodeError) as error:
+            errors.append(f"人物资产无法读取：{path}：{error}")
+            valid = False
+            continue
+
+        if name == "persona":
+            if not content.strip():
+                errors.append(f"人物资产不能为空：{path}")
+                valid = False
+        elif name in json_asset_names:
+            try:
+                value = json.loads(content)
+            except (json.JSONDecodeError, RecursionError) as error:
+                errors.append(f"人物资产无法读取：{path}：{error}")
+                valid = False
+                continue
+            if not isinstance(value, dict):
+                errors.append(f"人物资产必须是 JSON 对象：{path}")
+                valid = False
+                continue
+            json_assets[name] = value
+        elif name in jsonl_asset_names:
+            try:
+                rows = [json.loads(line) for line in content.splitlines() if line.strip()]
+            except (json.JSONDecodeError, RecursionError) as error:
+                errors.append(f"人物资产无法读取：{path}：{error}")
+                valid = False
+                continue
+            if any(not isinstance(row, dict) for row in rows):
+                errors.append(f"人物资产中的每一行必须是 JSON 对象：{path}")
+                valid = False
+                continue
+            jsonl_assets[name] = rows
+    if not valid:
+        return None
+    return json_assets, jsonl_assets
+
+
+def _v2_agent_root(workspace: Path, errors: list[str]) -> Path | None:
+    agent_root = workspace / "agent"
+    try:
+        mode = agent_root.lstat().st_mode
+    except OSError as error:
+        errors.append(f"人物资产目录无法读取：agent：{error}")
+        return None
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        errors.append("人物资产目录缺失、不安全或不是目录：agent")
+        return None
+    try:
+        resolved_agent_root = agent_root.resolve(strict=True)
+    except OSError as error:
+        errors.append(f"人物资产目录无法读取：agent：{error}")
+        return None
+    if not resolved_agent_root.is_relative_to(workspace):
+        errors.append("人物资产目录不在工作区内：agent")
+        return None
+    return resolved_agent_root
+
+
+def _read_v2_asset_text(agent_root: Path, asset_path: str) -> str:
+    path = PurePosixPath(asset_path)
+    if len(path.parts) < 2 or path.parts[0] != "agent":
+        raise BuildError("人物资产必须位于 agent 目录内")
+
+    current = agent_root
+    for part in path.parts[1:-1]:
+        current /= part
+        mode = current.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise BuildError("人物资产父目录不能是符号链接")
+        if not stat.S_ISDIR(mode):
+            raise BuildError("人物资产父路径必须是目录")
+
+    leaf = current / path.parts[-1]
+    mode = leaf.lstat().st_mode
+    if stat.S_ISLNK(mode):
+        raise BuildError("人物资产不能是符号链接")
+    if not stat.S_ISREG(mode):
+        raise BuildError("人物资产必须是普通文件")
+    resolved_leaf = leaf.resolve(strict=True)
+    if not resolved_leaf.is_relative_to(agent_root):
+        raise BuildError("人物资产不在 agent 目录内")
+    return leaf.read_text("utf-8")
+
+
+def _v2_semantic_assets_are_empty(
+    json_assets: dict[str, Any],
+    jsonl_assets: dict[str, list[dict[str, Any]]],
+) -> bool:
+    if any(jsonl_assets.values()):
+        return False
+    return not any(_json_has_content(value) for value in json_assets.values())
 
 
 def _json_has_content(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(_json_has_content(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_json_has_content(item) for item in value)
-    return bool(value)
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+        elif current:
+            return True
+    return False
 
 
 def validate_workspace(workspace: Path) -> BuildReport:
