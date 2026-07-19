@@ -13,14 +13,25 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_private_key
 
 from .corpus_pipeline import build_corpus_index_streaming
 from .evaluation import evaluate_workspace, validate_declared_corpus_question_coverage
 from .evaluation import read_v2_asset_bytes
 from .extractors import extract_document, iter_v2_source_sections_stream
-from .models import BuildError, BuildReport, CorpusShard, ExtractedDocument, PackResult
+from .models import (
+    BuildError,
+    BuildReport,
+    CorpusShard,
+    ExtractedDocument,
+    InstallPlan,
+    PackResult,
+)
 from .schema_v2 import (
     AgentAssetPaths,
     Authorship,
@@ -41,6 +52,22 @@ SOURCE_HASH_BUFFER_SIZE = 1024 * 1024
 V2_STORED_NAME_MAX_BYTES = 200
 V2_SOURCE_HASH_PREFIX_LENGTH = 16
 V2_FILE_NAME_HASH_PREFIX_LENGTH = 16
+V2_AGENT_PAYLOAD_FILES = frozenset({
+    "agent/persona.md",
+    "agent/identity.json",
+    "agent/voice.json",
+    "agent/worldview.jsonl",
+    "agent/episodes.jsonl",
+    "agent/concepts.json",
+    "agent/examples.jsonl",
+    "agent/openers.json",
+    "agent/eval.jsonl",
+    "install-plan.json",
+    "manifest.json",
+})
+V2_AGENT_ENTRY_MAX_BYTES = 16 * 1024 * 1024
+V2_AGENT_TOTAL_MAX_BYTES = 64 * 1024 * 1024
+WORKSPACE_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -257,19 +284,51 @@ def prepare_workspace_v2(
     return workspace
 
 
+def read_workspace_schema_version(workspace: Path) -> int:
+    manifest = _read_workspace_manifest_object(workspace)
+    schema_version = manifest.get("schemaVersion")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise BuildError(f"不支持的 schemaVersion：{schema_version}")
+    return schema_version
+
+
 def load_workspace_v2(workspace: Path) -> WorkspaceV2:
-    workspace = Path(workspace).expanduser().resolve()
+    return WorkspaceV2.from_dict(_read_workspace_manifest_object(workspace))
+
+
+def _read_workspace_manifest_object(workspace: Path) -> dict[str, Any]:
     try:
-        return WorkspaceV2.from_dict(_read_json(workspace / "workspace.json"))
-    except (OSError, json.JSONDecodeError, RecursionError) as error:
+        path = Path(workspace).expanduser().resolve() / "workspace.json"
+    except (OSError, RuntimeError) as error:
+        raise BuildError(f"工作区路径无法解析：{error}") from error
+    descriptor = _open_regular_nofollow(path)
+    try:
+        before = os.fstat(descriptor)
+        if before.st_size > WORKSPACE_MANIFEST_MAX_BYTES:
+            raise BuildError("workspace.json 超过大小上限")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            payload = stream.read(WORKSPACE_MANIFEST_MAX_BYTES + 1)
+        after = os.fstat(descriptor)
+        if len(payload) > WORKSPACE_MANIFEST_MAX_BYTES:
+            raise BuildError("workspace.json 超过大小上限")
+        if not _same_file_identity(before, after):
+            raise BuildError("workspace.json 在读取期间发生变化")
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         raise BuildError(f"workspace.json 无法读取：{error}") from error
+    if not isinstance(value, dict):
+        raise BuildError("workspace.json 必须是 JSON 对象")
+    return value
 
 
 def validate_workspace_v2(workspace: Path) -> BuildReport:
-    workspace = Path(workspace).expanduser().resolve()
     try:
+        workspace = Path(workspace).expanduser().resolve()
         manifest = load_workspace_v2(workspace)
-    except BuildError as error:
+    except (BuildError, OSError, RuntimeError) as error:
         return BuildReport(False, [str(error)])
 
     errors: list[str] = []
@@ -1015,6 +1074,141 @@ def pack_workspace_v2(
                 pass
 
 
+def repack_agent_install_plan_v2(
+    source_agent_package: Path,
+    target: Path,
+    install_plan: InstallPlan,
+    private_key_path: Path,
+) -> Path:
+    """Create an agent-plan variant from the exact signed agent asset snapshot."""
+    destination = Path(target).expanduser().resolve()
+    private_key = _load_private_key(Path(private_key_path))
+    install_plan_bytes = _canonical_json_bytes(
+        install_plan.to_dict(require_artifacts=True)
+    )
+    payloads = _read_verified_agent_payloads_v2(
+        source_agent_package,
+        private_key,
+    )
+    payloads["install-plan.json"] = install_plan_bytes
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return _write_signed_package_v2(destination, payloads, private_key)
+
+
+def read_verified_agent_install_plan_v2(
+    source_agent_package: Path,
+    private_key_path: Path,
+) -> dict[str, Any]:
+    _, install_plan = read_verified_agent_snapshot_v2(
+        source_agent_package,
+        private_key_path,
+    )
+    return install_plan
+
+
+def read_verified_agent_snapshot_v2(
+    source_agent_package: Path,
+    private_key_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    private_key = _load_private_key(Path(private_key_path))
+    payloads = _read_verified_agent_payloads_v2(
+        source_agent_package,
+        private_key,
+    )
+    return (
+        _parse_canonical_json_object_v2(
+            payloads["manifest.json"],
+            "签名 hagent manifest",
+        ),
+        _parse_canonical_json_object_v2(
+            payloads["install-plan.json"],
+            "签名安装计划",
+        ),
+    )
+
+
+def _parse_canonical_json_object_v2(
+    raw: bytes,
+    label: str,
+) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        raise BuildError(f"{label}无法解析：{error}") from error
+    if not isinstance(value, dict) or raw != _canonical_json_bytes(value):
+        raise BuildError(f"{label}必须是 canonical JSON 对象")
+    return value
+
+
+def _read_verified_agent_payloads_v2(
+    source_agent_package: Path,
+    private_key: Ed25519PrivateKey,
+) -> dict[str, bytes]:
+    source = Path(source_agent_package).expanduser().resolve()
+    expected_public_key = private_key.public_key().public_bytes(
+        Encoding.Raw,
+        PublicFormat.Raw,
+    )
+    expected_entries = V2_AGENT_PAYLOAD_FILES | {"checksums.json", "signature.json"}
+    try:
+        with zipfile.ZipFile(source) as archive:
+            names = [info.filename for info in archive.infolist()]
+            if len(names) != len(set(names)) or set(names) != expected_entries:
+                raise BuildError("签名 hagent 条目集合无效")
+            checksums_bytes = _read_bounded_zip_entry_v2(archive, "checksums.json")
+            signature_bytes = _read_bounded_zip_entry_v2(archive, "signature.json")
+            checksums = json.loads(checksums_bytes)
+            signature = json.loads(signature_bytes)
+            if (
+                not isinstance(checksums, dict)
+                or checksums_bytes != _canonical_json_bytes(checksums)
+                or not isinstance(checksums.get("files"), dict)
+                or set(checksums["files"]) != V2_AGENT_PAYLOAD_FILES
+            ):
+                raise BuildError("签名 hagent checksums.json 无效")
+            if (
+                not isinstance(signature, dict)
+                or signature_bytes != _canonical_json_bytes(signature)
+                or signature.get("algorithm") != "Ed25519"
+                or signature.get("signedFile") != "checksums.json"
+            ):
+                raise BuildError("签名 hagent signature.json 无效")
+            public_key = base64.b64decode(signature["publicKey"], validate=True)
+            signature_value = base64.b64decode(signature["signature"], validate=True)
+            if public_key != expected_public_key:
+                raise BuildError("签名 hagent 与 publisher key 不一致")
+            Ed25519PublicKey.from_public_bytes(public_key).verify(
+                signature_value,
+                checksums_bytes,
+            )
+            payloads: dict[str, bytes] = {}
+            total_bytes = 0
+            for name in sorted(V2_AGENT_PAYLOAD_FILES):
+                payload = _read_bounded_zip_entry_v2(archive, name)
+                total_bytes += len(payload)
+                if total_bytes > V2_AGENT_TOTAL_MAX_BYTES:
+                    raise BuildError("签名 hagent 人物资产总量过大")
+                declared_hash = checksums["files"].get(name)
+                if (
+                    not isinstance(declared_hash, str)
+                    or hashlib.sha256(payload).hexdigest() != declared_hash
+                ):
+                    raise BuildError(f"签名 hagent 条目哈希不匹配：{name}")
+                payloads[name] = payload
+        return payloads
+    except BuildError:
+        raise
+    except (
+        InvalidSignature,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ) as error:
+        raise BuildError(f"签名 hagent 无法验证：{error}") from error
+
+
 def _validate_workspace_v2_for_pack(
     workspace: Path,
 ) -> tuple[WorkspaceV2, BuildReport]:
@@ -1088,12 +1282,16 @@ def _pack_corpus_shard_v2(
         _write_jsonl_stream(chunks_path, planner.iter_chunks(shard))
         _write_jsonl_stream(duplicates_path, planner.iter_duplicates(shard))
         metrics = planner.metrics(shard)
+        metadata = planner.metadata(shard)
         manifest = {
             "agentId": planner.manifest.agent_id,
+            "authorship": list(metadata["authorship"]),
             "chunkCount": metrics["chunkCount"],
+            "coverage": sorted(shard.coverage),
+            "genres": list(metadata["genres"]),
             "id": shard.package_id,
             "installClass": shard.install_class,
-            "periods": list(shard.periods),
+            "periods": list(metadata["periods"]),
             "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
             "sourceIds": [row["sourceId"] for row in source_rows],
             "sourceHashes": [row["sourceHash"] for row in source_rows],
@@ -1137,6 +1335,7 @@ def _pack_source_v2(
                     "agentId": agent_id,
                     "fileName": source.file_name,
                     "id": f"source-{source.source_id}",
+                    "rawSizeBytes": source.raw_size_bytes,
                     "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
                     "sourceHash": source.source_hash,
                     "sourceId": source.source_id,
@@ -1468,6 +1667,17 @@ def _read_small_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise BuildError(f"报告必须是 JSON 对象：{path}")
     return value
+
+
+def _read_bounded_zip_entry_v2(archive: zipfile.ZipFile, name: str) -> bytes:
+    info = archive.getinfo(name)
+    if info.is_dir() or info.file_size > V2_AGENT_ENTRY_MAX_BYTES:
+        raise BuildError(f"签名 hagent 条目过大或不是文件：{name}")
+    with archive.open(info) as stream:
+        payload = stream.read(V2_AGENT_ENTRY_MAX_BYTES + 1)
+    if len(payload) != info.file_size or len(payload) > V2_AGENT_ENTRY_MAX_BYTES:
+        raise BuildError(f"签名 hagent 条目大小不一致：{name}")
+    return payload
 
 
 def _write_signed_package(

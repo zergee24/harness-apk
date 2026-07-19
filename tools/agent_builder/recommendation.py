@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
-from .builder import load_workspace_v2, pack_workspace_v2
-from .install_planner import CorpusPlanIndex
+from .builder import (
+    pack_workspace_v2,
+    read_verified_agent_snapshot_v2,
+    repack_agent_install_plan_v2,
+)
 from .models import BuildError, InstallPackage, InstallPlan, InstallProfile
 
 
@@ -32,7 +37,7 @@ EVIDENCE_LABELS = {
 def build_recommendation(workspace: Path, key_path: Path) -> dict[str, Any]:
     workspace = Path(workspace).expanduser().resolve()
     key_path = Path(key_path).expanduser().resolve()
-    manifest = load_workspace_v2(workspace)
+    started_at = time.monotonic_ns()
     with tempfile.TemporaryDirectory(prefix=".harness-recommend-") as temporary:
         root = Path(temporary)
         result = pack_workspace_v2(
@@ -42,52 +47,93 @@ def build_recommendation(workspace: Path, key_path: Path) -> dict[str, Any]:
             profile_id="source",
             emit_sources=True,
         )
-        plan = _read_install_plan(result.agent_package)
-        with CorpusPlanIndex(workspace) as planner:
-            if planner.manifest != manifest:
-                raise BuildError("workspace manifest 在精确预检期间发生变化")
-            shard_values = planner.shards(materialize_ids=False)
-            shards = {shard.package_id: shard for shard in shard_values}
-            planned_corpora = {
-                package.package_id
-                for package in plan.packages
-                if package.package_type == "hcorpus"
-            }
-            if set(shards) != planned_corpora:
-                raise BuildError("签名安装计划与当前语料分片不一致")
-            metadata = {
-                shard.package_id: _shard_metadata(planner, shard)
-                for shard in shard_values
-            }
+        signed_agent_manifest, signed_plan = read_verified_agent_snapshot_v2(
+            result.agent_package,
+            key_path,
+        )
+        agent_id, version = _agent_identity(signed_agent_manifest)
+        source_plan = _read_install_plan(signed_plan)
+        runtime_plan = _runtime_install_plan(source_plan)
+        runtime_agent = repack_agent_install_plan_v2(
+            result.agent_package,
+            root / "runtime" / result.agent_package.name,
+            runtime_plan,
+            key_path,
+        )
+        metadata = _read_signed_corpus_metadata(
+            result.corpus_packages,
+            source_plan,
+            agent_id,
+            version,
+        )
+        source_metadata = _read_signed_source_metadata(
+            result.source_packages,
+            source_plan,
+            agent_id,
+            version,
+        )
         source_bundle_name = result.bundle_package.name
         if not source_bundle_name.endswith("-source.hbundle"):
             raise BuildError("source 预检产物名称无效")
         bundle_prefix = source_bundle_name.removesuffix("-source.hbundle")
-        agent_bytes = result.agent_package.stat().st_size
-        profiles = [
-            _profile_summary(
+        source_agent_sha256, source_agent_bytes = _hash_regular_file(
+            result.agent_package
+        )
+        runtime_agent_sha256, runtime_agent_bytes = _hash_regular_file(runtime_agent)
+        profiles = []
+        previous_coverage: set[str] = set()
+        previous_package_ids: set[str] = set()
+        for profile_id in PROFILE_ORDER:
+            plan = source_plan if profile_id == "source" else runtime_plan
+            agent_sha256 = (
+                source_agent_sha256
+                if profile_id == "source"
+                else runtime_agent_sha256
+            )
+            agent_bytes = (
+                source_agent_bytes
+                if profile_id == "source"
+                else runtime_agent_bytes
+            )
+            summary = _profile_summary(
                 profile_id,
                 plan,
                 f"{bundle_prefix}-{profile_id}.hbundle",
                 result.agent_package.name,
                 agent_bytes,
-                shards,
+                agent_sha256,
                 metadata,
-                manifest,
+                set(source_metadata),
+                previous_coverage,
+                previous_package_ids,
             )
-            for profile_id in PROFILE_ORDER
-        ]
+            profiles.append(summary)
+            previous_coverage.update(summary["incrementalCoverage"])
+            previous_package_ids.update(summary["incrementalPackageIds"])
+        elapsed_milliseconds = max(
+            1,
+            (time.monotonic_ns() - started_at + 999_999) // 1_000_000,
+        )
         return {
-            "agentId": manifest.agent_id,
+            "agentId": agent_id,
+            "preflight": {
+                "elapsedMilliseconds": elapsed_milliseconds,
+                "mode": "local-exact-signed",
+                "sourceInputBytes": sum(
+                    row["rawSizeBytes"] for row in source_metadata.values()
+                ),
+                "temporaryArtifactBytes": _temporary_regular_bytes(root),
+            },
             "recommendedProfileId": "balanced",
             "schemaVersion": 2,
-            "version": manifest.version,
+            "version": version,
             "profiles": profiles,
         }
 
 
 def format_recommendation_summary(recommendation: dict[str, Any]) -> str:
     profiles = {row["id"]: row for row in recommendation["profiles"]}
+    preflight = recommendation["preflight"]
     blocks = []
     for profile_id in HUMAN_PROFILE_ORDER:
         row = profiles[profile_id]
@@ -116,7 +162,13 @@ def format_recommendation_summary(recommendation: dict[str, Any]) -> str:
                 )
             )
         )
-    return "\n\n".join(blocks)
+    preflight_summary = (
+        "本地精确预检："
+        f"耗时 {preflight['elapsedMilliseconds']} 毫秒；"
+        f"临时产物 {preflight['temporaryArtifactBytes']} 字节；"
+        f"原始资料 {preflight['sourceInputBytes']} 字节。"
+    )
+    return preflight_summary + "\n\n" + "\n\n".join(blocks)
 
 
 def _profile_summary(
@@ -125,27 +177,24 @@ def _profile_summary(
     bundle_file_name: str,
     agent_file_name: str,
     agent_bytes: int,
-    shards: dict[str, Any],
-    metadata: dict[str, dict[str, tuple[str, ...]]],
-    manifest: Any,
+    agent_sha256: str,
+    metadata: dict[str, dict[str, frozenset[str] | tuple[str, ...]]],
+    known_source_ids: set[str],
+    previous_coverage: set[str],
+    previous_package_ids: set[str],
 ) -> dict[str, Any]:
     profile = plan.profile(profile_id)
     packages = [_package(plan, package_id) for package_id in profile.package_ids]
-    selected_shards = [
-        shards[package_id]
-        for package_id in profile.package_ids
-        if package_id in shards
-    ]
-    coverage = (
-        set().union(*(shard.coverage for shard in selected_shards))
-        if selected_shards
-        else set()
-    )
     selected_metadata = [
         metadata[package_id]
         for package_id in profile.package_ids
         if package_id in metadata
     ]
+    coverage = (
+        set().union(*(row["coverage"] for row in selected_metadata))
+        if selected_metadata
+        else set()
+    )
     periods = sorted({
         value for row in selected_metadata for value in row["periods"]
     })
@@ -155,6 +204,15 @@ def _profile_summary(
     authorship = sorted({
         value for row in selected_metadata for value in row["authorship"]
     })
+    coverage.update(f"period:{value}" for value in periods)
+    coverage.update(f"genre:{value}" for value in genres)
+    coverage.update(f"authorship:{value}" for value in authorship)
+    incremental_coverage = coverage - previous_coverage
+    incremental_package_ids = [
+        package_id
+        for package_id in profile.package_ids
+        if package_id not in previous_package_ids
+    ]
     evidence_types = sorted({
         EVIDENCE_LABELS[prefix]
         for feature in coverage
@@ -164,19 +222,23 @@ def _profile_summary(
     evidence_types.extend(value for value in authorship if value not in evidence_types)
     if profile_id == "source":
         evidence_types.append("原始文件")
-    reasons = _coverage_reasons(profile_id, coverage, periods, genres)
-    known_sources = {source.source_id for source in manifest.sources}
+    reasons = _coverage_reasons(
+        profile_id,
+        incremental_coverage,
+        incremental_package_ids,
+    )
     source_package_ids = {
         package.package_id.removeprefix("source-")
         for package in packages
         if package.package_type == "hsource"
     }
-    if profile_id == "source" and source_package_ids != known_sources:
+    if profile_id == "source" and source_package_ids != known_source_ids:
         raise BuildError("source profile 未包含全部原文包")
     return {
         "agentPackage": {
             "exactSignedBytes": agent_bytes,
             "fileName": agent_file_name,
+            "sha256": agent_sha256,
             "type": "hagent",
         },
         "bundleFileName": bundle_file_name,
@@ -185,6 +247,8 @@ def _profile_summary(
         "genres": genres or ["未单独扩展"],
         "id": profile_id,
         "includesOriginals": profile_id == "source",
+        "incrementalCoverage": sorted(incremental_coverage),
+        "incrementalPackageIds": incremental_package_ids,
         "label": PROFILE_LABELS[profile_id],
         "packages": [
             {
@@ -206,33 +270,81 @@ def _profile_summary(
 def _coverage_reasons(
     profile_id: str,
     coverage: set[str],
-    periods: list[str],
-    genres: list[str],
+    incremental_package_ids: list[str],
 ) -> list[str]:
-    if profile_id == "lite":
-        return ["核心身份、立场、关系与评测引用证据"]
     if profile_id == "source":
-        return ["完整证据外附带本地原文，原文仅供阅读核验且不参与回答"]
+        return [
+            f"附带 {len(incremental_package_ids)} 个本地原文包，"
+            "原文仅供阅读核验且不参与回答"
+        ]
     reasons = []
     if any(feature.startswith("voice:direct-material:") for feature in coverage):
         reasons.append("直接对话或直接作者材料")
-    if "relationship" in {feature.partition(":")[0] for feature in coverage}:
-        reasons.append("关系证据")
+    prefixes = {feature.partition(":")[0] for feature in coverage}
+    for prefix, label in (
+        ("identity", "身份"),
+        ("stance", "立场"),
+        ("relationship", "关系"),
+        ("episode", "经历"),
+        ("voice", "表达"),
+    ):
+        if prefix in prefixes and not (prefix == "voice" and reasons):
+            reasons.append(f"{label}证据")
+    periods = sorted(
+        feature.partition(":")[2]
+        for feature in coverage
+        if feature.startswith("period:")
+    )
+    genres = sorted(
+        feature.partition(":")[2]
+        for feature in coverage
+        if feature.startswith("genre:")
+    )
+    authorship = sorted(
+        feature.partition(":")[2]
+        for feature in coverage
+        if feature.startswith("authorship:")
+    )
     if periods:
         reasons.append("时期覆盖：" + "、".join(periods))
     if genres:
         reasons.append("体裁覆盖：" + "、".join(genres))
+    if authorship:
+        reasons.append("材料归属：" + "、".join(authorship))
     if any(feature.startswith("eval:") for feature in coverage):
         reasons.append("独特评测覆盖")
-    if profile_id == "complete":
-        reasons.append("全部可用证据分片")
-    return reasons or ["核心证据之外的独特覆盖增益"]
+    if profile_id == "lite":
+        reasons = [f"核心必需覆盖：{reason}" for reason in reasons]
+    if profile_id == "complete" and incremental_package_ids:
+        reasons.append(
+            f"补齐全部可用证据分片（新增 {len(incremental_package_ids)} 个）"
+        )
+    if reasons:
+        return reasons
+    if incremental_package_ids:
+        return [f"新增 {len(incremental_package_ids)} 个证据分片，补充证据深度"]
+    return ["相对上一档没有新增运行时证据"]
 
 
-def _read_install_plan(agent_package: Path) -> InstallPlan:
+def _agent_identity(manifest: dict[str, Any]) -> tuple[str, int]:
+    agent = manifest.get("agent")
+    if (
+        manifest.get("schemaVersion") != 2
+        or manifest.get("type") != "hagent"
+        or not isinstance(agent, dict)
+        or not isinstance(agent.get("id"), str)
+        or not agent["id"]
+        or not isinstance(agent.get("name"), str)
+        or not agent["name"]
+        or type(agent.get("version")) is not int
+        or agent["version"] <= 0
+    ):
+        raise BuildError("签名 hagent 身份无效")
+    return agent["id"], agent["version"]
+
+
+def _read_install_plan(raw: dict[str, Any]) -> InstallPlan:
     try:
-        with zipfile.ZipFile(agent_package) as archive:
-            raw = json.loads(archive.read("install-plan.json"))
         plan = InstallPlan(
             packages=tuple(
                 InstallPackage(
@@ -263,6 +375,187 @@ def _read_install_plan(agent_package: Path) -> InstallPlan:
         raise BuildError(f"签名安装计划无法读取：{error}") from error
 
 
+def _runtime_install_plan(source_plan: InstallPlan) -> InstallPlan:
+    runtime_packages = tuple(
+        package
+        for package in source_plan.packages
+        if package.package_type == "hcorpus"
+    )
+    runtime_ids = {package.package_id for package in runtime_packages}
+    runtime_plan = InstallPlan(
+        packages=runtime_packages,
+        profiles=tuple(
+            InstallProfile(
+                profile_id=profile.profile_id,
+                package_ids=tuple(
+                    package_id
+                    for package_id in profile.package_ids
+                    if package_id in runtime_ids
+                ),
+                recommended=profile.recommended,
+            )
+            for profile in source_plan.profiles
+        ),
+        required_corpus_ids=source_plan.required_corpus_ids,
+        recommended_profile_id=source_plan.recommended_profile_id,
+    )
+    runtime_plan.to_dict(require_artifacts=True)
+    return runtime_plan
+
+
+def _read_signed_corpus_metadata(
+    paths: list[Path],
+    plan: InstallPlan,
+    agent_id: str,
+    version: int,
+) -> dict[str, dict[str, frozenset[str] | tuple[str, ...]]]:
+    declared = {
+        package.file_name: package
+        for package in plan.packages
+        if package.package_type == "hcorpus"
+    }
+    if set(declared) != {path.name for path in paths}:
+        raise BuildError("签名安装计划与已生成语料包集合不一致")
+    result = {}
+    for path in paths:
+        package = declared[path.name]
+        digest, size = _hash_regular_file(path)
+        if digest != package.sha256 or size != package.size_bytes:
+            raise BuildError(f"签名语料包大小或哈希不匹配：{package.package_id}")
+        manifest = _read_zip_json_object(path, "manifest.json")
+        if (
+            manifest.get("schemaVersion") != 2
+            or manifest.get("type") != "hcorpus"
+            or manifest.get("id") != package.package_id
+            or manifest.get("agentId") != agent_id
+            or manifest.get("version") != version
+            or manifest.get("installClass") != package.install_class
+        ):
+            raise BuildError(f"签名语料包身份不匹配：{package.package_id}")
+        coverage = _string_tuple(manifest.get("coverage"), "coverage", package)
+        periods = _string_tuple(manifest.get("periods"), "periods", package)
+        genres = _string_tuple(manifest.get("genres"), "genres", package)
+        authorship = _string_tuple(
+            manifest.get("authorship"),
+            "authorship",
+            package,
+        )
+        if (
+            tuple(sorted(coverage)) != coverage
+            or not coverage
+            or not periods
+            or not genres
+            or not authorship
+        ):
+            raise BuildError(f"签名语料包覆盖元数据无效：{package.package_id}")
+        result[package.package_id] = {
+            "authorship": authorship,
+            "coverage": frozenset(coverage),
+            "genres": genres,
+            "periods": periods,
+        }
+    return result
+
+
+def _read_signed_source_metadata(
+    paths: list[Path],
+    plan: InstallPlan,
+    agent_id: str,
+    version: int,
+) -> dict[str, dict[str, Any]]:
+    declared = {
+        package.file_name: package
+        for package in plan.packages
+        if package.package_type == "hsource"
+    }
+    if set(declared) != {path.name for path in paths}:
+        raise BuildError("签名安装计划与已生成原文包集合不一致")
+    result = {}
+    for path in paths:
+        package = declared[path.name]
+        digest, size = _hash_regular_file(path)
+        if digest != package.sha256 or size != package.size_bytes:
+            raise BuildError(f"签名原文包大小或哈希不匹配：{package.package_id}")
+        manifest = _read_zip_json_object(path, "manifest.json")
+        source_id = manifest.get("sourceId")
+        stored_name = manifest.get("storedName")
+        raw_size = manifest.get("rawSizeBytes")
+        source_hash = manifest.get("sourceHash")
+        if (
+            manifest.get("schemaVersion") != 2
+            or manifest.get("type") != "hsource"
+            or manifest.get("id") != package.package_id
+            or manifest.get("agentId") != agent_id
+            or manifest.get("version") != version
+            or not isinstance(source_id, str)
+            or package.package_id != f"source-{source_id}"
+            or not isinstance(stored_name, str)
+            or not stored_name
+            or type(raw_size) is not int
+            or raw_size < 0
+            or not isinstance(source_hash, str)
+            or len(source_hash) != 64
+            or any(character not in "0123456789abcdef" for character in source_hash)
+        ):
+            raise BuildError(f"签名原文包身份或大小无效：{package.package_id}")
+        try:
+            with zipfile.ZipFile(path) as archive:
+                payload = archive.getinfo(f"files/{stored_name}")
+                payload_names = [
+                    info.filename
+                    for info in archive.infolist()
+                    if info.filename.startswith("files/")
+                ]
+        except (KeyError, OSError, zipfile.BadZipFile) as error:
+            raise BuildError(f"签名原文包文件无法读取：{package.package_id}：{error}") from error
+        if (
+            payload.is_dir()
+            or payload_names != [f"files/{stored_name}"]
+            or payload.file_size != raw_size
+            or source_id in result
+        ):
+            raise BuildError(f"签名原文包文件声明不一致：{package.package_id}")
+        result[source_id] = {
+            "rawSizeBytes": raw_size,
+            "sourceHash": source_hash,
+        }
+    return result
+
+
+def _read_zip_json_object(path: Path, name: str) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            info = archive.getinfo(name)
+            if info.is_dir() or info.file_size > 4 * 1024 * 1024:
+                raise BuildError(f"签名包 JSON 条目过大：{path.name} / {name}")
+            with archive.open(info) as stream:
+                raw = stream.read(4 * 1024 * 1024 + 1)
+        if len(raw) != info.file_size or len(raw) > 4 * 1024 * 1024:
+            raise BuildError(f"签名包 JSON 条目大小不一致：{path.name} / {name}")
+        value = json.loads(raw)
+    except BuildError:
+        raise
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile) as error:
+        raise BuildError(f"签名包 JSON 无法读取：{path.name} / {name}：{error}") from error
+    if not isinstance(value, dict):
+        raise BuildError(f"签名包 JSON 必须是对象：{path.name} / {name}")
+    return value
+
+
+def _string_tuple(
+    value: Any,
+    field: str,
+    package: InstallPackage,
+) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise BuildError(f"签名语料包 {field} 无效：{package.package_id}")
+    return tuple(value)
+
+
 def _package(plan: InstallPlan, package_id: str) -> InstallPackage:
     package = next(
         (item for item in plan.packages if item.package_id == package_id),
@@ -283,28 +576,22 @@ def _package_bytes(package: InstallPackage) -> int:
     return package.size_bytes
 
 
-def _shard_metadata(
-    planner: CorpusPlanIndex,
-    shard: Any,
-) -> dict[str, tuple[str, ...]]:
-    query, params = planner._selection_query(shard)
-    rows = tuple(
-        planner._connection().execute(
-            f"""
-            SELECT DISTINCT period, genre, authorship
-            FROM chunks {query}
-            ORDER BY period, genre, authorship
-            """,
-            params,
-        )
+def _hash_regular_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with Path(path).open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+            size += len(block)
+    return digest.hexdigest(), size
+
+
+def _temporary_regular_bytes(root: Path) -> int:
+    return sum(
+        path.stat().st_size
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink()
     )
-    if not rows:
-        raise BuildError(f"安装分片没有真实资料元数据：{shard.package_id}")
-    return {
-        "periods": tuple(sorted({row["period"] for row in rows})),
-        "genres": tuple(sorted({row["genre"] for row in rows})),
-        "authorship": tuple(sorted({row["authorship"] for row in rows})),
-    }
 
 
 def _join(values: list[str]) -> str:

@@ -345,6 +345,26 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
         ).fetchone()
         return {"chunkCount": row["count"], "extractedCharacters": row["chars"]}
 
+    def metadata(self, shard: CorpusShard) -> dict[str, tuple[str, ...]]:
+        query, params = self._selection_query(shard)
+        rows = tuple(
+            self._connection().execute(
+                f"""
+                SELECT DISTINCT period, genre, authorship
+                FROM chunks {query}
+                ORDER BY period, genre, authorship
+                """,
+                params,
+            )
+        )
+        if not rows:
+            raise BuildError(f"安装分片没有真实资料元数据：{shard.package_id}")
+        return {
+            "periods": tuple(sorted({row["period"] for row in rows})),
+            "genres": tuple(sorted({row["genre"] for row in rows})),
+            "authorship": tuple(sorted({row["authorship"] for row in rows})),
+        }
+
     def coverage_for(self, mode: str, selector: str) -> frozenset[str]:
         connection = self._connection()
         if mode == "core":

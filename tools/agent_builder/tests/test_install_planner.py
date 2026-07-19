@@ -13,7 +13,7 @@ from unittest import mock
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
-from tools.agent_builder import builder, install_planner
+from tools.agent_builder import builder, install_planner, recommendation
 from tools.agent_builder.builder import BuildError, pack_workspace_v2
 from tools.agent_builder.cli import main
 from tools.agent_builder.install_planner import (
@@ -469,6 +469,11 @@ class InstallPlannerTest(unittest.TestCase):
             with zipfile.ZipFile(by_name[package["fileName"]]) as archive:
                 manifest = json.loads(archive.read("manifest.json"))
             self.assertEqual("recommended", manifest["installClass"])
+            self.assertEqual(sorted(manifest["coverage"]), manifest["coverage"])
+            self.assertTrue(manifest["coverage"])
+            self.assertTrue(manifest["periods"])
+            self.assertTrue(manifest["genres"])
+            self.assertTrue(manifest["authorship"])
 
     def test_source_package_declares_owning_agent_and_exact_source(self):
         result = pack_workspace_v2(
@@ -486,9 +491,11 @@ class InstallPlannerTest(unittest.TestCase):
                 payload_names = [
                     name for name in archive.namelist() if name.startswith("files/")
                 ]
+                payload_size = archive.getinfo(payload_names[0]).file_size
             self.assertEqual("person.fixture", manifest["agentId"])
             self.assertEqual(2, manifest["version"])
             self.assertEqual(1, len(payload_names))
+            self.assertEqual(payload_size, manifest["rawSizeBytes"])
 
     def test_install_plan_rejects_invalid_artifacts_and_dependency_incomplete_profiles(self):
         valid_hash = "a" * 64
@@ -799,6 +806,60 @@ class InstallPlannerTest(unittest.TestCase):
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
             self.assertNotEqual(0, main(["validate", str(self.workspace)]))
 
+    def test_cli_schema_dispatch_rejects_non_object_and_non_integer_without_traceback(self):
+        manifest_path = self.workspace / "workspace.json"
+        for raw in ("[]", '"workspace"', '{"schemaVersion":2.0}'):
+            with self.subTest(raw=raw):
+                manifest_path.write_text(raw, encoding="utf-8")
+                stderr = StringIO()
+                with redirect_stdout(StringIO()), redirect_stderr(stderr):
+                    self.assertNotEqual(0, main(["validate", str(self.workspace)]))
+                self.assertIn("构建失败", stderr.getvalue())
+                self.assertNotIn("Traceback", stderr.getvalue())
+        manifest_path.write_bytes(b"\xff\xfe\x00")
+        stderr = StringIO()
+        with redirect_stdout(StringIO()), redirect_stderr(stderr):
+            self.assertNotEqual(0, main(["validate", str(self.workspace)]))
+        self.assertIn("构建失败", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        manifest_path.write_text(
+            '{"schemaVersion":' + ("9" * 5000) + "}",
+            encoding="utf-8",
+        )
+        stderr = StringIO()
+        with redirect_stdout(StringIO()), redirect_stderr(stderr):
+            self.assertNotEqual(0, main(["validate", str(self.workspace)]))
+        self.assertIn("构建失败", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        loop_a = self.root / "workspace-loop-a"
+        loop_b = self.root / "workspace-loop-b"
+        loop_a.symlink_to(loop_b, target_is_directory=True)
+        loop_b.symlink_to(loop_a, target_is_directory=True)
+        for command in ("validate", "validate-v2"):
+            with self.subTest(command=command):
+                stderr = StringIO()
+                with redirect_stdout(StringIO()), redirect_stderr(stderr):
+                    self.assertNotEqual(0, main([command, str(loop_a)]))
+                self.assertNotIn("Traceback", stderr.getvalue())
+        outside = self.root / "outside-workspace.json"
+        outside.write_text('{"schemaVersion":2}', encoding="utf-8")
+        manifest_path.unlink()
+        manifest_path.symlink_to(outside)
+        stderr = StringIO()
+        with redirect_stdout(StringIO()), redirect_stderr(stderr):
+            self.assertNotEqual(0, main(["validate", str(self.workspace)]))
+        self.assertIn("构建失败", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        manifest_path.unlink()
+        with manifest_path.open("wb") as stream:
+            stream.seek(4 * 1024 * 1024)
+            stream.write(b"x")
+        stderr = StringIO()
+        with redirect_stdout(StringIO()), redirect_stderr(stderr):
+            self.assertNotEqual(0, main(["validate", str(self.workspace)]))
+        self.assertIn("构建失败", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_cli_pack_dispatches_v2_profiles_and_source_alone_reads_originals(self):
         for profile in ("lite", "balanced", "complete", "source"):
             output = self.root / f"cli-{profile}"
@@ -828,18 +889,33 @@ class InstallPlannerTest(unittest.TestCase):
             self.assertEqual(profile, pack_v2.call_args.kwargs["profile_id"])
 
     def test_cli_recommend_human_and_json_use_real_signed_artifact_bytes(self):
-        actual = pack_workspace_v2(
+        actual_runtime = pack_workspace_v2(
+            self.workspace,
+            self.root / "actual-runtime",
+            self.private_key_path,
+            profile_id="balanced",
+            emit_sources=False,
+        )
+        actual_source = pack_workspace_v2(
             self.workspace,
             self.root / "actual-source",
             self.private_key_path,
             profile_id="source",
             emit_sources=True,
         )
-        with zipfile.ZipFile(actual.agent_package) as archive:
-            actual_plan = json.loads(archive.read("install-plan.json"))
-        packages = {row["id"]: row for row in actual_plan["packages"]}
-        profiles = {row["id"]: row for row in actual_plan["profiles"]}
-        agent_bytes = actual.agent_package.stat().st_size
+        actuals = {}
+        for profile_id, result in (
+            ("runtime", actual_runtime),
+            ("source", actual_source),
+        ):
+            with zipfile.ZipFile(result.agent_package) as archive:
+                plan = json.loads(archive.read("install-plan.json"))
+            actuals[profile_id] = {
+                "agentBytes": result.agent_package.stat().st_size,
+                "agentSha256": self._sha256(result.agent_package),
+                "packages": {row["id"]: row for row in plan["packages"]},
+                "profiles": {row["id"]: row for row in plan["profiles"]},
+            }
         temp_before = set(Path(tempfile.gettempdir()).glob(".harness-recommend-*"))
 
         human = StringIO()
@@ -860,6 +936,8 @@ class InstallPlannerTest(unittest.TestCase):
         for label in ("轻量", "完整证据", "包含原文"):
             self.assertIn(label, output)
         for detail in ("资料类型", "时期", "体裁", "独特覆盖原因", "原文", "可立即运行"):
+            self.assertIn(detail, output)
+        for detail in ("本地精确预检", "耗时", "临时产物"):
             self.assertIn(detail, output)
         self.assertRegex(output, r"\d+ 字节")
 
@@ -894,16 +972,31 @@ class InstallPlannerTest(unittest.TestCase):
             ["lite", "balanced", "complete", "source"],
             [profile["id"] for profile in parsed["profiles"]],
         )
+        self.assertGreater(parsed["preflight"]["elapsedMilliseconds"], 0)
+        self.assertGreater(parsed["preflight"]["temporaryArtifactBytes"], 0)
+        self.assertGreater(parsed["preflight"]["sourceInputBytes"], 0)
         for profile in parsed["profiles"]:
-            selected = profiles[profile["id"]]["packageIds"]
+            actual = actuals["source" if profile["id"] == "source" else "runtime"]
+            selected = actual["profiles"][profile["id"]]["packageIds"]
             self.assertEqual(
-                agent_bytes + sum(packages[package_id]["sizeBytes"] for package_id in selected),
+                actual["agentBytes"]
+                + sum(actual["packages"][package_id]["sizeBytes"] for package_id in selected),
                 profile["exactSignedBytes"],
             )
-            self.assertEqual(agent_bytes, profile["agentPackage"]["exactSignedBytes"])
+            self.assertEqual(
+                actual["agentBytes"],
+                profile["agentPackage"]["exactSignedBytes"],
+            )
+            self.assertEqual(
+                actual["agentSha256"],
+                profile["agentPackage"]["sha256"],
+            )
             self.assertEqual(
                 [
-                    (packages[package_id]["fileName"], packages[package_id]["sizeBytes"])
+                    (
+                        actual["packages"][package_id]["fileName"],
+                        actual["packages"][package_id]["sizeBytes"],
+                    )
                     for package_id in selected
                 ],
                 [
@@ -922,6 +1015,136 @@ class InstallPlannerTest(unittest.TestCase):
             temp_before,
             set(Path(tempfile.gettempdir()).glob(".harness-recommend-*")),
         )
+
+    def test_recommendation_uses_signed_snapshot_and_true_incremental_coverage(self):
+        chunks_path = self.workspace / "corpora" / "index" / "chunks.jsonl"
+        original_chunks = chunks_path.read_bytes()
+        original_pack = recommendation.pack_workspace_v2
+
+        def pack_then_mutate(*args, **kwargs):
+            result = original_pack(*args, **kwargs)
+            chunks = [
+                json.loads(line)
+                for line in original_chunks.decode("utf-8").splitlines()
+                if line.strip()
+            ]
+            for chunk in chunks:
+                chunk["genre"] = "fabricated-after-signing"
+            self._write_jsonl(chunks_path, chunks)
+            return result
+
+        try:
+            with mock.patch.object(
+                recommendation,
+                "pack_workspace_v2",
+                side_effect=pack_then_mutate,
+            ):
+                result = recommendation.build_recommendation(
+                    self.workspace,
+                    self.private_key_path,
+                )
+        finally:
+            chunks_path.write_bytes(original_chunks)
+
+        self.assertNotIn(
+            "fabricated-after-signing",
+            {
+                genre
+                for profile in result["profiles"]
+                for genre in profile["genres"]
+            },
+        )
+        profiles = {profile["id"]: profile for profile in result["profiles"]}
+        for profile_id in ("lite", "balanced", "complete"):
+            self.assertEqual(
+                sorted(profiles[profile_id]["incrementalCoverage"]),
+                profiles[profile_id]["incrementalCoverage"],
+            )
+        balanced_reasons = " ".join(profiles["balanced"]["uniqueCoverageReasons"])
+        balanced_delta = set(profiles["balanced"]["incrementalCoverage"])
+        if profiles["balanced"]["periods"] == profiles["lite"]["periods"]:
+            self.assertNotIn("时期覆盖", balanced_reasons)
+        if profiles["balanced"]["genres"] == profiles["lite"]["genres"]:
+            self.assertNotIn("体裁覆盖", balanced_reasons)
+        if not any(item.startswith("period:") for item in balanced_delta):
+            self.assertNotIn("时期覆盖", balanced_reasons)
+        if not any(item.startswith("genre:") for item in balanced_delta):
+            self.assertNotIn("体裁覆盖", balanced_reasons)
+
+    def test_recommendation_source_bytes_come_from_signed_snapshot(self):
+        actual = builder.load_workspace_v2(self.workspace)
+        stale_sources = list(actual.sources)
+        stale_sources[0] = replace(
+            stale_sources[0],
+            raw_size_bytes=stale_sources[0].raw_size_bytes + 999,
+        )
+        stale = replace(actual, sources=tuple(stale_sources))
+
+        with mock.patch.object(
+            recommendation,
+            "load_workspace_v2",
+            return_value=stale,
+            create=True,
+        ):
+            result = recommendation.build_recommendation(
+                self.workspace,
+                self.private_key_path,
+            )
+
+        self.assertEqual(
+            sum(source.raw_size_bytes for source in actual.sources),
+            result["preflight"]["sourceInputBytes"],
+        )
+        self.assertNotEqual(
+            sum(source.raw_size_bytes for source in stale.sources),
+            result["preflight"]["sourceInputBytes"],
+        )
+
+    def test_recommendation_rejects_tampered_install_plan_before_parsing(self):
+        original_pack = recommendation.pack_workspace_v2
+
+        def pack_then_tamper(*args, **kwargs):
+            result = original_pack(*args, **kwargs)
+            replacement = result.agent_package.with_suffix(".tampered")
+            with (
+                zipfile.ZipFile(result.agent_package) as source,
+                zipfile.ZipFile(
+                    replacement,
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                    compresslevel=9,
+                ) as target,
+            ):
+                for info in source.infolist():
+                    payload = source.read(info)
+                    if info.filename == "install-plan.json":
+                        plan = json.loads(payload)
+                        source_package = next(
+                            row for row in plan["packages"] if row["type"] == "hsource"
+                        )
+                        source_package["fileName"] = "tampered-" + source_package["fileName"]
+                        payload = json.dumps(
+                            plan,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    target.writestr(info, payload)
+            replacement.replace(result.agent_package)
+            return result
+
+        with (
+            mock.patch.object(
+                recommendation,
+                "pack_workspace_v2",
+                side_effect=pack_then_tamper,
+            ),
+            self.assertRaisesRegex(BuildError, "哈希"),
+        ):
+            recommendation.build_recommendation(
+                self.workspace,
+                self.private_key_path,
+            )
 
     def test_cli_recommend_requires_existing_publisher_key_without_partial_output(self):
         temp_before = set(Path(tempfile.gettempdir()).glob(".harness-recommend-*"))

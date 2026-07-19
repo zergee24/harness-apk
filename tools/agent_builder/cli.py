@@ -12,6 +12,7 @@ from .builder import (
     pack_workspace_v2,
     prepare_workspace,
     prepare_workspace_v2,
+    read_workspace_schema_version,
     validate_workspace,
     validate_workspace_v2,
 )
@@ -155,14 +156,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _workspace_schema_version(workspace: Path) -> int:
-    try:
-        manifest = json.loads((Path(workspace) / "workspace.json").read_text("utf-8"))
-        schema_version = manifest.get("schemaVersion")
-    except (OSError, json.JSONDecodeError, RecursionError) as error:
-        raise BuildError(f"workspace.json 无法读取：{error}") from error
-    if isinstance(schema_version, bool) or schema_version not in {1, 2}:
-        raise BuildError(f"不支持的 schemaVersion：{schema_version}")
-    return schema_version
+    return read_workspace_schema_version(workspace)
 
 
 if __name__ == "__main__":

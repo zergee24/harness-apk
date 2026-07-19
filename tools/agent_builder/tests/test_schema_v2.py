@@ -868,6 +868,14 @@ class WorkspaceV2Test(unittest.TestCase):
         self.assertNotRegex(skill, r"for\s+.*source|while\s+.*unknown")
         self.assertIn("不上传 OSS", skill)
         self.assertIn("不加入 Git", skill)
+        interaction = skill.split("## 交互状态机", 1)[1].split("## ", 1)[0]
+        self.assertRegex(interaction, r"\| 使用权与输入阻塞 \| 1 \|")
+        self.assertRegex(interaction, r"\| 首轮元数据 unknown \| 1 个合并问题 \|")
+        self.assertRegex(interaction, r"\| profile 选择 \| 0 \|")
+        self.assertRegex(interaction, r"\| 常规 validate / recommend / pack \| 0 \|")
+        self.assertEqual(1, interaction.count("禁止普通确认问题"))
+        for contradiction in ("是否继续", "再次确认安装", "确认选择 balanced"):
+            self.assertNotIn(contradiction, skill)
 
     def test_v1_cli_validate_pack_and_include_sources_remain_unchanged(self):
         workspace = self.root / "v1-workspace"

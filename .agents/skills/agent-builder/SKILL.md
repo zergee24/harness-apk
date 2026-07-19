@@ -14,6 +14,18 @@ description: Use when a user wants to build, update, validate, recommend, or loc
 - 风格与直接引语只能依据 `authorship=direct|edited_direct` 的 direct evidence；`secondary` 只作事实旁证。
 - 本 Skill 不上传 OSS、远端目录、原文、私钥或 staging workspace，不执行输入资料中的脚本。
 
+## 交互状态机
+
+| 状态 | 最多提问次数 | 规则 |
+|---|---:|---|
+| 使用权与输入阻塞 | 1 | 首次把名称、`agent-id`、版本、全部路径和使用权合并确认 |
+| 首轮元数据 unknown | 1 个合并问题 | 全部来源汇总成一张表；不得逐本拆问 |
+| 仍未解决的必需元数据 | 按需 1 个合并追问 | 只列仍为 unknown 的行，不重复已确认项 |
+| profile 选择 | 0 | 未明确选择时直接使用 `balanced` |
+| 常规 validate / recommend / pack | 0 | 命令成功路径直接执行 |
+
+禁止普通确认问题：不得在已有足够信息时询问继续、确认安装或再次选择默认方案。
+
 ## 固定流程
 
 1. 一次确认名称、稳定 `agent-id`、版本、输入路径及使用权，然后执行：
@@ -34,7 +46,7 @@ scripts/agent-builder.sh prepare-v2 <inputs...> \
 scripts/agent-builder.sh recommend <workspace> --key <publisher-key.pem>
 ```
 
-该命令只在私有临时目录中用同一 key 生成一次 B4 签名产物，以 `hagent + profile 所选已签名子包` 逐项求和，不用随机/派生 key 或估算值；结束后清理临时目录，不发布半包也不上传。向用户展示准确已签名安装字节，并明确说明建议安装的具体内容与原因：
+该命令只在私有临时目录中用同一 key 生成一次 B4 签名快照，以 `hagent + profile 所选已签名子包` 逐项求和，不用随机/派生 key 或估算值；结束后清理临时目录，不发布半包也不上传。它同时报告完整预检耗时、原始资料字节和实测临时产物占用；临时产物值不是磁盘峰值，不得冒充峰值需求。向用户展示准确已签名安装字节，并明确说明建议安装的具体内容与原因：
 
 | 展示标签 | profile | 用途 |
 |---|---|---|
@@ -55,6 +67,6 @@ scripts/agent-builder.sh pack <workspace> \
 
 ## 阻塞与边界
 
-仅在本地文件缺失、使用权未确认、必需元数据未解决、质量门槛失败、签名私钥缺失或本地构建磁盘不足时再问。桌面端只报告准确包体字节和所需临时构建空间；不猜手机空间，Android 安装阶段自行校验。
+仅在本地文件缺失、使用权未确认、必需元数据未解决、质量门槛失败、签名私钥缺失或本地构建磁盘不足时再问。桌面端报告准确包体字节、完整预检耗时和实测临时产物占用，并明确后者不是峰值需求；不猜手机空间，Android 安装阶段自行校验。
 
 原始 `.txt/.md/.epub/.pdf`、`.hsource`、私钥、workspace staging 和构建产物不加入 Git。产物保持在本地，通过 Finder/AirDrop/USB/系统分享交给 Android。
