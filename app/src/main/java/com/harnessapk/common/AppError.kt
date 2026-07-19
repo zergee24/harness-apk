@@ -5,6 +5,7 @@ sealed class AppError(message: String, cause: Throwable? = null) : Exception(mes
     class ApiKeyMissing : AppError("请重新输入供应商 API Key")
     class VisionUnsupported : AppError("当前供应商未开启图片输入，请切换支持图片的模型或移除图片。")
     class ImageTooLarge : AppError("图片超过 8 MB，请选择更小的截图或图片")
+    class AgentUnavailable : AppError("固定人格当前不可用，请检查人格包和所需资料后重试。")
     class Network(message: String) : AppError(message)
     class Update(message: String) : AppError(message)
 }

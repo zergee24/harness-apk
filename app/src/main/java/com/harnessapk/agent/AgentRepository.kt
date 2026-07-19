@@ -1197,14 +1197,8 @@ class AgentRepository(
             if (ftsQuery.isBlank()) {
                 emptyList()
             } else {
-                val candidateKeys = dao.searchChunkKeys(
-                    corpusKeys = corpusKeys,
-                    ftsQuery = ftsQuery,
-                    limit = (limit * CANDIDATE_MULTIPLIER).coerceAtLeast(limit),
-                )
-                val chunks = dao.listChunks(candidateKeys).associateBy(AgentChunkEntity::chunkKey)
                 val queryTerms = agentQueryTerms(query)
-                candidateKeys.mapNotNull(chunks::get).map { chunk ->
+                scanTopChunkMatches(corpusKeys, ftsQuery, query, limit).map { chunk ->
                     AgentEvidence(
                         chunkId = chunk.chunkId,
                         sourceTitle = chunk.sourceTitle,
@@ -1213,7 +1207,7 @@ class AgentRepository(
                         score = scoreChunk(chunk, query, queryTerms),
                         chunkKey = chunk.chunkKey,
                     )
-                }.sortedWith(compareByDescending<AgentEvidence> { it.score }.thenBy { it.chunkId }).take(limit)
+                }
             }
         }
         AgentRuntimeContext(
@@ -1256,18 +1250,38 @@ class AgentRepository(
         val corpusKeys = versionCorpusKeys(agentId, version)
         val ftsQuery = buildAgentFtsQuery(query)
         if (corpusKeys.isEmpty() || ftsQuery.isBlank() || limit <= 0) return@withContext emptyList()
-        val nodeKeys = dao.searchHierarchyNodeKeysForCorpora(corpusKeys, ftsQuery, limit)
-        val nodes = loadHierarchyClosure(nodeKeys)
         val terms = agentQueryTerms(query)
-        nodeKeys.mapNotNull(nodes::get).map { node ->
-            val root = resolveHierarchyRoot(node, nodes)
-            AgentHierarchyRoute(
-                nodeKey = node.nodeKey,
-                sourceId = node.sourceId,
-                topLevelId = root.nodeId,
-                physicalScore = scoreHierarchyNode(node, query, terms),
+        val topRoutes = mutableListOf<AgentHierarchyRoute>()
+        var afterNodeKey = ""
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val nodeKeys = dao.searchHierarchyNodeKeysForCorpora(
+                corpusKeys = corpusKeys,
+                ftsQuery = ftsQuery,
+                afterNodeKey = afterNodeKey,
+                limit = FTS_SCAN_PAGE_SIZE,
             )
+            currentCoroutineContext().ensureActive()
+            if (nodeKeys.isEmpty()) break
+            val nodes = loadHierarchyClosure(nodeKeys)
+            nodeKeys.mapNotNull(nodes::get).forEach { node ->
+                val root = resolveHierarchyRoot(node, nodes)
+                topRoutes += AgentHierarchyRoute(
+                    nodeKey = node.nodeKey,
+                    sourceId = node.sourceId,
+                    topLevelId = root.nodeId,
+                    physicalScore = scoreHierarchyNode(node, query, terms),
+                )
+            }
+            topRoutes.sortWith(repositoryRouteComparator())
+            if (topRoutes.size > limit) topRoutes.subList(limit, topRoutes.size).clear()
+            currentCoroutineContext().ensureActive()
+            if (nodeKeys.size < FTS_SCAN_PAGE_SIZE) break
+            val nextKey = nodeKeys.last()
+            check(nextKey != afterNodeKey) { "层级 FTS 分页游标未前进" }
+            afterNodeKey = nextKey
         }
+        topRoutes.toList()
     }
 
     override suspend fun searchChunks(
@@ -1286,15 +1300,15 @@ class AgentRepository(
         } else {
             dao.listChunkKeysForHierarchyNodes(corpusKeys, hierarchyKeys, limit)
         }
-        val ftsKeys = if (ftsQuery.isBlank()) {
+        val ftsChunks = if (ftsQuery.isBlank()) {
             emptyList()
         } else {
-            dao.searchChunkKeys(corpusKeys, ftsQuery, limit)
+            scanTopChunkMatches(corpusKeys, ftsQuery, query, limit)
         }
-        val candidateKeys = (routedKeys + ftsKeys).distinct()
-        val chunks = dao.listChunks(candidateKeys).associateBy(AgentChunkEntity::chunkKey)
+        val routedChunks = dao.listChunks(routedKeys)
+        val chunks = (routedChunks + ftsChunks).associateBy(AgentChunkEntity::chunkKey).values
         val terms = agentQueryTerms(query)
-        candidateKeys.mapNotNull(chunks::get).map { chunk ->
+        chunks.map { chunk ->
             val parentIds = chunk.parentPath.split('/').filter(String::isNotBlank).toSet()
             AgentRetrievalChunk(
                 chunkKey = chunk.chunkKey,
@@ -1321,6 +1335,42 @@ class AgentRepository(
         ).take(limit)
     }
 
+    private suspend fun scanTopChunkMatches(
+        corpusKeys: List<String>,
+        ftsQuery: String,
+        rawQuery: String,
+        limit: Int,
+    ): List<AgentChunkEntity> {
+        if (limit <= 0) return emptyList()
+        val terms = agentQueryTerms(rawQuery)
+        val topMatches = mutableListOf<ScoredChunkMatch>()
+        var afterChunkKey = ""
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val chunkKeys = dao.searchChunkKeys(
+                corpusKeys = corpusKeys,
+                ftsQuery = ftsQuery,
+                afterChunkKey = afterChunkKey,
+                limit = FTS_SCAN_PAGE_SIZE,
+            )
+            currentCoroutineContext().ensureActive()
+            if (chunkKeys.isEmpty()) break
+            val pageChunks = dao.listChunks(chunkKeys)
+            currentCoroutineContext().ensureActive()
+            pageChunks.forEach { chunk ->
+                topMatches += ScoredChunkMatch(chunk, scoreChunk(chunk, rawQuery, terms))
+            }
+            topMatches.sortWith(scoredChunkMatchComparator())
+            if (topMatches.size > limit) topMatches.subList(limit, topMatches.size).clear()
+            currentCoroutineContext().ensureActive()
+            if (chunkKeys.size < FTS_SCAN_PAGE_SIZE) break
+            val nextKey = chunkKeys.last()
+            check(nextKey != afterChunkKey) { "语料 FTS 分页游标未前进" }
+            afterChunkKey = nextKey
+        }
+        return topMatches.map(ScoredChunkMatch::chunk)
+    }
+
     private suspend fun versionCorpusKeys(agentId: String, version: Int): List<String> =
         dao.listVersionCorpora(agentId, version).map { corpusKey(it.corpusId, it.sourceHash) }
 
@@ -1328,7 +1378,9 @@ class AgentRepository(
         val nodes = linkedMapOf<String, AgentHierarchyNodeEntity>()
         var pending = nodeKeys.distinct()
         while (pending.isNotEmpty()) {
+            currentCoroutineContext().ensureActive()
             val loaded = dao.listHierarchyNodes(pending)
+            currentCoroutineContext().ensureActive()
             val loadedKeys = loaded.mapTo(mutableSetOf(), AgentHierarchyNodeEntity::nodeKey)
             if (pending.any { it !in loadedKeys }) throw AgentBundleException("层级路由父链缺失")
             loaded.forEach { node -> nodes[node.nodeKey] = node }
@@ -1666,8 +1718,8 @@ class AgentRepository(
 
     companion object {
         private const val DEFAULT_EVIDENCE_LIMIT = 8
-        private const val CANDIDATE_MULTIPLIER = 4
         private const val CHUNK_BATCH_SIZE = 200
+        private const val FTS_SCAN_PAGE_SIZE = 64
         private const val SOURCE_PAYLOAD_NAME = "payload"
         private const val TOMBSTONE_META_SUFFIX = ".meta"
         private const val TOMBSTONE_DATA_SUFFIX = ".data"
@@ -1715,6 +1767,23 @@ private fun scoreHierarchyNode(
     val phraseScore = if (rawQuery.isNotBlank() && searchable.contains(rawQuery.trim())) 8 else 0
     return termScore + phraseScore
 }
+
+private data class ScoredChunkMatch(
+    val chunk: AgentChunkEntity,
+    val score: Int,
+)
+
+private fun scoredChunkMatchComparator(): Comparator<ScoredChunkMatch> =
+    compareByDescending<ScoredChunkMatch>(ScoredChunkMatch::score)
+        .thenBy { match -> match.chunk.sourceId.ifBlank { match.chunk.sourceHash } }
+        .thenBy { match -> match.chunk.period }
+        .thenBy { match -> match.chunk.chunkKey }
+
+private fun repositoryRouteComparator(): Comparator<AgentHierarchyRoute> =
+    compareByDescending<AgentHierarchyRoute>(AgentHierarchyRoute::physicalScore)
+        .thenBy(AgentHierarchyRoute::sourceId)
+        .thenBy(AgentHierarchyRoute::topLevelId)
+        .thenBy(AgentHierarchyRoute::nodeKey)
 
 private fun AgentVersionEntity.toContextPackage(
     installedRequiredCorpusCount: Int,

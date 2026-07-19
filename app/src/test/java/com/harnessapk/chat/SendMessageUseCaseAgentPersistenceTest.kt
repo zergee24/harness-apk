@@ -192,6 +192,71 @@ class SendMessageUseCaseAgentPersistenceTest {
     }
 
     @Test
+    fun fixedAgentConversationFailsUnavailableBeforeNetworkWhenAssemblerReturnsNull() = runTest {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("data: [DONE]"))
+        server.start()
+        try {
+            val store = inMemoryChatStore()
+            val repository = store.repository
+            val conversationId = repository.createConversation(agentId = "agent-1", agentVersion = 7)
+            val userMessageId = repository.insertUserMessage(conversationId, "继续", emptyList())
+            val useCase = SendMessageUseCase(
+                context = ContextWrapper(null),
+                chatRepository = repository,
+                providerRepository = providerRepository(server),
+                client = OpenAiCompatibleClient(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+                dispatchers = AppDispatchers(Dispatchers.Unconfined, Dispatchers.Unconfined, Dispatchers.Unconfined),
+                agentContextProvider = { _, _ -> null },
+            )
+            val entry = ChatExecutionEntry(
+                id = "entry-unavailable",
+                conversationId = conversationId,
+                userMessageId = userMessageId,
+                assistantMessageId = null,
+                targetAssistantMessageId = null,
+                sequence = 1L,
+                type = ChatExecutionType.NORMAL,
+                status = ChatExecutionStatus.RUNNING,
+                providerId = null,
+                model = null,
+                reasoningEffort = defaultReasoningEffort(),
+                requestContext = ChatExecutionRequestContext(
+                    sessionContext = com.harnessapk.session.SessionRequestContext(
+                        finalPrompt = "不得降级使用的普通会话提示",
+                        projectName = null,
+                        deliverableTitle = null,
+                        projectContext = "不得降级使用的项目提示",
+                        deliverableMarkdown = "",
+                    ),
+                    webSearchEnabled = true,
+                ),
+                errorMessage = null,
+                createdAt = 1L,
+                updatedAt = 1L,
+            )
+
+            val result = useCase.execute(
+                entry,
+                repository.listMessages(conversationId),
+                nativeWebSearchMode = com.harnessapk.provider.NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
+            )
+
+            assertEquals(ChatExecutionStatus.FAILED, result.status)
+            assertEquals("固定人格当前不可用，请检查人格包和所需资料后重试。", result.errorMessage)
+            assertEquals(0, server.requestCount)
+            val assistant = repository.listMessages(conversationId).last()
+            assertEquals(MessageRole.ASSISTANT, assistant.role)
+            assertEquals(MessageStatus.FAILED, assistant.status)
+            assertTrue(assistant.errorMessage.orEmpty().contains("固定人格当前不可用，请检查人格包和所需资料后重试。"))
+            assertTrue(assistant.errorMessage.orEmpty().contains("AppError\$AgentUnavailable"))
+            assertTrue(repository.listMessageParts(assistant.id).isEmpty())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun executeSendsStoredV1RuntimeContextWithoutWorldviewInternalId() = runTest {
         var requestBody = ""
         val root = Files.createTempDirectory("agent-send-context-test").toFile().apply { deleteOnExit() }

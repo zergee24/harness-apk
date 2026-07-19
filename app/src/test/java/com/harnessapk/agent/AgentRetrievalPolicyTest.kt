@@ -49,6 +49,15 @@ class AgentRetrievalPolicyTest {
     }
 
     @Test
+    fun chineseRelationshipIntentRequiresAConcreteInterpersonalQuestion() {
+        assertEquals(AgentQueryIntent.EXACT_FACT, policy.intentFor("关系数据库是什么"))
+        assertEquals(AgentQueryIntent.STANCE_METHOD, policy.intentFor("认识论有哪些主张"))
+        assertEquals(AgentQueryIntent.STANCE_METHOD, policy.intentFor("你如何认识实践与理论的关系"))
+        assertEquals(AgentQueryIntent.RELATIONSHIP, policy.intentFor("你和周先生是什么关系"))
+        assertEquals(AgentQueryIntent.RELATIONSHIP, policy.intentFor("你认识周先生吗"))
+    }
+
+    @Test
     fun greetingAndThanksOnlyClassifyAsRelationshipWhenTheWholeMessageIsSocial() {
         val matrix = listOf(
             "hi" to AgentQueryIntent.RELATIONSHIP,

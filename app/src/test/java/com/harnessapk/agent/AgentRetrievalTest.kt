@@ -23,6 +23,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
@@ -1285,6 +1286,93 @@ class AgentRetrievalTest {
     }
 
     @Test
+    fun chunkFtsRetrievalScoresEveryKeysetPageAndIsIndependentOfInsertionOrder() = runTest {
+        fun fixture(order: List<String>): Pair<AgentRepository, FakeAgentDao> {
+            val dao = FakeAgentDao().apply {
+                versionCorpora = listOf(AgentVersionCorpusCrossRef("agent-1", 1, "corpus", "hash", true))
+                val keys = (0 until 65).map { index -> "key-${index.toString().padStart(3, '0')}" } + "key-zzz"
+                keys.forEach { key ->
+                    chunks[key] = AgentChunkEntity(
+                        chunkKey = key,
+                        sourceId = "source-$key",
+                        sourceHash = "hash-$key",
+                        chunkId = key,
+                        sourceTitle = key,
+                        location = "location",
+                        text = if (key == "key-zzz") "调查事实" else "调查",
+                        keywordsText = if (key == "key-zzz") "调查 查事 事实" else "",
+                    )
+                }
+                searchResult = order.ifEmpty { keys }
+            }
+            return repository(dao) to dao
+        }
+        val keys = (0 until 65).map { index -> "key-${index.toString().padStart(3, '0')}" } + "key-zzz"
+        val (firstRepository, firstDao) = fixture(keys)
+        val (secondRepository, secondDao) = fixture(keys.reversed())
+
+        val first = firstRepository.searchChunks("agent-1", 1, "调查事实", 2, emptyList())
+        val second = secondRepository.searchChunks("agent-1", 1, "调查事实", 2, emptyList())
+
+        assertEquals(first.map(AgentRetrievalChunk::chunkKey), second.map(AgentRetrievalChunk::chunkKey))
+        assertEquals("key-zzz", first.first().chunkKey)
+        assertEquals(listOf(64, 64), firstDao.chunkSearchLimits)
+        assertEquals(listOf(64, 64), secondDao.chunkSearchLimits)
+        assertTrue(firstDao.chunkLoadBatchSizes.all { it <= 64 })
+    }
+
+    @Test
+    fun hierarchyFtsRetrievalScoresEveryKeysetPageBeforeStableTruncation() = runTest {
+        val dao = FakeAgentDao().apply {
+            versionCorpora = listOf(AgentVersionCorpusCrossRef("agent-1", 1, "corpus", "hash", true))
+            val keys = (0 until 65).map { index -> "node-${index.toString().padStart(3, '0')}" } + "node-zzz"
+            keys.reversed().forEach { key ->
+                hierarchyNodes[key] = AgentHierarchyNodeEntity(
+                    nodeKey = key,
+                    sourceId = "source-$key",
+                    sourceHash = "hash-$key",
+                    nodeId = key,
+                    kind = "section",
+                    title = if (key == "node-zzz") "调查事实" else "调查",
+                    parentNodeKey = null,
+                    path = key,
+                    summary = "",
+                )
+                hierarchySearchRows += AgentHierarchyFtsEntity(key, "调查事实")
+            }
+        }
+
+        val routes = repository(dao).searchHierarchy("agent-1", 1, "调查事实", 2)
+
+        assertEquals("node-zzz", routes.first().nodeKey)
+        assertEquals(listOf(64, 64), dao.hierarchySearchLimits)
+        assertTrue(dao.hierarchyLoadBatchSizes.all { it <= 64 })
+    }
+
+    @Test
+    fun pagedFtsRetrievalChecksCancellationBetweenBoundedPages() = runTest {
+        val dao = FakeAgentDao().apply {
+            versionCorpora = listOf(AgentVersionCorpusCrossRef("agent-1", 1, "corpus", "hash", true))
+            searchResult = (0 until 130).map { index -> "key-${index.toString().padStart(3, '0')}" }
+            searchResult.forEach { key ->
+                chunks[key] = AgentChunkEntity(
+                    key, key, "hash-$key", key, key, location = "location", text = "调查", keywordsText = "调查",
+                )
+            }
+            cancelAfterChunkLoadCalls = 1
+        }
+
+        val retrieval = async {
+            repository(dao).searchChunks("agent-1", 1, "调查", 2, emptyList())
+        }
+        val failure = runCatching { retrieval.await() }.exceptionOrNull()
+
+        assertTrue(failure is CancellationException)
+        assertEquals(1, dao.chunkSearchLimits.size)
+        assertEquals(listOf(64), dao.chunkLoadBatchSizes)
+    }
+
+    @Test
     fun chineseQueryUsesQuotedTermsWithoutFtsOperatorsFromUserInput() {
         val query = buildAgentFtsQuery("调查 OR 事实 \"任意引号\"")
 
@@ -1449,6 +1537,12 @@ internal class FakeAgentDao : AgentDao {
     var searchResult: List<String> = emptyList()
     var routedSearchResult: List<String> = emptyList()
     var lastCorpusKeys: List<String> = emptyList()
+    val chunkSearchLimits = mutableListOf<Int>()
+    val hierarchySearchLimits = mutableListOf<Int>()
+    val chunkLoadBatchSizes = mutableListOf<Int>()
+    val hierarchyLoadBatchSizes = mutableListOf<Int>()
+    var cancelAfterChunkSearchCalls: Int? = null
+    var cancelAfterChunkLoadCalls: Int? = null
     var maxChunkBatchSize: Int = 0
     val referencedChunkKeys = mutableSetOf<String>()
     val legacyAgentSourceVersions = mutableSetOf<String>()
@@ -1648,13 +1742,27 @@ internal class FakeAgentDao : AgentDao {
         return entities.map { 1L }
     }
 
-    override suspend fun searchChunkKeys(corpusKeys: List<String>, ftsQuery: String, limit: Int): List<String> {
+    override suspend fun searchChunkKeys(
+        corpusKeys: List<String>,
+        ftsQuery: String,
+        afterChunkKey: String,
+        limit: Int,
+    ): List<String> {
         lastCorpusKeys = corpusKeys
-        return searchResult.take(limit)
+        chunkSearchLimits += limit
+        if (chunkSearchLimits.size == cancelAfterChunkSearchCalls) {
+            currentCoroutineContext().cancel(CancellationException("cancel paged search"))
+        }
+        return searchResult.distinct().sorted().filter { it > afterChunkKey }.take(limit)
     }
 
-    override suspend fun listChunks(chunkKeys: List<String>): List<AgentChunkEntity> =
-        chunkKeys.mapNotNull(chunks::get)
+    override suspend fun listChunks(chunkKeys: List<String>): List<AgentChunkEntity> {
+        chunkLoadBatchSizes += chunkKeys.size
+        if (chunkLoadBatchSizes.size == cancelAfterChunkLoadCalls) {
+            currentCoroutineContext().cancel(CancellationException("cancel paged load"))
+        }
+        return chunkKeys.mapNotNull(chunks::get)
+    }
     override suspend fun countRequiredEvidenceChunk(agentId: String, version: Int, chunkId: String): Int {
         if (failEvidenceCheck) throw IllegalStateException("evidence check failed")
         val requiredCorpora = versionCorpora.filter {
@@ -1707,8 +1815,14 @@ internal class FakeAgentDao : AgentDao {
     override suspend fun searchHierarchyNodeKeysForCorpora(
         corpusKeys: List<String>,
         ftsQuery: String,
+        afterNodeKey: String,
         limit: Int,
-    ): List<String> = hierarchySearchRows.map(AgentHierarchyFtsEntity::nodeKey).take(limit)
+    ): List<String> {
+        hierarchySearchLimits += limit
+        return hierarchySearchRows.map(AgentHierarchyFtsEntity::nodeKey).distinct().sorted()
+            .filter { it > afterNodeKey }
+            .take(limit)
+    }
     override suspend fun listChunkKeysForHierarchyNodes(
         corpusKeys: List<String>,
         nodeKeys: List<String>,
@@ -1719,8 +1833,10 @@ internal class FakeAgentDao : AgentDao {
             chunks.values.firstOrNull { chunk -> node.nodeId in chunk.parentPath.split('/') }?.chunkKey
         }.distinct().take(limit)
     }
-    override suspend fun listHierarchyNodes(nodeKeys: List<String>): List<AgentHierarchyNodeEntity> =
-        nodeKeys.mapNotNull(hierarchyNodes::get)
+    override suspend fun listHierarchyNodes(nodeKeys: List<String>): List<AgentHierarchyNodeEntity> {
+        hierarchyLoadBatchSizes += nodeKeys.size
+        return nodeKeys.mapNotNull(hierarchyNodes::get)
+    }
     override suspend fun deleteOrphanChunkSearchRows(): Int {
         val before = searchRows.size
         searchRows.removeIf { it.chunkKey !in chunks }

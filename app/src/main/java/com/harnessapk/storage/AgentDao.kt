@@ -288,6 +288,7 @@ interface AgentDao {
             ON agent_corpus_chunks.chunkKey = agent_chunk_fts.chunkKey
         WHERE agent_chunk_fts MATCH :ftsQuery
           AND (agent_corpus_chunks.corpusId || ':' || agent_corpus_chunks.corpusHash) IN (:corpusKeys)
+          AND agent_chunk_fts.chunkKey > :afterChunkKey
         ORDER BY agent_chunk_fts.chunkKey
         LIMIT :limit
         """,
@@ -295,6 +296,7 @@ interface AgentDao {
     suspend fun searchChunkKeys(
         corpusKeys: List<String>,
         ftsQuery: String,
+        afterChunkKey: String,
         limit: Int,
     ): List<String>
 
@@ -316,6 +318,7 @@ interface AgentDao {
             ON agent_corpus_hierarchy.nodeKey = agent_hierarchy_fts.nodeKey
         WHERE agent_hierarchy_fts MATCH :ftsQuery
           AND (agent_corpus_hierarchy.corpusId || ':' || agent_corpus_hierarchy.corpusHash) IN (:corpusKeys)
+          AND agent_hierarchy_fts.nodeKey > :afterNodeKey
         ORDER BY agent_hierarchy_fts.nodeKey
         LIMIT :limit
         """,
@@ -323,6 +326,7 @@ interface AgentDao {
     suspend fun searchHierarchyNodeKeysForCorpora(
         corpusKeys: List<String>,
         ftsQuery: String,
+        afterNodeKey: String,
         limit: Int,
     ): List<String>
 

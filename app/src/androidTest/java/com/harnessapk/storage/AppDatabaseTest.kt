@@ -157,6 +157,7 @@ class AppDatabaseTest {
         val keys = dao.searchChunkKeys(
             corpusKeys = listOf("corpus-1:source-hash"),
             ftsQuery = "调查 OR 事实",
+            afterChunkKey = "",
             limit = 8,
         )
 
@@ -480,7 +481,7 @@ class AppDatabaseTest {
     fun ftsCandidateLimitsAreStableAcrossDifferentInsertionOrders() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        suspend fun search(order: List<String>): Pair<List<String>, List<String>> {
+        suspend fun search(order: List<String>): List<List<String>> {
             val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
             val dao = db.agentDao()
             val corpusHash = "f".repeat(64)
@@ -515,9 +516,16 @@ class AppDatabaseTest {
             }
             dao.insertHierarchyNodes(nodes)
             dao.insertHierarchySearchRows(nodes.map { AgentHierarchyFtsEntity(it.nodeKey, "shared evidence") })
+            dao.insertCorpusHierarchyRefs(
+                nodes.map { AgentCorpusHierarchyCrossRef("corpus", corpusHash, it.nodeKey) },
+            )
 
-            val result = dao.searchChunkKeys(listOf("corpus:$corpusHash"), "shared", 2) to
-                dao.searchHierarchyNodeKeys("shared", 2)
+            val result = listOf(
+                dao.searchChunkKeys(listOf("corpus:$corpusHash"), "shared", "", 2),
+                dao.searchChunkKeys(listOf("corpus:$corpusHash"), "shared", "m-key", 2),
+                dao.searchHierarchyNodeKeysForCorpora(listOf("corpus:$corpusHash"), "shared", "", 2),
+                dao.searchHierarchyNodeKeysForCorpora(listOf("corpus:$corpusHash"), "shared", "m-key", 2),
+            )
             db.close()
             return result
         }
@@ -526,8 +534,15 @@ class AppDatabaseTest {
         val second = search(listOf("m-key", "z-key", "a-key"))
 
         assertEquals(first, second)
-        assertEquals(listOf("a-key", "m-key"), first.first)
-        assertEquals(listOf("a-key", "m-key"), first.second)
+        assertEquals(
+            listOf(
+                listOf("a-key", "m-key"),
+                listOf("z-key"),
+                listOf("a-key", "m-key"),
+                listOf("z-key"),
+            ),
+            first,
+        )
     }
 
     @Test
@@ -573,6 +588,7 @@ class AppDatabaseTest {
             db.agentDao().searchChunkKeys(
                 listOf("corpus-core:source-hash", "corpus-full:source-hash"),
                 "调查",
+                "",
                 8,
             ),
         )
@@ -582,6 +598,7 @@ class AppDatabaseTest {
                 db.agentDao().searchChunkKeys(
                     listOf("corpus-core:source-hash", "corpus-full:source-hash"),
                     legacyNgram,
+                    "",
                     8,
                 ),
             )

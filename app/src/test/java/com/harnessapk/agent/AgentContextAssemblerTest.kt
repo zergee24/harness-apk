@@ -397,6 +397,59 @@ class AgentContextAssemblerTest {
     }
 
     @Test
+    fun globalReservationJointlyCoversPeriodsAndRoutesBeforeTheSameSourceCapIsSpent() = runTest {
+        val routeA = AgentHierarchyRoute("node-a", "source-a", "root-a", 10)
+        val routeB = AgentHierarchyRoute("node-b", "source-a", "root-b", 9)
+        val candidates = listOf(
+            chunk(
+                "route-a-early",
+                "source-a",
+                "early",
+                "a-early",
+                V2Authorship.DIRECT,
+                100,
+                "route a early",
+                setOf("source-a/root-a"),
+            ),
+            chunk(
+                "route-a-late",
+                "source-a",
+                "late",
+                "a-late",
+                V2Authorship.DIRECT,
+                99,
+                "route a late",
+                setOf("source-a/root-a"),
+            ),
+            chunk(
+                "route-b-late",
+                "source-a",
+                "late",
+                "b-late",
+                V2Authorship.DIRECT,
+                1,
+                "route b late",
+                setOf("source-a/root-b"),
+            ),
+        )
+        val source = FakeContextSource(
+            packageData(stances = emptyList()),
+            candidates = candidates,
+            routes = listOf(routeA, routeB),
+        )
+        val assembler = AgentContextAssembler(source)
+
+        val first = assembler.assemble(request("请全面概括你的思想体系"))!!
+        source.candidates = candidates.reversed()
+        val second = assembler.assemble(request("请全面概括你的思想体系"))!!
+
+        assertEquals(listOf("route-a-early", "route-b-late"), first.diagnostics.selectedChunkKeys)
+        assertEquals(first.diagnostics.selectedChunkKeys, second.diagnostics.selectedChunkKeys)
+        assertEquals(2, first.diagnostics.periodCount)
+        assertEquals(setOf("source-a/root-a", "source-a/root-b"), first.diagnostics.selectedRouteIds.toSet())
+    }
+
+    @Test
     fun evidenceBudgetChargesTheCompleteRenderedBlock() = runTest {
         val fitting = chunk(
             "fitting",
@@ -449,6 +502,53 @@ class AgentContextAssemblerTest {
         assertEquals(listOf("raw"), context.diagnostics.selectedChunkKeys)
         assertTrue(context.evidence.single().text.contains("直接事实"))
         assertTrue(context.diagnostics.selectedCharacterCount <= 4_800)
+    }
+
+    @Test
+    fun structuredAssetsRequirePositiveLexicalRelevanceAndDoNotFillTheirMaximums() = runTest {
+        val relatedStance = V2Worldview(
+            "stance-related", "调查方法", "调查后判断", emptyList(), "", emptyList(), 1.0, emptyList(),
+        )
+        val unrelatedStance = V2Worldview(
+            "stance-unrelated", "文学", "重视诗歌韵律", emptyList(), "", emptyList(), 1.0, emptyList(),
+        )
+        val relatedEpisode = V2Episode(
+            "episode-related", "", "调查现场", emptyList(), "开展调查", "形成方法", emptyList(),
+        )
+        val unrelatedEpisode = V2Episode(
+            "episode-unrelated", "", "剧院", emptyList(), "观看演出", "审美体验", emptyList(),
+        )
+        val relatedExample = V2Example(
+            "example-related", "调查方法", "如何调查", "先收集事实", emptyList(), "synthesized", emptyList(),
+        )
+        val unrelatedExample = V2Example(
+            "example-unrelated", "饮食", "晚餐吃什么", "清淡即可", emptyList(), "synthesized", emptyList(),
+        )
+        val assembler = AgentContextAssembler(
+            FakeContextSource(
+                packageData(
+                    stances = listOf(unrelatedStance, relatedStance),
+                    episodes = listOf(unrelatedEpisode, relatedEpisode),
+                    examples = listOf(unrelatedExample, relatedExample),
+                ),
+            ),
+        )
+        val context = assembler.assemble(request("你如何看待调查方法"))!!
+
+        assertEquals(
+            setOf("stance-related", "episode-related", "example-related"),
+            context.diagnostics.selectedAssetIds.toSet(),
+        )
+        assertFalse(context.systemPrompt.contains("诗歌韵律"))
+        assertFalse(context.systemPrompt.contains("观看演出"))
+        assertFalse(context.systemPrompt.contains("晚餐吃什么"))
+
+        val noOverlap = assembler.assemble(request("量子纠缠有哪些主张"))!!
+        assertTrue(noOverlap.diagnostics.selectedAssetIds.isEmpty())
+        assertEquals(0, noOverlap.diagnostics.selectedCharacterCount)
+        assertFalse(noOverlap.systemPrompt.contains("本轮相关立场"))
+        assertFalse(noOverlap.systemPrompt.contains("本轮相关经历"))
+        assertFalse(noOverlap.systemPrompt.contains("本轮表达示例"))
     }
 
     @Test
@@ -558,6 +658,8 @@ class AgentContextAssemblerTest {
         stances: List<V2Worldview> = listOf(
             V2Worldview("stance-1", "调查", "先调查再判断", emptyList(), "all", emptyList(), 1.0, listOf("a")),
         ),
+        episodes: List<V2Episode> = emptyList(),
+        examples: List<V2Example> = emptyList(),
         requiredCorpusCount: Int = 1,
         installedRequiredCorpusCount: Int = 1,
         missingOptionalCoverage: List<String> = emptyList(),
@@ -569,8 +671,8 @@ class AgentContextAssemblerTest {
         identity = V2Identity(listOf("测试人物"), "1900-1970", listOf("研究者"), relationships),
         voice = voice,
         stances = stances,
-        episodes = emptyList(),
-        examples = emptyList(),
+        episodes = episodes,
+        examples = examples,
         opener = opener,
         requiredCorpusCount = requiredCorpusCount,
         installedRequiredCorpusCount = installedRequiredCorpusCount,

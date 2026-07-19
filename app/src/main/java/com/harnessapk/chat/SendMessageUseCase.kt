@@ -103,6 +103,10 @@ class SendMessageUseCase(
         nativeWebSearchMode: NativeWebSearchMode? = null,
         onAssistantCreated: suspend (String) -> Unit = {},
     ): ChatExecutionResult = withContext(dispatchers.io) {
+        val conversation = requireNotNull(chatRepository.conversation(entry.conversationId)) {
+            "待执行的会话不存在"
+        }
+        val fixedAgentConversation = !conversation.agentId.isNullOrBlank() && conversation.agentVersion != null
         val currentUserMessage = requireNotNull(chatRepository.message(entry.userMessageId)) {
             "待执行的用户消息不存在"
         }
@@ -180,6 +184,7 @@ class SendMessageUseCase(
                     sessionContext = entry.requestContext.sessionContext,
                 ),
             )
+            if (fixedAgentConversation && agentContext == null) throw AppError.AgentUnavailable()
             val effectiveSearchContexts = effectiveAgentSearchContexts(
                 agentContext = agentContext,
                 webSearchContext = webSearchContext,

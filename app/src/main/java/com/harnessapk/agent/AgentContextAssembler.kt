@@ -292,31 +292,12 @@ class AgentContextAssembler(
             return true
         }
 
-        fun tryAddFirst(candidatesForSlot: Sequence<AgentRetrievalChunk>): Boolean {
-            for (candidate in candidatesForSlot) {
-                if (candidate !in selected && tryAdd(candidate)) return true
-                if (selected.size >= budget.chunkCount) return false
-            }
-            return false
-        }
-
-        if (budget.requirePeriodDiversity) {
-            var reservedPeriods = 0
-            val periods = sorted.map(AgentRetrievalChunk::period)
-                .filter(String::isNotBlank)
-                .distinct()
-            for (period in periods) {
-                if (tryAddFirst(sorted.asSequence().filter { it.period == period })) reservedPeriods += 1
-                if (reservedPeriods >= MIN_DIVERSE_PERIODS || selected.size >= budget.chunkCount) break
-            }
-        }
-        if (hierarchyRoutes.isNotEmpty()) {
-            hierarchyRoutes.map(AgentHierarchyRoute::stableRouteId).distinct().forEach { routeId ->
-                if (selected.none { routeId in it.routeIds }) {
-                    tryAddFirst(sorted.asSequence().filter { routeId in it.routeIds })
-                }
-            }
-        }
+        planDiversityReservations(
+            candidates = sorted,
+            budget = budget,
+            remainingCharacters = selectionBudget.remaining,
+            routeIds = hierarchyRoutes.map(AgentHierarchyRoute::stableRouteId).toSet(),
+        ).forEach { reserved -> check(tryAdd(reserved)) }
         sorted.filterNot(selected::contains).forEach(::tryAdd)
         return selected
     }
@@ -399,13 +380,14 @@ class AgentContextAssembler(
         const val CANDIDATE_MULTIPLIER = 4
         const val V1_EVIDENCE_LIMIT = 8
         const val MAX_DIAGNOSTIC_ITEMS = 64
-        const val MIN_DIVERSE_PERIODS = 2
     }
 }
 
 private class CharacterSelectionBudget(private val limit: Int) {
     var used: Int = 0
         private set
+    val remaining: Int
+        get() = limit - used
 
     fun tryUse(characters: Int): Boolean {
         if (characters < 0 || used + characters > limit) return false
@@ -425,16 +407,79 @@ private fun <T> selectAssets(
 ): List<T> {
     if (limit == 0) return emptyList()
     val terms = retrievalTerms(query)
-    val sorted = assets.sortedWith(
-        compareByDescending<T> { asset ->
-            searchableText(asset).sumOf { value -> terms.count(value.lowercase()::contains) }
-        }.thenBy(id),
-    )
+    val scored = assets.map { asset ->
+        asset to searchableText(asset).sumOf { value -> terms.count(value.lowercase()::contains) }
+    }.filter { (_, score) -> score > 0 }
+    val sorted = scored.sortedWith(
+        compareByDescending<Pair<T, Int>>(Pair<T, Int>::second).thenBy { (asset, _) -> id(asset) },
+    ).map(Pair<T, Int>::first)
     return buildList {
         sorted.forEach { asset ->
             if (size < limit && characterBudget.tryUse(render(asset).length + 1)) add(asset)
         }
     }
+}
+
+private fun planDiversityReservations(
+    candidates: List<AgentRetrievalChunk>,
+    budget: AgentRetrievalBudget,
+    remainingCharacters: Int,
+    routeIds: Set<String>,
+): List<AgentRetrievalChunk> {
+    if ((!budget.requirePeriodDiversity && routeIds.isEmpty()) || budget.chunkCount <= 0) return emptyList()
+    val maxReservationCount = minOf(2, budget.chunkCount)
+    val plans = mutableListOf<List<AgentRetrievalChunk>>()
+
+    fun isFeasible(plan: List<AgentRetrievalChunk>): Boolean {
+        if (plan.size > maxReservationCount) return false
+        if (plan.groupingBy(AgentRetrievalChunk::sourceId).eachCount().values.any { it > budget.perSourceCount }) {
+            return false
+        }
+        if (plan.map(AgentRetrievalChunk::stableDuplicateKey).distinct().size != plan.size) return false
+        return plan.sumOf { renderEvidenceBlock(it).length } <= remainingCharacters
+    }
+
+    candidates.forEachIndexed { firstIndex, first ->
+        listOf(first).takeIf(::isFeasible)?.let(plans::add)
+        if (maxReservationCount >= 2) {
+            for (secondIndex in firstIndex + 1 until candidates.size) {
+                listOf(first, candidates[secondIndex]).takeIf(::isFeasible)?.let(plans::add)
+            }
+        }
+    }
+    if (plans.isEmpty()) return emptyList()
+
+    fun periodCount(plan: List<AgentRetrievalChunk>): Int = if (budget.requirePeriodDiversity) {
+        plan.map(AgentRetrievalChunk::period).filter(String::isNotBlank).distinct().size
+    } else {
+        0
+    }
+    fun routeCount(plan: List<AgentRetrievalChunk>): Int =
+        plan.flatMap(AgentRetrievalChunk::routeIds).filter(routeIds::contains).distinct().size
+
+    val targetPeriods = plans.maxOf(::periodCount).coerceAtMost(2)
+    val targetRoutes = plans.maxOf(::routeCount).coerceAtMost(2)
+    var best = plans.first()
+    fun compare(left: List<AgentRetrievalChunk>, right: List<AgentRetrievalChunk>): Int {
+        val leftPeriods = periodCount(left)
+        val rightPeriods = periodCount(right)
+        val leftRoutes = routeCount(left)
+        val rightRoutes = routeCount(right)
+        val leftMeetsTargets = if (leftPeriods >= targetPeriods && leftRoutes >= targetRoutes) 1 else 0
+        val rightMeetsTargets = if (rightPeriods >= targetPeriods && rightRoutes >= targetRoutes) 1 else 0
+        if (leftMeetsTargets != rightMeetsTargets) return leftMeetsTargets.compareTo(rightMeetsTargets)
+        val leftCappedCoverage = minOf(leftPeriods, 2) + minOf(leftRoutes, 2)
+        val rightCappedCoverage = minOf(rightPeriods, 2) + minOf(rightRoutes, 2)
+        if (leftCappedCoverage != rightCappedCoverage) return leftCappedCoverage.compareTo(rightCappedCoverage)
+        val leftCoverage = leftPeriods + leftRoutes
+        val rightCoverage = rightPeriods + rightRoutes
+        if (leftCoverage != rightCoverage) return leftCoverage.compareTo(rightCoverage)
+        return right.size.compareTo(left.size)
+    }
+    plans.drop(1).forEach { candidate ->
+        if (compare(candidate, best) > 0) best = candidate
+    }
+    return best
 }
 
 private fun chunkComparator(preferDirect: Boolean): Comparator<AgentRetrievalChunk> =

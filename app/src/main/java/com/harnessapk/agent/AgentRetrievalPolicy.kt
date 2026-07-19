@@ -8,7 +8,7 @@ class AgentRetrievalPolicy {
             containsAnyTerm(normalized, TEMPORAL_TERMS) || YEAR_PATTERN.findAll(normalized).count() >= 2 -> {
                 AgentQueryIntent.TEMPORAL
             }
-            containsAnyTerm(normalized, RELATIONSHIP_TOPIC_TERMS) -> AgentQueryIntent.RELATIONSHIP
+            isRelationshipQuery(normalized) -> AgentQueryIntent.RELATIONSHIP
             containsAnyTerm(normalized, STANCE_TERMS) -> AgentQueryIntent.STANCE_METHOD
             isPureSocialMessage(normalized) -> AgentQueryIntent.RELATIONSHIP
             else -> AgentQueryIntent.EXACT_FACT
@@ -33,9 +33,16 @@ class AgentRetrievalPolicy {
             CHINESE_SOCIAL_MESSAGE.matches(withoutLatin)
     }
 
+    private fun isRelationshipQuery(query: String): Boolean =
+        containsAnyTerm(query, ENGLISH_RELATIONSHIP_TERMS) ||
+            CHINESE_BILATERAL_RELATIONSHIP.containsMatchIn(query) ||
+            CHINESE_PERSON_KNOWLEDGE.containsMatchIn(query) ||
+            CHINESE_PERSON_IDENTITY.containsMatchIn(query) ||
+            CHINESE_PERSON_ROLE.containsMatchIn(query)
+
     private companion object {
         const val MAX_SOCIAL_MESSAGE_LENGTH = 64
-        val RELATIONSHIP_TOPIC_TERMS = listOf("关系", "认识", "朋友", "家人", "同事", "relationship")
+        val ENGLISH_RELATIONSHIP_TERMS = listOf("relationship", "who are you", "do you know")
         val STANCE_TERMS = listOf(
             "怎么看", "如何", "为什么", "方法", "立场", "主张", "态度", "怎么", "how", "why", "method",
         )
@@ -53,6 +60,18 @@ class AgentRetrievalPolicy {
         )
         val CHINESE_SOCIAL_MESSAGE = Regex(
             "^(?:你好|您好|早上好|晚上好|嗨|谢谢|多谢|感谢|再见|继续|接着|刚才|承接前文|说|聊|话题|前文|下去|吧|呀|啊|啦|哦|你|您|的)*$",
+        )
+        const val CHINESE_PERSON =
+            "(?:你|您|我|他|她|我们|你们|他们|她们|某人|谁|[\\u3400-\\u9fff]{1,12}(?:先生|女士|老师|教授|同志|同学))"
+        val CHINESE_BILATERAL_RELATIONSHIP = Regex(
+            "$CHINESE_PERSON.{0,4}(?:和|与|跟|同).{0,4}$CHINESE_PERSON.{0,8}(?:什么|怎样|哪种|何种)?关系",
+        )
+        val CHINESE_PERSON_KNOWLEDGE = Regex(
+            "$CHINESE_PERSON.{0,8}(?:认识|熟悉)(?!论).{0,4}$CHINESE_PERSON",
+        )
+        val CHINESE_PERSON_IDENTITY = Regex("$CHINESE_PERSON.{0,4}(?:是谁|是什么人)")
+        val CHINESE_PERSON_ROLE = Regex(
+            "$CHINESE_PERSON.{0,8}(?:朋友|家人|同事|亲属|师生|师友|伴侣|配偶)",
         )
     }
 }
