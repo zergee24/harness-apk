@@ -68,15 +68,14 @@ fun AgentPackagesScreen(
         scope.launch {
             isWorking = true
             errorText = null
-            runCatching {
-                container.agentRepository.prepareImport(uri.lastPathSegment ?: "智能体包") {
+            try {
+                val session = container.agentRepository.prepareImport(uri.lastPathSegment ?: "智能体包") {
                     context.contentResolver.openInputStream(uri)
                         ?: throw AgentBundleException("无法读取所选文件")
                 }
-            }.onSuccess { session ->
-                importSession?.let(container.agentRepository::discardImport)
+                importSession?.let { previous -> container.agentRepository.discardImport(previous) }
                 importSession = session
-            }.onFailure { error ->
+            } catch (error: Throwable) {
                 errorText = error.message ?: "智能体包读取失败"
             }
             isWorking = false
@@ -154,8 +153,10 @@ fun AgentPackagesScreen(
             session = session,
             isInstalling = isWorking,
             onDismiss = {
-                container.agentRepository.discardImport(session)
-                importSession = null
+                scope.launch {
+                    runCatching { container.agentRepository.discardImport(session) }
+                    importSession = null
+                }
             },
             onInstall = {
                 scope.launch {

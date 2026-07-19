@@ -116,20 +116,10 @@ class AgentRepository(
         }
     }
 
-    suspend fun install(session: AgentImportSession): AgentInstallResult {
-        val owned = packageSessions.remove(session.id)
-            ?: throw AgentBundleException("导入会话已经失效或已使用")
-        try {
-            validateOwnedSession(owned.session, owned)
-            val expected = owned.v1CompatibilitySession
-            val mismatch = session !== expected ||
-                session.stagedFile != owned.session.stagedFile ||
-                session.parsedBundle !== (owned.session.parsedPackage as? V1Bundle)?.bundle ||
-                session.preview != owned.session.preview
-            if (mismatch) throw AgentBundleException("V1 导入会话并非 repository 实际签发对象")
-            return installV1(session)
-        } finally {
-            deleteOrRecordOrphan(owned.session.stagedFile)
+    suspend fun install(session: AgentImportSession): AgentInstallResult = withContext(ioDispatcher) {
+        lifecycleCoordinator.serialized {
+            val owned = consumeOwnedV1SessionUnlocked(session)
+            installConsumedPackageUnlocked(owned, profileId = "balanced")
         }
     }
 
@@ -137,26 +127,13 @@ class AgentRepository(
         session: AgentPackageImportSession,
         profileId: String = "balanced",
     ): AgentInstallResult = withContext(ioDispatcher) {
-        recoverFileLifecycleLocked()
-        val owned = packageSessions.remove(session.id)
-            ?: throw AgentBundleException("导入会话已经失效或已使用")
-        try {
-            validateOwnedSession(session, owned)
-            when (val parsed = owned.session.parsedPackage) {
-                is V1Bundle -> installV1(
-                    AgentImportSession(session.id, session.stagedFile, parsed.bundle, session.preview),
-                )
-                is V2Bundle -> installV2Bundle(parsed, session.stagedFile, profileId)
-                is V2Agent -> installV2Agent(parsed, session.stagedFile)
-                is V2Corpus -> installStandaloneV2Corpus(parsed, session.stagedFile, session.sourceName)
-                is V2Source -> installStandaloneV2Source(parsed, session.stagedFile, session.sourceName)
-            }
-        } finally {
-            deleteOrRecordOrphan(owned.session.stagedFile)
+        lifecycleCoordinator.serialized {
+            val owned = consumeOwnedPackageSessionUnlocked(session)
+            installConsumedPackageUnlocked(owned, profileId)
         }
     }
 
-    private suspend fun installV1(session: AgentImportSession): AgentInstallResult = withContext(ioDispatcher) {
+    private suspend fun installV1Unlocked(session: AgentImportSession): AgentInstallResult {
         val bundle = session.parsedBundle
         require(session.stagedFile == bundle.file && session.stagedFile.isFile) { "导入会话已经失效" }
         val existingVersion = dao.findVersion(bundle.agent.id, bundle.agent.version)
@@ -166,7 +143,7 @@ class AgentRepository(
             }
             deleteOrRecordOrphan(session.stagedFile)
             val existingAgent = requireNotNull(dao.findAgent(bundle.agent.id))
-            return@withContext AgentInstallResult(AgentInstallOutcome.ALREADY_INSTALLED, existingAgent.toDomain())
+            return AgentInstallResult(AgentInstallOutcome.ALREADY_INSTALLED, existingAgent.toDomain())
         }
         val existingAgent = dao.findAgent(bundle.agent.id)
         if (existingAgent != null && existingAgent.publisherFingerprint != bundle.publisherFingerprint) {
@@ -178,7 +155,7 @@ class AgentRepository(
         fileOps.createDirectories(versionDirectory)
         fileOps.moveAtomically(session.stagedFile, finalBundle)
         val installedBundle = bundle.copy(file = finalBundle)
-        try {
+        return try {
             val now = timeProvider.nowMillis()
             var resultAgent: AgentEntity? = null
             transactionRunner.run {
@@ -205,7 +182,11 @@ class AgentRepository(
                     publisherPublicKey = bundle.publisherPublicKey,
                     publisherFingerprint = bundle.publisherFingerprint,
                     installSource = "LOCAL_FILE",
-                    status = status.name,
+                    status = if (existingAgent?.status == AgentStatus.DISABLED.name) {
+                        AgentStatus.DISABLED.name
+                    } else {
+                        status.name
+                    },
                     requiredCorpusCount = bundle.agent.requiredCorpora.size,
                     installedCorpusCount = installedRequired,
                     createdAt = existingAgent?.createdAt ?: now,
@@ -248,14 +229,110 @@ class AgentRepository(
         }
     }
 
-    fun discardImport(session: AgentImportSession) {
-        packageSessions.remove(session.id)
-        deleteOrRecordOrphan(session.stagedFile)
+    suspend fun discardImport(session: AgentImportSession) = withContext(ioDispatcher) {
+        lifecycleCoordinator.serialized {
+            val owned = packageSessions[session.id]
+                ?: throw AgentBundleException("导入会话已经失效或已使用")
+            if (session !== owned.v1CompatibilitySession) {
+                throw AgentBundleException("V1 导入会话并非 repository 实际签发对象")
+            }
+            discardOwnedSessionUnlocked(owned)
+        }
     }
 
-    fun discardPackageImport(session: AgentPackageImportSession) {
-        packageSessions.remove(session.id)
-        deleteOrRecordOrphan(session.stagedFile)
+    suspend fun discardPackageImport(session: AgentPackageImportSession) = withContext(ioDispatcher) {
+        lifecycleCoordinator.serialized {
+            val owned = packageSessions[session.id]
+                ?: throw AgentBundleException("导入会话已经失效或已使用")
+            if (session !== owned.session) {
+                throw AgentBundleException("导入会话并非 repository 实际签发对象")
+            }
+            discardOwnedSessionUnlocked(owned)
+        }
+    }
+
+    private suspend fun consumeOwnedV1SessionUnlocked(session: AgentImportSession): OwnedPackageSession {
+        val owned = packageSessions.remove(session.id)
+            ?: throw AgentBundleException("导入会话已经失效或已使用")
+        val expected = owned.v1CompatibilitySession
+        if (session !== expected) {
+            deleteOrRecordOrphan(owned.session.stagedFile)
+            throw AgentBundleException("V1 导入会话并非 repository 实际签发对象")
+        }
+        return owned
+    }
+
+    private suspend fun consumeOwnedPackageSessionUnlocked(
+        session: AgentPackageImportSession,
+    ): OwnedPackageSession {
+        val owned = packageSessions.remove(session.id)
+            ?: throw AgentBundleException("导入会话已经失效或已使用")
+        if (session !== owned.session) {
+            deleteOrRecordOrphan(owned.session.stagedFile)
+            throw AgentBundleException("导入会话并非 repository 实际签发对象")
+        }
+        return owned
+    }
+
+    private fun discardOwnedSessionUnlocked(owned: OwnedPackageSession) {
+        if (!packageSessions.remove(owned.session.id, owned)) {
+            throw AgentBundleException("导入会话已经失效或已使用")
+        }
+        deleteOrRecordOrphan(owned.session.stagedFile)
+    }
+
+    private suspend fun installConsumedPackageUnlocked(
+        owned: OwnedPackageSession,
+        profileId: String,
+    ): AgentInstallResult {
+        var snapshot: File? = null
+        try {
+            recoverFileLifecycleLocked()
+            validateOwnedSessionForConsumption(owned)
+            val consumed = snapshotOwnedPackageUnlocked(owned)
+            snapshot = consumed.file
+            return when (val parsed = consumed.parsed) {
+                is V1Bundle -> installV1Unlocked(
+                    AgentImportSession(owned.session.id, consumed.file, parsed.bundle, consumed.preview),
+                )
+                is V2Bundle -> installV2Bundle(parsed, consumed.file, profileId)
+                is V2Agent -> installV2Agent(parsed, consumed.file)
+                is V2Corpus -> installStandaloneV2Corpus(parsed, consumed.file, owned.session.sourceName)
+                is V2Source -> installStandaloneV2Source(parsed, consumed.file, owned.session.sourceName)
+            }
+        } finally {
+            snapshot?.let(::deleteOrRecordOrphan)
+            deleteEmptyDirectory(File(cacheDir, INSTALL_SNAPSHOT_DIRECTORY))
+        }
+    }
+
+    private suspend fun snapshotOwnedPackageUnlocked(owned: OwnedPackageSession): ConsumedPackageSnapshot {
+        val snapshotDirectory = File(cacheDir, INSTALL_SNAPSHOT_DIRECTORY).also(fileOps::createDirectories)
+        val snapshot = File(snapshotDirectory, "${UUID.randomUUID()}.package")
+        try {
+            owned.session.stagedFile.inputStream().use { input ->
+                fileOps.copyBounded(input, snapshot, MAX_IMPORT_BUNDLE_BYTES)
+            }
+            val packageBytes = snapshot.length()
+            val packageSha256 = snapshot.sha256Hex()
+            val parsed = reader.readPackageSuspending(snapshot)
+            val preview = if (parsed is V1Bundle) reader.inspect(snapshot) else parsed.toPreview()
+            if (
+                packageBytes != owned.session.packageBytes ||
+                packageSha256 != owned.session.packageSha256 ||
+                parsed::class != owned.session.parsedPackage::class ||
+                parsed.publisherFingerprint != owned.session.publisherFingerprint ||
+                preview != owned.session.preview
+            ) {
+                throw AgentBundleException("导入会话快照与签发内容不匹配")
+            }
+            return ConsumedPackageSnapshot(snapshot, parsed, preview)
+        } catch (error: Throwable) {
+            deleteOrRecordOrphan(snapshot)
+            throw error
+        } finally {
+            deleteOrRecordOrphan(owned.session.stagedFile)
+        }
     }
 
     private suspend fun installV2Bundle(
@@ -312,7 +389,11 @@ class AgentRepository(
                         publisherPublicKey = agent.publisherPublicKey,
                         publisherFingerprint = agent.publisherFingerprint,
                         installSource = "LOCAL_FILE",
-                        status = AgentStatus.WAITING_FOR_CORPUS.name,
+                        status = if (existingAgent?.status == AgentStatus.DISABLED.name) {
+                            AgentStatus.DISABLED.name
+                        } else {
+                            AgentStatus.WAITING_FOR_CORPUS.name
+                        },
                         requiredCorpusCount = agent.manifest.requiredCorpora.size,
                         installedCorpusCount = 0,
                         createdAt = existingAgent?.createdAt ?: now,
@@ -883,20 +964,12 @@ class AgentRepository(
         storageJson.decodeFromString<List<String>>(evaluationCorpusIdsJson).toSet()
     }.getOrElse { emptySet() }
 
-    private suspend fun validateOwnedSession(
-        supplied: AgentPackageImportSession,
-        owned: OwnedPackageSession,
-    ) {
+    private fun validateOwnedSessionForConsumption(owned: OwnedPackageSession) {
         val expected = owned.session
         val expired = timeProvider.nowMillis() - owned.createdAt >= IMPORT_STAGING_TTL_MILLIS
-        val mismatch = supplied !== expected || supplied.id != expected.id ||
-            supplied.stagedFile != expected.stagedFile || supplied.parsedPackage !== expected.parsedPackage ||
-            supplied.sourceName != expected.sourceName ||
-            supplied.publisherFingerprint != expected.publisherFingerprint ||
-            supplied.packageSha256 != expected.packageSha256 || supplied.packageBytes != expected.packageBytes
-        val modified = !expected.stagedFile.isFile || expected.stagedFile.length() != expected.packageBytes ||
-            runCatching { expected.stagedFile.sha256Hex() }.getOrNull() != expected.packageSha256
-        if (expired || mismatch || modified) throw AgentBundleException("导入会话已经失效、被修改或不匹配")
+        if (expired || !expected.stagedFile.isFile) {
+            throw AgentBundleException("导入会话已经失效、被修改或不匹配")
+        }
     }
 
     private fun purgeExpiredOwnedSessions(now: Long) {
@@ -992,6 +1065,7 @@ class AgentRepository(
     }
 
     suspend fun setAgentEnabled(agentId: String, enabled: Boolean) = withContext(ioDispatcher) {
+        lifecycleCoordinator.serialized {
         val agent = requireNotNull(dao.findAgent(agentId)) { "智能体不存在" }
         val status = if (enabled) {
             dao.findVersion(agentId, agent.activeVersion)?.state ?: AgentStatus.WAITING_FOR_CORPUS.name
@@ -999,6 +1073,7 @@ class AgentRepository(
             AgentStatus.DISABLED.name
         }
         check(dao.updateAgentStatus(agentId, status, timeProvider.nowMillis()) == 1) { "智能体状态更新失败" }
+        }
     }
 
     suspend fun versionCoverage(agentId: String, version: Int): AgentVersionCoverage =
@@ -1532,6 +1607,12 @@ private data class OwnedPackageSession(
     var v1CompatibilitySession: AgentImportSession? = null
 }
 
+private data class ConsumedPackageSnapshot(
+    val file: File,
+    val parsed: ParsedAgentPackage,
+    val preview: AgentImportPreview,
+)
+
 private data class PreparedSourceFile(
     val source: V2Source,
     val file: File,
@@ -1707,4 +1788,5 @@ private suspend fun File.sha256Hex(): String {
 private const val MAX_QUERY_TERM_COUNT = 24
 private const val MAX_IMPORT_BUNDLE_BYTES = 2L * 1024 * 1024 * 1024
 private const val IMPORT_STAGING_TTL_MILLIS = 24L * 60 * 60 * 1000
+private const val INSTALL_SNAPSHOT_DIRECTORY = "agent-install-snapshots"
 private val FTS_OPERATORS = setOf("and", "or", "not", "near")
