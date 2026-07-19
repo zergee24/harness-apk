@@ -4,6 +4,7 @@ import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.harnessapk.agent.Agent
@@ -75,6 +76,28 @@ class AgentPackagesScreenComposeTest {
             assertEquals("project-1", startedProjectId)
             assertEquals(1, doneCount)
         }
+    }
+
+    @Test
+    fun waitingAgentInstallDialogExplainsMissingCorpusAndDoesNotOfferStartConversation() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                AgentInstallSuccessDialog(
+                    agent = agent().copy(
+                        status = AgentStatus.WAITING_FOR_CORPUS,
+                        requiredCorpusCount = 2,
+                        installedCorpusCount = 1,
+                    ),
+                    sourceProjectId = null,
+                    onStartConversation = { _, _ -> },
+                    onDone = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("仍缺少资料，补齐后可开始对话。").assertIsDisplayed()
+        assertEquals(0, composeRule.onAllNodesWithText("开始对话").fetchSemanticsNodes().size)
+        composeRule.onNodeWithText("完成").assertHasClickAction()
     }
 
     private fun agent(): Agent = Agent(

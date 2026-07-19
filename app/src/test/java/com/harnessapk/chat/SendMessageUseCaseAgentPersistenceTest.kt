@@ -409,9 +409,9 @@ private class ExecuteConversationDao : ConversationDao {
     override suspend fun insert(entity: ConversationEntity) { rows[entity.id] = entity }
     override suspend fun update(entity: ConversationEntity) { rows[entity.id] = entity }
     override suspend fun updateIdentityIfNoUserMessages(id: String, agentId: String?, agentVersion: Int?, updatedAt: Long): Int = 0
-    override suspend fun clearProject(projectId: String, updatedAt: Long) {
+    override suspend fun clearProject(projectId: String) {
         rows.replaceAll { _, conversation ->
-            if (conversation.projectId == projectId) conversation.copy(projectId = null, updatedAt = updatedAt) else conversation
+            if (conversation.projectId == projectId) conversation.copy(projectId = null) else conversation
         }
     }
     override suspend fun archive(id: String, updatedAt: Long) = Unit

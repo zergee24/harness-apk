@@ -120,7 +120,6 @@ class AppContainer(context: Context) {
     val deleteProjectUseCase = DeleteProjectUseCase(
         projectRepository = projectRepository,
         database = database,
-        timeProvider = SystemTimeProvider,
     )
     val projectWorkspaceGateway = ProjectWorkspaceGatewayAdapter(projectRepository)
     val promptOptimizerUseCase = PromptOptimizerUseCase(

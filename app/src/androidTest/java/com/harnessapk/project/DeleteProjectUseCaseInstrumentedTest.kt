@@ -4,7 +4,10 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.harnessapk.agent.AgentStatus
+import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.common.TimeProvider
+import com.harnessapk.storage.AgentEntity
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.ConversationEntity
 import com.harnessapk.storage.ConversationMarkdownLinkEntity
@@ -34,7 +37,6 @@ class DeleteProjectUseCaseInstrumentedTest {
     private val useCase = DeleteProjectUseCase(
         projectRepository = projectRepository,
         database = database,
-        timeProvider = TimeProvider { 200L },
     )
 
     @After
@@ -93,6 +95,35 @@ class DeleteProjectUseCaseInstrumentedTest {
     }
 
     @Test
+    fun deletingOldProjectConversationPreservesActivityOrderingForGlobalIdentitySuggestion() = runBlocking {
+        val project = projectRepository.createProject("旧人物项目")
+        database.agentDao().upsertAgent(readyAgent("agent-1"))
+        insertConversation(
+            id = "old-person",
+            projectId = project.id,
+            agentId = "agent-1",
+            agentVersion = 1,
+            updatedAt = 100L,
+        )
+        insertConversation(id = "recent-assistant", projectId = null, updatedAt = 200L)
+        val deletion = DeleteProjectUseCase(
+            projectRepository = projectRepository,
+            database = database,
+        )
+
+        deletion.delete(project.id)
+
+        assertEquals(100L, database.conversationDao().findById("old-person")!!.updatedAt)
+        val identityRepository = ConversationIdentityRepository(
+            conversationDao = database.conversationDao(),
+            messageDao = database.messageDao(),
+            agentDao = database.agentDao(),
+            timeProvider = TimeProvider { 400L },
+        )
+        assertNull(identityRepository.suggest(projectId = null).agentId)
+    }
+
+    @Test
     fun fileDeletionFailureLeavesDatabaseReferencesUntouched() = runBlocking {
         insertConversation(id = "c1", projectId = "missing-project", agentId = "a1", agentVersion = 2)
         insertMarkdownLink("c1", "missing-project", "notes.md")
@@ -124,12 +155,11 @@ class DeleteProjectUseCaseInstrumentedTest {
         val cancellationUseCase = DeleteProjectUseCase(
             projectRepository = projectRepository,
             database = database,
-            timeProvider = TimeProvider {
+            beforeDatabaseCleanup = {
                 transactionEntered.countDown()
                 check(continueTransaction.await(5, TimeUnit.SECONDS)) {
                     "Timed out waiting to continue the Room transaction"
                 }
-                300L
             },
         )
 
@@ -163,13 +193,14 @@ class DeleteProjectUseCaseInstrumentedTest {
         projectId: String?,
         agentId: String? = null,
         agentVersion: Int? = null,
+        updatedAt: Long = 1L,
     ) {
         database.conversationDao().insert(
             ConversationEntity(
                 id = id,
                 title = id,
                 createdAt = 1L,
-                updatedAt = 1L,
+                updatedAt = updatedAt,
                 defaultProviderId = null,
                 defaultModel = null,
                 isArchived = false,
@@ -182,6 +213,21 @@ class DeleteProjectUseCaseInstrumentedTest {
             ),
         )
     }
+
+    private fun readyAgent(id: String) = AgentEntity(
+        id = id,
+        name = "李德胜",
+        summary = "",
+        activeVersion = 1,
+        publisherPublicKey = byteArrayOf(),
+        publisherFingerprint = "",
+        installSource = "test",
+        status = AgentStatus.READY.name,
+        requiredCorpusCount = 0,
+        installedCorpusCount = 0,
+        createdAt = 1L,
+        updatedAt = 1L,
+    )
 
     private suspend fun insertMessage(id: String, conversationId: String) {
         database.messageDao().insert(

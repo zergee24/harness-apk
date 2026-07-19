@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NewConversationUseCaseTest {
@@ -79,6 +80,22 @@ class NewConversationUseCaseTest {
         assertEquals("a1", created.agentId)
         assertEquals(4, created.agentVersion)
     }
+
+    @Test
+    fun explicitWaitingAgentConversationFailsInsteadOfCreatingAssistantConversation() = runTest {
+        agentDao.rows["waiting"] = readyAgent("waiting", activeVersion = 1).copy(
+            status = AgentStatus.WAITING_FOR_CORPUS.name,
+            requiredCorpusCount = 2,
+            installedCorpusCount = 1,
+        )
+
+        val failure = runCatching {
+            useCase.create(identity = InitialConversationIdentity.Agent("waiting"))
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals(0, conversationDao.count)
+    }
 }
 
 private fun conversation(
@@ -120,6 +137,7 @@ private fun readyAgent(id: String, activeVersion: Int) = AgentEntity(
 
 private class NewConversationFakeConversationDao : ConversationDao {
     private val rows = linkedMapOf<String, ConversationEntity>()
+    val count: Int get() = rows.size
 
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(rows.values.toList())
     override suspend fun findById(id: String): ConversationEntity? = rows[id]
@@ -140,9 +158,9 @@ private class NewConversationFakeConversationDao : ConversationDao {
         rows[id] = conversation.copy(agentId = agentId, agentVersion = agentVersion, updatedAt = updatedAt)
         return 1
     }
-    override suspend fun clearProject(projectId: String, updatedAt: Long) {
+    override suspend fun clearProject(projectId: String) {
         rows.replaceAll { _, conversation ->
-            if (conversation.projectId == projectId) conversation.copy(projectId = null, updatedAt = updatedAt) else conversation
+            if (conversation.projectId == projectId) conversation.copy(projectId = null) else conversation
         }
     }
     override suspend fun archive(id: String, updatedAt: Long) = Unit

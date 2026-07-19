@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentBundleException
 import com.harnessapk.agent.AgentImportSession
+import com.harnessapk.agent.AgentStatus
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
 import com.harnessapk.common.AppContainer
 import kotlinx.coroutines.launch
@@ -284,13 +285,24 @@ internal fun AgentInstallSuccessDialog(
     onStartConversation: (Agent, String?) -> Unit,
     onDone: () -> Unit,
 ) {
+    val canStartConversation = agent.status == AgentStatus.READY
     AlertDialog(
         onDismissRequest = {},
         title = { Text("智能体已安装") },
-        text = { Text("${agent.name} 已可用于新对话。") },
+        text = {
+            Text(
+                if (canStartConversation) {
+                    "${agent.name} 已可用于新对话。"
+                } else {
+                    "仍缺少资料，补齐后可开始对话。"
+                },
+            )
+        },
         confirmButton = {
-            TextButton(onClick = { onStartConversation(agent, sourceProjectId) }) {
-                Text("开始对话")
+            if (canStartConversation) {
+                TextButton(onClick = { onStartConversation(agent, sourceProjectId) }) {
+                    Text("开始对话")
+                }
             }
         },
         dismissButton = {

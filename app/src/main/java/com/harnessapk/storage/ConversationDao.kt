@@ -57,8 +57,8 @@ interface ConversationDao {
         updatedAt: Long,
     ): Int
 
-    @Query("UPDATE conversations SET projectId = NULL, updatedAt = :updatedAt WHERE projectId = :projectId")
-    suspend fun clearProject(projectId: String, updatedAt: Long)
+    @Query("UPDATE conversations SET projectId = NULL WHERE projectId = :projectId")
+    suspend fun clearProject(projectId: String)
 
     @Query("UPDATE conversations SET isArchived = 1, updatedAt = :updatedAt WHERE id = :id")
     suspend fun archive(id: String, updatedAt: Long)
