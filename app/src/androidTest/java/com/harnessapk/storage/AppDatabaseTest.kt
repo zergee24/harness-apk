@@ -11,13 +11,16 @@ import com.harnessapk.chat.UiMessagePartType
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
     @Test
-    fun storesAgentVersionAndFindsCorpusChunkThroughFts() = runBlocking {
+    fun storesOnePhysicalChunkForTwoCorporaAndFiltersFtsThroughCrossRefs() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         val dao = db.agentDao()
@@ -67,27 +70,64 @@ class AppDatabaseTest {
                 corpusId = "corpus-1",
                 sourceHash = "source-hash",
                 required = true,
+                installClass = "required",
+                packageSha256 = "a".repeat(64),
+                packageSizeBytes = 100L,
+                installedAt = 1L,
+            ),
+        )
+        dao.insertCorpus(
+            AgentCorpusEntity(
+                corpusId = "corpus-full",
+                sourceHash = "source-hash",
+                title = "完整资料",
+                indexedAt = 1L,
+                sizeBytes = 100L,
+            ),
+        )
+        dao.insertVersionCorpus(
+            AgentVersionCorpusCrossRef(
+                agentId = "agent-1",
+                version = 1,
+                corpusId = "corpus-full",
+                sourceHash = "source-hash",
+                required = false,
+                installClass = "optional",
+                packageSha256 = "b".repeat(64),
+                packageSizeBytes = 200L,
+                installedAt = 1L,
             ),
         )
         dao.insertChunks(
             listOf(
                 AgentChunkEntity(
-                    chunkKey = "corpus-1:source-hash:chunk-1",
-                    corpusId = "corpus-1",
+                    chunkKey = "source-hash:chunk-1",
+                    sourceId = "source-1",
                     sourceHash = "source-hash",
                     chunkId = "chunk-1",
                     sourceTitle = "测试资料",
+                    period = "1926",
+                    genre = "speech",
+                    authorship = "direct",
                     location = "第一章",
+                    parentPath = "测试资料 / 第一章",
+                    context = "测试资料 / 第一章 / 1926",
                     text = "研究问题必须从事实出发",
                     keywordsText = "调查 事实",
+                    duplicateGroup = "core",
                 ),
+            ),
+        )
+        dao.insertCorpusChunkRefs(
+            listOf(
+                AgentCorpusChunkCrossRef("corpus-1", "source-hash", "source-hash:chunk-1"),
+                AgentCorpusChunkCrossRef("corpus-full", "source-hash", "source-hash:chunk-1"),
             ),
         )
         dao.insertChunkSearchRows(
             listOf(
                 AgentChunkFtsEntity(
-                    chunkKey = "corpus-1:source-hash:chunk-1",
-                    corpusKey = "corpus-1:source-hash",
+                    chunkKey = "source-hash:chunk-1",
                     searchableText = "调查 事实 调查研究",
                 ),
             ),
@@ -99,8 +139,117 @@ class AppDatabaseTest {
             limit = 8,
         )
 
-        assertEquals(listOf("corpus-1:source-hash:chunk-1"), keys)
+        assertEquals(listOf("source-hash:chunk-1"), keys)
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
+        assertEquals(2, db.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
         db.close()
+    }
+
+    @Test
+    fun storesHierarchyAndOriginalSourceWithoutCreatingSourceChunkRows() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val dao = db.agentDao()
+        dao.insertSource(
+            AgentSourceFileEntity(
+                sourceId = "source-1",
+                sourceHash = "c".repeat(64),
+                title = "原始资料",
+                fileName = "source.pdf",
+                storedName = "source.pdf",
+                format = "pdf",
+                genre = "speech",
+                authorship = "direct",
+                period = "1926",
+                rawSizeBytes = 1024L,
+                filePath = "/tmp/source.pdf",
+                packageSha256 = "d".repeat(64),
+                installedAt = 2L,
+            ),
+        )
+        dao.insertHierarchyNodes(
+            listOf(
+                AgentHierarchyNodeEntity(
+                    nodeKey = "${"c".repeat(64)}:node-1",
+                    sourceId = "source-1",
+                    sourceHash = "c".repeat(64),
+                    nodeId = "node-1",
+                    kind = "section",
+                    title = "第一章",
+                    parentNodeKey = null,
+                    path = "原始资料 / 第一章",
+                    summary = "层级摘要",
+                ),
+            ),
+        )
+        dao.insertHierarchySearchRows(
+            listOf(AgentHierarchyFtsEntity(nodeKey = "${"c".repeat(64)}:node-1", searchableText = "第一章 层级摘要")),
+        )
+
+        assertNotNull(dao.findSource("source-1", "c".repeat(64)))
+        assertEquals(
+            listOf("${"c".repeat(64)}:node-1"),
+            dao.searchHierarchyNodeKeys("第一章", 8),
+        )
+        assertEquals(0, db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(0, db.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
+        db.close()
+    }
+
+    @Test
+    fun migratesRealVersion11FixtureAndPreservesV1DataAndSearch() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-11-12-${System.nanoTime()}.db"
+        createVersion11Fixture(context, name, conflictingChunk = false)
+
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(AppDatabase.MIGRATION_11_12)
+            .build()
+        val sqlite = db.openHelper.writableDatabase
+
+        assertEquals(12, sqlite.version)
+        assertEquals("conversation-1", sqlite.string("SELECT id FROM conversations"))
+        assertEquals("message-part-1", sqlite.string("SELECT id FROM message_parts"))
+        assertEquals("notes/fixture.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
+        assertEquals("provider-1", sqlite.string("SELECT id FROM provider_profiles"))
+        assertEquals("V1 persona", db.agentDao().findVersion("agent-1", 1)?.persona)
+        assertEquals("", db.agentDao().findVersion("agent-1", 1)?.identityJson)
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
+        assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
+        assertEquals(
+            listOf("source-hash:chunk-1"),
+            db.agentDao().searchChunkKeys(
+                listOf("corpus-core:source-hash", "corpus-full:source-hash"),
+                "调查",
+                8,
+            ),
+        )
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
+        db.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
+    fun migrationFailsWhenCollapsedPhysicalEvidenceConflicts() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-11-12-conflict-${System.nanoTime()}.db"
+        createVersion11Fixture(context, name, conflictingChunk = true)
+
+        try {
+            Room.databaseBuilder(context, AppDatabase::class.java, name)
+                .addMigrations(AppDatabase.MIGRATION_11_12)
+                .build()
+                .openHelper
+                .writableDatabase
+            fail("Expected conflicting physical evidence to fail migration")
+        } catch (expected: Throwable) {
+            assertTrue(expected.stackTraceToString().contains("conflicting physical chunk"))
+        } finally {
+            context.deleteDatabase(name)
+        }
     }
 
     @Test
@@ -428,6 +577,123 @@ class AppDatabaseTest {
         db.close()
     }
 
+    private fun createVersion11Fixture(
+        context: Context,
+        name: String,
+        conflictingChunk: Boolean,
+    ) {
+        context.deleteDatabase(name)
+        val db = context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null)
+        db.execSQL("PRAGMA foreign_keys=ON")
+        VERSION_11_SCHEMA.forEach(db::execSQL)
+        db.execSQL(
+            """
+            INSERT INTO conversations (
+                id, title, createdAt, updatedAt, defaultProviderId, defaultModel, isArchived,
+                projectId, promptOriginal, promptOptimized, promptFinal, agentId, agentVersion
+            ) VALUES ('conversation-1', '迁移会话', 1, 2, 'provider-1', 'model-1', 0,
+                'project-1', '原始', '优化', '最终', 'agent-1', 1)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO messages (
+                id, conversationId, role, content, status, providerId, model,
+                createdAt, updatedAt, errorCode, errorMessage
+            ) VALUES ('message-1', 'conversation-1', 'ASSISTANT', '保留消息', 'SUCCEEDED',
+                'provider-1', 'model-1', 2, 3, NULL, NULL)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO message_parts (
+                id, messageId, partIndex, type, content, metadataJson, stable, createdAt, updatedAt
+            ) VALUES ('message-part-1', 'message-1', 0, 'TEXT', '保留分片', '{}', 1, 2, 3)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO provider_profiles (
+                id, name, baseUrl, apiKeyAlias, encryptedApiKey, apiKeyIv, defaultModel,
+                availableModels, defaultVisionModel, supportsVision, nativeWebSearchMode,
+                enabled, createdAt, updatedAt, customHeadersJson, customBodyJson
+            ) VALUES ('provider-1', 'Provider', 'https://example.com', 'key', NULL, NULL,
+                'model-1', 'model-1', NULL, 0, 'DISABLED', 1, 1, 1, '', '')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO conversation_markdown_links (
+                conversationId, projectId, relativePath, linkedAt, updatedAt
+            ) VALUES ('conversation-1', 'project-1', 'notes/fixture.md', 2, 3)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agents (
+                id, name, summary, activeVersion, publisherPublicKey, publisherFingerprint,
+                installSource, status, requiredCorpusCount, installedCorpusCount, createdAt, updatedAt
+            ) VALUES ('agent-1', 'V1 人格', '迁移人格', 1, X'010203', 'fingerprint',
+                'LOCAL_FILE', 'READY', 1, 2, 1, 2)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_versions (
+                agentId, version, schemaVersion, bundlePath, bundleSha256, manifestJson,
+                persona, worldviewJsonl, installedAt, state
+            ) VALUES ('agent-1', 1, 1, '/tmp/v1.hbundle', 'bundle-sha', '{}',
+                'V1 persona', '', 2, 'READY')
+            """.trimIndent(),
+        )
+        listOf("corpus-core", "corpus-full").forEach { corpusId ->
+            db.execSQL(
+                """
+                INSERT INTO agent_corpora (corpusId, sourceHash, title, indexedAt, sizeBytes)
+                VALUES ('$corpusId', 'source-hash', '$corpusId', 2, 100)
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                INSERT INTO agent_version_corpora (
+                    agentId, version, corpusId, sourceHash, required
+                ) VALUES ('agent-1', 1, '$corpusId', 'source-hash', ${if (corpusId == "corpus-core") 1 else 0})
+                """.trimIndent(),
+            )
+        }
+        db.execSQL(
+            """
+            INSERT INTO agent_chunks (
+                chunkKey, corpusId, sourceHash, chunkId, sourceTitle, location, text, keywordsText
+            ) VALUES ('corpus-core:source-hash:chunk-1', 'corpus-core', 'source-hash',
+                'chunk-1', '测试资料', '第一章', '调查以后再下结论', '调查 事实')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_chunks (
+                chunkKey, corpusId, sourceHash, chunkId, sourceTitle, location, text, keywordsText
+            ) VALUES ('corpus-full:source-hash:chunk-1', 'corpus-full', 'source-hash',
+                'chunk-1', '测试资料', '第一章',
+                '${if (conflictingChunk) "冲突文本" else "调查以后再下结论"}', '调查 事实')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_chunk_fts (chunkKey, corpusKey, searchableText)
+            VALUES ('corpus-core:source-hash:chunk-1', 'corpus-core:source-hash', '调查 事实')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_chunk_fts (chunkKey, corpusKey, searchableText)
+            VALUES ('corpus-full:source-hash:chunk-1', 'corpus-full:source-hash', '调查 事实')
+            """.trimIndent(),
+        )
+        db.version = 11
+        db.close()
+    }
+
     private fun conversation(
         id: String,
         updatedAt: Long,
@@ -448,4 +714,61 @@ class AppDatabaseTest {
         agentId = agentId,
         agentVersion = agentId?.let { 1 },
     )
+
+    companion object {
+        private val VERSION_11_SCHEMA = listOf(
+            "CREATE TABLE conversations (id TEXT NOT NULL, title TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, defaultProviderId TEXT, defaultModel TEXT, isArchived INTEGER NOT NULL, projectId TEXT, promptOriginal TEXT NOT NULL, promptOptimized TEXT NOT NULL, promptFinal TEXT NOT NULL, agentId TEXT, agentVersion INTEGER, PRIMARY KEY(id))",
+            "CREATE TABLE messages (id TEXT NOT NULL, conversationId TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, providerId TEXT, model TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, errorCode TEXT, errorMessage TEXT, PRIMARY KEY(id), FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE)",
+            "CREATE INDEX index_messages_conversationId ON messages(conversationId)",
+            "CREATE TABLE message_attachments (id TEXT NOT NULL, messageId TEXT NOT NULL, type TEXT NOT NULL, uri TEXT NOT NULL, mimeType TEXT NOT NULL, createdAt INTEGER NOT NULL, PRIMARY KEY(id), FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE)",
+            "CREATE INDEX index_message_attachments_messageId ON message_attachments(messageId)",
+            "CREATE TABLE message_parts (id TEXT NOT NULL, messageId TEXT NOT NULL, partIndex INTEGER NOT NULL, type TEXT NOT NULL, content TEXT NOT NULL, metadataJson TEXT NOT NULL, stable INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id), FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE)",
+            "CREATE INDEX index_message_parts_messageId ON message_parts(messageId)",
+            "CREATE UNIQUE INDEX index_message_parts_messageId_partIndex ON message_parts(messageId, partIndex)",
+            "CREATE TABLE provider_profiles (id TEXT NOT NULL, name TEXT NOT NULL, baseUrl TEXT NOT NULL, apiKeyAlias TEXT NOT NULL, encryptedApiKey BLOB, apiKeyIv BLOB, defaultModel TEXT NOT NULL, availableModels TEXT NOT NULL, defaultVisionModel TEXT, supportsVision INTEGER NOT NULL, nativeWebSearchMode TEXT NOT NULL, enabled INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, customHeadersJson TEXT NOT NULL, customBodyJson TEXT NOT NULL, PRIMARY KEY(id))",
+            "CREATE TABLE conversation_memory (conversationId TEXT NOT NULL, summary TEXT NOT NULL, coveredThroughMessageId TEXT, coveredThroughCreatedAt INTEGER NOT NULL, compressedMessageCount INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(conversationId), FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE)",
+            "CREATE TABLE chat_execution_entries (id TEXT NOT NULL, conversationId TEXT NOT NULL, userMessageId TEXT NOT NULL, assistantMessageId TEXT, targetAssistantMessageId TEXT, sequence INTEGER NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL, providerId TEXT, model TEXT, reasoningEffort TEXT NOT NULL, requestContextJson TEXT NOT NULL, errorMessage TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id), FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE, FOREIGN KEY(userMessageId) REFERENCES messages(id) ON DELETE CASCADE)",
+            "CREATE INDEX index_chat_execution_entries_conversationId ON chat_execution_entries(conversationId)",
+            "CREATE INDEX index_chat_execution_entries_userMessageId ON chat_execution_entries(userMessageId)",
+            "CREATE UNIQUE INDEX index_chat_execution_entries_conversationId_sequence ON chat_execution_entries(conversationId, sequence)",
+            "CREATE TABLE conversation_markdown_links (conversationId TEXT NOT NULL, projectId TEXT NOT NULL, relativePath TEXT NOT NULL, linkedAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(conversationId, projectId, relativePath), FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE)",
+            "CREATE INDEX index_conversation_markdown_links_conversationId ON conversation_markdown_links(conversationId)",
+            "CREATE INDEX index_conversation_markdown_links_projectId ON conversation_markdown_links(projectId)",
+            "CREATE TABLE markdown_change_drafts (id TEXT NOT NULL, conversationId TEXT NOT NULL, projectId TEXT NOT NULL, sourceUserMessageId TEXT NOT NULL, assistantMessageId TEXT, status TEXT NOT NULL, summary TEXT NOT NULL, rawResponse TEXT, errorMessage TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id), FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE)",
+            "CREATE INDEX index_markdown_change_drafts_conversationId ON markdown_change_drafts(conversationId)",
+            "CREATE INDEX index_markdown_change_drafts_projectId ON markdown_change_drafts(projectId)",
+            "CREATE INDEX index_markdown_change_drafts_sourceUserMessageId ON markdown_change_drafts(sourceUserMessageId)",
+            "CREATE TABLE markdown_change_draft_items (id TEXT NOT NULL, draftId TEXT NOT NULL, itemIndex INTEGER NOT NULL, operation TEXT NOT NULL, relativePath TEXT NOT NULL, title TEXT NOT NULL, reason TEXT NOT NULL, proposedMarkdown TEXT NOT NULL, retained INTEGER NOT NULL, baselineSha256 TEXT, expectedAbsent INTEGER NOT NULL, applyStatus TEXT, applyErrorMessage TEXT, PRIMARY KEY(id), FOREIGN KEY(draftId) REFERENCES markdown_change_drafts(id) ON DELETE CASCADE)",
+            "CREATE INDEX index_markdown_change_draft_items_draftId ON markdown_change_draft_items(draftId)",
+            "CREATE UNIQUE INDEX index_markdown_change_draft_items_draftId_itemIndex ON markdown_change_draft_items(draftId, itemIndex)",
+            "CREATE TABLE agents (id TEXT NOT NULL, name TEXT NOT NULL, summary TEXT NOT NULL, activeVersion INTEGER NOT NULL, publisherPublicKey BLOB NOT NULL, publisherFingerprint TEXT NOT NULL, installSource TEXT NOT NULL, status TEXT NOT NULL, requiredCorpusCount INTEGER NOT NULL, installedCorpusCount INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))",
+            "CREATE TABLE agent_versions (agentId TEXT NOT NULL, version INTEGER NOT NULL, schemaVersion INTEGER NOT NULL, bundlePath TEXT NOT NULL, bundleSha256 TEXT NOT NULL, manifestJson TEXT NOT NULL, persona TEXT NOT NULL, worldviewJsonl TEXT NOT NULL, installedAt INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(agentId, version), FOREIGN KEY(agentId) REFERENCES agents(id) ON DELETE CASCADE)",
+            "CREATE INDEX index_agent_versions_agentId ON agent_versions(agentId)",
+            "CREATE TABLE agent_corpora (corpusId TEXT NOT NULL, sourceHash TEXT NOT NULL, title TEXT NOT NULL, indexedAt INTEGER NOT NULL, sizeBytes INTEGER NOT NULL, PRIMARY KEY(corpusId, sourceHash))",
+            "CREATE TABLE agent_version_corpora (agentId TEXT NOT NULL, version INTEGER NOT NULL, corpusId TEXT NOT NULL, sourceHash TEXT NOT NULL, required INTEGER NOT NULL, PRIMARY KEY(agentId, version, corpusId, sourceHash), FOREIGN KEY(agentId, version) REFERENCES agent_versions(agentId, version) ON DELETE CASCADE, FOREIGN KEY(corpusId, sourceHash) REFERENCES agent_corpora(corpusId, sourceHash) ON DELETE CASCADE)",
+            "CREATE INDEX index_agent_version_corpora_agentId_version ON agent_version_corpora(agentId, version)",
+            "CREATE INDEX index_agent_version_corpora_corpusId_sourceHash ON agent_version_corpora(corpusId, sourceHash)",
+            "CREATE TABLE agent_chunks (chunkKey TEXT NOT NULL, corpusId TEXT NOT NULL, sourceHash TEXT NOT NULL, chunkId TEXT NOT NULL, sourceTitle TEXT NOT NULL, location TEXT NOT NULL, text TEXT NOT NULL, keywordsText TEXT NOT NULL, PRIMARY KEY(chunkKey), FOREIGN KEY(corpusId, sourceHash) REFERENCES agent_corpora(corpusId, sourceHash) ON DELETE CASCADE)",
+            "CREATE INDEX index_agent_chunks_corpusId_sourceHash ON agent_chunks(corpusId, sourceHash)",
+            "CREATE VIRTUAL TABLE agent_chunk_fts USING FTS4(chunkKey TEXT NOT NULL, corpusKey TEXT NOT NULL, searchableText TEXT NOT NULL, tokenize=unicode61)",
+        )
+    }
 }
+
+private fun AppDatabase.scalarInt(query: String): Int =
+    openHelper.readableDatabase.query(query).use { cursor ->
+        check(cursor.moveToFirst())
+        cursor.getInt(0)
+    }
+
+private fun androidx.sqlite.db.SupportSQLiteDatabase.scalarInt(query: String): Int =
+    query(query).use { cursor ->
+        check(cursor.moveToFirst())
+        cursor.getInt(0)
+    }
+
+private fun androidx.sqlite.db.SupportSQLiteDatabase.string(query: String): String =
+    query(query).use { cursor ->
+        check(cursor.moveToFirst())
+        cursor.getString(0)
+    }

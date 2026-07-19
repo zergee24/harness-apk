@@ -3,11 +3,16 @@ package com.harnessapk.agent
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AgentChunkEntity
 import com.harnessapk.storage.AgentChunkFtsEntity
+import com.harnessapk.storage.AgentCorpusChunkCrossRef
 import com.harnessapk.storage.AgentCorpusEntity
 import com.harnessapk.storage.AgentDao
 import com.harnessapk.storage.AgentEntity
+import com.harnessapk.storage.AgentHierarchyFtsEntity
+import com.harnessapk.storage.AgentHierarchyNodeEntity
+import com.harnessapk.storage.AgentSourceFileEntity
 import com.harnessapk.storage.AgentVersionCorpusCrossRef
 import com.harnessapk.storage.AgentVersionEntity
+import com.harnessapk.storage.AgentVersionSourceCrossRef
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -133,9 +138,9 @@ class AgentRetrievalTest {
             versionCorpora = listOf(
                 AgentVersionCorpusCrossRef("agent-1", 1, "corpus-current", "hash-current", true),
             )
-            chunks["corpus-current:hash-current:chunk-investigation"] = AgentChunkEntity(
-                chunkKey = "corpus-current:hash-current:chunk-investigation",
-                corpusId = "corpus-current",
+            chunks["hash-current:chunk-investigation"] = AgentChunkEntity(
+                chunkKey = "hash-current:chunk-investigation",
+                sourceId = "source-current",
                 sourceHash = "hash-current",
                 chunkId = "chunk-investigation",
                 sourceTitle = "调查研究",
@@ -143,7 +148,7 @@ class AgentRetrievalTest {
                 text = "没有调查，没有发言权。研究问题必须从事实出发。",
                 keywordsText = "调查 事实 研究",
             )
-            searchResult = listOf("corpus-current:hash-current:chunk-investigation")
+            searchResult = listOf("hash-current:chunk-investigation")
         }
         val repository = repository(dao)
 
@@ -215,6 +220,7 @@ internal class FakeAgentDao : AgentDao {
     var versionCorpora: List<AgentVersionCorpusCrossRef> = emptyList()
     val chunks = linkedMapOf<String, AgentChunkEntity>()
     val corpora = linkedMapOf<String, AgentCorpusEntity>()
+    val corpusChunkRefs = mutableListOf<AgentCorpusChunkCrossRef>()
     val searchRows = mutableListOf<AgentChunkFtsEntity>()
     var searchResult: List<String> = emptyList()
     var lastCorpusKeys: List<String> = emptyList()
@@ -233,6 +239,8 @@ internal class FakeAgentDao : AgentDao {
         corpora.values.firstOrNull { it.corpusId == corpusId }
     override suspend fun listVersionCorpora(agentId: String, version: Int): List<AgentVersionCorpusCrossRef> =
         versionCorpora.filter { it.agentId == agentId && it.version == version }
+    override suspend fun findSource(sourceId: String, sourceHash: String): AgentSourceFileEntity? = null
+    override suspend fun listVersionSources(agentId: String, version: Int): List<AgentSourceFileEntity> = emptyList()
 
     override suspend fun upsertAgent(entity: AgentEntity) {
         agents.value = agents.value.filterNot { it.id == entity.id } + entity
@@ -260,6 +268,10 @@ internal class FakeAgentDao : AgentDao {
         entities.forEach { chunks[it.chunkKey] = it }
         return entities.map { 1L }
     }
+    override suspend fun insertCorpusChunkRefs(entities: List<AgentCorpusChunkCrossRef>): List<Long> {
+        corpusChunkRefs += entities
+        return entities.map { 1L }
+    }
 
     override suspend fun insertChunkSearchRows(entities: List<AgentChunkFtsEntity>): List<Long> {
         searchRows += entities
@@ -273,6 +285,18 @@ internal class FakeAgentDao : AgentDao {
 
     override suspend fun listChunks(chunkKeys: List<String>): List<AgentChunkEntity> =
         chunkKeys.mapNotNull(chunks::get)
+    override suspend fun insertHierarchyNodes(entities: List<AgentHierarchyNodeEntity>): List<Long> = emptyList()
+    override suspend fun insertHierarchySearchRows(entities: List<AgentHierarchyFtsEntity>): List<Long> = emptyList()
+    override suspend fun insertSource(entity: AgentSourceFileEntity): Long = 0L
+    override suspend fun insertVersionSource(entity: AgentVersionSourceCrossRef): Long = 0L
+    override suspend fun searchHierarchyNodeKeys(ftsQuery: String, limit: Int): List<String> = emptyList()
+    override suspend fun listHierarchyNodes(nodeKeys: List<String>): List<AgentHierarchyNodeEntity> = emptyList()
+    override suspend fun deleteOrphanChunkSearchRows(): Int = 0
+    override suspend fun deleteOrphanChunks(): Int = 0
+    override suspend fun deleteOrphanHierarchySearchRows(): Int = 0
+    override suspend fun deleteOrphanHierarchyNodes(): Int = 0
+    override suspend fun deleteOrphanSources(): Int = 0
+    override suspend fun deleteOrphanCorpora(): Int = 0
 }
 
 private class FakeAgentBundleAccess(

@@ -30,6 +30,20 @@ interface AgentDao {
     @Query("SELECT * FROM agent_version_corpora WHERE agentId = :agentId AND version = :version")
     suspend fun listVersionCorpora(agentId: String, version: Int): List<AgentVersionCorpusCrossRef>
 
+    @Query("SELECT * FROM agent_source_files WHERE sourceId = :sourceId AND sourceHash = :sourceHash LIMIT 1")
+    suspend fun findSource(sourceId: String, sourceHash: String): AgentSourceFileEntity?
+
+    @Query(
+        """
+        SELECT source.* FROM agent_source_files AS source
+        INNER JOIN agent_version_sources AS ref
+            ON ref.sourceId = source.sourceId AND ref.sourceHash = source.sourceHash
+        WHERE ref.agentId = :agentId AND ref.version = :version
+        ORDER BY source.title, source.sourceId
+        """,
+    )
+    suspend fun listVersionSources(agentId: String, version: Int): List<AgentSourceFileEntity>
+
     @Upsert
     suspend fun upsertAgent(entity: AgentEntity)
 
@@ -49,12 +63,31 @@ interface AgentDao {
     suspend fun insertChunks(entities: List<AgentChunkEntity>): List<Long>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertCorpusChunkRefs(entities: List<AgentCorpusChunkCrossRef>): List<Long>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertChunkSearchRows(entities: List<AgentChunkFtsEntity>): List<Long>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertHierarchyNodes(entities: List<AgentHierarchyNodeEntity>): List<Long>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertHierarchySearchRows(entities: List<AgentHierarchyFtsEntity>): List<Long>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertSource(entity: AgentSourceFileEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertVersionSource(entity: AgentVersionSourceCrossRef): Long
 
     @Query(
         """
-        SELECT chunkKey FROM agent_chunk_fts
-        WHERE agent_chunk_fts MATCH :ftsQuery AND corpusKey IN (:corpusKeys)
+        SELECT DISTINCT agent_chunk_fts.chunkKey
+        FROM agent_chunk_fts
+        INNER JOIN agent_corpus_chunks
+            ON agent_corpus_chunks.chunkKey = agent_chunk_fts.chunkKey
+        WHERE agent_chunk_fts MATCH :ftsQuery
+          AND (agent_corpus_chunks.corpusId || ':' || agent_corpus_chunks.corpusHash) IN (:corpusKeys)
         LIMIT :limit
         """,
     )
@@ -64,6 +97,63 @@ interface AgentDao {
         limit: Int,
     ): List<String>
 
+    @Query(
+        """
+        SELECT nodeKey FROM agent_hierarchy_fts
+        WHERE agent_hierarchy_fts MATCH :ftsQuery
+        LIMIT :limit
+        """,
+    )
+    suspend fun searchHierarchyNodeKeys(ftsQuery: String, limit: Int): List<String>
+
     @Query("SELECT * FROM agent_chunks WHERE chunkKey IN (:chunkKeys)")
     suspend fun listChunks(chunkKeys: List<String>): List<AgentChunkEntity>
+
+    @Query("SELECT * FROM agent_hierarchy_nodes WHERE nodeKey IN (:nodeKeys)")
+    suspend fun listHierarchyNodes(nodeKeys: List<String>): List<AgentHierarchyNodeEntity>
+
+    @Query("DELETE FROM agent_chunk_fts WHERE chunkKey NOT IN (SELECT chunkKey FROM agent_chunks)")
+    suspend fun deleteOrphanChunkSearchRows(): Int
+
+    @Query("DELETE FROM agent_chunks WHERE chunkKey NOT IN (SELECT chunkKey FROM agent_corpus_chunks)")
+    suspend fun deleteOrphanChunks(): Int
+
+    @Query("DELETE FROM agent_hierarchy_fts WHERE nodeKey NOT IN (SELECT nodeKey FROM agent_hierarchy_nodes)")
+    suspend fun deleteOrphanHierarchySearchRows(): Int
+
+    @Query(
+        """
+        DELETE FROM agent_hierarchy_nodes
+        WHERE NOT EXISTS (
+            SELECT 1 FROM agent_source_files
+            WHERE agent_source_files.sourceId = agent_hierarchy_nodes.sourceId
+              AND agent_source_files.sourceHash = agent_hierarchy_nodes.sourceHash
+        )
+        """,
+    )
+    suspend fun deleteOrphanHierarchyNodes(): Int
+
+    @Query(
+        """
+        DELETE FROM agent_source_files
+        WHERE NOT EXISTS (
+            SELECT 1 FROM agent_version_sources
+            WHERE agent_version_sources.sourceId = agent_source_files.sourceId
+              AND agent_version_sources.sourceHash = agent_source_files.sourceHash
+        )
+        """,
+    )
+    suspend fun deleteOrphanSources(): Int
+
+    @Query(
+        """
+        DELETE FROM agent_corpora
+        WHERE NOT EXISTS (
+            SELECT 1 FROM agent_version_corpora
+            WHERE agent_version_corpora.corpusId = agent_corpora.corpusId
+              AND agent_version_corpora.sourceHash = agent_corpora.sourceHash
+        )
+        """,
+    )
+    suspend fun deleteOrphanCorpora(): Int
 }

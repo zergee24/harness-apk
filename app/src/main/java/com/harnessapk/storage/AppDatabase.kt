@@ -22,9 +22,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentCorpusEntity::class,
         AgentVersionCorpusCrossRef::class,
         AgentChunkEntity::class,
+        AgentCorpusChunkCrossRef::class,
         AgentChunkFtsEntity::class,
+        AgentHierarchyNodeEntity::class,
+        AgentHierarchyFtsEntity::class,
+        AgentSourceFileEntity::class,
+        AgentVersionSourceCrossRef::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -320,6 +325,219 @@ abstract class AppDatabase : RoomDatabase() {
                     USING FTS4(chunkKey TEXT NOT NULL, corpusKey TEXT NOT NULL, searchableText TEXT NOT NULL, tokenize=unicode61)
                     """.trimIndent(),
                 )
+            }
+        }
+
+        val MIGRATION_11_12: Migration = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN identityJson TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN voiceJson TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN episodesJsonl TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN conceptsJson TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN examplesJsonl TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN openersJson TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN installPlanJson TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN lastEvidenceExpandedAt INTEGER DEFAULT NULL")
+
+                db.execSQL("ALTER TABLE agent_version_corpora ADD COLUMN installClass TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_version_corpora ADD COLUMN packageSha256 TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_version_corpora ADD COLUMN packageSizeBytes INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE agent_version_corpora ADD COLUMN installedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    """
+                    UPDATE agent_version_corpora
+                    SET installClass = CASE WHEN required = 1 THEN 'required' ELSE 'optional' END,
+                        installedAt = COALESCE((
+                            SELECT agent_versions.installedAt
+                            FROM agent_versions
+                            WHERE agent_versions.agentId = agent_version_corpora.agentId
+                              AND agent_versions.version = agent_version_corpora.version
+                        ), 0)
+                    """.trimIndent(),
+                )
+
+                db.query(
+                    """
+                    SELECT sourceHash, chunkId
+                    FROM agent_chunks
+                    GROUP BY sourceHash, chunkId
+                    HAVING MIN(sourceTitle) <> MAX(sourceTitle)
+                        OR MIN(location) <> MAX(location)
+                        OR MIN(text) <> MAX(text)
+                        OR MIN(keywordsText) <> MAX(keywordsText)
+                    LIMIT 1
+                    """.trimIndent(),
+                ).use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        throw IllegalStateException(
+                            "conflicting physical chunk: ${cursor.getString(0)}:${cursor.getString(1)}",
+                        )
+                    }
+                }
+
+                db.execSQL("ALTER TABLE agent_chunks RENAME TO agent_chunks_v11")
+                db.execSQL("DROP TABLE agent_chunk_fts")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_chunks (
+                        chunkKey TEXT NOT NULL PRIMARY KEY,
+                        sourceId TEXT NOT NULL,
+                        sourceHash TEXT NOT NULL,
+                        chunkId TEXT NOT NULL,
+                        sourceTitle TEXT NOT NULL,
+                        period TEXT NOT NULL,
+                        genre TEXT NOT NULL,
+                        authorship TEXT NOT NULL,
+                        location TEXT NOT NULL,
+                        parentPath TEXT NOT NULL,
+                        context TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        keywordsText TEXT NOT NULL,
+                        duplicateGroup TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO agent_chunks (
+                        chunkKey, sourceId, sourceHash, chunkId, sourceTitle, period,
+                        genre, authorship, location, parentPath, context, text,
+                        keywordsText, duplicateGroup
+                    )
+                    SELECT sourceHash || ':' || chunkId, '', sourceHash, chunkId,
+                        MIN(sourceTitle), '', 'unknown', 'unknown', MIN(location), '',
+                        '', MIN(text), MIN(keywordsText), ''
+                    FROM agent_chunks_v11
+                    GROUP BY sourceHash, chunkId
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_corpus_chunks (
+                        corpusId TEXT NOT NULL,
+                        corpusHash TEXT NOT NULL,
+                        chunkKey TEXT NOT NULL,
+                        PRIMARY KEY(corpusId, corpusHash, chunkKey),
+                        FOREIGN KEY(corpusId, corpusHash)
+                            REFERENCES agent_corpora(corpusId, sourceHash)
+                            ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(chunkKey) REFERENCES agent_chunks(chunkKey)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO agent_corpus_chunks (corpusId, corpusHash, chunkKey)
+                    SELECT corpusId, sourceHash, sourceHash || ':' || chunkId
+                    FROM agent_chunks_v11
+                    """.trimIndent(),
+                )
+                db.execSQL("DROP TABLE agent_chunks_v11")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_chunks_sourceId_sourceHash ON agent_chunks(sourceId, sourceHash)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_agent_chunks_sourceHash_chunkId ON agent_chunks(sourceHash, chunkId)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_corpus_chunks_corpusId_corpusHash ON agent_corpus_chunks(corpusId, corpusHash)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_corpus_chunks_chunkKey ON agent_corpus_chunks(chunkKey)",
+                )
+                db.execSQL(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS agent_chunk_fts
+                    USING FTS4(chunkKey TEXT NOT NULL, searchableText TEXT NOT NULL, tokenize=unicode61)
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO agent_chunk_fts (chunkKey, searchableText)
+                    SELECT chunkKey, keywordsText || ' ' || text
+                    FROM agent_chunks
+                    """.trimIndent(),
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_hierarchy_nodes (
+                        nodeKey TEXT NOT NULL PRIMARY KEY,
+                        sourceId TEXT NOT NULL,
+                        sourceHash TEXT NOT NULL,
+                        nodeId TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        parentNodeKey TEXT,
+                        path TEXT NOT NULL,
+                        summary TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_hierarchy_nodes_sourceId_sourceHash ON agent_hierarchy_nodes(sourceId, sourceHash)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_hierarchy_nodes_parentNodeKey ON agent_hierarchy_nodes(parentNodeKey)",
+                )
+                db.execSQL(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS agent_hierarchy_fts
+                    USING FTS4(nodeKey TEXT NOT NULL, searchableText TEXT NOT NULL, tokenize=unicode61)
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_source_files (
+                        sourceId TEXT NOT NULL,
+                        sourceHash TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        fileName TEXT NOT NULL,
+                        storedName TEXT NOT NULL,
+                        format TEXT NOT NULL,
+                        genre TEXT NOT NULL,
+                        authorship TEXT NOT NULL,
+                        period TEXT NOT NULL,
+                        rawSizeBytes INTEGER NOT NULL,
+                        filePath TEXT NOT NULL,
+                        packageSha256 TEXT NOT NULL,
+                        installedAt INTEGER NOT NULL,
+                        PRIMARY KEY(sourceId, sourceHash)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_version_sources (
+                        agentId TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        sourceId TEXT NOT NULL,
+                        sourceHash TEXT NOT NULL,
+                        PRIMARY KEY(agentId, version, sourceId, sourceHash),
+                        FOREIGN KEY(agentId, version)
+                            REFERENCES agent_versions(agentId, version)
+                            ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(sourceId, sourceHash)
+                            REFERENCES agent_source_files(sourceId, sourceHash)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_version_sources_agentId_version ON agent_version_sources(agentId, version)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_version_sources_sourceId_sourceHash ON agent_version_sources(sourceId, sourceHash)",
+                )
+
+                db.query("PRAGMA foreign_key_check").use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        throw IllegalStateException(
+                            "foreign_key_check failed: ${cursor.getString(0)} / row ${cursor.getLong(1)}",
+                        )
+                    }
+                }
             }
         }
     }

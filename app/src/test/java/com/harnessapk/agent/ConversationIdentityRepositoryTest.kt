@@ -3,11 +3,16 @@ package com.harnessapk.agent
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AgentChunkEntity
 import com.harnessapk.storage.AgentChunkFtsEntity
+import com.harnessapk.storage.AgentCorpusChunkCrossRef
 import com.harnessapk.storage.AgentCorpusEntity
 import com.harnessapk.storage.AgentDao
 import com.harnessapk.storage.AgentEntity
+import com.harnessapk.storage.AgentHierarchyFtsEntity
+import com.harnessapk.storage.AgentHierarchyNodeEntity
+import com.harnessapk.storage.AgentSourceFileEntity
 import com.harnessapk.storage.AgentVersionCorpusCrossRef
 import com.harnessapk.storage.AgentVersionEntity
+import com.harnessapk.storage.AgentVersionSourceCrossRef
 import com.harnessapk.storage.ConversationDao
 import com.harnessapk.storage.ConversationEntity
 import com.harnessapk.storage.MessageDao
@@ -245,13 +250,28 @@ private class IdentityFakeAgentDao : AgentDao {
     override suspend fun findCorpus(corpusId: String, sourceHash: String): AgentCorpusEntity? = null
     override suspend fun findCorpusById(corpusId: String): AgentCorpusEntity? = null
     override suspend fun listVersionCorpora(agentId: String, version: Int): List<AgentVersionCorpusCrossRef> = emptyList()
+    override suspend fun findSource(sourceId: String, sourceHash: String): AgentSourceFileEntity? = null
+    override suspend fun listVersionSources(agentId: String, version: Int): List<AgentSourceFileEntity> = emptyList()
     override suspend fun upsertAgent(entity: AgentEntity) = Unit
     override suspend fun insertVersion(entity: AgentVersionEntity) = Unit
     override suspend fun insertCorpus(entity: AgentCorpusEntity): Long = 1L
     override suspend fun updateCorpusSize(corpusId: String, sourceHash: String, sizeBytes: Long) = Unit
     override suspend fun insertVersionCorpus(entity: AgentVersionCorpusCrossRef): Long = 1L
     override suspend fun insertChunks(entities: List<AgentChunkEntity>): List<Long> = emptyList()
+    override suspend fun insertCorpusChunkRefs(entities: List<AgentCorpusChunkCrossRef>): List<Long> = emptyList()
     override suspend fun insertChunkSearchRows(entities: List<AgentChunkFtsEntity>): List<Long> = emptyList()
+    override suspend fun insertHierarchyNodes(entities: List<AgentHierarchyNodeEntity>): List<Long> = emptyList()
+    override suspend fun insertHierarchySearchRows(entities: List<AgentHierarchyFtsEntity>): List<Long> = emptyList()
+    override suspend fun insertSource(entity: AgentSourceFileEntity): Long = 0L
+    override suspend fun insertVersionSource(entity: AgentVersionSourceCrossRef): Long = 0L
     override suspend fun searchChunkKeys(corpusKeys: List<String>, ftsQuery: String, limit: Int): List<String> = emptyList()
     override suspend fun listChunks(chunkKeys: List<String>): List<AgentChunkEntity> = emptyList()
+    override suspend fun searchHierarchyNodeKeys(ftsQuery: String, limit: Int): List<String> = emptyList()
+    override suspend fun listHierarchyNodes(nodeKeys: List<String>): List<AgentHierarchyNodeEntity> = emptyList()
+    override suspend fun deleteOrphanChunkSearchRows(): Int = 0
+    override suspend fun deleteOrphanChunks(): Int = 0
+    override suspend fun deleteOrphanHierarchySearchRows(): Int = 0
+    override suspend fun deleteOrphanHierarchyNodes(): Int = 0
+    override suspend fun deleteOrphanSources(): Int = 0
+    override suspend fun deleteOrphanCorpora(): Int = 0
 }

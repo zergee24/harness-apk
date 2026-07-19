@@ -4,6 +4,7 @@ import com.harnessapk.common.SystemTimeProvider
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AgentChunkEntity
 import com.harnessapk.storage.AgentChunkFtsEntity
+import com.harnessapk.storage.AgentCorpusChunkCrossRef
 import com.harnessapk.storage.AgentCorpusEntity
 import com.harnessapk.storage.AgentDao
 import com.harnessapk.storage.AgentEntity
@@ -208,8 +209,22 @@ class AgentRepository(
         val searchBatch = ArrayList<AgentChunkFtsEntity>(CHUNK_BATCH_SIZE)
         suspend fun flush() {
             if (chunkBatch.isEmpty()) return
-            dao.insertChunks(chunkBatch.toList())
-            dao.insertChunkSearchRows(searchBatch.toList())
+            val chunks = chunkBatch.toList()
+            val insertResults = dao.insertChunks(chunks)
+            dao.insertCorpusChunkRefs(
+                chunks.map { chunk ->
+                    AgentCorpusChunkCrossRef(
+                        corpusId = corpus.id,
+                        corpusHash = corpus.sourceHash,
+                        chunkKey = chunk.chunkKey,
+                    )
+                },
+            )
+            dao.insertChunkSearchRows(
+                searchBatch.zip(insertResults)
+                    .filter { (_, rowId) -> rowId != -1L }
+                    .map { (searchRow, _) -> searchRow },
+            )
             chunkBatch.clear()
             searchBatch.clear()
         }
@@ -222,13 +237,13 @@ class AgentRepository(
         )
         dao.insertCorpus(corpusEntity)
         reader.forEachChunkSuspending(bundle, corpus) { chunk ->
-            val key = chunkKey(corpus.id, corpus.sourceHash, chunk.id)
+            val key = chunkKey(chunk.sourceHash, chunk.id)
             val searchable = (chunk.keywords + chunk.ngrams).distinct().joinToString(" ")
             sizeBytes += chunk.text.encodeToByteArray().size
             chunkBatch += AgentChunkEntity(
                 chunkKey = key,
-                corpusId = corpus.id,
-                sourceHash = corpus.sourceHash,
+                sourceId = chunk.sourceHash,
+                sourceHash = chunk.sourceHash,
                 chunkId = chunk.id,
                 sourceTitle = chunk.sourceTitle,
                 location = chunk.location,
@@ -237,7 +252,6 @@ class AgentRepository(
             )
             searchBatch += AgentChunkFtsEntity(
                 chunkKey = key,
-                corpusKey = corpusKey(corpus.id, corpus.sourceHash),
                 searchableText = searchable,
             )
             if (chunkBatch.size >= CHUNK_BATCH_SIZE) flush()
@@ -319,8 +333,7 @@ private fun safeFileSegment(value: String): String =
 
 private fun corpusKey(corpusId: String, sourceHash: String): String = "$corpusId:$sourceHash"
 
-private fun chunkKey(corpusId: String, sourceHash: String, chunkId: String): String =
-    "${corpusKey(corpusId, sourceHash)}:$chunkId"
+private fun chunkKey(sourceHash: String, chunkId: String): String = "$sourceHash:$chunkId"
 
 private fun AgentEntity.toDomain(): Agent = Agent(
     id = id,
