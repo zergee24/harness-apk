@@ -39,6 +39,8 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.TimeUnit
@@ -205,6 +207,119 @@ class QueuedAttachmentStoreInstrumentedTest {
         assertTrue("Persist must never write through a managed-root symlink", outsideDirectory.listFiles().orEmpty().isEmpty())
         outsideDirectory.deleteRecursively()
         Unit
+    }
+
+    @Test
+    fun persistAllKeepsWritesAndCleanupInsideThePinnedDirectoryWhenTheRawRootIsReplaced() = runBlocking {
+        val pinnedDirectory = File(context.cacheDir, "pinned-managed-root-persist").apply {
+            deleteRecursively()
+        }
+        val outsideDirectory = File(context.cacheDir, "swapped-managed-root-persist").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        lateinit var temporaryName: String
+        lateinit var finalName: String
+        val store = QueuedAttachmentStore(
+            context = context,
+            testHooks = QueuedAttachmentStoreTestHooks(
+                beforeWrite = { temporary, final ->
+                    temporaryName = temporary
+                    finalName = final
+                    File(outsideDirectory, temporary).writeText("outside temporary")
+                    File(outsideDirectory, final).writeText("outside final")
+                    assertTrue(managedDirectory.renameTo(pinnedDirectory))
+                    Files.createSymbolicLink(managedDirectory.toPath(), outsideDirectory.toPath())
+                },
+            ),
+        )
+
+        try {
+            try {
+                store.persistAll(listOf(sourceAttachment("swapped-root.jpg")))
+                fail("Expected replacement of the managed root to invalidate the batch")
+            } catch (_: IllegalStateException) {
+            }
+
+            assertEquals("outside temporary", File(outsideDirectory, temporaryName).readText())
+            assertEquals("outside final", File(outsideDirectory, finalName).readText())
+            assertTrue("The original pinned directory must be reclaimed", pinnedDirectory.listFiles().orEmpty().isEmpty())
+        } finally {
+            managedDirectory.delete()
+            pinnedDirectory.deleteRecursively()
+            outsideDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cleanupDeletesOnlyFromThePinnedDirectoryWhenTheRawRootIsReplacedBeforeDelete() = runBlocking {
+        val pinnedDirectory = File(context.cacheDir, "pinned-managed-root-cleanup").apply {
+            deleteRecursively()
+        }
+        val outsideDirectory = File(context.cacheDir, "swapped-managed-root-cleanup").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        var replaceBeforeDelete = false
+        lateinit var finalName: String
+        val store = QueuedAttachmentStore(
+            context = context,
+            testHooks = QueuedAttachmentStoreTestHooks(
+                beforeCleanupDelete = { name ->
+                    if (replaceBeforeDelete && name == finalName && managedDirectory.exists()) {
+                        assertTrue(managedDirectory.renameTo(pinnedDirectory))
+                        Files.createSymbolicLink(managedDirectory.toPath(), outsideDirectory.toPath())
+                    }
+                },
+            ),
+        )
+        val batch = store.persistAll(listOf(sourceAttachment("cleanup-swapped-root.jpg")))
+        finalName = File(requireNotNull(batch.attachments.single().uri.path)).name
+        File(outsideDirectory, finalName).writeText("outside final")
+        replaceBeforeDelete = true
+
+        try {
+            store.cleanup(batch)
+
+            assertEquals("outside final", File(outsideDirectory, finalName).readText())
+            assertTrue("The opened directory must receive the deletion", pinnedDirectory.listFiles().orEmpty().isEmpty())
+        } finally {
+            managedDirectory.delete()
+            pinnedDirectory.deleteRecursively()
+            outsideDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun concurrentFirstPersistsTreatDirectoryCreationAsARecoverableRace() = runBlocking {
+        val creationBarrier = CyclicBarrier(2)
+        val firstStore = QueuedAttachmentStore(
+            context = context,
+            testHooks = QueuedAttachmentStoreTestHooks(
+                beforeChildDirectoryCreate = { creationBarrier.await(5L, TimeUnit.SECONDS) },
+            ),
+        )
+        val secondStore = QueuedAttachmentStore(
+            context = context,
+            testHooks = QueuedAttachmentStoreTestHooks(
+                beforeChildDirectoryCreate = { creationBarrier.await(5L, TimeUnit.SECONDS) },
+            ),
+        )
+
+        val batches = withTimeout(10_000L) {
+            coroutineScope {
+                listOf(
+                    async(Dispatchers.IO) { firstStore.persistAll(listOf(sourceAttachment("first-race.jpg"))) },
+                    async(Dispatchers.IO) { secondStore.persistAll(listOf(sourceAttachment("second-race.jpg"))) },
+                ).awaitAll()
+            }
+        }
+
+        assertEquals(2, batches.size)
+        assertEquals(2, managedFiles().size)
+        firstStore.cleanup(batches[0])
+        secondStore.cleanup(batches[1])
+        assertTrue(managedDirectory.listFiles().orEmpty().isEmpty())
     }
 
     @Test
@@ -506,15 +621,15 @@ class QueuedAttachmentStoreInstrumentedTest {
                     PendingImageAttachment(traversal, "image/jpeg"),
                     PendingImageAttachment(symlink.toUri(), "image/jpeg"),
                 ),
-                generatedPaths = listOf(
-                    File("/never-delete"),
-                    managedDirectory,
-                    nested,
-                    sourceLikeFile,
-                    malformedUuid,
-                    sourceOutside,
-                    File(requireNotNull(traversal.path)),
-                    symlink,
+                generatedNames = listOf(
+                    "never-delete",
+                    managedDirectory.name,
+                    "nested/child.jpg",
+                    sourceLikeFile.name,
+                    malformedUuid.name,
+                    sourceOutside.name,
+                    "nested/../traversal.jpg",
+                    symlink.name,
                 ),
             ),
         )
@@ -551,7 +666,8 @@ class QueuedAttachmentStoreInstrumentedTest {
             PersistedAttachmentBatch(
                 attachments = attachments,
                 ownerToken = Any(),
-                generatedPaths = attachments.map { attachment -> File(requireNotNull(attachment.uri.path)) },
+                generatedNames = attachments.map { attachment -> requireNotNull(attachment.uri.lastPathSegment) },
+                directoryFileKey = Any(),
             ),
         )
 
@@ -640,6 +756,14 @@ class QueuedAttachmentStoreInstrumentedTest {
         .map(File::getCanonicalFile)
         .sortedBy(File::getName)
 
+    private fun managedDirectoryFileKey(): Any = requireNotNull(
+        Files.readAttributes(
+            managedDirectory.toPath(),
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        ).fileKey(),
+    )
+
     private fun sourceAttachment(name: String): PendingImageAttachment {
         val source = File(sourceDirectory, name).apply { writeText("$name bytes") }
         return PendingImageAttachment(source.toUri(), "image/jpeg")
@@ -648,14 +772,15 @@ class QueuedAttachmentStoreInstrumentedTest {
     private fun batchWithStoreOwner(
         store: QueuedAttachmentStore,
         attachments: List<PendingImageAttachment>,
-        generatedPaths: List<File>,
+        generatedNames: List<String>,
     ): PersistedAttachmentBatch {
         val ownerTokenField = QueuedAttachmentStore::class.java.getDeclaredField("ownerToken")
         ownerTokenField.isAccessible = true
         return PersistedAttachmentBatch(
             attachments = attachments,
             ownerToken = requireNotNull(ownerTokenField.get(store)),
-            generatedPaths = generatedPaths,
+            generatedNames = generatedNames,
+            directoryFileKey = managedDirectoryFileKey(),
         )
     }
 
