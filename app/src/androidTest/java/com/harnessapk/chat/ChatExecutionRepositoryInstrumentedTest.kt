@@ -15,6 +15,7 @@ import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.security.EncryptedValue
 import com.harnessapk.security.StringCipher
 import com.harnessapk.storage.AgentEntity
+import com.harnessapk.storage.AgentVersionEntity
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.websearch.JinaWebSearchClient
 import kotlinx.coroutines.CancellationException
@@ -71,6 +72,20 @@ class ChatExecutionRepositoryInstrumentedTest {
     @Test
     fun enqueuePinsLatestIdentityAndInsertsFirstUserMessage() = runBlocking {
         database.agentDao().upsertAgent(readyAgent(id = "a1", activeVersion = 4))
+        database.agentDao().insertVersion(
+            AgentVersionEntity(
+                agentId = "a1",
+                version = 4,
+                schemaVersion = 2,
+                bundlePath = "/tmp/a1-v4.hagent",
+                bundleSha256 = "bundle-sha",
+                manifestJson = "{}",
+                persona = "人格",
+                worldviewJsonl = "",
+                installedAt = 1L,
+                state = AgentStatus.READY.name,
+            ),
+        )
         val conversationId = chatRepository.createConversation(agentId = "a1", agentVersion = 1)
 
         repository.enqueue(

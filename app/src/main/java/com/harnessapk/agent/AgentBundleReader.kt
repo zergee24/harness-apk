@@ -3,6 +3,8 @@ package com.harnessapk.agent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.asContextElement
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -39,6 +41,7 @@ interface AgentBundleAccess {
     fun inspect(file: File): AgentImportPreview
     fun read(file: File): ParsedAgentBundle
     fun readPackage(file: File): ParsedAgentPackage = V1Bundle(read(file))
+    suspend fun readPackageSuspending(file: File): ParsedAgentPackage = readPackage(file)
     suspend fun forEachChunkSuspending(
         bundle: ParsedAgentBundle,
         corpus: AgentCorpusManifest,
@@ -100,6 +103,9 @@ class AgentBundleReader(
         return withVerifiedPackage(file) { parsed, _ -> parsed }
     }
 
+    override suspend fun readPackageSuspending(file: File): ParsedAgentPackage =
+        withVerifiedPackageSuspending(file) { parsed, _ -> parsed }
+
     private fun <T> withVerifiedPackage(
         file: File,
         block: (ParsedAgentPackage, Map<String, File>) -> T,
@@ -124,19 +130,22 @@ class AgentBundleReader(
         file: File,
         block: suspend (ParsedAgentPackage, Map<String, File>) -> T,
     ): T {
-        val staging = stagePackage(file)
-        return try {
-            val stagedPackages = linkedMapOf<String, File>()
-            val parsed = readVerifiedPackage(staging.file, file, nestingDepth = 0, stagedPackages)
-            block(parsed, stagedPackages)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: AgentBundleException) {
-            throw error
-        } catch (error: Throwable) {
-            throw AgentBundleException("人格包读取失败：${error.message.orEmpty()}", error)
-        } finally {
-            staging.close()
+        val context = currentCoroutineContext()
+        return AgentReaderCancellation.withCheckpoint({ context.ensureActive() }) {
+            val staging = stagePackage(file)
+            try {
+                val stagedPackages = linkedMapOf<String, File>()
+                val parsed = readVerifiedPackage(staging.file, file, nestingDepth = 0, stagedPackages)
+                block(parsed, stagedPackages)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: AgentBundleException) {
+                throw error
+            } catch (error: Throwable) {
+                throw AgentBundleException("人格包读取失败：${error.message.orEmpty()}", error)
+            } finally {
+                staging.close()
+            }
         }
     }
 
@@ -2388,6 +2397,7 @@ private fun InputStream.copyBoundedTo(output: OutputStream, maxBytes: Long, name
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var total = 0L
     while (true) {
+        AgentReaderCancellation.checkpoint()
         val read = read(buffer)
         if (read < 0) break
         total += read
@@ -2405,6 +2415,7 @@ private inline fun InputStream.forEachUtf8JsonLine(
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var lineNumber = 1
     while (true) {
+        AgentReaderCancellation.checkpoint()
         val count = read(buffer)
         if (count < 0) break
         for (index in 0 until count) {
@@ -2440,6 +2451,7 @@ private suspend fun InputStream.forEachUtf8JsonLineSuspending(
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var lineNumber = 1
     while (true) {
+        currentCoroutineContext().ensureActive()
         val count = read(buffer)
         if (count < 0) break
         for (index in 0 until count) {
@@ -2471,6 +2483,7 @@ private fun InputStream.sha256(): String {
     val digest = MessageDigest.getInstance("SHA-256")
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     while (true) {
+        AgentReaderCancellation.checkpoint()
         val read = read(buffer)
         if (read < 0) break
         digest.update(buffer, 0, read)
@@ -2483,6 +2496,7 @@ private fun InputStream.sha256Limited(maxBytes: Long, name: String): HashedBytes
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var total = 0L
     while (true) {
+        AgentReaderCancellation.checkpoint()
         val read = read(buffer)
         if (read < 0) break
         total += read
@@ -2505,9 +2519,22 @@ private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
 private fun ByteArray.findSignatureBackwards(signature: Int): Int {
     for (offset in size - 4 downTo 0) {
+        if (offset and 0xfff == 0) AgentReaderCancellation.checkpoint()
         if (readIntLe(offset) == signature) return offset
     }
     return -1
+}
+
+private object AgentReaderCancellation {
+    private val checkpoint = ThreadLocal<(() -> Unit)?>()
+
+    suspend fun <T> withCheckpoint(check: () -> Unit, block: suspend () -> T): T {
+        return withContext(checkpoint.asContextElement(check)) { block() }
+    }
+
+    fun checkpoint() {
+        checkpoint.get()?.invoke()
+    }
 }
 
 private fun ByteArray.readUnsignedShortLe(offset: Int): Int =

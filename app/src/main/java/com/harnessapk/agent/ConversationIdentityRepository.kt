@@ -11,6 +11,7 @@ class ConversationIdentityRepository(
     private val messageDao: MessageDao,
     private val agentDao: AgentDao,
     private val timeProvider: TimeProvider,
+    private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
 ) {
     suspend fun suggest(projectId: String?): ConversationIdentitySelection {
         val recent = if (projectId.isNullOrBlank()) {
@@ -21,7 +22,8 @@ class ConversationIdentityRepository(
         return selectionFor(recent?.agentId, locked = false)
     }
 
-    suspend fun selectDraft(conversationId: String, agentId: String?): ConversationIdentitySelection {
+    suspend fun selectDraft(conversationId: String, agentId: String?): ConversationIdentitySelection =
+        lifecycleCoordinator.serialized {
         val conversation = requireNotNull(conversationDao.findById(conversationId)) { "会话不存在" }
         val selected = selectionFor(agentId, locked = false)
         check(
@@ -32,13 +34,14 @@ class ConversationIdentityRepository(
                 updatedAt = timeProvider.nowMillis(),
             ) == 1,
         ) { "首条消息发送后不能切换身份" }
-        return selected
-    }
+        selected
+        }
 
-    suspend fun pinForFirstMessage(conversationId: String): ConversationIdentitySelection {
+    suspend fun pinForFirstMessage(conversationId: String): ConversationIdentitySelection =
+        lifecycleCoordinator.serialized {
         val conversation = requireNotNull(conversationDao.findById(conversationId)) { "会话不存在" }
         if (messageDao.countUserMessages(conversationId) > 0) {
-            return selectionForPinned(conversation)
+            return@serialized selectionForPinned(conversation)
         }
         val selected = selectionFor(conversation.agentId, locked = true)
         conversationDao.update(
@@ -48,12 +51,15 @@ class ConversationIdentityRepository(
                 updatedAt = timeProvider.nowMillis(),
             ),
         )
-        return selected
-    }
+        selected
+        }
 
     suspend fun selectionForNewConversation(agentId: String): ConversationIdentitySelection {
         val agent = agentDao.findAgent(agentId)
         check(agent?.status == AgentStatus.READY.name) { "智能体资料尚未就绪" }
+        check(agentDao.findVersion(agent.id, agent.activeVersion)?.state == AgentStatus.READY.name) {
+            "智能体 active version 资料尚未就绪"
+        }
         return ConversationIdentitySelection(
             agentId = agent.id,
             agentVersion = agent.activeVersion,
@@ -63,7 +69,9 @@ class ConversationIdentityRepository(
     }
 
     private suspend fun selectionFor(agentId: String?, locked: Boolean): ConversationIdentitySelection {
-        val agent = agentId?.let { agentDao.findAgent(it) }?.takeIf { it.status == AgentStatus.READY.name }
+        val agent = agentId?.let { agentDao.findAgent(it) }
+            ?.takeIf { it.status == AgentStatus.READY.name }
+            ?.takeIf { agentDao.findVersion(it.id, it.activeVersion)?.state == AgentStatus.READY.name }
         return ConversationIdentitySelection(
             agentId = agent?.id,
             agentVersion = agent?.activeVersion,

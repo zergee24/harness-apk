@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import androidx.room.withTransaction
 import com.harnessapk.agent.AgentRepository
+import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.BuildConfig
@@ -64,6 +65,7 @@ class AppContainer(context: Context) {
         AppDatabase.MIGRATION_10_11,
         AppDatabase.MIGRATION_11_12,
         AppDatabase.MIGRATION_12_13,
+        AppDatabase.MIGRATION_13_14,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -91,11 +93,13 @@ class AppContainer(context: Context) {
         memoryDao = database.conversationMemoryDao(),
         timeProvider = SystemTimeProvider,
     )
+    private val agentLifecycleCoordinator = AgentLifecycleCoordinator()
     val agentRepository = AgentRepository(
         filesDir = appContext.filesDir,
         cacheDir = appContext.cacheDir,
         dao = database.agentDao(),
         conversationDao = database.conversationDao(),
+        lifecycleCoordinator = agentLifecycleCoordinator,
         transactionRunner = AgentTransactionRunner { block ->
             database.withTransaction { block() }
         },
@@ -107,10 +111,12 @@ class AppContainer(context: Context) {
         messageDao = database.messageDao(),
         agentDao = database.agentDao(),
         timeProvider = SystemTimeProvider,
+        lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val newConversationUseCase = NewConversationUseCase(
         chatRepository = chatRepository,
         identityRepository = conversationIdentityRepository,
+        lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
     val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
@@ -154,6 +160,7 @@ class AppContainer(context: Context) {
                 agentRepository.runtimeContext(agentId, agentVersion, query)
             }
         },
+        lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val chatExecutionRepository = ChatExecutionRepository(
         database = database,
@@ -161,6 +168,7 @@ class AppContainer(context: Context) {
         chatRepository = chatRepository,
         identityRepository = conversationIdentityRepository,
         timeProvider = SystemTimeProvider,
+        lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val chatSendRecoveryStore = ChatSendRecoveryStore()
     val chatExecutionCoordinator = ChatExecutionCoordinator(

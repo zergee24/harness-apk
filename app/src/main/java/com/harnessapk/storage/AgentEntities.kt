@@ -156,6 +156,9 @@ data class AgentChunkEntity(
     val text: String,
     val keywordsText: String,
     val duplicateGroup: String = "",
+    @ColumnInfo(defaultValue = "''") val conflictKey: String = "",
+    @ColumnInfo(defaultValue = "'[]'") val sourceAliasesJson: String = "[]",
+    @ColumnInfo(defaultValue = "''") val simHash: String = "",
 )
 
 @Entity(

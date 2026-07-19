@@ -19,9 +19,13 @@ import com.harnessapk.storage.AgentSourceFileEntity
 import com.harnessapk.storage.AgentVersionSourceCrossRef
 import com.harnessapk.storage.ConversationDao
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -33,10 +37,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
 import java.io.InputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -51,6 +53,8 @@ class AgentRepository(
     private val conversationDao: ConversationDao? = null,
     private val reader: AgentBundleAccess = AgentBundleReader(),
     private val transactionRunner: AgentTransactionRunner = AgentTransactionRunner { block -> block() },
+    private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
+    private val fileOps: AgentFileOps = DefaultAgentFileOps(),
     private val timeProvider: TimeProvider = SystemTimeProvider,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
@@ -71,21 +75,24 @@ class AgentRepository(
                 discardPackageImport(session)
                 throw AgentBundleException("V2 人格包必须通过统一安装 API 导入")
             }
-        return AgentImportSession(session.id, session.stagedFile, bundle, session.preview)
+        val compatibilitySession = AgentImportSession(session.id, session.stagedFile, bundle, session.preview)
+        requireNotNull(packageSessions[session.id]).v1CompatibilitySession = compatibilitySession
+        return compatibilitySession
     }
 
     suspend fun preparePackageImport(
         sourceName: String,
         openInputStream: () -> InputStream,
     ): AgentPackageImportSession = withContext(ioDispatcher) {
-        val stagingDirectory = File(cacheDir, "agent-staging").apply { mkdirs() }
+        val stagingDirectory = File(cacheDir, "agent-staging").also(fileOps::createDirectories)
         val now = timeProvider.nowMillis()
+        recoverFileLifecycle()
         purgeExpiredOwnedSessions(now)
-        purgeStaleImportFiles(stagingDirectory, now)
+        purgeStaleImportFilesChecked(stagingDirectory, now)
         val stagedFile = File(stagingDirectory, "${UUID.randomUUID()}.package")
         try {
-            openInputStream().use { input -> copyBundleWithLimit(input, stagedFile) }
-            val parsed = reader.readPackage(stagedFile)
+            openInputStream().use { input -> fileOps.copyBounded(input, stagedFile, MAX_IMPORT_BUNDLE_BYTES) }
+            val parsed = reader.readPackageSuspending(stagedFile)
             val id = UUID.randomUUID().toString()
             val session = AgentPackageImportSession(
                 id = id,
@@ -100,20 +107,37 @@ class AgentRepository(
             packageSessions[id] = OwnedPackageSession(session, now)
             session
         } catch (error: Throwable) {
-            stagedFile.delete()
-            throw if (error is AgentBundleException) error else AgentBundleException("无法导入 $sourceName", error)
+            deleteOrRecordOrphan(stagedFile)
+            throw when (error) {
+                is CancellationException -> error
+                is AgentBundleException -> error
+                else -> AgentBundleException("无法导入 $sourceName", error)
+            }
         }
     }
 
     suspend fun install(session: AgentImportSession): AgentInstallResult {
-        packageSessions[session.id]?.let { return installPackage(it.session) }
-        return installV1(session)
+        val owned = packageSessions.remove(session.id)
+            ?: throw AgentBundleException("导入会话已经失效或已使用")
+        try {
+            validateOwnedSession(owned.session, owned)
+            val expected = owned.v1CompatibilitySession
+            val mismatch = session !== expected ||
+                session.stagedFile != owned.session.stagedFile ||
+                session.parsedBundle !== (owned.session.parsedPackage as? V1Bundle)?.bundle ||
+                session.preview != owned.session.preview
+            if (mismatch) throw AgentBundleException("V1 导入会话并非 repository 实际签发对象")
+            return installV1(session)
+        } finally {
+            deleteOrRecordOrphan(owned.session.stagedFile)
+        }
     }
 
     suspend fun installPackage(
         session: AgentPackageImportSession,
         profileId: String = "balanced",
     ): AgentInstallResult = withContext(ioDispatcher) {
+        recoverFileLifecycleLocked()
         val owned = packageSessions.remove(session.id)
             ?: throw AgentBundleException("导入会话已经失效或已使用")
         try {
@@ -128,7 +152,7 @@ class AgentRepository(
                 is V2Source -> installStandaloneV2Source(parsed, session.stagedFile, session.sourceName)
             }
         } finally {
-            session.stagedFile.delete()
+            deleteOrRecordOrphan(owned.session.stagedFile)
         }
     }
 
@@ -140,7 +164,7 @@ class AgentRepository(
             if (existingVersion.bundleSha256 != bundle.packageSha256) {
                 throw AgentBundleException("同一版本的智能体内容不同，请发布新版本")
             }
-            session.stagedFile.delete()
+            deleteOrRecordOrphan(session.stagedFile)
             val existingAgent = requireNotNull(dao.findAgent(bundle.agent.id))
             return@withContext AgentInstallResult(AgentInstallOutcome.ALREADY_INSTALLED, existingAgent.toDomain())
         }
@@ -151,8 +175,8 @@ class AgentRepository(
 
         val versionDirectory = File(filesDir, "agents/${safeFileSegment(bundle.agent.id)}/${bundle.agent.version}")
         val finalBundle = File(versionDirectory, "bundle.hbundle")
-        versionDirectory.mkdirs()
-        moveAtomically(session.stagedFile, finalBundle)
+        fileOps.createDirectories(versionDirectory)
+        fileOps.moveAtomically(session.stagedFile, finalBundle)
         val installedBundle = bundle.copy(file = finalBundle)
         try {
             val now = timeProvider.nowMillis()
@@ -218,20 +242,20 @@ class AgentRepository(
             }
             AgentInstallResult(AgentInstallOutcome.INSTALLED, requireNotNull(resultAgent).toDomain())
         } catch (error: Throwable) {
-            finalBundle.delete()
-            versionDirectory.delete()
+            retireUnreferencedFile(finalBundle)
+            deleteEmptyDirectory(versionDirectory)
             throw error
         }
     }
 
     fun discardImport(session: AgentImportSession) {
         packageSessions.remove(session.id)
-        session.stagedFile.delete()
+        deleteOrRecordOrphan(session.stagedFile)
     }
 
     fun discardPackageImport(session: AgentPackageImportSession) {
         packageSessions.remove(session.id)
-        session.stagedFile.delete()
+        deleteOrRecordOrphan(session.stagedFile)
     }
 
     private suspend fun installV2Bundle(
@@ -269,8 +293,8 @@ class AgentRepository(
         )
         val finalPackage = if (existingVersion == null) File(versionDirectory, installedName) else null
         if (finalPackage != null) {
-            versionDirectory.mkdirs()
-            moveAtomically(stagedFile, finalPackage)
+            fileOps.createDirectories(versionDirectory)
+            fileOps.moveAtomically(stagedFile, finalPackage)
         }
         val readablePackage = finalPackage ?: stagedFile
         val preparedSources = mutableListOf<PreparedSourceFile>()
@@ -370,20 +394,20 @@ class AgentRepository(
             return AgentInstallResult(outcome, requireNotNull(result).toDomain())
         } catch (error: Throwable) {
             if (finalPackage != null) {
-                finalPackage.delete()
-                versionDirectory.delete()
+                retireUnreferencedFile(finalPackage)
+                deleteEmptyDirectory(versionDirectory)
             }
             preparedSources.filter(PreparedSourceFile::created).forEach { prepared ->
-                prepared.file.delete()
-                prepared.file.parentFile?.delete()
+                retireUnreferencedFile(prepared.file)
+                prepared.file.parentFile?.let(::deleteEmptyDirectory)
             }
             throw error
         }
     }
 
     private suspend fun prepareV2SourceFile(packageFile: File, source: V2Source): PreparedSourceFile {
-        val directory = File(filesDir, "agents/sources/${source.manifest.sourceHash}").apply { mkdirs() }
-        val destination = File(directory, source.manifest.storedName)
+        val directory = File(filesDir, "agents/sources/${source.manifest.sourceHash}").also(fileOps::createDirectories)
+        val destination = File(directory, SOURCE_PAYLOAD_NAME)
         if (destination.isFile) {
             if (
                 destination.length() != source.manifest.rawSizeBytes ||
@@ -393,9 +417,9 @@ class AgentRepository(
             }
             return PreparedSourceFile(source, destination, false)
         }
-        val part = File(directory, ".${source.manifest.storedName}.${UUID.randomUUID()}.part")
+        val part = File(directory, ".$SOURCE_PAYLOAD_NAME.${UUID.randomUUID()}.part")
         try {
-            part.outputStream().buffered().use { output ->
+            fileOps.write(part) { output ->
                 reader.copyV2SourcePayload(packageFile, source.manifest.id, output)
             }
             if (
@@ -404,17 +428,18 @@ class AgentRepository(
             ) {
                 throw AgentBundleException("hsource 原始文件复制 hash/bytes 不匹配")
             }
-            moveAtomically(part, destination)
+            fileOps.moveAtomically(part, destination)
             return PreparedSourceFile(source, destination, true)
         } catch (error: Throwable) {
-            part.delete()
-            directory.delete()
+            deleteOrRecordOrphan(part)
+            deleteEmptyDirectory(directory)
             throw error
         }
     }
 
     private suspend fun persistV2Source(source: V2Source, file: File, now: Long) {
         val existing = dao.findSource(source.manifest.sourceId, source.manifest.sourceHash)
+        existing?.requireSameDescriptor(source.manifest)
         dao.upsertSource(
             AgentSourceFileEntity(
                 sourceId = source.manifest.sourceId,
@@ -480,15 +505,32 @@ class AgentRepository(
             }
             return AgentInstallResult(AgentInstallOutcome.ALREADY_INSTALLED, agent.toDomain())
         }
-        val packageDirectory = File(filesDir, "agents/packages").apply { mkdirs() }
+        val packageDirectory = File(filesDir, "agents/packages").also(fileOps::createDirectories)
         val finalPackage = File(packageDirectory, "${corpus.packageSha256}.hcorpus")
         val createdFile = !finalPackage.exists()
-        if (createdFile) moveAtomically(stagedFile, finalPackage)
+        val installCorpus = if (createdFile) {
+            fileOps.moveAtomically(stagedFile, finalPackage)
+            corpus.copy(file = finalPackage)
+        } else {
+            if (
+                !finalPackage.isFile ||
+                finalPackage.length() != declaration.packageSizeBytes ||
+                finalPackage.sha256Hex() != declaration.packageSha256
+            ) {
+                throw AgentBundleException("已存在 hcorpus 与 install plan 的 hash/bytes 不一致")
+            }
+            val existingPackage = reader.readPackageSuspending(finalPackage) as? V2Corpus
+                ?: throw AgentBundleException("已存在目标文件不是 hcorpus")
+            if (!existingPackage.matchesStandaloneCorpus(corpus, declaration)) {
+                throw AgentBundleException("已存在 hcorpus 与当前 session package/manifest 不一致")
+            }
+            existingPackage
+        }
         try {
             val now = timeProvider.nowMillis()
             var updated: AgentEntity? = null
             transactionRunner.run {
-                installV2Corpus(finalPackage, corpus.copy(file = finalPackage), now)
+                installV2Corpus(finalPackage, installCorpus, now)
                 dao.markVersionPackageInstalled(
                     corpus.manifest.agentId,
                     corpus.manifest.version,
@@ -535,7 +577,7 @@ class AgentRepository(
             }
             return AgentInstallResult(AgentInstallOutcome.INSTALLED, requireNotNull(updated).toDomain())
         } catch (error: Throwable) {
-            if (createdFile) finalPackage.delete()
+            if (createdFile) retireUnreferencedFile(finalPackage)
             throw error
         }
     }
@@ -568,6 +610,7 @@ class AgentRepository(
         }
         if (declaration.installed) {
             val stored = dao.findSource(source.manifest.sourceId, source.manifest.sourceHash)
+            stored?.requireSameDescriptor(source.manifest)
             val installed = stored?.filePath?.takeIf(String::isNotBlank)?.let(::File)
             if (
                 installed == null || !installed.isFile || installed.length() != source.manifest.rawSizeBytes ||
@@ -577,13 +620,13 @@ class AgentRepository(
             }
             return AgentInstallResult(AgentInstallOutcome.ALREADY_INSTALLED, agent.toDomain())
         }
-        val sourceDirectory = File(filesDir, "agents/sources/${source.manifest.sourceHash}").apply { mkdirs() }
-        val finalSource = File(sourceDirectory, source.manifest.storedName)
+        val sourceDirectory = File(filesDir, "agents/sources/${source.manifest.sourceHash}").also(fileOps::createDirectories)
+        val finalSource = File(sourceDirectory, SOURCE_PAYLOAD_NAME)
         val createdFile = !finalSource.exists()
         if (createdFile) {
-            val part = File(sourceDirectory, ".${source.manifest.storedName}.${UUID.randomUUID()}.part")
+            val part = File(sourceDirectory, ".$SOURCE_PAYLOAD_NAME.${UUID.randomUUID()}.part")
             try {
-                part.outputStream().buffered().use { output ->
+                fileOps.write(part) { output ->
                     reader.copyV2SourcePayload(stagedFile, source.manifest.id, output)
                 }
                 if (part.length() != source.manifest.rawSizeBytes) {
@@ -592,10 +635,10 @@ class AgentRepository(
                 if (part.sha256Hex() != source.manifest.sourceHash) {
                     throw AgentBundleException("hsource 原始文件复制 hash 不匹配")
                 }
-                moveAtomically(part, finalSource)
+                fileOps.moveAtomically(part, finalSource)
             } catch (error: Throwable) {
-                part.delete()
-                sourceDirectory.delete()
+                deleteOrRecordOrphan(part)
+                deleteEmptyDirectory(sourceDirectory)
                 throw error
             }
         } else if (
@@ -608,6 +651,7 @@ class AgentRepository(
             val now = timeProvider.nowMillis()
             transactionRunner.run {
                 val existing = dao.findSource(source.manifest.sourceId, source.manifest.sourceHash)
+                existing?.requireSameDescriptor(source.manifest)
                 dao.upsertSource(
                     AgentSourceFileEntity(
                         sourceId = source.manifest.sourceId,
@@ -644,8 +688,8 @@ class AgentRepository(
             return AgentInstallResult(AgentInstallOutcome.INSTALLED, requireNotNull(dao.findAgent(agent.id)).toDomain())
         } catch (error: Throwable) {
             if (createdFile) {
-                finalSource.delete()
-                sourceDirectory.delete()
+                retireUnreferencedFile(finalSource)
+                deleteEmptyDirectory(sourceDirectory)
             }
             throw error
         }
@@ -699,6 +743,9 @@ class AgentRepository(
                     text = chunk.text,
                     keywordsText = (chunk.keywords + chunk.ngrams).distinct().joinToString(" "),
                     duplicateGroup = chunk.duplicateGroup,
+                    conflictKey = chunk.conflictKey,
+                    sourceAliasesJson = storageJson.encodeToString(chunk.sourceAliases.sorted()),
+                    simHash = chunk.simHash,
                 )
                 searchBatch += AgentChunkFtsEntity(key, (chunk.keywords + chunk.ngrams).distinct().joinToString(" "))
                 if (chunkBatch.size >= CHUNK_BATCH_SIZE) flushChunks()
@@ -707,6 +754,7 @@ class AgentRepository(
             val sourcesById = corpus.sources.associateBy(V2SourceRecord::sourceId)
             corpus.sources.forEach { source ->
                 val existing = dao.findSource(source.sourceId, source.sourceHash)
+                existing?.requireSameDescriptor(source)
                 dao.upsertSource(
                     AgentSourceFileEntity(
                         sourceId = source.sourceId,
@@ -814,13 +862,16 @@ class AgentRepository(
             AgentStatus.WAITING_FOR_CORPUS
         }
         dao.updateVersionState(agent.manifest.id, agent.manifest.version, status.name, now)
-        dao.updateAgentInstallState(
-            agent.manifest.id,
-            status.name,
-            agent.manifest.requiredCorpora.size,
-            installedRequired,
-            now,
-        )
+        val currentAgent = requireNotNull(dao.findAgent(agent.manifest.id))
+        if (currentAgent.activeVersion == agent.manifest.version) {
+            dao.updateAgentInstallState(
+                agent.manifest.id,
+                if (currentAgent.status == AgentStatus.DISABLED.name) AgentStatus.DISABLED.name else status.name,
+                agent.manifest.requiredCorpora.size,
+                installedRequired,
+                now,
+            )
+        }
         return requireNotNull(dao.findAgent(agent.manifest.id))
     }
 
@@ -832,7 +883,7 @@ class AgentRepository(
         storageJson.decodeFromString<List<String>>(evaluationCorpusIdsJson).toSet()
     }.getOrElse { emptySet() }
 
-    private fun validateOwnedSession(
+    private suspend fun validateOwnedSession(
         supplied: AgentPackageImportSession,
         owned: OwnedPackageSession,
     ) {
@@ -849,11 +900,17 @@ class AgentRepository(
     }
 
     private fun purgeExpiredOwnedSessions(now: Long) {
-        packageSessions.entries.removeIf { (_, owned) ->
-            val expired = now - owned.createdAt >= IMPORT_STAGING_TTL_MILLIS
-            if (expired) owned.session.stagedFile.delete()
-            expired
+        packageSessions.entries.toList().forEach { (id, owned) ->
+            if (now - owned.createdAt >= IMPORT_STAGING_TTL_MILLIS && packageSessions.remove(id, owned)) {
+                deleteOrRecordOrphan(owned.session.stagedFile)
+            }
         }
+    }
+
+    private fun purgeStaleImportFilesChecked(directory: File, now: Long) {
+        directory.listFiles().orEmpty().filter { file ->
+            file.isFile && now - file.lastModified() >= IMPORT_STAGING_TTL_MILLIS
+        }.forEach(::deleteOrRecordOrphan)
     }
 
     suspend fun removeOptionalCorpus(
@@ -861,20 +918,37 @@ class AgentRepository(
         version: Int,
         corpusId: String,
     ): AgentCorpusRemovalResult = withContext(ioDispatcher) {
+        lifecycleCoordinator.serialized {
+        recoverFileLifecycleLocked()
         val reference = dao.findVersionCorpus(agentId, version, corpusId)
-            ?: return@withContext AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.NOT_INSTALLED)
+            ?: return@serialized AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.NOT_INSTALLED)
         if (reference.required || reference.installClass == V2InstallClass.REQUIRED.wireName) {
-            return@withContext AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.REQUIRED)
+            return@serialized AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.REQUIRED)
         }
         val chunkKeys = dao.listCorpusChunkKeys(reference.corpusId, reference.sourceHash)
         if (
             dao.countLegacyAgentSourceParts() > 0 ||
             chunkKeys.any { dao.countAgentSourcePartsReferencingChunkKey(it) > 0 }
         ) {
-            return@withContext AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.REFERENCED)
+            return@serialized AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.REFERENCED)
         }
         val packagePath = dao.findVersionPackage(agentId, version, corpusId)?.filePath.orEmpty()
-        transactionRunner.run {
+        val removablePaths = buildList {
+            if (
+                packagePath.isNotBlank() &&
+                dao.countInstalledPackagePathReferences(packagePath) <= 1
+            ) {
+                add(packagePath)
+            }
+            dao.listCorpusSources(reference.corpusId, reference.sourceHash).forEach { source ->
+                if (source.filePath.isNotBlank() && dao.countSourceReferences(source.sourceId, source.sourceHash) <= 1) {
+                    add(source.filePath)
+                }
+            }
+        }.distinct()
+        val tombstones = stageFilesForDeletion(removablePaths)
+        try {
+            transactionRunner.run {
             dao.deleteVersionCorpus(agentId, version, corpusId)
             dao.markVersionPackageRemoved(agentId, version, corpusId)
             if (dao.countVersionCorpusReferences(reference.corpusId, reference.sourceHash) == 0) {
@@ -901,11 +975,20 @@ class AgentRepository(
                     updatedAt = timeProvider.nowMillis(),
                 )
             }
+            }
+        } catch (error: Throwable) {
+            withContext(NonCancellable) { restoreTombstones(tombstones) }
+            throw error
         }
-        if (packagePath.isNotBlank() && dao.countInstalledPackagePathReferences(packagePath) == 0) {
-            File(packagePath).delete()
+        val cleanupPending = !finalizeTombstones(tombstones)
+        AgentCorpusRemovalResult(
+            if (cleanupPending) {
+                AgentCorpusRemovalOutcome.REMOVED_CLEANUP_PENDING
+            } else {
+                AgentCorpusRemovalOutcome.REMOVED
+            },
+        )
         }
-        AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.REMOVED)
     }
 
     suspend fun setAgentEnabled(agentId: String, enabled: Boolean) = withContext(ioDispatcher) {
@@ -933,23 +1016,53 @@ class AgentRepository(
 
     suspend fun removeVersion(agentId: String, version: Int): AgentVersionRemovalResult =
         withContext(ioDispatcher) {
+            lifecycleCoordinator.serialized {
+            recoverFileLifecycleLocked()
             val stored = dao.findVersion(agentId, version)
-                ?: return@withContext AgentVersionRemovalResult(AgentVersionRemovalOutcome.NOT_FOUND)
+                ?: return@serialized AgentVersionRemovalResult(AgentVersionRemovalOutcome.NOT_FOUND)
             val references = requireNotNull(conversationDao) {
                 "删除智能体版本需要 ConversationDao"
             }.countByAgentVersion(agentId, version)
             if (references > 0) {
-                return@withContext AgentVersionRemovalResult(AgentVersionRemovalOutcome.REFERENCED)
+                return@serialized AgentVersionRemovalResult(AgentVersionRemovalOutcome.REFERENCED)
             }
             val agent = requireNotNull(dao.findAgent(agentId))
             val versions = dao.listVersions(agentId)
             if (agent.activeVersion == version && versions.size > 1) {
-                return@withContext AgentVersionRemovalResult(AgentVersionRemovalOutcome.ACTIVE)
+                return@serialized AgentVersionRemovalResult(AgentVersionRemovalOutcome.ACTIVE)
             }
             val packagePaths = dao.listVersionPackages(agentId, version)
                 .map(AgentVersionPackageEntity::filePath)
                 .filter(String::isNotBlank)
-            transactionRunner.run {
+            val versionCorpora = dao.listVersionCorpora(agentId, version)
+            val orphanedCorpora = versionCorpora.filter {
+                dao.countVersionCorpusReferences(it.corpusId, it.sourceHash) <= 1
+            }
+            val versionSources = dao.listVersionSources(agentId, version)
+            val removablePaths = buildList {
+                add(stored.bundlePath)
+                packagePaths.distinct().forEach { path ->
+                    val targetReferences = dao.listVersionPackages(agentId, version)
+                        .count { it.installed && it.filePath == path }
+                    if (dao.countInstalledPackagePathReferences(path) <= targetReferences) add(path)
+                }
+                versionSources.forEach { source ->
+                    val removedReferenceCount = 1 + orphanedCorpora.count { corpus ->
+                        dao.listCorpusSources(corpus.corpusId, corpus.sourceHash).any {
+                            it.sourceId == source.sourceId && it.sourceHash == source.sourceHash
+                        }
+                    }
+                    if (
+                        source.filePath.isNotBlank() &&
+                        dao.countSourceReferences(source.sourceId, source.sourceHash) <= removedReferenceCount
+                    ) {
+                        add(source.filePath)
+                    }
+                }
+            }.filter(String::isNotBlank).distinct()
+            val tombstones = stageFilesForDeletion(removablePaths)
+            try {
+                transactionRunner.run {
                 if (versions.size == 1) {
                     dao.deleteAgent(agentId)
                 } else {
@@ -961,13 +1074,21 @@ class AgentRepository(
                 dao.deleteOrphanHierarchyNodes()
                 dao.deleteOrphanHierarchySearchRows()
                 dao.deleteOrphanSources()
+                }
+            } catch (error: Throwable) {
+                withContext(NonCancellable) { restoreTombstones(tombstones) }
+                throw error
             }
-            File(stored.bundlePath).delete()
-            File(stored.bundlePath).parentFile?.delete()
-            packagePaths.forEach { path ->
-                if (dao.countInstalledPackagePathReferences(path) == 0) File(path).delete()
+            val cleanupPending = !finalizeTombstones(tombstones)
+            File(stored.bundlePath).parentFile?.let(::deleteEmptyDirectory)
+            AgentVersionRemovalResult(
+                if (cleanupPending) {
+                    AgentVersionRemovalOutcome.REMOVED_CLEANUP_PENDING
+                } else {
+                    AgentVersionRemovalOutcome.REMOVED
+                },
+            )
             }
-            AgentVersionRemovalResult(AgentVersionRemovalOutcome.REMOVED)
         }
 
     suspend fun runtimeContext(
@@ -1091,28 +1212,191 @@ class AgentRepository(
         return corpusEntity.copy(sizeBytes = sizeBytes)
     }
 
-    private fun moveAtomically(source: File, destination: File) {
-        try {
-            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
-        } catch (error: AtomicMoveNotSupportedException) {
-            val part = File(destination.parentFile, "${destination.name}.part")
-            try {
-                source.inputStream().buffered().use { input ->
-                    part.outputStream().buffered().use(input::copyTo)
+    suspend fun recoverFileLifecycle() = withContext(ioDispatcher) {
+        lifecycleCoordinator.serialized { recoverFileLifecycleLocked() }
+    }
+
+    private suspend fun recoverFileLifecycleLocked() {
+        val directory = tombstoneDirectory()
+        if (directory.isDirectory) {
+            directory.listFiles().orEmpty()
+                .filter { it.isFile && it.name.endsWith(TOMBSTONE_META_SUFFIX) }
+                .sortedBy(File::getName)
+                .forEach { meta ->
+                    val id = meta.name.removeSuffix(TOMBSTONE_META_SUFFIX)
+                    val data = directory.resolve("$id$TOMBSTONE_DATA_SUFFIX")
+                    val original = runCatching {
+                        File(String(Base64.getUrlDecoder().decode(meta.readText()), Charsets.UTF_8))
+                    }.getOrElse {
+                        if (data.exists()) return@forEach
+                        fileOps.delete(meta)
+                        return@forEach
+                    }
+                    val referenced = dao.countVersionBundlePathReferences(original.absolutePath) > 0 ||
+                        dao.countInstalledPackagePathReferences(original.absolutePath) > 0 ||
+                        dao.countSourceFilePathReferences(original.absolutePath) > 0
+                    if (referenced && data.isFile) {
+                        fileOps.createDirectories(requireNotNull(original.parentFile))
+                        if (original.exists()) {
+                            if (!fileOps.delete(data)) return@forEach
+                        } else {
+                            fileOps.moveAtomically(data, original)
+                        }
+                        fileOps.delete(meta)
+                    } else if (!referenced) {
+                        finalizeTombstone(FileTombstone(original, data, meta))
+                    }
                 }
-                if (!part.renameTo(destination)) throw AgentBundleException("无法原子安装智能体包")
-                source.delete()
-            } catch (failure: Throwable) {
-                part.delete()
-                throw failure
+            deleteEmptyDirectory(directory)
+        }
+        canonicalizeLegacySourcePayloads()
+    }
+
+    private suspend fun canonicalizeLegacySourcePayloads() {
+        dao.listInstalledSources().groupBy(AgentSourceFileEntity::sourceHash).forEach { (sourceHash, rows) ->
+            val expectedBytes = rows.map(AgentSourceFileEntity::rawSizeBytes).distinct()
+            if (expectedBytes.size != 1) {
+                throw AgentBundleException("同一 sourceHash 的 descriptor bytes 不一致：$sourceHash")
             }
+            val canonical = File(filesDir, "agents/sources/$sourceHash/$SOURCE_PAYLOAD_NAME").canonicalFile
+            val installedFiles = rows.map(AgentSourceFileEntity::filePath)
+                .filter(String::isNotBlank)
+                .map { File(it).canonicalFile }
+                .distinctBy(File::getAbsolutePath)
+            installedFiles.forEach { file ->
+                if (
+                    !file.isFile ||
+                    file.length() != expectedBytes.single() ||
+                    file.sha256Hex() != sourceHash
+                ) {
+                    throw AgentBundleException("已安装 source descriptor/hash/bytes 不一致：$sourceHash")
+                }
+            }
+            if (installedFiles.all { it == canonical }) return@forEach
+
+            var movedFrom: File? = null
+            if (canonical.isFile) {
+                if (canonical.length() != expectedBytes.single() || canonical.sha256Hex() != sourceHash) {
+                    throw AgentBundleException("canonical source payload 被修改：$sourceHash")
+                }
+            } else {
+                val source = installedFiles.firstOrNull()
+                    ?: throw AgentBundleException("source payload 文件缺失：$sourceHash")
+                fileOps.moveAtomically(source, canonical)
+                movedFrom = source
+            }
+            val duplicates = installedFiles.filter { it != canonical && it != movedFrom }
+            val tombstones = stageFilesForDeletion(duplicates.map(File::getAbsolutePath))
+            try {
+                transactionRunner.run {
+                    check(dao.updateSourcePathByHash(sourceHash, canonical.absolutePath) == rows.size) {
+                        "source canonical path 更新失败"
+                    }
+                }
+            } catch (error: Throwable) {
+                withContext(NonCancellable) {
+                    restoreTombstones(tombstones)
+                    movedFrom?.let { original ->
+                        if (canonical.isFile) fileOps.moveAtomically(canonical, original)
+                    }
+                }
+                throw error
+            }
+            finalizeTombstones(tombstones)
         }
     }
+
+    private suspend fun stageFilesForDeletion(paths: List<String>): List<FileTombstone> {
+        val uniqueFiles = paths.map(::File).distinctBy(File::getAbsolutePath)
+        val staged = mutableListOf<FileTombstone>()
+        try {
+            uniqueFiles.forEach { file ->
+                if (!file.isFile) throw AgentBundleException("数据库引用文件缺失：${file.absolutePath}")
+                staged += stageFileForDeletion(file)
+            }
+            return staged
+        } catch (error: Throwable) {
+            restoreTombstones(staged)
+            throw error
+        }
+    }
+
+    private suspend fun stageFileForDeletion(file: File): FileTombstone {
+        val canonicalFilesRoot = filesDir.canonicalFile
+        val canonicalFile = file.canonicalFile
+        if (!canonicalFile.toPath().startsWith(canonicalFilesRoot.toPath())) {
+            throw AgentBundleException("拒绝移动私有目录外文件：${file.absolutePath}")
+        }
+        val directory = tombstoneDirectory().also(fileOps::createDirectories)
+        val id = UUID.randomUUID().toString()
+        val data = directory.resolve("$id$TOMBSTONE_DATA_SUFFIX")
+        val meta = directory.resolve("$id$TOMBSTONE_META_SUFFIX")
+        val metaPart = directory.resolve(".$id.meta.part")
+        val encoded = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(canonicalFile.absolutePath.toByteArray(Charsets.UTF_8))
+        fileOps.write(metaPart) { it.write(encoded.toByteArray(Charsets.UTF_8)) }
+        fileOps.moveAtomically(metaPart, meta)
+        try {
+            fileOps.moveAtomically(canonicalFile, data)
+        } catch (error: Throwable) {
+            if (!fileOps.delete(meta)) throw AgentBundleException("tombstone metadata 清理失败", error)
+            throw error
+        }
+        return FileTombstone(canonicalFile, data, meta)
+    }
+
+    private suspend fun restoreTombstones(tombstones: List<FileTombstone>) {
+        var failure: Throwable? = null
+        tombstones.asReversed().forEach { tombstone ->
+            try {
+                if (tombstone.data.isFile) {
+                    fileOps.createDirectories(requireNotNull(tombstone.original.parentFile))
+                    fileOps.moveAtomically(tombstone.data, tombstone.original)
+                }
+                if (!fileOps.delete(tombstone.meta)) {
+                    throw AgentBundleException("tombstone metadata 恢复清理失败")
+                }
+            } catch (error: Throwable) {
+                if (failure == null) failure = error else failure.addSuppressed(error)
+            }
+        }
+        deleteEmptyDirectory(tombstoneDirectory())
+        failure?.let { throw AgentBundleException("文件 tombstone 恢复失败", it) }
+    }
+
+    private fun finalizeTombstones(tombstones: List<FileTombstone>): Boolean =
+        tombstones.fold(true) { complete, tombstone -> finalizeTombstone(tombstone) && complete }
+
+    private fun finalizeTombstone(tombstone: FileTombstone): Boolean {
+        if (!fileOps.delete(tombstone.data)) return false
+        return fileOps.delete(tombstone.meta)
+    }
+
+    private suspend fun retireUnreferencedFile(file: File) {
+        if (!file.exists()) return
+        val tombstone = stageFileForDeletion(file)
+        finalizeTombstone(tombstone)
+    }
+
+    private fun deleteOrRecordOrphan(file: File) {
+        if (!fileOps.delete(file)) throw AgentBundleException("无法删除文件：${file.absolutePath}")
+    }
+
+    private fun deleteEmptyDirectory(directory: File) {
+        if (directory.isDirectory && directory.listFiles().orEmpty().isEmpty() && !fileOps.delete(directory)) {
+            throw AgentBundleException("无法删除空目录：${directory.absolutePath}")
+        }
+    }
+
+    private fun tombstoneDirectory(): File = File(filesDir, "agents/.tombstones")
 
     companion object {
         private const val DEFAULT_EVIDENCE_LIMIT = 8
         private const val CANDIDATE_MULTIPLIER = 4
         private const val CHUNK_BATCH_SIZE = 200
+        private const val SOURCE_PAYLOAD_NAME = "payload"
+        private const val TOMBSTONE_META_SUFFIX = ".meta"
+        private const val TOMBSTONE_DATA_SUFFIX = ".data"
     }
 }
 
@@ -1143,24 +1427,12 @@ private fun scoreChunk(chunk: AgentChunkEntity, rawQuery: String, terms: List<St
     return keywordScore + textScore + phraseScore
 }
 
-private fun copyBundleWithLimit(input: InputStream, target: File) {
-    target.outputStream().buffered().use { output ->
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        var total = 0L
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            total += read
-            if (total > MAX_IMPORT_BUNDLE_BYTES) throw AgentBundleException("智能体包超过 2 GiB 上限")
-            output.write(buffer, 0, read)
-        }
-    }
-}
-
 internal fun purgeStaleImportFiles(directory: File, nowMillis: Long) {
     directory.listFiles()?.filter { file ->
         file.isFile && nowMillis - file.lastModified() >= IMPORT_STAGING_TTL_MILLIS
-    }?.forEach(File::delete)
+    }?.forEach { file ->
+        if (!file.delete()) throw AgentBundleException("过期 staging 文件清理失败：${file.absolutePath}")
+    }
 }
 
 private fun safeFileSegment(value: String): String =
@@ -1186,7 +1458,61 @@ private fun AgentChunkEntity.hasSameImmutableEvidence(other: AgentChunkEntity): 
         context == other.context &&
         text == other.text &&
         keywordsText == other.keywordsText &&
-        duplicateGroup == other.duplicateGroup
+        duplicateGroup == other.duplicateGroup &&
+        conflictKey == other.conflictKey &&
+        sourceAliasesJson == other.sourceAliasesJson &&
+        simHash == other.simHash
+
+private fun AgentSourceFileEntity.requireSameDescriptor(source: V2SourceManifest) {
+    if (
+        sourceId != source.sourceId ||
+        sourceHash != source.sourceHash ||
+        fileName != source.fileName ||
+        rawSizeBytes != source.rawSizeBytes
+    ) {
+        throw AgentBundleException("同一 sourceHash 的 hsource descriptor 冲突：${source.sourceHash}")
+    }
+}
+
+private fun AgentSourceFileEntity.requireSameDescriptor(source: V2SourceRecord) {
+    val enrichedDescriptor = genre != V2SourceGenre.UNKNOWN.wireName ||
+        authorship != V2Authorship.UNKNOWN.wireName ||
+        period.isNotBlank()
+    if (
+        sourceId != source.sourceId ||
+        sourceHash != source.sourceHash ||
+        fileName != source.fileName ||
+        rawSizeBytes != source.rawSizeBytes ||
+        (
+            enrichedDescriptor && (
+                title != source.title ||
+                    format != source.format ||
+                    genre != source.genre.wireName ||
+                    authorship != source.authorship.wireName ||
+                    period != source.period
+                )
+            )
+    ) {
+        throw AgentBundleException("同一 sourceHash 的 corpus descriptor 冲突：${source.sourceHash}")
+    }
+}
+
+private fun V2Corpus.matchesStandaloneCorpus(
+    other: V2Corpus,
+    declaration: AgentVersionPackageEntity,
+): Boolean =
+    packageSha256 == declaration.packageSha256 &&
+        compressedSizeBytes == declaration.packageSizeBytes &&
+        packageSha256 == other.packageSha256 &&
+        compressedSizeBytes == other.compressedSizeBytes &&
+        publisherFingerprint == other.publisherFingerprint &&
+        manifestJson == other.manifestJson &&
+        manifest == other.manifest &&
+        sources == other.sources &&
+        nodeCount == other.nodeCount &&
+        chunkCount == other.chunkCount &&
+        duplicateCount == other.duplicateCount &&
+        validationDiagnostics == other.validationDiagnostics
 
 private fun AgentEntity.toDomain(): Agent = Agent(
     id = id,
@@ -1202,12 +1528,20 @@ private fun AgentEntity.toDomain(): Agent = Agent(
 private data class OwnedPackageSession(
     val session: AgentPackageImportSession,
     val createdAt: Long,
-)
+) {
+    var v1CompatibilitySession: AgentImportSession? = null
+}
 
 private data class PreparedSourceFile(
     val source: V2Source,
     val file: File,
     val created: Boolean,
+)
+
+private data class FileTombstone(
+    val original: File,
+    val data: File,
+    val meta: File,
 )
 
 private fun ParsedAgentPackage.toPreview(): AgentImportPreview = when (this) {
@@ -1356,11 +1690,12 @@ private fun V2Evaluation.toStorageJson(): JsonObject = buildJsonObject {
     put("corpusId", corpusId)
 }
 
-private fun File.sha256Hex(): String {
+private suspend fun File.sha256Hex(): String {
     val digest = MessageDigest.getInstance("SHA-256")
     inputStream().buffered().use { input ->
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         while (true) {
+            currentCoroutineContext().ensureActive()
             val read = input.read(buffer)
             if (read < 0) break
             digest.update(buffer, 0, read)

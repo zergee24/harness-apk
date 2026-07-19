@@ -226,7 +226,7 @@ class AppDatabaseTest {
         )
     }
 
-    private fun repositoryFixture(
+    private suspend fun repositoryFixture(
         db: AppDatabase,
         root: File,
         chunk: AgentCorpusChunk,
@@ -264,7 +264,7 @@ class AppDatabaseTest {
             compressedSizeBytes = staged.length(),
             uncompressedSizeBytes = staged.length(),
         )
-        val reader = RepositoryConflictReader(chunk)
+        val reader = RepositoryConflictReader(chunk, parsed)
         val repository = AgentRepository(
             filesDir = root.resolve("files"),
             cacheDir = root.resolve("cache"),
@@ -274,11 +274,12 @@ class AppDatabaseTest {
             timeProvider = TimeProvider { 1L },
             ioDispatcher = Dispatchers.Unconfined,
         )
+        val session = repository.prepareImport("staged.hbundle") { staged.inputStream() }
         return RepositoryConflictFixture(
             db = db,
             root = root,
             repository = repository,
-            session = AgentImportSession("session", staged, parsed, reader.inspect(staged)),
+            session = session,
         )
     }
 
@@ -340,15 +341,22 @@ class AppDatabaseTest {
         createVersion11Fixture(context, name, conflictingChunk = false)
 
         val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_11_12, AppDatabase.MIGRATION_12_13)
+            .addMigrations(
+                AppDatabase.MIGRATION_11_12,
+                AppDatabase.MIGRATION_12_13,
+                AppDatabase.MIGRATION_13_14,
+            )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(13, sqlite.version)
+        assertEquals(14, sqlite.version)
         assertEquals(1, sqlite.scalarInt("SELECT requiredCorpusCount FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_version_packages"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_sources"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_hierarchy"))
+        assertEquals("", sqlite.string("SELECT conflictKey FROM agent_chunks LIMIT 1"))
+        assertEquals("[]", sqlite.string("SELECT sourceAliasesJson FROM agent_chunks LIMIT 1"))
+        assertEquals("", sqlite.string("SELECT simHash FROM agent_chunks LIMIT 1"))
         assertEquals("conversation-1", sqlite.string("SELECT id FROM conversations"))
         assertEquals("message-part-1", sqlite.string("SELECT id FROM message_parts"))
         assertEquals("notes/fixture.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
@@ -393,7 +401,11 @@ class AppDatabaseTest {
         val name = "migration-11-12-reinstall-${System.nanoTime()}.db"
         createVersion11Fixture(context, name, conflictingChunk = false)
         val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_11_12, AppDatabase.MIGRATION_12_13)
+            .addMigrations(
+                AppDatabase.MIGRATION_11_12,
+                AppDatabase.MIGRATION_12_13,
+                AppDatabase.MIGRATION_13_14,
+            )
             .build()
         db.openHelper.writableDatabase
         val root = context.cacheDir.resolve("migration-reinstall-${System.nanoTime()}").apply { mkdirs() }
@@ -431,7 +443,11 @@ class AppDatabaseTest {
 
         try {
             Room.databaseBuilder(context, AppDatabase::class.java, name)
-                .addMigrations(AppDatabase.MIGRATION_11_12, AppDatabase.MIGRATION_12_13)
+                .addMigrations(
+                    AppDatabase.MIGRATION_11_12,
+                    AppDatabase.MIGRATION_12_13,
+                    AppDatabase.MIGRATION_13_14,
+                )
                 .build()
                 .openHelper
                 .writableDatabase
@@ -962,6 +978,7 @@ private data class RepositoryConflictFixture(
 
 private class RepositoryConflictReader(
     private val chunk: AgentCorpusChunk,
+    private val bundle: ParsedAgentBundle,
 ) : AgentBundleAccess {
     override fun inspect(file: File): AgentImportPreview = AgentImportPreview(
         agentId = "agent-room-conflict",
@@ -974,7 +991,7 @@ private class RepositoryConflictReader(
         includesOriginalSources = false,
     )
 
-    override fun read(file: File): ParsedAgentBundle = error("Not used")
+    override fun read(file: File): ParsedAgentBundle = bundle.copy(file = file)
 
     override suspend fun forEachChunkSuspending(
         bundle: ParsedAgentBundle,

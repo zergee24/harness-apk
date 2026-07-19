@@ -15,7 +15,16 @@ interface AgentDao {
     @Query("SELECT * FROM agents WHERE id = :id LIMIT 1")
     suspend fun findAgent(id: String): AgentEntity?
 
-    @Query("SELECT * FROM agents WHERE status = 'READY' ORDER BY updatedAt DESC")
+    @Query(
+        """
+        SELECT agents.* FROM agents
+        INNER JOIN agent_versions
+            ON agent_versions.agentId = agents.id
+           AND agent_versions.version = agents.activeVersion
+        WHERE agents.status = 'READY' AND agent_versions.state = 'READY'
+        ORDER BY agents.updatedAt DESC
+        """,
+    )
     suspend fun listReadyAgents(): List<AgentEntity>
 
     @Query("SELECT * FROM agent_versions WHERE agentId = :agentId AND version = :version LIMIT 1")
@@ -119,6 +128,38 @@ interface AgentDao {
 
     @Query("SELECT COUNT(*) FROM agent_version_packages WHERE installed = 1 AND filePath = :filePath")
     suspend fun countInstalledPackagePathReferences(filePath: String): Int
+
+    @Query("SELECT COUNT(*) FROM agent_versions WHERE bundlePath = :filePath")
+    suspend fun countVersionBundlePathReferences(filePath: String): Int
+
+    @Query("SELECT COUNT(*) FROM agent_source_files WHERE filePath = :filePath")
+    suspend fun countSourceFilePathReferences(filePath: String): Int
+
+    @Query(
+        """
+        SELECT (
+            (SELECT COUNT(*) FROM agent_version_sources WHERE sourceId = :sourceId AND sourceHash = :sourceHash) +
+            (SELECT COUNT(*) FROM agent_corpus_sources WHERE sourceId = :sourceId AND sourceHash = :sourceHash)
+        )
+        """,
+    )
+    suspend fun countSourceReferences(sourceId: String, sourceHash: String): Int
+
+    @Query(
+        """
+        SELECT source.* FROM agent_source_files AS source
+        INNER JOIN agent_corpus_sources AS ref
+            ON ref.sourceId = source.sourceId AND ref.sourceHash = source.sourceHash
+        WHERE ref.corpusId = :corpusId AND ref.corpusHash = :corpusHash
+        """,
+    )
+    suspend fun listCorpusSources(corpusId: String, corpusHash: String): List<AgentSourceFileEntity>
+
+    @Query("SELECT * FROM agent_source_files WHERE filePath != '' ORDER BY sourceHash, sourceId")
+    suspend fun listInstalledSources(): List<AgentSourceFileEntity>
+
+    @Query("UPDATE agent_source_files SET filePath = :filePath WHERE sourceHash = :sourceHash")
+    suspend fun updateSourcePathByHash(sourceHash: String, filePath: String): Int
 
     @Query("UPDATE agent_versions SET state = :state, lastEvidenceExpandedAt = :expandedAt WHERE agentId = :agentId AND version = :version")
     suspend fun updateVersionState(agentId: String, version: Int, state: String, expandedAt: Long?): Int

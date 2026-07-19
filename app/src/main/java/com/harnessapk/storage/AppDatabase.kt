@@ -32,7 +32,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentSourceFileEntity::class,
         AgentVersionSourceCrossRef::class,
     ],
-    version = 13,
+    version = 14,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -649,6 +649,14 @@ abstract class AppDatabase : RoomDatabase() {
                         )
                     }
                 }
+            }
+        }
+
+        val MIGRATION_13_14: Migration = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE agent_chunks ADD COLUMN conflictKey TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_chunks ADD COLUMN sourceAliasesJson TEXT NOT NULL DEFAULT '[]'")
+                db.execSQL("ALTER TABLE agent_chunks ADD COLUMN simHash TEXT NOT NULL DEFAULT ''")
             }
         }
     }

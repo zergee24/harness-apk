@@ -133,6 +133,7 @@ data class AgentEvidence(
 
 enum class AgentCorpusRemovalOutcome {
     REMOVED,
+    REMOVED_CLEANUP_PENDING,
     REQUIRED,
     REFERENCED,
     NOT_INSTALLED,
@@ -152,6 +153,7 @@ data class AgentVersionCoverage(
 
 enum class AgentVersionRemovalOutcome {
     REMOVED,
+    REMOVED_CLEANUP_PENDING,
     REFERENCED,
     ACTIVE,
     NOT_FOUND,

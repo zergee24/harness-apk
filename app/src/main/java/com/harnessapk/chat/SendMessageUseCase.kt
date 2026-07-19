@@ -7,6 +7,7 @@ import android.net.Uri
 import android.util.Base64
 import com.harnessapk.agent.AgentEvidence
 import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.sanitizeAgentCitationMarkers
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.AppError
@@ -27,6 +28,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -51,6 +53,7 @@ class SendMessageUseCase(
     private val outputTransformerPipelineFactory: () -> StreamEventTransformerPipeline = {
         StreamEventTransformerPipeline(listOf(ThinkTagStreamTransformer()))
     },
+    private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
 ) {
     suspend fun send(
         conversationId: String,
@@ -243,10 +246,13 @@ class SendMessageUseCase(
                 chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
             }
             if (agentContext != null) {
-                latestSnapshot = sanitizeAgentCitationMarkers(requireNotNull(latestSnapshot))
-                latestSnapshot = appendAgentSourcesPart(requireNotNull(latestSnapshot), agentContext.evidence)
-                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
+                lifecycleCoordinator.serialized {
+                    latestSnapshot = sanitizeAgentCitationMarkers(requireNotNull(latestSnapshot))
+                    latestSnapshot = appendAgentSourcesPart(requireNotNull(latestSnapshot), agentContext.evidence)
+                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
+                }
             }
+            currentCoroutineContext().ensureActive()
             chatRepository.markAssistantSucceeded(nextAssistantId)
             ChatExecutionResult(
                 status = ChatExecutionStatus.SUCCEEDED,

@@ -244,11 +244,26 @@ private class FakeMessageDao : MessageDao {
 
 private class IdentityFakeAgentDao : AgentDao {
     val rows = linkedMapOf<String, AgentEntity>()
+    val versionStates = linkedMapOf<String, String>()
 
     override fun observeAgents(): Flow<List<AgentEntity>> = MutableStateFlow(rows.values.toList())
     override suspend fun findAgent(id: String): AgentEntity? = rows[id]
     override suspend fun listReadyAgents(): List<AgentEntity> = rows.values.filter { it.status == AgentStatus.READY.name }
-    override suspend fun findVersion(agentId: String, version: Int): AgentVersionEntity? = null
+    override suspend fun findVersion(agentId: String, version: Int): AgentVersionEntity? {
+        val agent = rows[agentId]?.takeIf { it.activeVersion == version } ?: return null
+        return AgentVersionEntity(
+            agentId = agentId,
+            version = version,
+            schemaVersion = 2,
+            bundlePath = "",
+            bundleSha256 = "",
+            manifestJson = "",
+            persona = "",
+            worldviewJsonl = "",
+            installedAt = 0L,
+            state = versionStates["$agentId:$version"] ?: AgentStatus.READY.name,
+        )
+    }
     override suspend fun listVersions(agentId: String) = emptyList<AgentVersionEntity>()
     override suspend fun findVersionPackage(agentId: String, version: Int, packageId: String) = null
     override suspend fun listVersionPackages(agentId: String, version: Int) = emptyList<com.harnessapk.storage.AgentVersionPackageEntity>()
@@ -268,6 +283,12 @@ private class IdentityFakeAgentDao : AgentDao {
     override suspend fun markVersionPackageInstalled(agentId: String, version: Int, packageId: String, filePath: String, installedAt: Long) = 0
     override suspend fun markVersionPackageRemoved(agentId: String, version: Int, packageId: String) = 0
     override suspend fun countInstalledPackagePathReferences(filePath: String) = 0
+    override suspend fun countVersionBundlePathReferences(filePath: String) = 0
+    override suspend fun countSourceFilePathReferences(filePath: String) = 0
+    override suspend fun countSourceReferences(sourceId: String, sourceHash: String) = 0
+    override suspend fun listCorpusSources(corpusId: String, corpusHash: String) = emptyList<AgentSourceFileEntity>()
+    override suspend fun listInstalledSources() = emptyList<AgentSourceFileEntity>()
+    override suspend fun updateSourcePathByHash(sourceHash: String, filePath: String) = 0
     override suspend fun updateVersionState(agentId: String, version: Int, state: String, expandedAt: Long?) = 0
     override suspend fun updateAgentInstallState(agentId: String, status: String, requiredCount: Int, installedCount: Int, updatedAt: Long) = 0
     override suspend fun updateAgentStatus(agentId: String, status: String, updatedAt: Long) = 0
