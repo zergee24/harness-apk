@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_private_key
 
 from .corpus_pipeline import build_corpus_index_streaming
-from .evaluation import evaluate_workspace
+from .evaluation import evaluate_workspace, validate_declared_corpus_question_coverage
 from .evaluation import read_v2_asset_bytes
 from .extractors import extract_document, iter_v2_source_sections_stream
 from .models import BuildError, BuildReport, CorpusShard, ExtractedDocument, PackResult
@@ -826,6 +826,8 @@ def pack_workspace_v2(
         package_root = staging / "packages"
         package_root.mkdir()
         with CorpusPlanIndex(workspace) as planner:
+            if planner.manifest != manifest:
+                raise BuildError("workspace manifest 在验证与规划之间发生变化")
             logical_shards = planner.shards(materialize_ids=False)
             logical_sources = [
                 CorpusShard.source(
@@ -840,6 +842,14 @@ def pack_workspace_v2(
                 package.package_id: package.install_class
                 for package in logical_plan.packages
             }
+            evaluation = evaluate_workspace(workspace)
+            coverage_errors = validate_declared_corpus_question_coverage(
+                evaluation,
+                install_classes,
+            )
+            coverage_errors.extend(planner.validate_declared_corpus_questions(install_classes))
+            if coverage_errors:
+                raise BuildError("语料评估题归属校验失败：" + "；".join(dict.fromkeys(coverage_errors)))
             logical_shards = [
                 replace(shard, install_class=install_classes[shard.package_id])
                 for shard in logical_shards
@@ -1204,6 +1214,14 @@ def _pack_bundle_v2(
     selected_ids = install_plan.profile(profile_id).package_ids
     if len(selected_paths) != len(selected_ids):
         raise BuildError("bundle 子包与安装计划不一致")
+    selected_package_ids = []
+    for path in selected_paths:
+        declared = package_by_name.get(path.name)
+        if declared is None:
+            raise BuildError(f"bundle 包含未声明子包：{path.name}")
+        selected_package_ids.append(declared.package_id)
+    if tuple(selected_package_ids) != tuple(selected_ids):
+        raise BuildError("bundle 子包 package ID 序列与安装计划不一致")
     entries: dict[str, bytes | Path] = {
         f"packages/{agent_path.name}": agent_path,
     }
@@ -1212,8 +1230,7 @@ def _pack_bundle_v2(
     }
     for path in selected_paths:
         declared = package_by_name.get(path.name)
-        if declared is None:
-            raise BuildError(f"bundle 包含未声明子包：{path.name}")
+        assert declared is not None
         actual_hash, actual_size = _hash_regular_file(path)
         if actual_hash != declared.sha256 or actual_size != declared.size_bytes:
             raise BuildError(f"bundle 子包大小或哈希不匹配：{path.name}")

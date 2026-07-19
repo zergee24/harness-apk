@@ -24,6 +24,12 @@ from .schema_v2 import WorkspaceV2
 
 MAX_JSONL_LINE_BYTES = 16 * 1024 * 1024
 SMALL_FIXTURE_ID_LIMIT = 4096
+JSONL_BUFFER_BYTES = 64 * 1024
+COVERAGE_PREFIXES = frozenset({
+    "identity", "stance", "voice", "relationship", "episode",
+    "period", "genre", "authorship", "eval",
+})
+DIRECT_VOICE_GENRES = frozenset({"speech", "conversation", "letter", "interview"})
 
 
 def plan_corpus_shards(workspace: Path) -> list[CorpusShard]:
@@ -41,6 +47,8 @@ def choose_install_profiles(shards: Iterable[CorpusShard]) -> InstallPlan:
         raise BuildError("安装计划存在重复 package ID")
     if len(names) != len(set(names)):
         raise BuildError("安装计划存在重复 fileName")
+    for shard in values:
+        _validate_coverage(shard.coverage, shard.package_id)
 
     corpora = tuple(shard for shard in values if shard.package_type == "hcorpus")
     sources = tuple(shard for shard in values if shard.package_type == "hsource")
@@ -110,7 +118,6 @@ def choose_install_profiles(shards: Iterable[CorpusShard]) -> InstallPlan:
 
 def _coverage_score(features: set[str] | frozenset[str]) -> int:
     weights = {
-        "dialogue": 100,
         "relationship": 80,
         "period": 60,
         "eval": 50,
@@ -121,7 +128,21 @@ def _coverage_score(features: set[str] | frozenset[str]) -> int:
         "genre": 20,
         "authorship": 10,
     }
-    return sum(weights.get(feature.split(":", 1)[0], 1) for feature in features)
+    score = 0
+    for feature in features:
+        prefix = feature.split(":", 1)[0]
+        if prefix == "voice" and feature.startswith("voice:direct-material:"):
+            score += 100
+        else:
+            score += weights[prefix]
+    return score
+
+
+def _validate_coverage(features: frozenset[str], package_id: str) -> None:
+    for feature in features:
+        prefix, separator, value = feature.partition(":")
+        if prefix not in COVERAGE_PREFIXES or not separator or not value:
+            raise BuildError(f"coverage 维度无效：{package_id} / {feature}")
 
 
 class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
@@ -334,6 +355,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                 ORDER BY coverage.feature
                 """
             )
+            return frozenset(row["feature"] for row in rows)
         else:
             source_id, period, top_id = selector.split("\u001f")
             rows = connection.execute(
@@ -345,7 +367,30 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                 """,
                 (source_id, period, top_id),
             )
-        return frozenset(row["feature"] for row in rows)
+            features = {row["feature"] for row in rows}
+            metadata = connection.execute(
+                """
+                SELECT DISTINCT period, genre, authorship
+                FROM chunks
+                WHERE source_id = ? AND period = ? AND top_id = ?
+                """,
+                (source_id, period, top_id),
+            )
+            metadata_rows = tuple(metadata)
+            if not metadata_rows:
+                raise BuildError(f"无法计算分片 coverage：{source_id}")
+            for metadata_row in metadata_rows:
+                features.update({
+                    f"period:{metadata_row['period']}",
+                    f"genre:{metadata_row['genre']}",
+                    f"authorship:{metadata_row['authorship']}",
+                })
+                if (
+                    metadata_row["genre"] in DIRECT_VOICE_GENRES
+                    and metadata_row["authorship"] in {"direct", "edited_direct"}
+                ):
+                    features.add(f"voice:direct-material:{source_id}:{period}")
+            return frozenset(features)
 
     def _selection_query(self, shard: CorpusShard) -> tuple[str, tuple[str, ...]]:
         if shard.package_id == "core-evidence":
@@ -374,6 +419,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                 period TEXT NOT NULL,
                 genre TEXT NOT NULL,
                 authorship TEXT NOT NULL,
+                conflict_key TEXT NOT NULL,
                 top_id TEXT NOT NULL,
                 duplicate_group TEXT NOT NULL,
                 text TEXT NOT NULL,
@@ -409,7 +455,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
 
     def _load_nodes(self) -> None:
         connection = self._connection()
-        for row in _iter_jsonl_regular(self.workspace / "corpora" / "index" / "nodes.jsonl"):
+        for row in _iter_jsonl_regular(self.workspace, ("corpora", "index", "nodes.jsonl")):
             connection.execute(
                 "INSERT INTO nodes(id, source_id, parent_id, payload) VALUES (?, ?, ?, ?)",
                 (
@@ -425,7 +471,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
         source_hashes = {
             source.source_id: source.source_hash for source in self.manifest.sources
         }
-        for row in _iter_jsonl_regular(self.workspace / "corpora" / "index" / "chunks.jsonl"):
+        for row in _iter_jsonl_regular(self.workspace, ("corpora", "index", "chunks.jsonl")):
             parents = row.get("parentIds")
             if not isinstance(parents, list) or len(parents) < 2:
                 raise BuildError(f"chunk 缺少完整父路径：{row.get('id')}")
@@ -435,9 +481,9 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
             connection.execute(
                 """
                 INSERT INTO chunks(
-                    id, source_id, source_hash, period, genre, authorship,
+                    id, source_id, source_hash, period, genre, authorship, conflict_key,
                     top_id, duplicate_group, text, payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["id"],
@@ -446,6 +492,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                     row["period"],
                     row["genre"],
                     row["authorship"],
+                    row.get("conflictKey", ""),
                     parents[1],
                     row.get("duplicateGroup", ""),
                     row.get("text", ""),
@@ -468,34 +515,35 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                     "INSERT INTO chunk_nodes(chunk_id, node_id, ordinal) VALUES (?, ?, ?)",
                     (row["id"], node_id, ordinal),
                 )
-            self._add_coverage(row["id"], f"period:{row['period']}")
-            self._add_coverage(row["id"], f"genre:{row['genre']}")
-            self._add_coverage(row["id"], f"authorship:{row['authorship']}")
-            if (
-                row["genre"] in {"conversation", "interview"}
-                and row["authorship"] in {"direct", "edited_direct"}
-            ):
-                self._add_coverage(row["id"], f"dialogue:{row['id']}")
             self.chunk_count += 1
 
     def _load_duplicates(self) -> None:
         connection = self._connection()
         known_sources = {source.source_id for source in self.manifest.sources}
         for row in _iter_jsonl_regular(
-            self.workspace / "corpora" / "index" / "duplicates.jsonl"
+            self.workspace, ("corpora", "index", "duplicates.jsonl")
         ):
             duplicate_id = row.get("duplicateChunkId")
             physical_id = row.get("physicalChunkId")
             duplicate_source_id = row.get("duplicateSourceId")
+            physical = connection.execute(
+                "SELECT source_id, period, conflict_key FROM chunks WHERE id = ?", (physical_id,)
+            ).fetchone() if isinstance(physical_id, str) else None
             if (
                 not isinstance(duplicate_id, str)
                 or not duplicate_id
                 or not isinstance(physical_id, str)
-                or connection.execute(
-                    "SELECT 1 FROM chunks WHERE id = ?",
-                    (physical_id,),
-                ).fetchone() is None
+                or physical is None
+                or connection.execute("SELECT 1 FROM chunks WHERE id = ?", (duplicate_id,)).fetchone() is not None
                 or duplicate_source_id not in known_sources
+                or row.get("primarySourceId") != physical["source_id"]
+                or row.get("period") != physical["period"]
+                or row.get("conflictKey", "") != physical["conflict_key"]
+                or row.get("matchType") not in {"exact", "near"}
+                or connection.execute(
+                    "SELECT 1 FROM chunk_sources WHERE chunk_id = ? AND source_id = ?",
+                    (physical_id, duplicate_source_id),
+                ).fetchone() is None
             ):
                 raise BuildError(f"duplicates.jsonl 引用无效：{duplicate_id}")
             connection.execute(
@@ -586,6 +634,51 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                 f"chunk 父节点不存在：{missing_nodes['chunk_id']} -> {missing_nodes['node_id']}"
             )
 
+    def validate_declared_corpus_questions(self, install_classes: dict[str, str]) -> list[str]:
+        """Bind eval corpusId declarations to the actual packaged chunk selection."""
+        known = {shard.package_id: shard for shard in self.shards(materialize_ids=False)}
+        errors: list[str] = []
+        attributed = {package_id: 0 for package_id in known}
+        rows = _jsonl_asset(self.workspace, self.manifest.assets.eval)
+        for line_number, row in enumerate(rows, start=1):
+            corpus_id = row.get("corpusId", "unassigned")
+            evidence = row.get("expectedEvidence")
+            if corpus_id == "unassigned":
+                continue
+            if not isinstance(corpus_id, str) or corpus_id not in known:
+                errors.append(f"评估题 {line_number} 声明了未知 corpusId：{corpus_id}")
+                continue
+            if not isinstance(evidence, list) or not any(
+                isinstance(chunk_id, str) and self._chunk_in_shard(chunk_id, known[corpus_id])
+                for chunk_id in evidence
+            ):
+                errors.append(f"评估题 {line_number} 的 expectedEvidence 不属于声明 corpus：{corpus_id}")
+                continue
+            attributed[corpus_id] += 1
+        for package_id, install_class in sorted(install_classes.items()):
+            if install_class not in {"required", "recommended"}:
+                continue
+            count = attributed.get(package_id, 0)
+            if count < 2:
+                errors.append(
+                    f"{install_class} corpus {package_id} 至少需要 2 道真实归属评估题，实际 {count}"
+                )
+        return errors
+
+    def _chunk_in_shard(self, chunk_id: str, shard: CorpusShard) -> bool:
+        connection = self._connection()
+        if shard.package_id == "core-evidence":
+            return connection.execute(
+                "SELECT 1 FROM core_refs WHERE chunk_id = ?", (chunk_id,)
+            ).fetchone() is not None
+        return connection.execute(
+            """
+            SELECT 1 FROM chunks
+            WHERE id = ? AND source_id = ? AND period = ? AND top_id = ?
+            """,
+            (chunk_id, shard.source_ids[0], shard.periods[0], shard.top_level_ids[0]),
+        ).fetchone() is not None
+
     def _source(self, source_id: str) -> dict[str, Any]:
         for source in self.manifest.sources:
             if source.source_id == source_id:
@@ -609,38 +702,89 @@ def _shard_id(source_id: str, period: str, top_id: str) -> str:
     return f"corpus-{safe_source}-{suffix}"
 
 
-def _iter_jsonl_regular(path: Path):
-    try:
-        expected = path.lstat()
-    except OSError as error:
-        raise BuildError(f"索引文件无法读取：{path.name}：{error}") from error
-    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
-        raise BuildError(f"索引文件必须是普通文件：{path.name}")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+def _iter_jsonl_regular(workspace: Path, parts: tuple[str, ...]):
+    name = parts[-1]
+    descriptor = _open_regular_relative(workspace, parts)
     try:
         before = os.fstat(descriptor)
-        if not _same_file_identity(expected, before):
-            raise BuildError(f"索引文件在读取前发生变化：{path.name}")
-        with os.fdopen(os.dup(descriptor), "rb") as stream:
-            for line_number, raw_line in enumerate(stream, start=1):
-                if len(raw_line) > MAX_JSONL_LINE_BYTES:
-                    raise BuildError(f"{path.name} 第 {line_number} 行过大")
-                if not raw_line.strip():
-                    continue
-                try:
-                    value = json.loads(raw_line.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-                    raise BuildError(
-                        f"{path.name} 第 {line_number} 行无法读取：{error}"
-                    ) from error
-                if not isinstance(value, dict):
-                    raise BuildError(f"{path.name} 第 {line_number} 行必须是对象")
-                yield value
+        for line_number, raw_line in _iter_bounded_jsonl_lines(descriptor, name):
+            if not raw_line.strip():
+                continue
+            try:
+                value = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+                raise BuildError(
+                    f"{name} 第 {line_number} 行无法读取：{error}"
+                ) from error
+            if not isinstance(value, dict):
+                raise BuildError(f"{name} 第 {line_number} 行必须是对象")
+            yield value
         after = os.fstat(descriptor)
         if not _same_file_identity(before, after):
-            raise BuildError(f"索引文件在读取期间发生变化：{path.name}")
+            raise BuildError(f"索引文件在读取期间发生变化：{name}")
     finally:
         os.close(descriptor)
+
+
+def _open_regular_relative(workspace: Path, parts: tuple[str, ...]) -> int:
+    root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(workspace, root_flags)
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise BuildError("workspace 必须是普通目录")
+        for index, part in enumerate(parts):
+            if not part or part in {".", ".."} or "/" in part:
+                raise BuildError(f"索引路径不安全：{part}")
+            final = index == len(parts) - 1
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            if not final:
+                flags |= getattr(os, "O_DIRECTORY", 0)
+            child = os.open(part, flags, dir_fd=descriptor)
+            info = os.fstat(child)
+            if (final and not stat.S_ISREG(info.st_mode)) or (not final and not stat.S_ISDIR(info.st_mode)):
+                os.close(child)
+                raise BuildError(f"索引目录或文件不安全：{part}")
+            parent = descriptor
+            descriptor = child
+            os.close(parent)
+        return descriptor
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise BuildError(f"索引目录或文件不安全：{parts[-1]}：{error}") from error
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _iter_bounded_jsonl_lines(descriptor: int, name: str):
+    pending = bytearray()
+    line_number = 1
+    while True:
+        block = os.read(descriptor, JSONL_BUFFER_BYTES)
+        if not block:
+            if pending:
+                yield line_number, bytes(pending)
+            return
+        start = 0
+        while start < len(block):
+            newline = block.find(b"\n", start)
+            if newline < 0:
+                pending.extend(block[start:])
+                if len(pending) > MAX_JSONL_LINE_BYTES:
+                    raise BuildError(f"{name} 第 {line_number} 行过大")
+                break
+            pending.extend(block[start:newline])
+            if len(pending) > MAX_JSONL_LINE_BYTES:
+                raise BuildError(f"{name} 第 {line_number} 行过大")
+            if pending.endswith(b"\r"):
+                pending.pop()
+            yield line_number, bytes(pending)
+            pending.clear()
+            line_number += 1
+            start = newline + 1
 
 
 def _json_asset(workspace: Path, asset_path: str) -> dict[str, Any]:

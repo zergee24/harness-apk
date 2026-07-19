@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -12,7 +13,11 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 
 from tools.agent_builder import builder, install_planner
 from tools.agent_builder.builder import BuildError, pack_workspace_v2
-from tools.agent_builder.install_planner import choose_install_profiles, plan_corpus_shards
+from tools.agent_builder.install_planner import (
+    CorpusPlanIndex,
+    choose_install_profiles,
+    plan_corpus_shards,
+)
 from tools.agent_builder.models import (
     CorpusShard,
     InstallPackage,
@@ -43,10 +48,12 @@ class InstallPlannerTest(unittest.TestCase):
         core = next(shard for shard in shards if shard.package_id == "core-evidence")
 
         self.assertEqual("required", core.install_class)
-        self.assertEqual(("chunk-core", "chunk-secondary"), core.chunk_ids)
-        self.assertEqual(("source-direct", "source-secondary"), core.source_ids)
+        self.assertEqual(("chunk-core", "chunk-dialogue", "chunk-secondary"), core.chunk_ids)
+        self.assertEqual(("source-dialogue", "source-direct", "source-secondary"), core.source_ids)
         self.assertEqual(
             (
+                "node-dialogue-root",
+                "node-dialogue-top",
                 "node-direct-root",
                 "node-direct-top",
                 "node-secondary-root",
@@ -54,7 +61,7 @@ class InstallPlannerTest(unittest.TestCase):
             ),
             core.node_ids,
         )
-        self.assertFalse({"chunk-background", "chunk-dialogue"} & set(core.chunk_ids))
+        self.assertFalse({"chunk-background"} & set(core.chunk_ids))
 
     def test_core_source_metadata_includes_deduplicated_source_aliases(self):
         alias_payload = b"alias source\n"
@@ -152,7 +159,8 @@ class InstallPlannerTest(unittest.TestCase):
         )
 
         self.assertEqual(("core-evidence",), lite)
-        self.assertEqual(("core-evidence", dialogue), balanced)
+        self.assertIn(dialogue, balanced)
+        self.assertEqual("core-evidence", balanced[0])
         self.assertNotIn(background, balanced)
         self.assertEqual(
             {"core-evidence", *(shard.package_id for shard in shards if shard.package_id != "core-evidence")},
@@ -162,6 +170,231 @@ class InstallPlannerTest(unittest.TestCase):
         self.assertEqual("balanced", plan.recommended_profile_id)
         for profile in plan.profiles:
             self.assertEqual(len(profile.package_ids), len(set(profile.package_ids)))
+
+    def test_rejects_duplicate_rows_inconsistent_with_physical_chunk(self):
+        rows = self._jsonl_rows("duplicates.jsonl")
+        rows.append(
+            {
+                "duplicateChunkId": "duplicate-core",
+                "physicalChunkId": "chunk-core",
+                "primarySourceId": "source-dialogue",
+                "duplicateSourceId": "source-dialogue",
+                "period": "1930",
+                "conflictKey": "different",
+                "matchType": "unsafe",
+            }
+        )
+        self._write_jsonl(self.workspace / "corpora" / "index" / "duplicates.jsonl", rows)
+
+        with self.assertRaisesRegex(BuildError, "duplicates.jsonl"):
+            plan_corpus_shards(self.workspace)
+
+    def test_rejects_duplicate_that_reuses_a_physical_chunk_id(self):
+        self._write_jsonl(
+            self.workspace / "corpora" / "index" / "duplicates.jsonl",
+            [{
+                "duplicateChunkId": "chunk-core",
+                "physicalChunkId": "chunk-core",
+                "primarySourceId": "source-direct",
+                "duplicateSourceId": "source-direct",
+                "period": "1926",
+                "conflictKey": "",
+                "matchType": "exact",
+            }],
+        )
+
+        with self.assertRaisesRegex(BuildError, "duplicates.jsonl"):
+            plan_corpus_shards(self.workspace)
+
+    def test_duplicate_package_includes_every_referenced_source_metadata(self):
+        alias_payload = b"alias source\n"
+        (self.workspace / "sources" / "alias.txt").write_bytes(alias_payload)
+        manifest_path = self.workspace / "workspace.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["sources"].append(
+            {
+                "sourceId": "source-alias",
+                "title": "同文异本",
+                "fileName": "alias.txt",
+                "storedName": "alias.txt",
+                "sourceHash": hashlib.sha256(alias_payload).hexdigest(),
+                "format": "txt",
+                "genre": "speech",
+                "authorship": "direct",
+                "period": "1926",
+                "rawSizeBytes": len(alias_payload),
+                "extractedChars": 10,
+            }
+        )
+        self._write_json(manifest_path, manifest)
+        chunks = self._jsonl_rows("chunks.jsonl")
+        next(row for row in chunks if row["id"] == "chunk-core")["sourceAliases"].append("source-alias")
+        self._write_jsonl(self.workspace / "corpora" / "index" / "chunks.jsonl", chunks)
+        nodes = self._jsonl_rows("nodes.jsonl")
+        nodes.append(self._node("node-alias-root", "source", "source-alias", None, ["同文异本"]))
+        self._write_jsonl(self.workspace / "corpora" / "index" / "nodes.jsonl", nodes)
+        self._write_jsonl(
+            self.workspace / "corpora" / "index" / "duplicates.jsonl",
+            [{
+                "duplicateChunkId": "duplicate-core-alias",
+                "physicalChunkId": "chunk-core",
+                "primarySourceId": "source-direct",
+                "duplicateSourceId": "source-alias",
+                "period": "1926",
+                "conflictKey": "",
+                "matchType": "exact",
+            }],
+        )
+
+        result = pack_workspace_v2(self.workspace, self.root / "dist-duplicate-alias", self.private_key_path)
+        core = next(path for path in result.corpus_packages if path.name == "core-evidence.hcorpus")
+        with zipfile.ZipFile(core) as archive:
+            source_ids = {row["sourceId"] for row in json.loads(archive.read("sources.json"))}
+        self.assertIn("source-alias", source_ids)
+
+    def test_bundle_rejects_selected_paths_with_wrong_package_id_sequence(self):
+        result = pack_workspace_v2(self.workspace, self.root / "dist-sequence", self.private_key_path)
+        with zipfile.ZipFile(result.agent_package) as archive:
+            raw_plan = json.loads(archive.read("install-plan.json"))
+        packages = tuple(
+            InstallPackage(
+                package_id=row["id"],
+                package_type=row["type"],
+                file_name=row["fileName"],
+                install_class=row["installClass"],
+                dependencies=tuple(row["dependencies"]),
+                size_bytes=row["sizeBytes"],
+                sha256=row["sha256"],
+            )
+            for row in raw_plan["packages"]
+        )
+        plan = InstallPlan(
+            packages=packages,
+            profiles=tuple(
+                InstallProfile(row["id"], tuple(row["packageIds"]), row["recommended"])
+                for row in raw_plan["profiles"]
+            ),
+            required_corpus_ids=tuple(raw_plan["requiredCorpusIds"]),
+        )
+        paths_by_name = {path.name: path for path in result.corpus_packages}
+        selected = [paths_by_name[next(row.file_name for row in packages if row.package_id == package_id)]
+                    for package_id in plan.profile("balanced").package_ids]
+        self.assertGreaterEqual(len(selected), 2)
+        selected[0], selected[1] = selected[1], selected[0]
+        agent_hash = self._sha256(result.agent_package)
+
+        with self.assertRaisesRegex(BuildError, "package ID 序列"):
+            builder._pack_bundle_v2(
+                builder.load_workspace_v2(self.workspace),
+                "balanced",
+                result.agent_package,
+                agent_hash,
+                result.agent_package.stat().st_size,
+                plan,
+                selected,
+                self.root / "wrong-order.hbundle",
+                Ed25519PrivateKey.generate(),
+            )
+
+    def test_pack_rejects_manifest_drift_between_validation_and_planning(self):
+        original_index = install_planner.CorpusPlanIndex
+
+        class DriftedIndex:
+            def __init__(self, workspace):
+                self._delegate = original_index(workspace)
+
+            def __enter__(self):
+                self._delegate.__enter__()
+                self.manifest = replace(self._delegate.manifest, version=self._delegate.manifest.version + 1)
+                return self
+
+            def __exit__(self, *args):
+                return self._delegate.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self._delegate, name)
+
+        with mock.patch.object(install_planner, "CorpusPlanIndex", DriftedIndex):
+            with self.assertRaisesRegex(BuildError, "manifest"):
+                pack_workspace_v2(self.workspace, self.root / "dist-manifest-drift", self.private_key_path)
+
+    def test_balanced_rejects_unknown_coverage_and_does_not_count_dialogue_chunks(self):
+        shards = plan_corpus_shards(self.workspace)
+        dialogue = next(
+            shard for shard in shards if shard.chunk_ids == ("chunk-dialogue",)
+        )
+        self.assertTrue(any(feature.startswith("voice:") for feature in dialogue.coverage))
+        self.assertFalse(any(feature.startswith("dialogue:") for feature in dialogue.coverage))
+        with self.assertRaisesRegex(BuildError, "coverage"):
+            choose_install_profiles([
+                *shards,
+                CorpusShard(
+                    package_id="unknown-coverage",
+                    package_type="hcorpus",
+                    title="bad",
+                    install_class="optional",
+                    coverage=frozenset({"unknown:feature"}),
+                    file_name="unknown.hcorpus",
+                ),
+            ])
+
+    def test_large_dialogue_shard_uses_compact_coverage_when_ids_not_materialized(self):
+        chunks = self._jsonl_rows("chunks.jsonl")
+        dialogue = next(row for row in chunks if row["id"] == "chunk-dialogue")
+        for index in range(5000):
+            row = dict(dialogue)
+            row["id"] = f"chunk-dialogue-large-{index:04d}"
+            row["text"] = f"谈话材料 {index}"
+            row["keywords"] = ["dialogueterm"]
+            chunks.append(row)
+        self._write_jsonl(self.workspace / "corpora" / "index" / "chunks.jsonl", chunks)
+
+        with CorpusPlanIndex(self.workspace) as index:
+            shards = index.shards(materialize_ids=False)
+        dialogue_shard = next(shard for shard in shards if shard.source_ids == ("source-dialogue",))
+        self.assertEqual((), dialogue_shard.chunk_ids)
+        self.assertLess(len(dialogue_shard.coverage), 16)
+        self.assertFalse(any("chunk-dialogue-large" in item for item in dialogue_shard.coverage))
+
+    def test_planner_rejects_symlinked_intermediate_index_directory(self):
+        outside = self.root / "outside-index"
+        outside.mkdir()
+        for name in ("nodes.jsonl", "chunks.jsonl", "duplicates.jsonl"):
+            (outside / name).write_bytes((self.workspace / "corpora" / "index" / name).read_bytes())
+        index = self.workspace / "corpora" / "index"
+        for path in index.iterdir():
+            path.unlink()
+        index.rmdir()
+        index.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(BuildError, "索引目录|不安全"):
+            plan_corpus_shards(self.workspace)
+
+    def test_pack_rejects_unknown_or_wrong_corpus_question_attribution(self):
+        rows = self._jsonl_rows("eval.jsonl")
+        rows[0]["corpusId"] = "corpus-unknown"
+        self._write_jsonl(self.workspace / "agent" / "eval.jsonl", rows)
+        with self.assertRaisesRegex(BuildError, "评估题"):
+            pack_workspace_v2(self.workspace, self.root / "dist-unknown-corpus", self.private_key_path)
+
+        workspace = self._workspace("wrong-corpus")
+        rows = self._jsonl_rows("eval.jsonl", workspace)
+        dialogue_id = install_planner._shard_id("source-dialogue", "1930", "node-dialogue-top")
+        rows[0]["corpusId"] = dialogue_id
+        self._write_jsonl(workspace / "agent" / "eval.jsonl", rows)
+        with self.assertRaisesRegex(BuildError, "不属于声明 corpus"):
+            pack_workspace_v2(workspace, self.root / "dist-wrong-corpus", self.private_key_path)
+
+    def test_pack_requires_two_true_questions_for_required_and_recommended_corpora(self):
+        rows = self._jsonl_rows("eval.jsonl")
+        dialogue_id = install_planner._shard_id("source-dialogue", "1930", "node-dialogue-top")
+        for row in rows:
+            if row["corpusId"] == dialogue_id:
+                row["corpusId"] = "core-evidence"
+        self._write_jsonl(self.workspace / "agent" / "eval.jsonl", rows)
+
+        with self.assertRaisesRegex(BuildError, "至少需要 2 道"):
+            pack_workspace_v2(self.workspace, self.root / "dist-missing-corpus-questions", self.private_key_path)
 
     def test_pack_records_real_child_hashes_and_nests_exact_signed_bytes(self):
         result = pack_workspace_v2(
@@ -548,8 +781,8 @@ class InstallPlannerTest(unittest.TestCase):
 
         self.assertEqual(before, after)
 
-    def _workspace(self) -> Path:
-        workspace = self.root / "workspace"
+    def _workspace(self, name: str = "workspace") -> Path:
+        workspace = self.root / name
         (workspace / "agent").mkdir(parents=True)
         (workspace / "corpora" / "index").mkdir(parents=True)
         (workspace / "sources").mkdir()
@@ -831,6 +1064,23 @@ class InstallPlannerTest(unittest.TestCase):
                         "corpusId": "core-evidence",
                     }
                 )
+        for source_id, period, top_id, chunk_id, question in (
+            ("source-direct", "1926", "node-direct-top", "chunk-core", "coreterm"),
+            ("source-secondary", "1926", "node-secondary-top", "chunk-secondary", "secondaryterm"),
+            ("source-dialogue", "1930", "node-dialogue-top", "chunk-dialogue", "dialogueterm"),
+        ):
+            corpus_id = install_planner._shard_id(source_id, period, top_id)
+            for index in range(2):
+                eval_rows.append(
+                    {
+                        "id": f"corpus-{source_id}-{index}",
+                        "category": "grounding",
+                        "question": question,
+                        "period": period,
+                        "expectedEvidence": [chunk_id],
+                        "corpusId": corpus_id,
+                    }
+                )
         self._write_jsonl(workspace / "agent" / "eval.jsonl", eval_rows)
         return workspace
 
@@ -902,6 +1152,14 @@ class InstallPlannerTest(unittest.TestCase):
             json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             encoding="utf-8",
         )
+
+    def _jsonl_rows(self, name: str, workspace: Path | None = None):
+        root = workspace or self.workspace
+        if name == "eval.jsonl":
+            path = root / "agent" / name
+        else:
+            path = root / "corpora" / "index" / name
+        return [json.loads(line) for line in path.read_text("utf-8").splitlines() if line.strip()]
 
     @classmethod
     def _write_jsonl(cls, path: Path, rows):
