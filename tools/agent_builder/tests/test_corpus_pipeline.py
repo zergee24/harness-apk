@@ -111,6 +111,134 @@ class CorpusPipelineTest(unittest.TestCase):
         self.assertEqual(first.duplicate_group, safe_variant.duplicate_group)
         self.assertNotEqual(negation_boundary.duplicate_group, attached_negation.duplicate_group)
 
+    def test_semantic_guard_preserves_maximal_latin_digit_tokens_and_boundaries(self):
+        exact_cases = (
+            ("abc1def", "abc1 def"),
+            ("notable", "not able"),
+            ("abc中文", "abc 中文"),
+        )
+        for index, (first, second) in enumerate(exact_cases):
+            with self.subTest(first=first, second=second):
+                self.assertEqual(
+                    corpus_pipeline.normalize_for_dedup(first),
+                    corpus_pipeline.normalize_for_dedup(second),
+                )
+                self.assertNotEqual(
+                    corpus_pipeline.semantic_guard_canonical(first),
+                    corpus_pipeline.semantic_guard_canonical(second),
+                )
+                result = build_corpus_index(
+                    [self._document(f"latin-a-{index}", first), self._document(f"latin-b-{index}", second)],
+                    [
+                        self._source(f"latin-a-{index}", period="1926"),
+                        self._source(f"latin-b-{index}", period="1926"),
+                    ],
+                )
+                self.assertEqual(2, len(result.chunks))
+
+        safe_near = build_corpus_index(
+            [
+                self._document("latin-near-a", "abc1def 以后"),
+                self._document("latin-near-b", "abc1 def 之后"),
+            ],
+            [
+                self._source("latin-near-a", period="1926"),
+                self._source("latin-near-b", period="1926"),
+            ],
+        )
+        self.assertEqual(2, len(safe_near.chunks))
+        self.assertEqual(0, safe_near.stats.near_duplicate_count)
+
+    def test_duplicate_group_matches_physical_merge_scope(self):
+        section = ExtractedSection("第一章", "调查以后再下结论。", conflict_key="method")
+        source = self._source("scope", period="1926")
+        primary = corpus_pipeline._contextual_chunk(source, section, section.text, (), "", 0, 0)
+        safe_variant = corpus_pipeline._contextual_chunk(
+            replace(source, source_id="scope-copy", source_hash="hash-scope-copy"),
+            ExtractedSection("第一章", "调查之后，再下结论。", conflict_key="method"),
+            "调查之后，再下结论。",
+            (),
+            "",
+            0,
+            1,
+        )
+        same_scope = corpus_pipeline._contextual_chunk(
+            replace(source, source_id="scope-alias", source_hash="hash-scope-alias"),
+            section,
+            section.text,
+            (),
+            "",
+            0,
+            2,
+        )
+        semantic_primary = corpus_pipeline._contextual_chunk(
+            source,
+            ExtractedSection("第一章", "abc1def 以后", conflict_key="method"),
+            "abc1def 以后",
+            (),
+            "",
+            0,
+            3,
+        )
+        semantic_variant = corpus_pipeline._contextual_chunk(
+            source,
+            ExtractedSection("第一章", "abc1 def 之后", conflict_key="method"),
+            "abc1 def 之后",
+            (),
+            "",
+            0,
+            4,
+        )
+        scoped_variants = (
+            corpus_pipeline._contextual_chunk(
+                replace(source, period="1945"), section, section.text, (), "", 0, 5
+            ),
+            corpus_pipeline._contextual_chunk(
+                source,
+                ExtractedSection("第一章", section.text, conflict_key="position"),
+                section.text,
+                (),
+                "",
+                0,
+                6,
+            ),
+            corpus_pipeline._contextual_chunk(
+                replace(source, genre=SourceGenre.LETTER), section, section.text, (), "", 0, 7
+            ),
+            corpus_pipeline._contextual_chunk(
+                replace(source, authorship=Authorship.SECONDARY), section, section.text, (), "", 0, 8
+            ),
+        )
+        unknown_primary = corpus_pipeline._contextual_chunk(
+            replace(source, period="unknown"), section, section.text, (), "", 0, 9
+        )
+        unknown_variants = (
+            corpus_pipeline._contextual_chunk(
+                replace(source, period="unknown", source_id="other"), section, section.text, (), "", 0, 10
+            ),
+            corpus_pipeline._contextual_chunk(
+                replace(source, period="unknown", source_hash="other-hash"), section, section.text, (), "", 0, 11
+            ),
+            corpus_pipeline._contextual_chunk(
+                replace(source, period="unknown"),
+                ExtractedSection("第二章", section.text, conflict_key="method"),
+                section.text,
+                (),
+                "",
+                0,
+                12,
+            ),
+        )
+
+        self.assertEqual(primary.duplicate_group, safe_variant.duplicate_group)
+        self.assertEqual(primary.duplicate_group, same_scope.duplicate_group)
+        self.assertEqual(semantic_primary.safe_near_hash, semantic_variant.safe_near_hash)
+        self.assertNotEqual(semantic_primary.duplicate_group, semantic_variant.duplicate_group)
+        for variant in scoped_variants:
+            self.assertNotEqual(primary.duplicate_group, variant.duplicate_group)
+        for variant in unknown_variants:
+            self.assertNotEqual(unknown_primary.duplicate_group, variant.duplicate_group)
+
     def test_semantic_guard_blocks_punctuation_candidate_collisions(self):
         cases = (
             ("不，应该这样做", "不应该这样做"),

@@ -595,7 +595,7 @@ def safe_near_canonical(text: str) -> str:
 def semantic_guard_canonical(text: str) -> str:
     """Keep evidence-significant lexical boundaries out of punctuation-only merges."""
     folded = unicodedata.normalize("NFKC", text).casefold()
-    latin_tokens = tuple(re.findall(r"[a-z]+(?:[0-9]+)?|[0-9]+(?:\.[0-9]+)?", folded))
+    latin_tokens, latin_token_boundaries = _latin_digit_tokens_with_boundaries(folded)
     digits = tuple(re.findall(r"\d+(?:\.\d+)?", folded))
     negations = tuple(
         f"{character}:{_semantic_boundary_kind(folded[index + 1:index + 2])}"
@@ -613,10 +613,37 @@ def semantic_guard_canonical(text: str) -> str:
         {
             "digits": digits,
             "latinTokens": latin_tokens,
+            "latinTokenBoundaries": latin_token_boundaries,
             "negationForms": negations,
             "stances": stances,
         }
     )
+
+
+def _latin_digit_tokens_with_boundaries(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    tokens: list[str] = []
+    boundaries: list[str] = []
+    for match in re.finditer(r"[a-z0-9]+", text):
+        tokens.append(match.group(0))
+        boundaries.append(
+            f"{_latin_token_boundary(text, match.start() - 1)}"
+            f">{match.group(0)}<"
+            f"{_latin_token_boundary(text, match.end())}"
+        )
+    return tuple(tokens), tuple(boundaries)
+
+
+def _latin_token_boundary(text: str, index: int) -> str:
+    if index < 0 or index >= len(text):
+        return "edge"
+    character = text[index]
+    if character.isspace():
+        return "space"
+    if "\u3400" <= character <= "\u9fff":
+        return "cjk"
+    if character.isalnum():
+        return "word"
+    return f"punct:{character}"
 
 
 def _semantic_boundary_kind(value: str) -> str:
@@ -784,12 +811,12 @@ def _contextual_chunk(
         keywords=tuple(_keywords(text)),
         ngrams=tuple(_ngrams(text)),
         conflict_key=section.conflict_key.strip(),
-        duplicate_group=_stable_id(
-            "duplicate",
+        duplicate_group=_duplicate_group(
+            source,
+            section.location,
+            section.conflict_key.strip(),
             safe_near,
             semantic_guard,
-            source.period,
-            section.conflict_key.strip(),
         ),
         source_aliases=(source.source_id,),
         normalized_hash=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
@@ -797,6 +824,26 @@ def _contextual_chunk(
         semantic_guard_hash=hashlib.sha256(semantic_guard.encode("utf-8")).hexdigest(),
         simhash=simhash64(text),
     )
+
+
+def _duplicate_group(
+    source: SourceRecord,
+    location: str,
+    conflict_key: str,
+    safe_near: str,
+    semantic_guard: str,
+) -> str:
+    scope = (
+        safe_near,
+        semantic_guard,
+        source.period,
+        conflict_key,
+        source.genre.value,
+        source.authorship.value,
+    )
+    if source.period == "unknown":
+        scope += (source.source_id, source.source_hash, location)
+    return _stable_id("duplicate", *scope)
 
 
 def _deduplicate(
