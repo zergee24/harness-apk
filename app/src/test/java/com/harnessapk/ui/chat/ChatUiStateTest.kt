@@ -31,6 +31,25 @@ import org.junit.Test
 
 class ChatUiStateTest {
     @Test
+    fun persistedMessagesStateOnlyTreatsLoadedEmptyHistoryAsEmptyChat() {
+        val message = ChatMessage(
+            id = "historical-message",
+            conversationId = "conversation",
+            role = MessageRole.ASSISTANT,
+            content = "历史回复",
+            status = MessageStatus.SUCCEEDED,
+            providerId = null,
+            model = null,
+            errorMessage = null,
+        )
+
+        assertFalse(PersistedMessagesState.Loading.isLoadedEmpty())
+        assertEquals(emptyList<ChatMessage>(), PersistedMessagesState.Loading.messagesOrEmpty())
+        assertTrue(PersistedMessagesState.Loaded(emptyList()).isLoadedEmpty())
+        assertFalse(PersistedMessagesState.Loaded(listOf(message)).isLoadedEmpty())
+    }
+
+    @Test
     fun cameraActionRequestsPermissionOnlyWhenNotGranted() {
         assertEquals(ChatImageSourceAction.REQUEST_CAMERA_PERMISSION, cameraAction(permissionGranted = false))
         assertEquals(ChatImageSourceAction.LAUNCH_CAMERA, cameraAction(permissionGranted = true))

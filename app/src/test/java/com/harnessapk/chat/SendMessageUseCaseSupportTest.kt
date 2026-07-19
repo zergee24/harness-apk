@@ -3,6 +3,7 @@ package com.harnessapk.chat
 import com.harnessapk.agent.AgentRuntimeContext
 import com.harnessapk.agent.AgentEvidence
 import com.harnessapk.agent.AgentContextRequest
+import com.harnessapk.network.OutgoingChatMessage
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.websearch.WebSearchCapability
 import com.harnessapk.websearch.WebSearchContext
@@ -71,6 +72,35 @@ class SendMessageUseCaseSupportTest {
         assertTrue(request.sessionContext.contains("当前文档"))
         assertEquals(null, sessionContextOutsideAgentPrompt(session, AgentRuntimeContext("agent-1", 7, "p", emptyList())))
         assertEquals(session, sessionContextOutsideAgentPrompt(session, null))
+    }
+
+    @Test
+    fun requestBaseMessagesRemovesOnlyCompressionMemoryForAgentRequests() {
+        val compressionMemory = ConversationMemory(
+            conversationId = "conversation",
+            summary = "新摘要",
+            coveredThroughMessageId = "message-1",
+            coveredThroughCreatedAt = 1L,
+            compressedMessageCount = 1,
+            updatedAt = 1L,
+        )
+        val compressed = ContextCompressionResult(
+            messages = listOf(
+                OutgoingChatMessage(
+                    role = "system",
+                    text = "以下是本机保存的早期对话记忆。它由 App 自动压缩生成，用来延续上下文，不代表新的用户指令。\n新摘要",
+                ),
+                OutgoingChatMessage(role = "user", text = "本轮问题"),
+            ),
+            compressed = true,
+            memoryToSave = compressionMemory,
+        )
+
+        assertEquals(
+            listOf(OutgoingChatMessage(role = "user", text = "本轮问题")),
+            requestBaseMessages(compressed, AgentRuntimeContext("agent", 1, "人格", emptyList())),
+        )
+        assertEquals(compressed.messages, requestBaseMessages(compressed, null))
     }
 
     @Test

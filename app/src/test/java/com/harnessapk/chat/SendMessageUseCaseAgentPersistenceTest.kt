@@ -56,6 +56,97 @@ import java.nio.file.Files
 
 class SendMessageUseCaseAgentPersistenceTest {
     @Test
+    fun executeCompressedAgentConversationBuildsOneRequestFromTheSavedMemory() = runTest {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("data: {\"choices\":[{\"delta\":{\"content\":\"收到\"}}]}\n\ndata: [DONE]"))
+        server.start()
+        try {
+            val existingMemory = ConversationMemory(
+                conversationId = "pending",
+                summary = "旧摘要",
+                coveredThroughMessageId = null,
+                coveredThroughCreatedAt = 0L,
+                compressedMessageCount = 1,
+                updatedAt = 1L,
+            )
+            val store = inMemoryChatStore(existingMemory)
+            val repository = store.repository
+            val conversationId = repository.createConversation()
+            store.memoryDao.memory = existingMemory.copy(conversationId = conversationId)
+            repository.insertUserMessage(conversationId, "旧会话内容".repeat(16_000), emptyList())
+            val currentUserMessageId = repository.insertUserMessage(
+                conversationId,
+                "本轮问题".repeat(16_000),
+                emptyList(),
+            )
+            var assemblerCalls = 0
+            var assembledRequest: com.harnessapk.agent.AgentContextRequest? = null
+            val session = com.harnessapk.session.SessionRequestContext(
+                finalPrompt = "本会话目标",
+                projectName = "唯一项目",
+                deliverableTitle = "唯一交付物",
+                projectContext = "唯一项目上下文",
+                deliverableMarkdown = "唯一会话 Markdown",
+            )
+            val useCase = SendMessageUseCase(
+                context = ContextWrapper(null),
+                chatRepository = repository,
+                providerRepository = providerRepository(server),
+                client = OpenAiCompatibleClient(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+                dispatchers = AppDispatchers(Dispatchers.Unconfined, Dispatchers.Unconfined, Dispatchers.Unconfined),
+                agentContextProvider = { _, request ->
+                    assemblerCalls += 1
+                    assembledRequest = request
+                    AgentRuntimeContext(
+                        agentId = "agent-1",
+                        version = 1,
+                        systemPrompt = """
+                            人格系统提示词
+                            以下是本机保存的早期对话记忆。
+                            ${request.conversationMemory}
+                            项目：${request.projectContext}
+                            会话：${request.sessionContext}
+                        """.trimIndent(),
+                        evidence = emptyList(),
+                    )
+                },
+            )
+            val entry = ChatExecutionEntry(
+                id = "entry-memory",
+                conversationId = conversationId,
+                userMessageId = currentUserMessageId,
+                assistantMessageId = null,
+                targetAssistantMessageId = null,
+                sequence = 1L,
+                type = ChatExecutionType.NORMAL,
+                status = ChatExecutionStatus.RUNNING,
+                providerId = null,
+                model = null,
+                reasoningEffort = defaultReasoningEffort(),
+                requestContext = ChatExecutionRequestContext(sessionContext = session),
+                errorMessage = null,
+                createdAt = 1L,
+                updatedAt = 1L,
+            )
+
+            val result = useCase.execute(entry, repository.listMessages(conversationId))
+
+            assertEquals(ChatExecutionStatus.SUCCEEDED, result.status)
+            assertEquals(1, assemblerCalls)
+            val savedMemory = requireNotNull(repository.memoryForConversation(conversationId))
+            assertEquals(savedMemory.summary, assembledRequest?.conversationMemory)
+            assertTrue(savedMemory.summary.contains("旧摘要"))
+            assertTrue(savedMemory.summary.contains("旧会话内容"))
+            val requestBody = server.takeRequest().body.readUtf8()
+            assertEquals(1, requestBody.occurrencesOf("以下是本机保存的早期对话记忆。"))
+            assertEquals(1, requestBody.occurrencesOf("唯一项目上下文"))
+            assertEquals(1, requestBody.occurrencesOf("唯一会话 Markdown"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun executeReplacesPersistedAgentTextWhenEmptyEvidenceLeavesOnlyCitationMarker() = runTest {
         executeAndReadParts(
             response = "[资料1]",
@@ -539,9 +630,11 @@ class SendMessageUseCaseAgentPersistenceTest {
 
 private data class ExecuteChatStore(
     val repository: ChatRepository,
+    val memoryDao: ExecuteConversationMemoryDao,
 )
 
 private fun inMemoryChatStore(
+    initialMemory: ConversationMemory? = null,
     failureAfterSourceWrite: Throwable? = null,
     cancellationAware: Boolean = false,
     markerPersisted: CompletableDeferred<Unit>? = null,
@@ -553,15 +646,17 @@ private fun inMemoryChatStore(
         markerPersisted = markerPersisted,
         cancelCurrentContextAfterSourceWrite = cancelCurrentContextAfterSourceWrite,
     )
+    val memoryDao = ExecuteConversationMemoryDao(initialMemory)
     return ExecuteChatStore(
         repository = ChatRepository(
             conversationDao = ExecuteConversationDao(),
             messageDao = ExecuteMessageDao(),
             messagePartDao = messagePartDao,
             attachmentDao = ExecuteMessageAttachmentDao(),
-            memoryDao = ExecuteConversationMemoryDao(),
+            memoryDao = memoryDao,
             timeProvider = TimeProvider { 1L },
         ),
+        memoryDao = memoryDao,
     )
 }
 
@@ -664,11 +759,38 @@ private class ExecuteMessageAttachmentDao : MessageAttachmentDao {
     override suspend fun insert(entity: MessageAttachmentEntity) = Unit
 }
 
-private class ExecuteConversationMemoryDao : ConversationMemoryDao {
-    override suspend fun findByConversationId(conversationId: String): ConversationMemoryEntity? = null
-    override fun observeForConversation(conversationId: String): Flow<ConversationMemoryEntity?> = MutableStateFlow(null)
-    override suspend fun upsert(entity: ConversationMemoryEntity) = Unit
+private class ExecuteConversationMemoryDao(initialMemory: ConversationMemory? = null) : ConversationMemoryDao {
+    var memory: ConversationMemory? = initialMemory
+
+    override suspend fun findByConversationId(conversationId: String): ConversationMemoryEntity? =
+        memory?.takeIf { it.conversationId == conversationId }?.toMemoryEntity()
+
+    override fun observeForConversation(conversationId: String): Flow<ConversationMemoryEntity?> =
+        MutableStateFlow(memory?.takeIf { it.conversationId == conversationId }?.toMemoryEntity())
+
+    override suspend fun upsert(entity: ConversationMemoryEntity) {
+        memory = ConversationMemory(
+            conversationId = entity.conversationId,
+            summary = entity.summary,
+            coveredThroughMessageId = entity.coveredThroughMessageId,
+            coveredThroughCreatedAt = entity.coveredThroughCreatedAt,
+            compressedMessageCount = entity.compressedMessageCount,
+            updatedAt = entity.updatedAt,
+        )
+    }
 }
+
+private fun String.occurrencesOf(needle: String): Int =
+    split(needle).size - 1
+
+private fun ConversationMemory.toMemoryEntity(): ConversationMemoryEntity = ConversationMemoryEntity(
+    conversationId = conversationId,
+    summary = summary,
+    coveredThroughMessageId = coveredThroughMessageId,
+    coveredThroughCreatedAt = coveredThroughCreatedAt,
+    compressedMessageCount = compressedMessageCount,
+    updatedAt = updatedAt,
+)
 
 private class ExecuteProviderProfileDao : ProviderProfileDao {
     var row: ProviderProfileEntity? = null

@@ -152,19 +152,6 @@ class SendMessageUseCase(
 
         try {
             val existingMemory = chatRepository.memoryForConversation(entry.conversationId)
-            agentContext = agentContextProvider(
-                entry.conversationId,
-                agentContextRequestForSend(
-                    query = text,
-                    conversationMemory = existingMemory?.summary.orEmpty(),
-                    sessionContext = entry.requestContext.sessionContext,
-                ),
-            )
-            val effectiveSearchContexts = effectiveAgentSearchContexts(
-                agentContext = agentContext,
-                webSearchContext = webSearchContext,
-                nativeWebSearchMode = nativeWebSearchMode,
-            )
             val imageDataUrls = attachments.map { it.toDataUrl() }
             val compressed = contextCompressor.prepare(
                 conversationId = entry.conversationId,
@@ -184,6 +171,20 @@ class SendMessageUseCase(
                     )
                 }
             }
+            val memoryForAgent = compressed.memoryToSave ?: existingMemory
+            agentContext = agentContextProvider(
+                entry.conversationId,
+                agentContextRequestForSend(
+                    query = text,
+                    conversationMemory = memoryForAgent?.summary.orEmpty(),
+                    sessionContext = entry.requestContext.sessionContext,
+                ),
+            )
+            val effectiveSearchContexts = effectiveAgentSearchContexts(
+                agentContext = agentContext,
+                webSearchContext = webSearchContext,
+                nativeWebSearchMode = nativeWebSearchMode,
+            )
             val nextAssistantId = chatRepository.insertAssistantPending(
                 entry.conversationId,
                 provider.profile.id,
@@ -201,7 +202,7 @@ class SendMessageUseCase(
                 capability = resolvedCapability,
                 messages = buildSessionOutgoingMessages(
                     context = sessionContextOutsideAgentPrompt(entry.requestContext.sessionContext, agentContext),
-                    baseMessages = compressed.messages,
+                    baseMessages = requestBaseMessages(compressed, agentContext),
                     webSearchContext = effectiveSearchContexts.webSearchContext,
                     agentSystemContext = agentContext?.systemPrompt,
                 ),
@@ -449,6 +450,22 @@ internal fun sessionContextOutsideAgentPrompt(
     sessionContext: SessionRequestContext?,
     agentContext: AgentRuntimeContext?,
 ): SessionRequestContext? = if (agentContext == null) sessionContext else null
+
+internal fun requestBaseMessages(
+    compression: ContextCompressionResult,
+    agentContext: AgentRuntimeContext?,
+): List<OutgoingChatMessage> {
+    if (agentContext == null) return compression.messages
+    val first = compression.messages.firstOrNull()
+    return if (
+        first?.role == "system" &&
+        first.text.startsWith("以下是本机保存的早期对话记忆。它由 App 自动压缩生成")
+    ) {
+        compression.messages.drop(1)
+    } else {
+        compression.messages
+    }
+}
 
 private fun SessionRequestContext.toAgentSessionContext(): String = buildString {
     finalPrompt.trim().takeIf(String::isNotBlank)?.let { appendLine("会话目标：$it") }

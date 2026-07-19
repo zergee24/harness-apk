@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -176,6 +177,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import java.util.Locale
 import java.util.UUID
 
@@ -222,7 +224,12 @@ fun ChatScreen(
     onOpenProjectGit: (projectId: String) -> Unit = {},
     contentPadding: PaddingValues,
 ) {
-    val messages by container.chatRepository.observeMessages(conversationId).collectAsState(initial = emptyList())
+    val persistedMessages by remember(conversationId) {
+        container.chatRepository.observeMessages(conversationId)
+            .map { messages -> PersistedMessagesState.Loaded(messages) as PersistedMessagesState }
+    }.collectAsState(initial = PersistedMessagesState.Loading)
+    val messageState = persistedMessages
+    val messages = messageState.messagesOrEmpty()
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
     val executionEntries by container.chatExecutionRepository
         .observeForConversation(conversationId)
@@ -478,12 +485,12 @@ fun ChatScreen(
         conversation?.agentId,
         conversation?.agentVersion,
         identityMessageStateKnown,
-        messages.isEmpty(),
+        messageState,
     ) {
         val agentId = conversation?.agentId
         val version = conversation?.agentVersion
         agentOpening = if (
-            identityMessageStateKnown && messages.isEmpty() && agentId != null && version != null
+            identityMessageStateKnown && messageState.isLoadedEmpty() && agentId != null && version != null
         ) {
             container.agentRepository.opening(agentId, version)
         } else {
@@ -1497,16 +1504,12 @@ fun ChatScreen(
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (messages.isEmpty()) {
-                    item {
-                        ChatContentRail(contentMaxWidth = contentMaxWidth) {
-                            EmptyChatState(
-                                showProviderHint = !isAgentConversation,
-                                agentOpening = agentOpening,
-                            )
-                        }
-                    }
-                }
+                emptyChatStateItem(
+                    messageState = messageState,
+                    contentMaxWidth = contentMaxWidth,
+                    showProviderHint = !isAgentConversation,
+                    agentOpening = agentOpening,
+                )
                 items(messages, key = { it.id }) { message ->
                     val persistedParts by container.chatRepository
                         .observeMessageParts(message.id)
@@ -3866,8 +3869,25 @@ private fun InlineStatus(text: String) {
     )
 }
 
+internal fun LazyListScope.emptyChatStateItem(
+    messageState: PersistedMessagesState,
+    contentMaxWidth: Dp,
+    showProviderHint: Boolean,
+    agentOpening: String?,
+) {
+    if (!messageState.isLoadedEmpty()) return
+    item {
+        ChatContentRail(contentMaxWidth = contentMaxWidth) {
+            EmptyChatState(
+                showProviderHint = showProviderHint,
+                agentOpening = agentOpening,
+            )
+        }
+    }
+}
+
 @Composable
-private fun EmptyChatState(
+internal fun EmptyChatState(
     showProviderHint: Boolean,
     agentOpening: String?,
 ) {
