@@ -288,6 +288,7 @@ interface AgentDao {
             ON agent_corpus_chunks.chunkKey = agent_chunk_fts.chunkKey
         WHERE agent_chunk_fts MATCH :ftsQuery
           AND (agent_corpus_chunks.corpusId || ':' || agent_corpus_chunks.corpusHash) IN (:corpusKeys)
+        ORDER BY agent_chunk_fts.chunkKey
         LIMIT :limit
         """,
     )
@@ -301,6 +302,7 @@ interface AgentDao {
         """
         SELECT nodeKey FROM agent_hierarchy_fts
         WHERE agent_hierarchy_fts MATCH :ftsQuery
+        ORDER BY nodeKey
         LIMIT :limit
         """,
     )
@@ -314,6 +316,7 @@ interface AgentDao {
             ON agent_corpus_hierarchy.nodeKey = agent_hierarchy_fts.nodeKey
         WHERE agent_hierarchy_fts MATCH :ftsQuery
           AND (agent_corpus_hierarchy.corpusId || ':' || agent_corpus_hierarchy.corpusHash) IN (:corpusKeys)
+        ORDER BY agent_hierarchy_fts.nodeKey
         LIMIT :limit
         """,
     )

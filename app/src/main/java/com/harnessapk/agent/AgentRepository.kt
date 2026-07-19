@@ -1257,13 +1257,14 @@ class AgentRepository(
         val ftsQuery = buildAgentFtsQuery(query)
         if (corpusKeys.isEmpty() || ftsQuery.isBlank() || limit <= 0) return@withContext emptyList()
         val nodeKeys = dao.searchHierarchyNodeKeysForCorpora(corpusKeys, ftsQuery, limit)
-        val nodes = dao.listHierarchyNodes(nodeKeys).associateBy(AgentHierarchyNodeEntity::nodeKey)
+        val nodes = loadHierarchyClosure(nodeKeys)
         val terms = agentQueryTerms(query)
         nodeKeys.mapNotNull(nodes::get).map { node ->
+            val root = resolveHierarchyRoot(node, nodes)
             AgentHierarchyRoute(
                 nodeKey = node.nodeKey,
                 sourceId = node.sourceId,
-                topLevelId = node.path.substringBefore('/').ifBlank { node.nodeId },
+                topLevelId = root.nodeId,
                 physicalScore = scoreHierarchyNode(node, query, terms),
             )
         }
@@ -1290,7 +1291,7 @@ class AgentRepository(
         } else {
             dao.searchChunkKeys(corpusKeys, ftsQuery, limit)
         }
-        val candidateKeys = (routedKeys + ftsKeys).distinct().take(limit)
+        val candidateKeys = (routedKeys + ftsKeys).distinct()
         val chunks = dao.listChunks(candidateKeys).associateBy(AgentChunkEntity::chunkKey)
         val terms = agentQueryTerms(query)
         candidateKeys.mapNotNull(chunks::get).map { chunk ->
@@ -1310,13 +1311,51 @@ class AgentRepository(
                 routeIds = hierarchyRoutes.filter { route ->
                     route.sourceId == chunk.sourceId &&
                         (route.topLevelId in parentIds || route.nodeKey.substringAfter(':') in parentIds)
-                }.map(AgentHierarchyRoute::topLevelId).toSet(),
+                }.map { route -> "${route.sourceId}/${route.topLevelId}" }.toSet(),
             )
-        }
+        }.sortedWith(
+            compareByDescending<AgentRetrievalChunk>(AgentRetrievalChunk::physicalScore)
+                .thenBy(AgentRetrievalChunk::sourceId)
+                .thenBy(AgentRetrievalChunk::period)
+                .thenBy(AgentRetrievalChunk::chunkKey),
+        ).take(limit)
     }
 
     private suspend fun versionCorpusKeys(agentId: String, version: Int): List<String> =
         dao.listVersionCorpora(agentId, version).map { corpusKey(it.corpusId, it.sourceHash) }
+
+    private suspend fun loadHierarchyClosure(nodeKeys: List<String>): Map<String, AgentHierarchyNodeEntity> {
+        val nodes = linkedMapOf<String, AgentHierarchyNodeEntity>()
+        var pending = nodeKeys.distinct()
+        while (pending.isNotEmpty()) {
+            val loaded = dao.listHierarchyNodes(pending)
+            val loadedKeys = loaded.mapTo(mutableSetOf(), AgentHierarchyNodeEntity::nodeKey)
+            if (pending.any { it !in loadedKeys }) throw AgentBundleException("层级路由父链缺失")
+            loaded.forEach { node -> nodes[node.nodeKey] = node }
+            pending = loaded.mapNotNull(AgentHierarchyNodeEntity::parentNodeKey)
+                .filterNot(nodes::containsKey)
+                .distinct()
+        }
+        return nodes
+    }
+
+    private fun resolveHierarchyRoot(
+        start: AgentHierarchyNodeEntity,
+        nodes: Map<String, AgentHierarchyNodeEntity>,
+    ): AgentHierarchyNodeEntity {
+        var current = start
+        val visited = mutableSetOf<String>()
+        while (current.parentNodeKey != null) {
+            if (!visited.add(current.nodeKey)) throw AgentBundleException("层级路由父链存在循环")
+            val parent = nodes[current.parentNodeKey]
+                ?: throw AgentBundleException("层级路由父链缺失")
+            if (parent.sourceId != start.sourceId || parent.sourceHash != start.sourceHash) {
+                throw AgentBundleException("层级路由父链跨越来源")
+            }
+            current = parent
+        }
+        return current
+    }
 
     private suspend fun installCorpus(
         bundle: ParsedAgentBundle,
@@ -1681,25 +1720,19 @@ private fun AgentVersionEntity.toContextPackage(
     installedRequiredCorpusCount: Int,
     missingOptionalCoverage: List<String>,
 ): AgentContextPackage {
-    val stances = parseContextJsonLines(worldviewJsonl).mapNotNull(JsonObject::toWorldview)
+    val decoded = if (schemaVersion >= 2) decodeStoredV2RuntimeAssets() else null
+    val stances = decoded?.stances
+        ?: parseContextJsonLines(worldviewJsonl).mapNotNull(JsonObject::toWorldview)
     return AgentContextPackage(
         agentId = agentId,
         version = version,
         schemaVersion = schemaVersion,
         persona = persona,
-        identity = if (schemaVersion >= 2) parseContextObject(identityJson)?.toIdentity() else null,
-        voice = if (schemaVersion >= 2) parseContextObject(voiceJson)?.toVoice() else null,
+        identity = decoded?.identity,
+        voice = decoded?.voice,
         stances = stances,
-        episodes = if (schemaVersion >= 2) {
-            parseContextJsonLines(episodesJsonl).mapNotNull(JsonObject::toEpisode)
-        } else {
-            emptyList()
-        },
-        examples = if (schemaVersion >= 2) {
-            parseContextJsonLines(examplesJsonl).mapNotNull(JsonObject::toExample)
-        } else {
-            emptyList()
-        },
+        episodes = decoded?.episodes.orEmpty(),
+        examples = decoded?.examples.orEmpty(),
         opener = if (schemaVersion >= 2) parseContextObject(openersJson)?.string("default") else null,
         requiredCorpusCount = requiredCorpusCount,
         installedRequiredCorpusCount = installedRequiredCorpusCount,
@@ -1709,6 +1742,161 @@ private fun AgentVersionEntity.toContextPackage(
 
 private val contextJson = Json { ignoreUnknownKeys = true }
 
+private data class StoredV2RuntimeAssets(
+    val identity: V2Identity,
+    val voice: V2Voice,
+    val stances: List<V2Worldview>,
+    val episodes: List<V2Episode>,
+    val examples: List<V2Example>,
+)
+
+private fun AgentVersionEntity.decodeStoredV2RuntimeAssets(): StoredV2RuntimeAssets {
+    val identity = parseRequiredContextObject(identityJson, "identity").toStrictIdentity("identity")
+    val voice = parseRequiredContextObject(voiceJson, "voice").toStrictVoice("voice")
+    val stances = parseRequiredContextJsonLines(worldviewJsonl, "worldview", JsonObject::toStrictWorldview)
+    val episodes = parseRequiredContextJsonLines(episodesJsonl, "episodes", JsonObject::toStrictEpisode)
+    parseRequiredConcepts(conceptsJson)
+    val examples = parseRequiredContextJsonLines(examplesJsonl, "examples", JsonObject::toStrictExample)
+    return StoredV2RuntimeAssets(identity, voice, stances, episodes, examples)
+}
+
+private fun parseRequiredContextObject(raw: String, label: String): JsonObject {
+    val element = try {
+        contextJson.parseToJsonElement(raw)
+    } catch (error: Throwable) {
+        throw invalidStoredRuntimeAsset(label, error.message)
+    }
+    return element as? JsonObject ?: throw invalidStoredRuntimeAsset(label, "必须是 JSON 对象")
+}
+
+private fun <T> parseRequiredContextJsonLines(
+    raw: String,
+    label: String,
+    decode: JsonObject.(String) -> T,
+): List<T> = raw.lineSequence()
+    .filter(String::isNotBlank)
+    .mapIndexed { index, line ->
+        val rowLabel = "$label 第 ${index + 1} 行"
+        parseRequiredContextObject(line, rowLabel).decode(rowLabel)
+    }
+    .toList()
+
+private fun parseRequiredConcepts(raw: String) {
+    val element = try {
+        contextJson.parseToJsonElement(raw)
+    } catch (error: Throwable) {
+        throw invalidStoredRuntimeAsset("concepts", error.message)
+    }
+    val concepts = element as? JsonArray
+        ?: throw invalidStoredRuntimeAsset("concepts", "必须是 JSON 数组")
+    concepts.forEachIndexed { index, value ->
+        val label = "concepts[$index]"
+        val row = value as? JsonObject ?: throw invalidStoredRuntimeAsset(label, "必须是 JSON 对象")
+        row.requiredStoredString("id", label)
+        row.requiredStoredString("name", label)
+        row.storedStrings("aliases", label)
+        row.storedStrings("keywords", label)
+        row.storedStrings("evidence", label)
+    }
+}
+
+private fun JsonObject.toStrictIdentity(label: String): V2Identity {
+    val relationships = storedArray("relationships", label).mapIndexed { index, value ->
+        val rowLabel = "$label relationships[$index]"
+        val row = value as? JsonObject ?: throw invalidStoredRuntimeAsset(rowLabel, "必须是 JSON 对象")
+        V2Relationship(
+            subject = row.requiredStoredString("subject", rowLabel),
+            relation = row.requiredStoredString("relation", rowLabel),
+            period = row.optionalStoredString("period", rowLabel),
+            evidence = row.storedStrings("evidence", rowLabel),
+        )
+    }
+    return V2Identity(
+        selfNames = storedStrings("selfNames", label),
+        timeHorizon = optionalStoredString("timeHorizon", label),
+        roles = storedStrings("roles", label),
+        relationships = relationships,
+    )
+}
+
+private fun JsonObject.toStrictVoice(label: String): V2Voice = V2Voice(
+    defaultForm = optionalStoredString("defaultForm", label),
+    sentenceRhythm = storedStrings("sentenceRhythm", label),
+    rhetoricalMoves = storedStrings("rhetoricalMoves", label),
+    preferredTerms = storedStrings("preferredTerms", label),
+    avoidPatterns = storedStrings("avoidPatterns", label),
+    evidence = storedStrings("evidence", label),
+)
+
+private fun JsonObject.toStrictWorldview(label: String): V2Worldview {
+    val confidence = when (val value = this["confidence"]) {
+        null -> 0.0
+        is JsonPrimitive -> value.doubleOrNull?.takeIf(Double::isFinite)
+            ?: throw invalidStoredRuntimeAsset(label, "confidence 必须是有限数值")
+        else -> throw invalidStoredRuntimeAsset(label, "confidence 必须是有限数值")
+    }
+    return V2Worldview(
+        id = requiredStoredString("id", label),
+        topic = requiredStoredString("topic", label),
+        statement = requiredStoredString("statement", label),
+        conditions = storedStrings("conditions", label),
+        period = optionalStoredString("period", label),
+        aliases = storedStrings("aliases", label),
+        confidence = confidence,
+        evidence = storedStrings("evidence", label),
+    )
+}
+
+private fun JsonObject.toStrictEpisode(label: String): V2Episode = V2Episode(
+    id = requiredStoredString("id", label),
+    period = optionalStoredString("period", label),
+    location = optionalStoredString("location", label),
+    participants = storedStrings("participants", label),
+    summary = requiredStoredString("summary", label),
+    meaning = optionalStoredString("meaning", label),
+    evidence = storedStrings("evidence", label),
+)
+
+private fun JsonObject.toStrictExample(label: String): V2Example = V2Example(
+    id = requiredStoredString("id", label),
+    intent = optionalStoredString("intent", label),
+    user = requiredStoredString("user", label),
+    assistant = requiredStoredString("assistant", label),
+    styleTags = storedStrings("styleTags", label),
+    generationType = requiredStoredString("generationType", label),
+    evidence = storedStrings("evidence", label),
+)
+
+private fun JsonObject.requiredStoredString(key: String, label: String): String =
+    optionalStoredString(key, label).takeIf(String::isNotBlank)
+        ?: throw invalidStoredRuntimeAsset(label, "缺少 $key")
+
+private fun JsonObject.optionalStoredString(key: String, label: String): String = when (val value = this[key]) {
+    null -> ""
+    is JsonPrimitive -> value.takeIf(JsonPrimitive::isString)?.contentOrNull?.trim()
+        ?: throw invalidStoredRuntimeAsset(label, "$key 必须是字符串")
+    else -> throw invalidStoredRuntimeAsset(label, "$key 必须是字符串")
+}
+
+private fun JsonObject.storedArray(key: String, label: String): JsonArray = when (val value = this[key]) {
+    null -> JsonArray(emptyList())
+    is JsonArray -> value
+    else -> throw invalidStoredRuntimeAsset(label, "$key 必须是数组")
+}
+
+private fun JsonObject.storedStrings(key: String, label: String): List<String> =
+    storedArray(key, label).mapIndexed { index, value ->
+        (value as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.contentOrNull?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?: throw invalidStoredRuntimeAsset(label, "$key[$index] 必须是非空字符串")
+    }
+
+private fun invalidStoredRuntimeAsset(label: String, detail: String?): AgentBundleException {
+    val boundedLabel = label.take(64)
+    val boundedDetail = detail.orEmpty().replace(Regex("\\s+"), " ").take(96)
+    return AgentBundleException("V2 runtime asset $boundedLabel 无效：$boundedDetail")
+}
+
 private fun parseContextObject(raw: String): JsonObject? = raw.trim().takeIf(String::isNotBlank)?.let { value ->
     runCatching { contextJson.parseToJsonElement(value) as? JsonObject }.getOrNull()
 }
@@ -1717,35 +1905,6 @@ private fun parseContextJsonLines(raw: String): List<JsonObject> = raw.lineSeque
     .filter(String::isNotBlank)
     .mapNotNull(::parseContextObject)
     .toList()
-
-private fun JsonObject.toIdentity(): V2Identity? {
-    val selfNames = strings("selfNames")
-    val timeHorizon = string("timeHorizon").orEmpty()
-    val roles = strings("roles")
-    if (selfNames.isEmpty() && timeHorizon.isBlank() && roles.isEmpty()) return null
-    val relationships = (this["relationships"] as? JsonArray).orEmpty().mapNotNull { value ->
-        val relationship = value as? JsonObject ?: return@mapNotNull null
-        val subject = relationship.string("subject") ?: return@mapNotNull null
-        V2Relationship(
-            subject = subject,
-            relation = relationship.string("relation").orEmpty(),
-            period = relationship.string("period").orEmpty(),
-            evidence = relationship.strings("evidence"),
-        )
-    }
-    return V2Identity(selfNames, timeHorizon, roles, relationships)
-}
-
-private fun JsonObject.toVoice(): V2Voice? {
-    val defaultForm = string("defaultForm").orEmpty()
-    val rhythm = strings("sentenceRhythm")
-    val moves = strings("rhetoricalMoves")
-    val terms = strings("preferredTerms")
-    val avoid = strings("avoidPatterns")
-    val evidence = strings("evidence")
-    if (defaultForm.isBlank() && rhythm.isEmpty() && moves.isEmpty() && terms.isEmpty() && avoid.isEmpty()) return null
-    return V2Voice(defaultForm, rhythm, moves, terms, avoid, evidence)
-}
 
 private fun JsonObject.toWorldview(): V2Worldview? {
     val statement = string("statement") ?: return null
@@ -1757,32 +1916,6 @@ private fun JsonObject.toWorldview(): V2Worldview? {
         period = string("period").orEmpty(),
         aliases = strings("aliases"),
         confidence = (this["confidence"] as? JsonPrimitive)?.doubleOrNull ?: 0.0,
-        evidence = strings("evidence"),
-    )
-}
-
-private fun JsonObject.toEpisode(): V2Episode? {
-    val id = string("id") ?: return null
-    return V2Episode(
-        id = id,
-        period = string("period").orEmpty(),
-        location = string("location").orEmpty(),
-        participants = strings("participants"),
-        summary = string("summary").orEmpty(),
-        meaning = string("meaning").orEmpty(),
-        evidence = strings("evidence"),
-    )
-}
-
-private fun JsonObject.toExample(): V2Example? {
-    val id = string("id") ?: return null
-    return V2Example(
-        id = id,
-        intent = string("intent").orEmpty(),
-        user = string("user").orEmpty(),
-        assistant = string("assistant").orEmpty(),
-        styleTags = strings("styleTags"),
-        generationType = string("generationType").orEmpty(),
         evidence = strings("evidence"),
     )
 }

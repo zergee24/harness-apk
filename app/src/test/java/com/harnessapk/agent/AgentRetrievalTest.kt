@@ -1447,6 +1447,7 @@ internal class FakeAgentDao : AgentDao {
     val hierarchyNodes = linkedMapOf<String, AgentHierarchyNodeEntity>()
     val hierarchySearchRows = mutableListOf<AgentHierarchyFtsEntity>()
     var searchResult: List<String> = emptyList()
+    var routedSearchResult: List<String> = emptyList()
     var lastCorpusKeys: List<String> = emptyList()
     var maxChunkBatchSize: Int = 0
     val referencedChunkKeys = mutableSetOf<String>()
@@ -1713,6 +1714,7 @@ internal class FakeAgentDao : AgentDao {
         nodeKeys: List<String>,
         limit: Int,
     ): List<String> {
+        if (routedSearchResult.isNotEmpty()) return routedSearchResult.take(limit)
         return nodeKeys.mapNotNull(hierarchyNodes::get).mapNotNull { node ->
             chunks.values.firstOrNull { chunk -> node.nodeId in chunk.parentPath.split('/') }?.chunkKey
         }.distinct().take(limit)

@@ -477,6 +477,60 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun ftsCandidateLimitsAreStableAcrossDifferentInsertionOrders() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        suspend fun search(order: List<String>): Pair<List<String>, List<String>> {
+            val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+            val dao = db.agentDao()
+            val corpusHash = "f".repeat(64)
+            dao.insertCorpus(AgentCorpusEntity("corpus", corpusHash, "corpus", 1L, 1L))
+            val chunks = order.map { key ->
+                AgentChunkEntity(
+                    chunkKey = key,
+                    sourceHash = corpusHash,
+                    chunkId = key,
+                    sourceTitle = "source",
+                    location = "location",
+                    text = "shared evidence",
+                    keywordsText = "shared",
+                )
+            }
+            dao.insertChunks(chunks)
+            dao.insertCorpusChunkRefs(chunks.map { AgentCorpusChunkCrossRef("corpus", corpusHash, it.chunkKey) })
+            dao.insertChunkSearchRows(chunks.map { AgentChunkFtsEntity(it.chunkKey, "shared evidence") })
+
+            val nodes = order.map { key ->
+                AgentHierarchyNodeEntity(
+                    nodeKey = key,
+                    sourceId = "source",
+                    sourceHash = corpusHash,
+                    nodeId = key,
+                    kind = "section",
+                    title = "shared",
+                    parentNodeKey = null,
+                    path = "shared",
+                    summary = "evidence",
+                )
+            }
+            dao.insertHierarchyNodes(nodes)
+            dao.insertHierarchySearchRows(nodes.map { AgentHierarchyFtsEntity(it.nodeKey, "shared evidence") })
+
+            val result = dao.searchChunkKeys(listOf("corpus:$corpusHash"), "shared", 2) to
+                dao.searchHierarchyNodeKeys("shared", 2)
+            db.close()
+            return result
+        }
+
+        val first = search(listOf("z-key", "a-key", "m-key"))
+        val second = search(listOf("m-key", "z-key", "a-key"))
+
+        assertEquals(first, second)
+        assertEquals(listOf("a-key", "m-key"), first.first)
+        assertEquals(listOf("a-key", "m-key"), first.second)
+    }
+
+    @Test
     fun migratesRealVersion11FixtureAndPreservesV1DataAndSearch() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-11-12-${System.nanoTime()}.db"

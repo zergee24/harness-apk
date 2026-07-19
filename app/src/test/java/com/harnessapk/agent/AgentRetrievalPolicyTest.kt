@@ -47,4 +47,24 @@ class AgentRetrievalPolicyTest {
         assertEquals(AgentQueryIntent.TEMPORAL, policy.intentFor("1930年和1940年的判断有什么不同？"))
         assertEquals(AgentQueryIntent.GLOBAL, policy.intentFor("请总结一下你的主要观点"))
     }
+
+    @Test
+    fun greetingAndThanksOnlyClassifyAsRelationshipWhenTheWholeMessageIsSocial() {
+        val matrix = listOf(
+            "hi" to AgentQueryIntent.RELATIONSHIP,
+            "Thanks, continue please." to AgentQueryIntent.RELATIONSHIP,
+            "Which year was the essay published?" to AgentQueryIntent.EXACT_FACT,
+            "What is his method?" to AgentQueryIntent.STANCE_METHOD,
+            "This happened where?" to AgentQueryIntent.EXACT_FACT,
+            "hi, which year was the essay published?" to AgentQueryIntent.EXACT_FACT,
+            "thanks, please summarize the argument" to AgentQueryIntent.GLOBAL,
+            "谢谢，《实践论》发表于哪一年？" to AgentQueryIntent.EXACT_FACT,
+            "谢谢，你如何开展调查？" to AgentQueryIntent.STANCE_METHOD,
+            "你好，请总结一下你的主要观点" to AgentQueryIntent.GLOBAL,
+        )
+
+        matrix.forEach { (query, expected) ->
+            assertEquals(query, expected, policy.intentFor(query))
+        }
+    }
 }

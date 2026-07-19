@@ -77,6 +77,7 @@ class AgentContextAssemblerTest {
                 state = AgentStatus.READY.name,
                 identityJson = """{"selfNames":["历史人物"],"timeHorizon":"第三版时期","roles":["研究者"],"relationships":[]}""",
                 voiceJson = """{"defaultForm":"第三版语气","sentenceRhythm":[],"rhetoricalMoves":[],"preferredTerms":[],"avoidPatterns":["套话"],"evidence":[]}""",
+                conceptsJson = "[]",
                 openersJson = """{"default":"第三版开场","alternatives":[]}""",
                 requiredCorpusCount = 1,
             )
@@ -104,6 +105,113 @@ class AgentContextAssemblerTest {
     }
 
     @Test
+    fun repositoryRejectsAnyMalformedRequiredV2RuntimeAssetButAllowsBadOpener() = runTest {
+        val valid = AgentVersionEntity(
+            agentId = "agent-strict",
+            version = 2,
+            schemaVersion = 2,
+            bundlePath = "/tmp/strict.hagent",
+            bundleSha256 = "sha-strict",
+            manifestJson = "{}",
+            persona = "strict persona",
+            worldviewJsonl = """{"id":"stance","topic":"topic","statement":"statement","conditions":[],"period":"","aliases":[],"confidence":1.0,"evidence":[]}""",
+            installedAt = 1L,
+            state = AgentStatus.READY.name,
+            identityJson = """{"selfNames":["name"],"timeHorizon":"","roles":[],"relationships":[]}""",
+            voiceJson = """{"defaultForm":"","sentenceRhythm":[],"rhetoricalMoves":[],"preferredTerms":[],"avoidPatterns":[],"evidence":[]}""",
+            episodesJsonl = """{"id":"episode","period":"","location":"","participants":[],"summary":"summary","meaning":"","evidence":[]}""",
+            conceptsJson = """[{"id":"concept","name":"name","aliases":[],"keywords":[],"evidence":[]}]""",
+            examplesJsonl = """{"id":"example","intent":"","user":"question","assistant":"answer","styleTags":[],"generationType":"curated","evidence":[]}""",
+            openersJson = "{bad opener",
+            requiredCorpusCount = 1,
+        )
+        val corruptions = listOf(
+            "identity" to valid.copy(identityJson = "{bad"),
+            "voice" to valid.copy(voiceJson = """{"defaultForm":42}"""),
+            "worldview" to valid.copy(worldviewJsonl = """{"id":"stance","statement":"missing topic"}"""),
+            "episodes" to valid.copy(episodesJsonl = """{"id":"episode","summary":"ok"}\n{bad"""),
+            "concepts" to valid.copy(conceptsJson = """[{"id":"concept"}]"""),
+            "examples" to valid.copy(examplesJsonl = """{"id":"example","user":"question"}"""),
+        )
+
+        corruptions.forEach { (label, storedVersion) ->
+            val repository = repositoryFor(storedVersion)
+            val failure = runCatching {
+                AgentContextAssembler(repository).assemble(
+                    AgentContextRequest("agent-strict", 2, "具体事实是什么？"),
+                )
+            }.exceptionOrNull()
+
+            assertTrue(label, failure is AgentBundleException)
+            assertTrue(label, failure?.message.orEmpty().length in 1..200)
+        }
+
+        val context = AgentContextAssembler(repositoryFor(valid)).assemble(
+            AgentContextRequest("agent-strict", 2, "具体事实是什么？"),
+        )
+        assertTrue(context != null)
+        assertNull(repositoryFor(valid).opening("agent-strict", 2))
+    }
+
+    @Test
+    fun repositoryResolvesHierarchyRoutesThroughParentChainBySourceAndRootId() = runTest {
+        val dao = FakeAgentDao().apply {
+            version = strictVersion("agent-routes", 2)
+            versionCorpora = listOf(
+                AgentVersionCorpusCrossRef("agent-routes", 2, "core", "hash-a", true),
+                AgentVersionCorpusCrossRef("agent-routes", 2, "extra", "hash-b", false),
+            )
+            val nodes = listOf(
+                hierarchyNode("hash-a:root-a", "source-a", "hash-a", "root-a", null, "同名标题"),
+                hierarchyNode("hash-a:child-a", "source-a", "hash-a", "child-a", "hash-a:root-a", "同名标题"),
+                hierarchyNode("hash-b:root-b", "source-b", "hash-b", "root-b", null, "同名标题"),
+                hierarchyNode("hash-b:child-b", "source-b", "hash-b", "child-b", "hash-b:root-b", "同名标题"),
+            )
+            nodes.forEach { hierarchyNodes[it.nodeKey] = it }
+            hierarchySearchRows += listOf(
+                com.harnessapk.storage.AgentHierarchyFtsEntity("hash-a:child-a", "同名标题"),
+                com.harnessapk.storage.AgentHierarchyFtsEntity("hash-b:child-b", "同名标题"),
+            )
+        }
+        val repository = repositoryFor(dao)
+
+        val routes = repository.searchHierarchy("agent-routes", 2, "同名标题", 8)
+
+        assertEquals(
+            setOf("source-a" to "root-a", "source-b" to "root-b"),
+            routes.map { it.sourceId to it.topLevelId }.toSet(),
+        )
+        assertEquals(2, routes.map { "${it.sourceId}/${it.topLevelId}" }.distinct().size)
+    }
+
+    @Test
+    fun repositoryReranksRoutedAndFtsCandidatesBeforeApplyingTheMergedLimit() = runTest {
+        val dao = FakeAgentDao().apply {
+            version = strictVersion("agent-merge", 2)
+            versionCorpora = listOf(
+                AgentVersionCorpusCrossRef("agent-merge", 2, "core", "hash", true),
+            )
+            routedSearchResult = listOf("routed-1", "routed-2")
+            searchResult = listOf("fts-1", "fts-2")
+            chunks["routed-1"] = storedChunk("routed-1", "source-r1", "unrelated")
+            chunks["routed-2"] = storedChunk("routed-2", "source-r2", "unrelated")
+            chunks["fts-1"] = storedChunk("fts-1", "source-f1", "target")
+            chunks["fts-2"] = storedChunk("fts-2", "source-f2", "target")
+        }
+        val repository = repositoryFor(dao)
+
+        val chunks = repository.searchChunks(
+            agentId = "agent-merge",
+            version = 2,
+            query = "target",
+            limit = 2,
+            hierarchyRoutes = listOf(AgentHierarchyRoute("node", "source-r1", "root", 1)),
+        )
+
+        assertEquals(listOf("fts-1", "fts-2"), chunks.map(AgentRetrievalChunk::chunkKey))
+    }
+
+    @Test
     fun relationshipIntentUsesIdentityAndMemoryWithoutRetrieval() = runTest {
         val source = FakeContextSource(packageData())
         val context = AgentContextAssembler(source).assemble(
@@ -121,6 +229,31 @@ class AgentContextAssemblerTest {
         assertTrue(context.systemPrompt.contains("用户正在比较两种研究方法"))
         assertTrue(context.systemPrompt.contains("关系记忆"))
         assertTrue(context.evidence.isEmpty())
+    }
+
+    @Test
+    fun relationshipIntentInjectsOnlyBoundedQueryRelevantRelationships() = runTest {
+        val relationships = listOf(
+            V2Relationship("周先生", "师友", "1930-1940", listOf("evidence-a")),
+            V2Relationship("周先生的同事", "共同研究者", "1935", listOf("evidence-b")),
+            V2Relationship("李先生", "同事", "1950", listOf("evidence-c")),
+            V2Relationship("王女士", "家人", "1960", listOf("evidence-d")),
+            V2Relationship("陈先生", "朋友", "1970", listOf("evidence-e")),
+            V2Relationship("赵先生", "朋友", "1980", listOf("evidence-f")),
+        )
+        val source = FakeContextSource(packageData(relationships = relationships))
+
+        val context = AgentContextAssembler(source).assemble(request("你和周先生是什么关系？"))!!
+
+        assertEquals(AgentQueryIntent.RELATIONSHIP, context.diagnostics.intent)
+        assertEquals(0, source.chunkSearches)
+        assertEquals(0, source.hierarchySearches)
+        assertTrue(context.systemPrompt.contains("周先生"))
+        assertTrue(context.systemPrompt.contains("师友"))
+        assertTrue(context.systemPrompt.contains("1930-1940"))
+        assertFalse(context.systemPrompt.contains("李先生"))
+        assertFalse(context.systemPrompt.contains("王女士"))
+        assertFalse(context.systemPrompt.contains("evidence-a"))
     }
 
     @Test
@@ -152,12 +285,179 @@ class AgentContextAssemblerTest {
     }
 
     @Test
+    fun periodReservationContinuesPastRejectedCandidatesBeforeOrdinaryFill() = runTest {
+        val early = (0 until 8).map { index ->
+            chunk(
+                key = "early-$index",
+                sourceId = "source-${index / 2}",
+                period = "early",
+                duplicateGroup = if (index == 0) "shared" else "early-$index",
+                authorship = V2Authorship.DIRECT,
+                score = 100 - index,
+                text = "early evidence $index",
+            )
+        }
+        val candidates = early + listOf(
+            chunk("late-blocked", "source-late-a", "late", "shared", V2Authorship.DIRECT, 91, "blocked"),
+            chunk("late-valid", "source-late-b", "late", "late-valid", V2Authorship.DIRECT, 1, "late evidence"),
+        )
+
+        val context = AgentContextAssembler(
+            FakeContextSource(packageData(stances = emptyList()), candidates = candidates),
+        ).assemble(request("你早年和晚年的观点如何变化？"))!!
+
+        assertEquals(8, context.diagnostics.selectedChunkKeys.size)
+        assertTrue(context.diagnostics.selectedChunkKeys.contains("late-valid"))
+        assertEquals(2, context.diagnostics.periodCount)
+    }
+
+    @Test
+    fun periodReservationSkipsAnUnavailablePeriodAndReservesTheNextAvailableOne() = runTest {
+        val middle = (0 until 8).map { index ->
+            chunk(
+                key = "middle-$index",
+                sourceId = "source-${index / 2}",
+                period = "middle",
+                duplicateGroup = "middle-$index",
+                authorship = V2Authorship.DIRECT,
+                score = 90 - index,
+                text = "middle evidence $index",
+            )
+        }
+        val candidates = listOf(
+            chunk(
+                "early-oversized",
+                "source-early",
+                "early",
+                "early",
+                V2Authorship.DIRECT,
+                100,
+                "x".repeat(10_000),
+            ),
+        ) + middle + listOf(
+            chunk("late-valid", "source-late", "late", "late", V2Authorship.DIRECT, 1, "late evidence"),
+        )
+
+        val context = AgentContextAssembler(
+            FakeContextSource(packageData(stances = emptyList()), candidates = candidates),
+        ).assemble(request("你早年和晚年的观点如何变化？"))!!
+
+        assertTrue(context.diagnostics.selectedChunkKeys.contains("late-valid"))
+        assertEquals(setOf("middle", "late"), context.evidence.map { evidence ->
+            candidates.single { it.chunkKey == evidence.chunkKey }.period
+        }.toSet())
+    }
+
+    @Test
+    fun routeReservationContinuesPastRejectedCandidatesAndKeepsSourceRootIdentity() = runTest {
+        val routeA = AgentHierarchyRoute("node-a", "source-a", "root", 10)
+        val routeB = AgentHierarchyRoute("node-b", "source-b", "root", 9)
+        val filler = (0 until 11).map { index ->
+            chunk(
+                key = "filler-$index",
+                sourceId = "source-${index / 2}",
+                period = "same",
+                duplicateGroup = if (index == 0) "shared" else "filler-$index",
+                authorship = V2Authorship.DIRECT,
+                score = 100 - index,
+                text = "filler $index",
+                routeIds = if (index == 0) setOf("source-a/root") else emptySet(),
+            )
+        }
+        val candidates = filler + listOf(
+            chunk(
+                "route-b-blocked",
+                "source-b",
+                "same",
+                "shared",
+                V2Authorship.DIRECT,
+                88,
+                "blocked",
+                setOf("source-b/root"),
+            ),
+            chunk(
+                "route-b-valid",
+                "source-b",
+                "same",
+                "route-b-valid",
+                V2Authorship.DIRECT,
+                1,
+                "route b",
+                setOf("source-b/root"),
+            ),
+        )
+
+        val context = AgentContextAssembler(
+            FakeContextSource(packageData(stances = emptyList()), candidates = candidates, routes = listOf(routeA, routeB)),
+        ).assemble(request("请全面概括你的思想体系"))!!
+
+        assertEquals(12, context.diagnostics.selectedChunkKeys.size)
+        assertTrue(context.diagnostics.selectedChunkKeys.contains("route-b-valid"))
+        assertEquals(setOf("source-a/root", "source-b/root"), context.diagnostics.selectedRouteIds.toSet())
+    }
+
+    @Test
+    fun evidenceBudgetChargesTheCompleteRenderedBlock() = runTest {
+        val fitting = chunk(
+            "fitting",
+            "source-a",
+            "period-a",
+            "fitting",
+            V2Authorship.DIRECT,
+            10,
+            "x".repeat(4_720),
+        )
+        val oversized = chunk(
+            "oversized",
+            "source-b",
+            "period-b",
+            "oversized",
+            V2Authorship.DIRECT,
+            9,
+            "y".repeat(4_780),
+        )
+
+        val context = AgentContextAssembler(
+            FakeContextSource(packageData(stances = emptyList()), candidates = listOf(oversized, fitting)),
+        ).assemble(request("具体事实是什么？"))!!
+        val expectedBlock = "[source-a | period-a | loc-fitting | direct]\n${fitting.text}\n"
+
+        assertEquals(listOf("fitting"), context.diagnostics.selectedChunkKeys)
+        assertEquals(expectedBlock.length, context.diagnostics.selectedCharacterCount)
+        assertTrue(context.diagnostics.selectedCharacterCount <= context.diagnostics.characterBudget)
+        assertTrue(context.systemPrompt.contains(expectedBlock.trimEnd()))
+    }
+
+    @Test
+    fun exactFactAllocatesRawEvidenceBeforeAStanceCanExhaustTheBudget() = runTest {
+        val oversizedStance = V2Worldview(
+            id = "stance-large",
+            topic = "事实",
+            statement = "立场".repeat(2_390),
+            conditions = emptyList(),
+            period = "",
+            aliases = emptyList(),
+            confidence = 1.0,
+            evidence = emptyList(),
+        )
+        val raw = chunk("raw", "source-a", "period-a", "raw", V2Authorship.DIRECT, 10, "直接事实")
+
+        val context = AgentContextAssembler(
+            FakeContextSource(packageData(stances = listOf(oversizedStance)), candidates = listOf(raw)),
+        ).assemble(request("具体事实是什么？"))!!
+
+        assertEquals(listOf("raw"), context.diagnostics.selectedChunkKeys)
+        assertTrue(context.evidence.single().text.contains("直接事实"))
+        assertTrue(context.diagnostics.selectedCharacterCount <= 4_800)
+    }
+
+    @Test
     fun globalSearchUsesMultipleHierarchyRoutesBeforeChildChunks() = runTest {
         val source = FakeContextSource(
             packageData(),
             candidates = listOf(
-                chunk("route-a", "source-a", "early", "g-a", V2Authorship.DIRECT, 9, "路线甲", setOf("top-a")),
-                chunk("route-b", "source-b", "late", "g-b", V2Authorship.DIRECT, 8, "路线乙", setOf("top-b")),
+                chunk("route-a", "source-a", "early", "g-a", V2Authorship.DIRECT, 9, "路线甲", setOf("source-a/top-a")),
+                chunk("route-b", "source-b", "late", "g-b", V2Authorship.DIRECT, 8, "路线乙", setOf("source-b/top-b")),
             ),
             routes = listOf(
                 AgentHierarchyRoute("top-a", "source-a", "top-a", 10),
@@ -169,8 +469,31 @@ class AgentContextAssemblerTest {
 
         assertEquals(listOf("hierarchy", "chunks"), source.calls)
         assertTrue(context.diagnostics.hierarchyRoutingUsed)
-        assertEquals(setOf("top-a", "top-b"), context.diagnostics.selectedRouteIds.toSet())
+        assertEquals(setOf("source-a/top-a", "source-b/top-b"), context.diagnostics.selectedRouteIds.toSet())
         assertEquals(2, context.diagnostics.periodCount)
+    }
+
+    @Test
+    fun v1DiagnosticsSortAndBoundAssetIdsWhileRetainingTotalCount() = runTest {
+        val stances = (0 until 80).map { index ->
+            V2Worldview(
+                id = "stance-${index.toString().padStart(3, '0')}",
+                topic = "topic",
+                statement = "statement",
+                conditions = emptyList(),
+                period = "",
+                aliases = emptyList(),
+                confidence = 1.0,
+                evidence = emptyList(),
+            )
+        }.reversed()
+        val source = FakeContextSource(packageData(stances = stances).copy(schemaVersion = 1))
+
+        val context = AgentContextAssembler(source).assemble(request("你好"))!!
+
+        assertEquals(64, context.diagnostics.selectedAssetIds.size)
+        assertEquals(stances.map(V2Worldview::id).sorted().take(64), context.diagnostics.selectedAssetIds)
+        assertEquals(80, context.diagnostics.selectedAssetTotalCount)
     }
 
     @Test
@@ -231,6 +554,10 @@ class AgentContextAssemblerTest {
         persona: String = "人格内核",
         opener: String = "固定开场",
         voice: V2Voice = V2Voice("自然回答", emptyList(), emptyList(), emptyList(), emptyList(), emptyList()),
+        relationships: List<V2Relationship> = emptyList(),
+        stances: List<V2Worldview> = listOf(
+            V2Worldview("stance-1", "调查", "先调查再判断", emptyList(), "all", emptyList(), 1.0, listOf("a")),
+        ),
         requiredCorpusCount: Int = 1,
         installedRequiredCorpusCount: Int = 1,
         missingOptionalCoverage: List<String> = emptyList(),
@@ -239,17 +566,86 @@ class AgentContextAssemblerTest {
         version = 7,
         schemaVersion = 2,
         persona = persona,
-        identity = V2Identity(listOf("测试人物"), "1900-1970", listOf("研究者"), emptyList()),
+        identity = V2Identity(listOf("测试人物"), "1900-1970", listOf("研究者"), relationships),
         voice = voice,
-        stances = listOf(
-            V2Worldview("stance-1", "调查", "先调查再判断", emptyList(), "all", emptyList(), 1.0, listOf("a")),
-        ),
+        stances = stances,
         episodes = emptyList(),
         examples = emptyList(),
         opener = opener,
         requiredCorpusCount = requiredCorpusCount,
         installedRequiredCorpusCount = installedRequiredCorpusCount,
         missingOptionalCoverage = missingOptionalCoverage,
+    )
+
+    private fun repositoryFor(version: AgentVersionEntity): AgentRepository {
+        val dao = FakeAgentDao().apply {
+            this.version = version
+            versionCorpora = listOf(
+                AgentVersionCorpusCrossRef(version.agentId, version.version, "core", "hash", true),
+            )
+        }
+        return repositoryFor(dao)
+    }
+
+    private fun repositoryFor(dao: FakeAgentDao): AgentRepository {
+        val root = java.nio.file.Files.createTempDirectory("b8-fix-repository").toFile()
+        return AgentRepository(
+            filesDir = root.resolve("files"),
+            cacheDir = root.resolve("cache"),
+            dao = dao,
+            timeProvider = TimeProvider { 1L },
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+    }
+
+    private fun strictVersion(agentId: String, version: Int) = AgentVersionEntity(
+        agentId = agentId,
+        version = version,
+        schemaVersion = 2,
+        bundlePath = "/tmp/$agentId.hagent",
+        bundleSha256 = "sha-$agentId",
+        manifestJson = "{}",
+        persona = "persona",
+        worldviewJsonl = "",
+        installedAt = 1L,
+        state = AgentStatus.READY.name,
+        identityJson = """{"selfNames":[],"timeHorizon":"","roles":[],"relationships":[]}""",
+        voiceJson = """{"defaultForm":"","sentenceRhythm":[],"rhetoricalMoves":[],"preferredTerms":[],"avoidPatterns":[],"evidence":[]}""",
+        conceptsJson = "[]",
+        requiredCorpusCount = 1,
+    )
+
+    private fun hierarchyNode(
+        nodeKey: String,
+        sourceId: String,
+        sourceHash: String,
+        nodeId: String,
+        parentNodeKey: String?,
+        title: String,
+    ) = com.harnessapk.storage.AgentHierarchyNodeEntity(
+        nodeKey = nodeKey,
+        sourceId = sourceId,
+        sourceHash = sourceHash,
+        nodeId = nodeId,
+        kind = "section",
+        title = title,
+        parentNodeKey = parentNodeKey,
+        path = title,
+        summary = title,
+    )
+
+    private fun storedChunk(key: String, sourceId: String, text: String) = AgentChunkEntity(
+        chunkKey = key,
+        sourceId = sourceId,
+        sourceHash = "hash",
+        chunkId = key,
+        sourceTitle = sourceId,
+        period = "period",
+        authorship = V2Authorship.DIRECT.wireName,
+        location = "location",
+        text = text,
+        keywordsText = text,
+        duplicateGroup = key,
     )
 
     private fun chunk(

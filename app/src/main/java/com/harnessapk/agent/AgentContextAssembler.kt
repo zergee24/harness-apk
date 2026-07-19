@@ -71,34 +71,6 @@ class AgentContextAssembler(
         val intent = policy.intentFor(request.query)
         val budget = policy.budgetFor(intent)
         val selectionBudget = CharacterSelectionBudget(budget.characterCount)
-        val stances = selectAssets(
-            packageData.stances,
-            budget.stanceCount,
-            request.query,
-            selectionBudget,
-            V2Worldview::id,
-            { stance -> listOf(stance.topic, stance.statement, stance.period) + stance.aliases + stance.conditions },
-            ::renderStance,
-        )
-        val episodes = selectAssets(
-            packageData.episodes,
-            budget.episodeCount,
-            request.query,
-            selectionBudget,
-            V2Episode::id,
-            { episode -> listOf(episode.period, episode.location, episode.summary, episode.meaning) + episode.participants },
-            ::renderEpisode,
-        )
-        val examples = selectAssets(
-            packageData.examples,
-            budget.exampleCount,
-            request.query,
-            selectionBudget,
-            V2Example::id,
-            { example -> listOf(example.intent, example.user, example.assistant) + example.styleTags },
-            ::renderExample,
-        )
-
         val hierarchyRoutes = if (intent == AgentQueryIntent.GLOBAL && budget.chunkCount > 0) {
             source.searchHierarchy(
                 request.agentId,
@@ -120,13 +92,60 @@ class AgentContextAssembler(
                 hierarchyRoutes,
             )
         }
-        val selectedChunks = rerankChunks(
-            candidates = candidates,
-            intent = intent,
-            budget = budget,
-            selectionBudget = selectionBudget,
-            hierarchyRoutes = hierarchyRoutes,
-        )
+        var stances = emptyList<V2Worldview>()
+        var episodes = emptyList<V2Episode>()
+        var examples = emptyList<V2Example>()
+        var selectedChunks = emptyList<AgentRetrievalChunk>()
+
+        fun selectStructuredAssets() {
+            stances = selectAssets(
+                packageData.stances,
+                budget.stanceCount,
+                request.query,
+                selectionBudget,
+                V2Worldview::id,
+                { stance -> listOf(stance.topic, stance.statement, stance.period) + stance.aliases + stance.conditions },
+                ::renderStance,
+            )
+            episodes = selectAssets(
+                packageData.episodes,
+                budget.episodeCount,
+                request.query,
+                selectionBudget,
+                V2Episode::id,
+                { episode ->
+                    listOf(episode.period, episode.location, episode.summary, episode.meaning) + episode.participants
+                },
+                ::renderEpisode,
+            )
+            examples = selectAssets(
+                packageData.examples,
+                budget.exampleCount,
+                request.query,
+                selectionBudget,
+                V2Example::id,
+                { example -> listOf(example.intent, example.user, example.assistant) + example.styleTags },
+                ::renderExample,
+            )
+        }
+
+        fun selectRawChunks() {
+            selectedChunks = rerankChunks(
+                candidates = candidates,
+                intent = intent,
+                budget = budget,
+                selectionBudget = selectionBudget,
+                hierarchyRoutes = hierarchyRoutes,
+            )
+        }
+
+        if (intent == AgentQueryIntent.EXACT_FACT) {
+            selectRawChunks()
+            selectStructuredAssets()
+        } else {
+            selectStructuredAssets()
+            selectRawChunks()
+        }
         val evidence = selectedChunks.map { chunk ->
             AgentEvidence(
                 chunkId = chunk.chunkId,
@@ -137,19 +156,21 @@ class AgentContextAssembler(
                 chunkKey = chunk.chunkKey,
             )
         }
+        val routeKeys = hierarchyRoutes.map(AgentHierarchyRoute::stableRouteId).toSet()
         val selectedRouteIds = selectedChunks.flatMap(AgentRetrievalChunk::routeIds)
-            .filter { routeId -> hierarchyRoutes.any { it.topLevelId == routeId } }
+            .filter(routeKeys::contains)
             .distinct()
             .sorted()
             .take(MAX_DIAGNOSTIC_ITEMS)
-        val selectedAssetIds = buildList {
+        val allSelectedAssetIds = buildList {
             addAll(stances.map(V2Worldview::id))
             addAll(episodes.map(V2Episode::id))
             addAll(examples.map(V2Example::id))
-        }
+        }.sorted()
         val diagnostics = AgentRuntimeDiagnostics(
             intent = intent,
-            selectedAssetIds = selectedAssetIds.toList(),
+            selectedAssetIds = allSelectedAssetIds.take(MAX_DIAGNOSTIC_ITEMS),
+            selectedAssetTotalCount = allSelectedAssetIds.size,
             selectedChunkKeys = selectedChunks.map(AgentRetrievalChunk::chunkKey).toList(),
             selectedRouteIds = selectedRouteIds,
             sourceCount = selectedChunks.map(AgentRetrievalChunk::sourceId).distinct().size,
@@ -161,10 +182,23 @@ class AgentContextAssembler(
                 .take(MAX_DIAGNOSTIC_ITEMS),
             hierarchyRoutingUsed = hierarchyRoutes.isNotEmpty(),
         )
+        val relationships = if (intent == AgentQueryIntent.RELATIONSHIP) {
+            selectRelationships(packageData.identity, request.query)
+        } else {
+            emptyList()
+        }
         return AgentRuntimeContext(
             agentId = request.agentId,
             version = request.version,
-            systemPrompt = buildV2Prompt(request, packageData, stances, episodes, examples, selectedChunks),
+            systemPrompt = buildV2Prompt(
+                request,
+                packageData,
+                relationships,
+                stances,
+                episodes,
+                examples,
+                selectedChunks,
+            ),
             evidence = evidence.toList(),
             diagnostics = diagnostics,
         )
@@ -221,7 +255,8 @@ class AgentContextAssembler(
             evidence = evidence,
             diagnostics = AgentRuntimeDiagnostics(
                 intent = intent,
-                selectedAssetIds = packageData.stances.map(V2Worldview::id),
+                selectedAssetIds = packageData.stances.map(V2Worldview::id).sorted().take(MAX_DIAGNOSTIC_ITEMS),
+                selectedAssetTotalCount = packageData.stances.size,
                 selectedChunkKeys = selectedChunks.map(AgentRetrievalChunk::chunkKey),
                 sourceCount = selectedChunks.map(AgentRetrievalChunk::sourceId).distinct().size,
                 periodCount = selectedChunks.map(AgentRetrievalChunk::period).filter(String::isNotBlank).distinct().size,
@@ -250,21 +285,36 @@ class AgentContextAssembler(
             if (selected.size >= budget.chunkCount) return false
             if (sourceCounts.getOrDefault(chunk.sourceId, 0) >= budget.perSourceCount) return false
             if (chunk.stableDuplicateKey() in duplicateGroups) return false
-            if (!selectionBudget.tryUse(chunk.text.length)) return false
+            if (!selectionBudget.tryUse(renderEvidenceBlock(chunk).length)) return false
             selected += chunk
             sourceCounts[chunk.sourceId] = sourceCounts.getOrDefault(chunk.sourceId, 0) + 1
             duplicateGroups += chunk.stableDuplicateKey()
             return true
         }
 
-        if (hierarchyRoutes.isNotEmpty()) {
-            hierarchyRoutes.map(AgentHierarchyRoute::topLevelId).distinct().forEach { routeId ->
-                sorted.firstOrNull { routeId in it.routeIds && it !in selected }?.let(::tryAdd)
+        fun tryAddFirst(candidatesForSlot: Sequence<AgentRetrievalChunk>): Boolean {
+            for (candidate in candidatesForSlot) {
+                if (candidate !in selected && tryAdd(candidate)) return true
+                if (selected.size >= budget.chunkCount) return false
+            }
+            return false
+        }
+
+        if (budget.requirePeriodDiversity) {
+            var reservedPeriods = 0
+            val periods = sorted.map(AgentRetrievalChunk::period)
+                .filter(String::isNotBlank)
+                .distinct()
+            for (period in periods) {
+                if (tryAddFirst(sorted.asSequence().filter { it.period == period })) reservedPeriods += 1
+                if (reservedPeriods >= MIN_DIVERSE_PERIODS || selected.size >= budget.chunkCount) break
             }
         }
-        if (budget.requirePeriodDiversity) {
-            sorted.map(AgentRetrievalChunk::period).filter(String::isNotBlank).distinct().forEach { period ->
-                sorted.firstOrNull { it.period == period && it !in selected }?.let(::tryAdd)
+        if (hierarchyRoutes.isNotEmpty()) {
+            hierarchyRoutes.map(AgentHierarchyRoute::stableRouteId).distinct().forEach { routeId ->
+                if (selected.none { routeId in it.routeIds }) {
+                    tryAddFirst(sorted.asSequence().filter { routeId in it.routeIds })
+                }
             }
         }
         sorted.filterNot(selected::contains).forEach(::tryAdd)
@@ -274,6 +324,7 @@ class AgentContextAssembler(
     private fun buildV2Prompt(
         request: AgentContextRequest,
         packageData: AgentContextPackage,
+        relationships: List<V2Relationship>,
         stances: List<V2Worldview>,
         episodes: List<V2Episode>,
         examples: List<V2Example>,
@@ -286,6 +337,12 @@ class AgentContextAssembler(
             appendLine("自称：${identity.selfNames.joinToString("、").ifBlank { "遵循身份内核" }}")
             appendLine("时间范围：${identity.timeHorizon.ifBlank { "仅限包内资料覆盖时期" }}")
             if (identity.roles.isNotEmpty()) appendLine("角色：${identity.roles.joinToString("、")}")
+            if (relationships.isNotEmpty()) {
+                appendLine("本轮相关关系：")
+                relationships.forEach { relationship ->
+                    appendLine(renderRelationship(relationship))
+                }
+            }
         }
         appendLine(packageData.persona.trim())
         packageData.voice?.let { voice ->
@@ -331,10 +388,7 @@ class AgentContextAssembler(
         if (chunks.isNotEmpty()) {
             appendLine()
             appendLine("本轮可用原始证据：")
-            chunks.forEach { chunk ->
-                appendLine("[${chunk.sourceTitle} | ${chunk.period.ifBlank { "时期未知" }} | ${chunk.location} | ${chunk.authorship.wireName}]")
-                appendLine(chunk.text.trim())
-            }
+            chunks.forEach { chunk -> append(renderEvidenceBlock(chunk)) }
         }
         appendLine()
         appendLine("回答应简洁自然，先直接回应；仅在核心主张需要时沿用应用既有引用约定。不要输出内部诊断、chunk 术语或机械编号来源段落。")
@@ -345,6 +399,7 @@ class AgentContextAssembler(
         const val CANDIDATE_MULTIPLIER = 4
         const val V1_EVIDENCE_LIMIT = 8
         const val MAX_DIAGNOSTIC_ITEMS = 64
+        const val MIN_DIVERSE_PERIODS = 2
     }
 }
 
@@ -377,7 +432,7 @@ private fun <T> selectAssets(
     )
     return buildList {
         sorted.forEach { asset ->
-            if (size < limit && characterBudget.tryUse(render(asset).length)) add(asset)
+            if (size < limit && characterBudget.tryUse(render(asset).length + 1)) add(asset)
         }
     }
 }
@@ -395,6 +450,9 @@ private fun routeComparator(): Comparator<AgentHierarchyRoute> =
         .thenBy(AgentHierarchyRoute::topLevelId)
         .thenBy(AgentHierarchyRoute::nodeKey)
 
+private val AgentHierarchyRoute.stableRouteId: String
+    get() = "$sourceId/$topLevelId"
+
 private fun V2Authorship.directRank(): Int = when (this) {
     V2Authorship.DIRECT -> 2
     V2Authorship.EDITED_DIRECT -> 1
@@ -402,6 +460,25 @@ private fun V2Authorship.directRank(): Int = when (this) {
 }
 
 private fun AgentRetrievalChunk.stableDuplicateKey(): String = duplicateGroup.ifBlank { chunkKey }
+
+private fun selectRelationships(identity: V2Identity?, query: String): List<V2Relationship> {
+    val terms = retrievalTerms(query)
+    if (identity == null || terms.isEmpty()) return emptyList()
+    return identity.relationships.map { relationship ->
+        val searchable = listOf(relationship.subject, relationship.relation, relationship.period)
+        val lexicalScore = searchable.sumOf { value -> terms.count(value.lowercase()::contains) }
+        val exactScore = searchable.count { value -> value.isNotBlank() && query.contains(value, ignoreCase = true) } * 100
+        relationship to (lexicalScore + exactScore)
+    }.filter { (_, score) -> score >= MIN_RELATIONSHIP_RELEVANCE }
+        .sortedWith(
+            compareByDescending<Pair<V2Relationship, Int>> { it.second }
+                .thenBy { it.first.subject }
+                .thenBy { it.first.relation }
+                .thenBy { it.first.period },
+        )
+        .map(Pair<V2Relationship, Int>::first)
+        .take(MAX_SELECTED_RELATIONSHIPS)
+}
 
 private fun retrievalTerms(query: String): List<String> = buildList {
     addAll(Regex("[A-Za-z0-9_]{2,}").findAll(query.lowercase()).map(MatchResult::value))
@@ -422,3 +499,18 @@ private fun renderEpisode(episode: V2Episode): String =
 
 private fun renderExample(example: V2Example): String =
     "用户：${example.user}\n人物：${example.assistant}"
+
+private fun renderRelationship(relationship: V2Relationship): String = buildString {
+    append("${relationship.subject}：${relationship.relation}")
+    if (relationship.period.isNotBlank()) append("（时期：${relationship.period}）")
+}
+
+private fun renderEvidenceBlock(chunk: AgentRetrievalChunk): String = buildString {
+    appendLine(
+        "[${chunk.sourceTitle} | ${chunk.period.ifBlank { "时期未知" }} | ${chunk.location} | ${chunk.authorship.wireName}]",
+    )
+    appendLine(chunk.text.trim())
+}
+
+private const val MAX_SELECTED_RELATIONSHIPS = 4
+private const val MIN_RELATIONSHIP_RELEVANCE = 2

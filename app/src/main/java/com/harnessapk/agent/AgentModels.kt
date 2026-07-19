@@ -162,6 +162,7 @@ data class AgentContextRequest(
 data class AgentRuntimeDiagnostics(
     val intent: AgentQueryIntent = AgentQueryIntent.EXACT_FACT,
     val selectedAssetIds: List<String> = emptyList(),
+    val selectedAssetTotalCount: Int = selectedAssetIds.size,
     val selectedChunkKeys: List<String> = emptyList(),
     val selectedRouteIds: List<String> = emptyList(),
     val sourceCount: Int = 0,
