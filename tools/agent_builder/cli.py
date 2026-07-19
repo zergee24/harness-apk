@@ -6,7 +6,14 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
-from .builder import BuildError, pack_workspace, prepare_workspace, validate_workspace
+from .builder import (
+    BuildError,
+    pack_workspace,
+    prepare_workspace,
+    prepare_workspace_v2,
+    validate_workspace,
+    validate_workspace_v2,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,8 +27,19 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--version", required=True, type=int)
     prepare.add_argument("--output", required=True, type=Path)
 
+    prepare_v2 = subparsers.add_parser("prepare-v2", help="创建 V2 人物资产工作区")
+    prepare_v2.add_argument("inputs", nargs="+", type=Path)
+    prepare_v2.add_argument("--agent-id", required=True)
+    prepare_v2.add_argument("--name", required=True)
+    prepare_v2.add_argument("--version", required=True, type=int)
+    prepare_v2.add_argument("--output", required=True, type=Path)
+    prepare_v2.add_argument("--source-catalog", type=Path)
+
     validate = subparsers.add_parser("validate", help="验证引用、覆盖和检索门槛")
     validate.add_argument("workspace", type=Path)
+
+    validate_v2 = subparsers.add_parser("validate-v2", help="验证 V2 人物资产工作区")
+    validate_v2.add_argument("workspace", type=Path)
 
     pack = subparsers.add_parser("pack", help="签名并输出 hagent/hcorpus/hsource/hbundle")
     pack.add_argument("workspace", type=Path)
@@ -38,8 +56,23 @@ def main(argv: list[str] | None = None) -> int:
             workspace = prepare_workspace(args.inputs, args.output, args.agent_id, args.name, args.version)
             print(workspace)
             return 0
+        if args.command == "prepare-v2":
+            workspace = prepare_workspace_v2(
+                args.inputs,
+                args.output,
+                args.agent_id,
+                args.name,
+                args.version,
+                args.source_catalog,
+            )
+            print(workspace)
+            return 0
         if args.command == "validate":
             report = validate_workspace(args.workspace)
+            print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+            return 0 if report.publishable else 2
+        if args.command == "validate-v2":
+            report = validate_workspace_v2(args.workspace)
             print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
             return 0 if report.publishable else 2
         key_path = args.key or args.workspace / "publisher-key.pem"

@@ -13,6 +13,14 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat,
 
 from .extractors import extract_document
 from .models import BuildError, BuildReport, PackResult
+from .schema_v2 import (
+    AgentAssetPaths,
+    Authorship,
+    SourceGenre,
+    SourceRecord,
+    WorkspaceV2,
+    WORKSPACE_V2_SCHEMA_VERSION,
+)
 
 
 SCHEMA_VERSION = 1
@@ -127,6 +135,238 @@ def prepare_workspace(
     (agent_dir / "examples.jsonl").write_text("", encoding="utf-8")
     (agent_dir / "eval.jsonl").write_text("", encoding="utf-8")
     return workspace
+
+
+def prepare_workspace_v2(
+    inputs: Iterable[Path],
+    output_dir: Path,
+    agent_id: str,
+    name: str,
+    version: int,
+    source_catalog_path: Path | None = None,
+) -> Path:
+    agent_id = _identifier(agent_id, "agent id")
+    name = name.strip()
+    if not name:
+        raise BuildError("智能体名称不能为空")
+    if version < 1:
+        raise BuildError("版本必须大于 0")
+    input_paths = [Path(item) for item in inputs]
+    if not input_paths:
+        raise BuildError("至少需要一个输入文件")
+
+    workspace = Path(output_dir).expanduser().resolve()
+    if workspace.exists() and any(workspace.iterdir()):
+        raise BuildError(f"输出目录必须为空：{workspace}")
+    documents = sorted(
+        (extract_document(path) for path in input_paths),
+        key=lambda document: (document.source_hash, document.source_path.name),
+    )
+    catalog = _load_source_catalog(source_catalog_path) if source_catalog_path else None
+    sources = _build_source_records(documents, catalog)
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    agent_dir = workspace / "agent"
+    source_dir = workspace / "sources"
+    agent_dir.mkdir()
+    source_dir.mkdir()
+    for document, source in zip(documents, sources, strict=True):
+        shutil.copyfile(document.source_path, source_dir / source.stored_name)
+
+    manifest = WorkspaceV2(
+        agent_id=agent_id,
+        name=name,
+        version=version,
+        assets=AgentAssetPaths(),
+        sources=tuple(sources),
+    )
+    _write_json(workspace / "workspace.json", manifest.to_dict())
+    _write_json(
+        workspace / "source-catalog.json",
+        {
+            "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+            "sources": [source.to_dict() for source in sources],
+        },
+    )
+    (agent_dir / "persona.md").write_text(
+        f"我是{name}，属于基于用户所选资料构建的模拟代理。\n\n"
+        "我必须使用第一人称表达，但只依据已提供资料形成判断；资料不足时明确说明。\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        agent_dir / "identity.json",
+        {"selfNames": [], "timeHorizon": "", "roles": [], "relationships": []},
+    )
+    _write_json(
+        agent_dir / "voice.json",
+        {
+            "defaultForm": "",
+            "sentenceRhythm": [],
+            "rhetoricalMoves": [],
+            "preferredTerms": [],
+            "avoidPatterns": [],
+            "evidence": [],
+        },
+    )
+    (agent_dir / "worldview.jsonl").write_text("", encoding="utf-8")
+    (agent_dir / "episodes.jsonl").write_text("", encoding="utf-8")
+    _write_json(agent_dir / "concepts.json", {"concepts": []})
+    (agent_dir / "examples.jsonl").write_text("", encoding="utf-8")
+    _write_json(agent_dir / "openers.json", {"default": "", "alternatives": []})
+    (agent_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    return workspace
+
+
+def load_workspace_v2(workspace: Path) -> WorkspaceV2:
+    workspace = Path(workspace).expanduser().resolve()
+    try:
+        return WorkspaceV2.from_dict(_read_json(workspace / "workspace.json"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BuildError(f"workspace.json 无法读取：{error}") from error
+
+
+def validate_workspace_v2(workspace: Path) -> BuildReport:
+    workspace = Path(workspace).expanduser().resolve()
+    try:
+        manifest = load_workspace_v2(workspace)
+    except BuildError as error:
+        return BuildReport(False, [str(error)])
+
+    errors: list[str] = []
+    if any(
+        source.genre == SourceGenre.UNKNOWN
+        or source.authorship == Authorship.UNKNOWN
+        or source.period == "unknown"
+        for source in manifest.sources
+    ):
+        errors.append("来源元数据仍有未确认项")
+    for path in manifest.assets.to_dict().values():
+        if not (workspace / path).is_file():
+            errors.append(f"人物资产缺失：{path}")
+    if _v2_semantic_assets_are_empty(workspace, manifest.assets):
+        errors.append("人物语义资产尚未完成")
+    return BuildReport(
+        publishable=not errors,
+        errors=errors,
+        metrics={"sourceCount": len(manifest.sources), "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION},
+    )
+
+
+def _load_source_catalog(path: Path) -> dict[str, dict[str, str]]:
+    try:
+        catalog = _read_json(Path(path))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BuildError(f"来源目录无法读取：{error}") from error
+    if not isinstance(catalog, dict):
+        raise BuildError("来源目录必须是 JSON 对象")
+    if "schemaVersion" in catalog and (
+        isinstance(catalog["schemaVersion"], bool)
+        or not isinstance(catalog["schemaVersion"], int)
+        or catalog["schemaVersion"] != WORKSPACE_V2_SCHEMA_VERSION
+    ):
+        raise BuildError(f"不支持的来源目录 schemaVersion：{catalog['schemaVersion']}")
+    rows = catalog.get("sources")
+    if not isinstance(rows, list) or not rows:
+        raise BuildError("来源目录 sources 必须是非空数组")
+
+    by_file_name: dict[str, dict[str, str]] = {}
+    source_ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise BuildError("来源目录中的 source 必须是对象")
+        values = {
+            key: _catalog_string(row.get(key), f"来源目录 {key}")
+            for key in ("sourceId", "fileName", "title", "genre", "authorship", "period")
+        }
+        try:
+            SourceGenre(values["genre"])
+        except ValueError as error:
+            raise BuildError(f"来源目录 genre 无效：{values['genre']}") from error
+        try:
+            Authorship(values["authorship"])
+        except ValueError as error:
+            raise BuildError(f"来源目录 authorship 无效：{values['authorship']}") from error
+        if values["sourceId"] in source_ids:
+            raise BuildError(f"来源目录存在重复 sourceId：{values['sourceId']}")
+        if values["fileName"] in by_file_name:
+            raise BuildError(f"来源目录存在重复 fileName：{values['fileName']}")
+        source_ids.add(values["sourceId"])
+        by_file_name[values["fileName"]] = values
+    return by_file_name
+
+
+def _build_source_records(
+    documents: list[Any],
+    catalog: dict[str, dict[str, str]] | None,
+) -> list[SourceRecord]:
+    input_file_names = {document.source_path.name for document in documents}
+    if len(input_file_names) != len(documents):
+        raise BuildError("输入资料文件名不能重复")
+    if catalog is not None and set(catalog) != input_file_names:
+        raise BuildError("来源目录必须与输入资料逐一对应")
+
+    records: list[SourceRecord] = []
+    for document in documents:
+        metadata = catalog.get(document.source_path.name) if catalog else None
+        stored_name = f"{document.source_hash[:16]}-{_safe_filename(document.source_path.name)}"
+        records.append(
+            SourceRecord(
+                source_id=(
+                    metadata["sourceId"]
+                    if metadata
+                    else f"source-{document.source_hash[:16]}-{_safe_filename(document.source_path.name)}"
+                ),
+                title=metadata["title"] if metadata else document.title,
+                file_name=document.source_path.name,
+                stored_name=stored_name,
+                source_hash=document.source_hash,
+                format=document.source_path.suffix.lower().lstrip("."),
+                genre=SourceGenre(metadata["genre"]) if metadata else SourceGenre.UNKNOWN,
+                authorship=Authorship(metadata["authorship"]) if metadata else Authorship.UNKNOWN,
+                period=metadata["period"] if metadata else "unknown",
+                raw_size_bytes=document.source_path.stat().st_size,
+                extracted_chars=sum(len(section.text) for section in document.sections),
+            )
+        )
+    source_ids = [record.source_id for record in records]
+    stored_names = [record.stored_name for record in records]
+    if len(source_ids) != len(set(source_ids)):
+        raise BuildError("来源目录生成了重复 sourceId")
+    if len(stored_names) != len(set(stored_names)):
+        raise BuildError("输入资料生成了重复 storedName")
+    return records
+
+
+def _catalog_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise BuildError(f"{label} 必须是非空字符串")
+    return value.strip()
+
+
+def _v2_semantic_assets_are_empty(workspace: Path, assets: AgentAssetPaths) -> bool:
+    json_assets = (assets.identity, assets.voice, assets.concepts, assets.openers)
+    jsonl_assets = (assets.worldview, assets.episodes, assets.examples, assets.eval)
+    for path in jsonl_assets:
+        try:
+            if (workspace / path).read_text("utf-8").strip():
+                return False
+        except OSError:
+            return False
+    for path in json_assets:
+        try:
+            if _json_has_content(_read_json(workspace / path)):
+                return False
+        except (OSError, json.JSONDecodeError):
+            return False
+    return True
+
+
+def _json_has_content(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_json_has_content(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_json_has_content(item) for item in value)
+    return bool(value)
 
 
 def validate_workspace(workspace: Path) -> BuildReport:
