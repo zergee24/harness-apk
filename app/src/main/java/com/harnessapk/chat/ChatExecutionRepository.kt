@@ -4,6 +4,7 @@ import androidx.room.RoomDatabase
 import androidx.room.withTransaction
 import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.common.TimeProvider
+import com.harnessapk.common.toUserMessage
 import com.harnessapk.storage.ChatExecutionEntryDao
 import com.harnessapk.storage.ChatExecutionEntryEntity
 import kotlinx.coroutines.flow.Flow
@@ -139,6 +140,27 @@ class ChatExecutionRepository(
                 errorMessage = errorMessage,
             )
         }
+    }
+
+    suspend fun markFailedAfterRunnerFailure(entryId: String, failure: Throwable): ChatExecutionEntry = database.withTransaction {
+        val entry = requireNotNull(dao.findById(entryId)) { "队列任务不存在" }
+        if (entry.status != ChatExecutionStatus.RUNNING.name) return@withTransaction entry.toDomain()
+
+        val errorMessage = failure.toUserMessage()
+        val assistantMessageId = entry.assistantMessageId ?: chatRepository.insertAssistantPending(
+            conversationId = entry.conversationId,
+            providerId = entry.providerId,
+            model = entry.model,
+        )
+        chatRepository.markAssistantFailed(assistantMessageId, errorMessage)
+        val updated = entry.copy(
+            status = ChatExecutionStatus.FAILED.name,
+            assistantMessageId = assistantMessageId,
+            errorMessage = errorMessage,
+            updatedAt = timeProvider.nowMillis(),
+        )
+        dao.update(updated)
+        updated.toDomain()
     }
 
     suspend fun recoverAfterProcessDeath(conversationId: String? = null) = database.withTransaction {

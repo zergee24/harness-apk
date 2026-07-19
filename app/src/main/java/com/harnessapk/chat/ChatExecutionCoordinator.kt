@@ -167,6 +167,10 @@ class ChatExecutionCoordinator(
                         executionRepository.markTerminal(next.id, ChatExecutionStatus.CANCELLED)
                     }
                     throw cancelled
+                } catch (failure: Throwable) {
+                    withContext(NonCancellable) {
+                        executionRepository.markFailedAfterRunnerFailure(next.id, failure)
+                    }
                 } finally {
                     markActive(conversationId, false)
                 }

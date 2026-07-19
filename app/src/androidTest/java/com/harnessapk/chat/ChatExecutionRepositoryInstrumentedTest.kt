@@ -10,6 +10,7 @@ import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.network.OpenAiCompatibleClient
+import com.harnessapk.provider.ProviderDraft
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.security.EncryptedValue
 import com.harnessapk.security.StringCipher
@@ -21,6 +22,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -242,6 +244,64 @@ class ChatExecutionRepositoryInstrumentedTest {
         assertEquals(0, database.chatExecutionEntryDao().listForConversation(conversationId).size)
     }
 
+    @Test
+    fun productionRunnerMarksMissingProviderFailuresAndContinuesQueuedConversation() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val first = repository.enqueue(request(conversationId).copy(requestId = "missing-provider-first"))
+        val second = repository.enqueue(request(conversationId).copy(requestId = "missing-provider-second"))
+        val coordinator = productionCoordinator(testProviderRepository())
+
+        try {
+            coordinator.resumePending()
+            awaitTerminal(first.id)
+            awaitTerminal(second.id)
+
+            assertEquals(ChatExecutionStatus.FAILED, repository.entry(first.id)!!.status)
+            assertEquals(ChatExecutionStatus.FAILED, repository.entry(second.id)!!.status)
+            assertEquals("请先在模型配置中保存供应商", repository.entry(first.id)!!.errorMessage)
+            val failedAssistant = chatRepository.listMessages(conversationId).last()
+            assertEquals(MessageRole.ASSISTANT, failedAssistant.role)
+            assertEquals(MessageStatus.FAILED, failedAssistant.status)
+            assertEquals("请先在模型配置中保存供应商", failedAssistant.errorMessage)
+        } finally {
+            coordinator.close()
+        }
+    }
+
+    @Test
+    fun productionRunnerMarksDeletedExplicitProviderFailed() = runBlocking {
+        val providerRepository = testProviderRepository()
+        val deletedProviderId = providerRepository.saveProvider(
+            ProviderDraft(
+                name = "待删除供应商",
+                baseUrl = "https://example.com/v1",
+                apiKey = "secret",
+                defaultModel = "model",
+                defaultVisionModel = null,
+                supportsVision = false,
+            ),
+        )
+        val conversationId = chatRepository.createConversation()
+        val entry = repository.enqueue(
+            request(conversationId).copy(
+                requestId = "deleted-provider",
+                providerId = deletedProviderId,
+            ),
+        )
+        providerRepository.deleteProvider(deletedProviderId)
+        val coordinator = productionCoordinator(providerRepository)
+
+        try {
+            coordinator.resumePending()
+            awaitTerminal(entry.id)
+
+            assertEquals(ChatExecutionStatus.FAILED, repository.entry(entry.id)!!.status)
+            assertEquals("请先在模型配置中保存供应商", repository.entry(entry.id)!!.errorMessage)
+        } finally {
+            coordinator.close()
+        }
+    }
+
     private fun request(conversationId: String) = EnqueueChatRequest(
         conversationId = conversationId,
         content = "第一条消息",
@@ -260,20 +320,10 @@ class ChatExecutionRepositoryInstrumentedTest {
             default = Dispatchers.IO,
             main = Dispatchers.IO,
         )
-        val providerRepository = ProviderRepository(
-            dao = database.providerProfileDao(),
-            cipher = TestCipher,
-            timeProvider = TimeProvider { 10L },
-        )
+        val providerRepository = testProviderRepository()
         return ChatExecutionCoordinator(
             executionRepository = repository,
-            sendMessageUseCase = SendMessageUseCase(
-                context = context,
-                chatRepository = chatRepository,
-                providerRepository = providerRepository,
-                client = OpenAiCompatibleClient(OkHttpClient(), Json {}),
-                dispatchers = dispatchers,
-            ),
+            sendMessageUseCase = sendMessageUseCase(providerRepository, dispatchers),
             providerRepository = providerRepository,
             webSearchClient = JinaWebSearchClient(OkHttpClient()),
             attachmentStore = QueuedAttachmentStore(context),
@@ -281,6 +331,54 @@ class ChatExecutionRepositoryInstrumentedTest {
             onWorkScheduled = onWorkScheduled,
             enqueueRunnerStarter = {},
         )
+    }
+
+    private fun productionCoordinator(providerRepository: ProviderRepository): ChatExecutionCoordinator {
+        val dispatchers = AppDispatchers(
+            io = Dispatchers.IO,
+            default = Dispatchers.IO,
+            main = Dispatchers.IO,
+        )
+        return ChatExecutionCoordinator(
+            executionRepository = repository,
+            sendMessageUseCase = sendMessageUseCase(providerRepository, dispatchers),
+            providerRepository = providerRepository,
+            webSearchClient = JinaWebSearchClient(OkHttpClient()),
+            attachmentStore = QueuedAttachmentStore(context),
+            dispatchers = dispatchers,
+        )
+    }
+
+    private fun sendMessageUseCase(
+        providerRepository: ProviderRepository,
+        dispatchers: AppDispatchers,
+    ) = SendMessageUseCase(
+        context = context,
+        chatRepository = chatRepository,
+        providerRepository = providerRepository,
+        client = OpenAiCompatibleClient(OkHttpClient(), Json {}),
+        dispatchers = dispatchers,
+    )
+
+    private fun testProviderRepository(): ProviderRepository = ProviderRepository(
+            dao = database.providerProfileDao(),
+            cipher = TestCipher,
+            timeProvider = TimeProvider { 10L },
+        )
+
+    private suspend fun awaitTerminal(entryId: String) {
+        withTimeout(5_000L) {
+            while (repository.entry(entryId)?.status !in setOf(
+                    ChatExecutionStatus.SUCCEEDED,
+                    ChatExecutionStatus.FAILED,
+                    ChatExecutionStatus.CANCELLED,
+                    ChatExecutionStatus.INTERRUPTED,
+                    ChatExecutionStatus.STEERED,
+                )
+            ) {
+                delay(25L)
+            }
+        }
     }
 
     private fun readyAgent(id: String, activeVersion: Int) = AgentEntity(
