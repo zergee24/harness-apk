@@ -39,6 +39,7 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.LinkOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
@@ -167,6 +168,95 @@ class QueuedAttachmentStoreInstrumentedTest {
         assertSame(originalFailure, copyFailure)
         assertTrue("Second copy must write its temporary file before failing", observedWrittenTemporary)
         assertTrue("Batch copy must leave no final or temporary files", managedDirectory.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun persistAllKeepsPreexistingTemporaryFileWhenCreateNewFails() = runBlocking {
+        lateinit var temporaryName: String
+        lateinit var finalName: String
+        val preexistingTemporaryContent = "preexisting temporary"
+        val store = QueuedAttachmentStore(
+            context = context,
+            testHooks = QueuedAttachmentStoreTestHooks(
+                beforeWrite = { temporary, final ->
+                    temporaryName = temporary
+                    finalName = final
+                    File(managedDirectory, temporary).writeText(preexistingTemporaryContent)
+                },
+            ),
+        )
+
+        var persistFailure: FileAlreadyExistsException? = null
+        try {
+            store.persistAll(listOf(sourceAttachment("preexisting-temporary.jpg")))
+        } catch (error: FileAlreadyExistsException) {
+            persistFailure = error
+        }
+
+        assertNotNull("Expected CREATE_NEW to reject the preexisting temporary file", persistFailure)
+        assertEquals(preexistingTemporaryContent, File(managedDirectory, temporaryName).readText())
+        assertTrue("No final file should be created", !File(managedDirectory, finalName).exists())
+    }
+
+    @Test
+    fun persistAllKeepsPreexistingFinalFileWhenFinalCreateNewFails() = runBlocking {
+        lateinit var temporaryName: String
+        lateinit var finalName: String
+        val preexistingFinalContent = "preexisting final"
+        val store = QueuedAttachmentStore(
+            context = context,
+            testHooks = QueuedAttachmentStoreTestHooks(
+                beforeWrite = { temporary, final ->
+                    temporaryName = temporary
+                    finalName = final
+                },
+                beforeFinalCreate = { _, final ->
+                    File(managedDirectory, final).writeText(preexistingFinalContent)
+                },
+            ),
+        )
+
+        var persistFailure: FileAlreadyExistsException? = null
+        try {
+            store.persistAll(listOf(sourceAttachment("preexisting-final.jpg")))
+        } catch (error: FileAlreadyExistsException) {
+            persistFailure = error
+        }
+
+        assertNotNull("Expected CREATE_NEW to reject the preexisting final file", persistFailure)
+        assertTrue("This call must reclaim its temporary file", !File(managedDirectory, temporaryName).exists())
+        assertEquals(preexistingFinalContent, File(managedDirectory, finalName).readText())
+    }
+
+    @Test
+    fun persistAllRethrowsCopyFailureAndReclaimsOwnedTemporaryAndFinalFiles() = runBlocking {
+        lateinit var temporaryName: String
+        lateinit var finalName: String
+        val originalFailure = IOException("copy from temporary to final interrupted")
+        val store = QueuedAttachmentStore(
+            context = context,
+            testHooks = QueuedAttachmentStoreTestHooks(
+                beforeWrite = { temporary, final ->
+                    temporaryName = temporary
+                    finalName = final
+                },
+                copyTemporaryToFinal = { input, output ->
+                    output.write(input.read())
+                    throw originalFailure
+                },
+            ),
+        )
+
+        var copyFailure: IOException? = null
+        try {
+            store.persistAll(listOf(sourceAttachment("final-copy-failure.jpg")))
+        } catch (error: IOException) {
+            copyFailure = error
+        }
+
+        assertSame(originalFailure, copyFailure)
+        assertTrue("This call must reclaim its temporary file", !File(managedDirectory, temporaryName).exists())
+        assertTrue("This call must reclaim its final file", !File(managedDirectory, finalName).exists())
     }
 
     @Test

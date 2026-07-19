@@ -5,6 +5,7 @@ import android.net.Uri
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.nio.channels.Channels
 import java.nio.file.DirectoryStream
 import java.nio.file.FileAlreadyExistsException
@@ -39,6 +40,8 @@ class PersistedAttachmentBatch internal constructor(
 internal data class QueuedAttachmentStoreTestHooks(
     val beforeChildDirectoryCreate: () -> Unit = {},
     val beforeWrite: (temporaryName: String, finalName: String) -> Unit = { _, _ -> },
+    val beforeFinalCreate: (temporaryName: String, finalName: String) -> Unit = { _, _ -> },
+    val copyTemporaryToFinal: (InputStream, OutputStream) -> Unit = { input, output -> input.copyTo(output) },
     val beforeCleanupDelete: (finalName: String) -> Unit = {},
 )
 
@@ -111,6 +114,8 @@ class QueuedAttachmentStore internal constructor(
         val uuid = UUID.randomUUID().toString()
         val finalName = "queued-$uuid$extension"
         val temporaryName = "temporary-$uuid.tmp"
+        var temporaryCreatedByThisCall = false
+        var finalCreatedByThisCall = false
         try {
             testHooks.beforeWrite(temporaryName, finalName)
             inputOpener(source.uri).use { input ->
@@ -119,10 +124,28 @@ class QueuedAttachmentStore internal constructor(
                     Path.of(temporaryName),
                     setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
                 ).use { channel ->
+                    temporaryCreatedByThisCall = true
                     Channels.newOutputStream(channel).use { output -> input.copyTo(output) }
                 }
             }
-            managedDirectory.move(Path.of(temporaryName), managedDirectory, Path.of(finalName))
+            testHooks.beforeFinalCreate(temporaryName, finalName)
+            managedDirectory.newByteChannel(
+                Path.of(finalName),
+                setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
+            ).use { finalChannel ->
+                finalCreatedByThisCall = true
+                managedDirectory.newByteChannel(
+                    Path.of(temporaryName),
+                    setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS),
+                ).use { temporaryChannel ->
+                    testHooks.copyTemporaryToFinal(
+                        Channels.newInputStream(temporaryChannel),
+                        Channels.newOutputStream(finalChannel),
+                    )
+                }
+            }
+            deleteFileIfPresent(managedDirectory, temporaryName)
+            temporaryCreatedByThisCall = false
             return PersistedAttachment(
                 attachment = PendingImageAttachment(
                     Uri.fromFile(rawManagedDirectory.resolve(finalName).toFile()),
@@ -131,8 +154,12 @@ class QueuedAttachmentStore internal constructor(
                 finalName = finalName,
             )
         } catch (error: Throwable) {
-            deleteFileIfPresent(managedDirectory, temporaryName)
-            deleteFileIfPresent(managedDirectory, finalName)
+            if (temporaryCreatedByThisCall) {
+                runCatching { deleteFileIfPresent(managedDirectory, temporaryName) }
+            }
+            if (finalCreatedByThisCall) {
+                runCatching { deleteFileIfPresent(managedDirectory, finalName) }
+            }
             throw error
         }
     }
