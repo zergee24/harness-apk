@@ -269,6 +269,24 @@ class EvaluationTest(unittest.TestCase):
         self.assertIn("voice expectedEvidence 只能引用 direct 或 edited_direct", joined)
         self.assertEqual(0, evaluate_workspace(workspace).category_metrics["voice"].passed)
 
+    def test_period_and_voice_categories_reject_non_expected_unsafe_retrieval(self):
+        workspace = self._complete_workspace()
+        chunks = self._chunks_path(workspace)
+        rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
+        companion = next(row for row in rows if row["sourceId"] == "source-companion")
+        companion["keywords"].append("以后")
+        chunks.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+        report = evaluate_workspace(workspace)
+
+        self.assertEqual(MINIMUM_EVAL_COUNTS["grounding"], report.category_metrics["grounding"].passed)
+        self.assertEqual(0, report.category_metrics["stance"].passed)
+        self.assertEqual(0, report.category_metrics["temporal"].passed)
+        self.assertEqual(0, report.category_metrics["voice"].passed)
+
     def test_global_rejects_two_routes_from_one_source(self):
         workspace = self._complete_workspace()
         chunk_id, _ = self._source_chunk_ids(workspace)
@@ -617,7 +635,8 @@ class EvaluationTest(unittest.TestCase):
             for index in range(total):
                 rows.append({
                     "id": f"{category}-{index:03d}", "category": category,
-                    "question": "调查", "period": "1926",
+                    "question": "调查" if category in {"diversity", "global"} else "以后",
+                    "period": "1926",
                     "expectedEvidence": [chunk_id, companion_id]
                     if category in {"diversity", "global"}
                     else [chunk_id],

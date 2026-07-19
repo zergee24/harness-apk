@@ -1232,12 +1232,14 @@ def _evaluate_rows(
     for row in rows:
         expected = {chunk_id: lookup.get(chunk_id) for chunk_id in row.expected_evidence}
         expected = {chunk_id: chunk for chunk_id, chunk in expected.items() if chunk is not None}
+        retrieved = {chunk_id: lookup.get(chunk_id) for chunk_id in lookup.retrieve(row.question)}
+        retrieved = {chunk_id: chunk for chunk_id, chunk in retrieved.items() if chunk is not None}
         retrieved_expected = {
             chunk_id: expected[chunk_id]
-            for chunk_id in lookup.retrieve(row.question)
+            for chunk_id in retrieved
             if chunk_id in expected
         }
-        passed = _category_passes(row, retrieved_expected)
+        passed = _category_passes(row, expected, retrieved_expected, retrieved)
         authorship = "+".join(sorted({chunk["authorship"] for chunk in expected.values()})) or "unassigned"
         results.append((row, passed, authorship))
     category = _metrics_by(((row.category, passed) for row, passed, _ in results), include=EVALUATION_CATEGORIES)
@@ -1247,29 +1249,39 @@ def _evaluate_rows(
     return category, periods, authorships, corpora
 
 
-def _category_passes(row: _EvalRow, retrieved: Mapping[str, Mapping[str, str]]) -> bool:
-    if not retrieved:
+def _category_passes(
+    row: _EvalRow,
+    expected: Mapping[str, Mapping[str, str]],
+    retrieved_expected: Mapping[str, Mapping[str, str]],
+    retrieved: Mapping[str, Mapping[str, str]],
+) -> bool:
+    if not retrieved_expected:
         return False
-    values = tuple(retrieved.values())
+    expected_values = tuple(expected.values())
+    retrieved_values = tuple(retrieved.values())
+    matched_values = tuple(retrieved_expected.values())
     if row.category == "grounding":
         return True
     if row.category == "stance":
-        return all(chunk["period"] == row.period for chunk in values)
+        return all(chunk["period"] == row.period for chunk in (*expected_values, *retrieved_values))
     if row.category == "voice":
-        return all(chunk["authorship"] in _DIRECT_AUTHORSHIPS for chunk in values)
+        return all(
+            chunk["authorship"] in _DIRECT_AUTHORSHIPS
+            for chunk in (*expected_values, *retrieved_values)
+        )
     if row.category == "temporal":
-        return all(chunk["period"] == row.period for chunk in values)
+        return all(chunk["period"] == row.period for chunk in (*expected_values, *retrieved_values))
     if row.category == "diversity":
         return (
-            len(values) >= 2
-            and len({chunk["source_id"] for chunk in values}) >= 2
-            and len({chunk["duplicate_group"] for chunk in values}) >= 2
+            len(matched_values) >= 2
+            and len({chunk["source_id"] for chunk in matched_values}) >= 2
+            and len({chunk["duplicate_group"] for chunk in matched_values}) >= 2
         )
     if row.category == "global":
         return (
-            len(values) >= 2
-            and len({chunk["source_id"] for chunk in values}) >= 2
-            and len({chunk["route"] for chunk in values}) >= 2
+            len(matched_values) >= 2
+            and len({chunk["source_id"] for chunk in matched_values}) >= 2
+            and len({chunk["route"] for chunk in matched_values}) >= 2
         )
     return False
 

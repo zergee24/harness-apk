@@ -939,7 +939,7 @@ class WorkspaceV2Test(unittest.TestCase):
             {
                 "id": f"{category}-{index:03d}",
                 "category": category,
-                "question": "调查",
+                "question": "调查" if category in {"diversity", "global"} else "发言权",
                 "period": "1926",
                 "expectedEvidence": [chunk_id, companion_id]
                 if category in {"diversity", "global"}
