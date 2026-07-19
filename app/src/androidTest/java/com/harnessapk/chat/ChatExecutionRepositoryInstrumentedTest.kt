@@ -279,6 +279,7 @@ class ChatExecutionRepositoryInstrumentedTest {
             attachmentStore = QueuedAttachmentStore(context),
             dispatchers = dispatchers,
             onWorkScheduled = onWorkScheduled,
+            enqueueRunnerStarter = {},
         )
     }
 

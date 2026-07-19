@@ -38,6 +38,7 @@ class ChatExecutionCoordinator(
     private val exactAttachmentBatchReferenced:
         suspend (requestId: String, attachments: List<PendingImageAttachment>) -> Boolean =
         executionRepository::isAttachmentBatchReferenced,
+    internal val enqueueRunnerStarter: (suspend (conversationId: String) -> Unit)? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
     private val runners = mutableMapOf<String, Job>()
@@ -57,11 +58,11 @@ class ChatExecutionCoordinator(
             }
             withContext(NonCancellable) {
                 try {
-                    ensureRunner(outcome.entry.conversationId)
+                    ensureRunnerForEnqueue(outcome.entry.conversationId)
                     onWorkScheduled()
                 } catch (cancelled: CancellationException) {
                     throw cancelled
-                } catch (_: Throwable) {
+                } catch (_: Exception) {
                 }
             }
             outcome.entry
@@ -83,6 +84,10 @@ class ChatExecutionCoordinator(
         if (referenced == false) {
             runCatching { attachmentStore.cleanup(batch) }
         }
+    }
+
+    private suspend fun ensureRunnerForEnqueue(conversationId: String) {
+        enqueueRunnerStarter?.invoke(conversationId) ?: ensureRunner(conversationId)
     }
 
     fun resumePending() {

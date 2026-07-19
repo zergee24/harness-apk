@@ -42,6 +42,7 @@ import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
@@ -164,6 +165,68 @@ class QueuedAttachmentStoreInstrumentedTest {
         assertSame(originalFailure, copyFailure)
         assertTrue("Second copy must write its temporary file before failing", observedWrittenTemporary)
         assertTrue("Batch copy must leave no final or temporary files", managedDirectory.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun persistAllRethrowsTheOriginalSinglePartyBarrierTimeoutAndDeletesCopiedFiles() = runBlocking {
+        val barrier = CyclicBarrier(2)
+        val store = QueuedAttachmentStore(
+            context = context,
+            onBatchPersisted = { barrier.await(100L, TimeUnit.MILLISECONDS) },
+        )
+
+        try {
+            store.persistAll(listOf(sourceAttachment("barrier-timeout.jpg")))
+            fail("Expected the unmatched barrier to time out")
+        } catch (error: TimeoutException) {
+            assertTrue(barrier.isBroken)
+        }
+
+        assertTrue("A failed batch must not leave copied files", managedDirectory.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun persistAllRejectsASymlinkedManagedRootWithoutWritingOutsideIt() = runBlocking {
+        val outsideDirectory = File(context.cacheDir, "symlinked-managed-root-persist").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        Files.createSymbolicLink(managedDirectory.toPath(), outsideDirectory.toPath())
+        val store = QueuedAttachmentStore(context)
+
+        try {
+            store.persistAll(listOf(sourceAttachment("root-symlink-persist.jpg")))
+            fail("Expected a symlinked managed root to be rejected")
+        } catch (_: IllegalStateException) {
+        } finally {
+            managedDirectory.delete()
+        }
+
+        assertTrue("Persist must never write through a managed-root symlink", outsideDirectory.listFiles().orEmpty().isEmpty())
+        outsideDirectory.deleteRecursively()
+        Unit
+    }
+
+    @Test
+    fun persistedBatchAttachmentsCannotBeMutatedAndCleanupStillDeletesEveryFile() = runBlocking {
+        val store = QueuedAttachmentStore(context)
+        val batch = store.persistAll(
+            listOf(
+                sourceAttachment("immutable-first.jpg"),
+                sourceAttachment("immutable-second.jpg"),
+            ),
+        )
+
+        try {
+            @Suppress("UNCHECKED_CAST")
+            (batch.attachments as MutableList<PendingImageAttachment>).clear()
+            fail("The batch attachment snapshot must not be mutable")
+        } catch (_: UnsupportedOperationException) {
+        }
+
+        assertEquals(2, batch.attachments.size)
+        store.cleanup(batch)
+        assertTrue("Cleanup must use the intact internal batch snapshot", managedDirectory.listFiles().orEmpty().isEmpty())
     }
 
     @Test
@@ -315,6 +378,33 @@ class QueuedAttachmentStoreInstrumentedTest {
             assertTrue(executionRepository.entry(request.requestId) != null)
             assertTrue(database.messageDao().countUserMessages(conversationId) == 1)
             assertTrue(context.contentResolver.openInputStream(Uri.parse(attachment.uri))!!.use { it.read() } >= 0)
+        } finally {
+            coordinator.close()
+        }
+    }
+
+    @Test
+    fun committedRequestPropagatesSchedulingErrorAndKeepsStoredAttachments() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val request = request(
+            conversationId = conversationId,
+            requestId = "attachment-scheduling-error",
+            attachments = listOf(sourceAttachment("scheduled-error.jpg")),
+        )
+        val originalError = AssertionError("boom")
+        val coordinator = coordinator(onWorkScheduled = { throw originalError })
+
+        try {
+            try {
+                coordinator.enqueue(request)
+                fail("Expected scheduling Error to propagate")
+            } catch (error: AssertionError) {
+                assertSame(originalError, error)
+            }
+
+            val entry = requireNotNull(executionRepository.entry(request.requestId))
+            val attachment = database.messageAttachmentDao().listForMessage(entry.userMessageId).single()
+            assertTrue(File(requireNotNull(Uri.parse(attachment.uri).path)).isFile)
         } finally {
             coordinator.close()
         }
@@ -487,6 +577,28 @@ class QueuedAttachmentStoreInstrumentedTest {
     }
 
     @Test
+    fun cleanupDoesNotFollowASymlinkReplacingTheEntireManagedRoot() = runBlocking {
+        val store = QueuedAttachmentStore(context)
+        val batch = store.persistAll(listOf(sourceAttachment("root-symlink-cleanup.jpg")))
+        val generatedFile = File(requireNotNull(batch.attachments.single().uri.path))
+        val outsideDirectory = File(context.cacheDir, "symlinked-managed-root-cleanup").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val outsideFile = File(outsideDirectory, generatedFile.name).apply { writeText("must survive cleanup") }
+
+        assertTrue(managedDirectory.deleteRecursively())
+        Files.createSymbolicLink(managedDirectory.toPath(), outsideDirectory.toPath())
+        try {
+            store.cleanup(batch)
+            assertTrue("Cleanup must not treat a symlink target as a managed root", outsideFile.isFile)
+        } finally {
+            managedDirectory.delete()
+            outsideDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun cleanupKeepsFilesWhenTheExactRequestLookupFails() = runBlocking {
         val conversationId = chatRepository.createConversation()
         val request = request(
@@ -583,6 +695,7 @@ class QueuedAttachmentStoreInstrumentedTest {
         dispatchers = dispatchers(),
         onWorkScheduled = onWorkScheduled,
         exactAttachmentBatchReferenced = exactAttachmentBatchReferenced,
+        enqueueRunnerStarter = {},
     )
 
     private fun dispatchers() = AppDispatchers(
