@@ -4,7 +4,9 @@ import os
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -13,6 +15,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 
 from tools.agent_builder import builder, install_planner
 from tools.agent_builder.builder import BuildError, pack_workspace_v2
+from tools.agent_builder.cli import main
 from tools.agent_builder.install_planner import (
     CorpusPlanIndex,
     choose_install_profiles,
@@ -783,6 +786,173 @@ class InstallPlannerTest(unittest.TestCase):
 
         self.assertEqual(["keep.txt"], sorted(path.name for path in output.iterdir()))
         self.assertFalse(any(".staging-" in path.name for path in output.parent.iterdir()))
+
+    def test_cli_validate_dispatches_schema_and_retains_validate_v2_alias(self):
+        for command in ("validate", "validate-v2"):
+            with self.subTest(command=command), redirect_stdout(StringIO()):
+                self.assertEqual(0, main([command, str(self.workspace)]))
+
+        manifest_path = self.workspace / "workspace.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["schemaVersion"] = 99
+        self._write_json(manifest_path, manifest)
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            self.assertNotEqual(0, main(["validate", str(self.workspace)]))
+
+    def test_cli_pack_dispatches_v2_profiles_and_source_alone_reads_originals(self):
+        for profile in ("lite", "balanced", "complete", "source"):
+            output = self.root / f"cli-{profile}"
+            with (
+                mock.patch(
+                    "tools.agent_builder.cli.pack_workspace_v2",
+                    wraps=pack_workspace_v2,
+                ) as pack_v2,
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()),
+            ):
+                exit_code = main(
+                    [
+                        "pack",
+                        str(self.workspace),
+                        "--output",
+                        str(output),
+                        "--key",
+                        str(self.private_key_path),
+                        "--profile",
+                        profile,
+                    ]
+                )
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(profile == "source", pack_v2.call_args.kwargs["emit_sources"])
+            self.assertEqual(profile, pack_v2.call_args.kwargs["profile_id"])
+
+    def test_cli_recommend_human_and_json_use_real_signed_artifact_bytes(self):
+        actual = pack_workspace_v2(
+            self.workspace,
+            self.root / "actual-source",
+            self.private_key_path,
+            profile_id="source",
+            emit_sources=True,
+        )
+        with zipfile.ZipFile(actual.agent_package) as archive:
+            actual_plan = json.loads(archive.read("install-plan.json"))
+        packages = {row["id"]: row for row in actual_plan["packages"]}
+        profiles = {row["id"]: row for row in actual_plan["profiles"]}
+        agent_bytes = actual.agent_package.stat().st_size
+        temp_before = set(Path(tempfile.gettempdir()).glob(".harness-recommend-*"))
+
+        human = StringIO()
+        with redirect_stdout(human), redirect_stderr(StringIO()):
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "recommend",
+                        str(self.workspace),
+                        "--key",
+                        str(self.private_key_path),
+                    ]
+                ),
+            )
+        output = human.getvalue()
+        self.assertEqual(1, output.count("推荐安装（默认）"))
+        for label in ("轻量", "完整证据", "包含原文"):
+            self.assertIn(label, output)
+        for detail in ("资料类型", "时期", "体裁", "独特覆盖原因", "原文", "可立即运行"):
+            self.assertIn(detail, output)
+        self.assertRegex(output, r"\d+ 字节")
+
+        machine = StringIO()
+        with redirect_stdout(machine), redirect_stderr(StringIO()):
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "recommend",
+                        str(self.workspace),
+                        "--key",
+                        str(self.private_key_path),
+                        "--json",
+                    ]
+                ),
+            )
+        raw = machine.getvalue()
+        parsed = json.loads(raw)
+        self.assertEqual(
+            raw,
+            json.dumps(
+                parsed,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+        )
+        self.assertEqual("balanced", parsed["recommendedProfileId"])
+        self.assertEqual(
+            ["lite", "balanced", "complete", "source"],
+            [profile["id"] for profile in parsed["profiles"]],
+        )
+        for profile in parsed["profiles"]:
+            selected = profiles[profile["id"]]["packageIds"]
+            self.assertEqual(
+                agent_bytes + sum(packages[package_id]["sizeBytes"] for package_id in selected),
+                profile["exactSignedBytes"],
+            )
+            self.assertEqual(agent_bytes, profile["agentPackage"]["exactSignedBytes"])
+            self.assertEqual(
+                [
+                    (packages[package_id]["fileName"], packages[package_id]["sizeBytes"])
+                    for package_id in selected
+                ],
+                [
+                    (package["fileName"], package["exactSignedBytes"])
+                    for package in profile["packages"]
+                ],
+            )
+            self.assertNotIn("bundleBytes", profile)
+            self.assertNotIn("核心证据覆盖时期", profile["periods"])
+            self.assertNotIn("未单独扩展", profile["genres"])
+        lite = next(profile for profile in parsed["profiles"] if profile["id"] == "lite")
+        self.assertEqual(["1926", "1930"], lite["periods"])
+        self.assertEqual(["conversation", "secondary", "speech"], lite["genres"])
+        self.assertTrue({"direct", "secondary"} <= set(lite["evidenceTypes"]))
+        self.assertEqual(
+            temp_before,
+            set(Path(tempfile.gettempdir()).glob(".harness-recommend-*")),
+        )
+
+    def test_cli_recommend_requires_existing_publisher_key_without_partial_output(self):
+        temp_before = set(Path(tempfile.gettempdir()).glob(".harness-recommend-*"))
+        for key_args in ([], ["--key", str(self.root / "missing.pem")]):
+            with self.subTest(key_args=key_args), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertNotEqual(
+                    0,
+                    main(["recommend", str(self.workspace), *key_args]),
+                )
+        self.assertEqual(
+            temp_before,
+            set(Path(tempfile.gettempdir()).glob(".harness-recommend-*")),
+        )
+
+    def test_cli_v2_pack_errors_do_not_publish_partial_output(self):
+        output = self.root / "cli-failure"
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            self.assertNotEqual(
+                0,
+                main(
+                    [
+                        "pack",
+                        str(self.workspace),
+                        "--output",
+                        str(output),
+                        "--key",
+                        str(self.root / "missing.pem"),
+                    ]
+                ),
+            )
+        self.assertFalse(output.exists())
 
     def test_planner_cleans_disk_index_when_enter_fails(self):
         before = set(Path(tempfile.gettempdir()).glob(".harness-install-plan-*"))

@@ -12,7 +12,7 @@ from tools.agent_builder.builder import (
     prepare_workspace_v2,
     validate_workspace_v2,
 )
-from tools.agent_builder.cli import main
+from tools.agent_builder.cli import build_parser, main
 from tools.agent_builder.schema_v2 import Authorship, SourceGenre
 
 
@@ -798,6 +798,147 @@ class WorkspaceV2Test(unittest.TestCase):
         catalog = json.loads((output / "source-catalog.json").read_text("utf-8"))
         self.assertEqual(2, catalog["schemaVersion"])
         self.assertEqual("unknown", catalog["sources"][0]["genre"])
+
+    def test_cli_parser_exposes_v2_profiles_and_balanced_default(self):
+        parser = build_parser()
+
+        default = parser.parse_args(
+            ["pack", "workspace", "--output", "dist", "--key", "publisher.pem"]
+        )
+        self.assertEqual("balanced", default.profile)
+        for profile in ("lite", "balanced", "complete", "source"):
+            with self.subTest(profile=profile):
+                parsed = parser.parse_args(
+                    [
+                        "pack",
+                        "workspace",
+                        "--output",
+                        "dist",
+                        "--key",
+                        "publisher.pem",
+                        "--profile",
+                        profile,
+                    ]
+                )
+                self.assertEqual(profile, parsed.profile)
+
+        recommend = parser.parse_args(
+            ["recommend", "workspace", "--key", "publisher.pem", "--json"]
+        )
+        self.assertEqual("recommend", recommend.command)
+        self.assertEqual(Path("publisher.pem"), recommend.key)
+        self.assertTrue(recommend.json)
+
+    def test_skill_contract_uses_one_consolidated_question_and_balanced_handoff(self):
+        skill = (
+            Path(__file__).parents[3]
+            / ".agents"
+            / "skills"
+            / "agent-builder"
+            / "SKILL.md"
+        ).read_text("utf-8")
+
+        for required in (
+            "一次性",
+            "全部 unknown",
+            "genre",
+            "authorship",
+            "period",
+            "推荐安装（默认）",
+            "轻量",
+            "完整证据",
+            "包含原文",
+            "自动",
+            "按建议",
+            "默认",
+            "balanced",
+            "确认有权",
+            "本地导入",
+            "Finder",
+            "AirDrop",
+            "USB",
+            "手机空间",
+            "Android",
+            "基于资料模拟",
+            "direct",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, skill)
+        self.assertNotIn("逐本询问", skill)
+        self.assertNotRegex(skill, r"for\s+.*source|while\s+.*unknown")
+        self.assertIn("不上传 OSS", skill)
+        self.assertIn("不加入 Git", skill)
+
+    def test_v1_cli_validate_pack_and_include_sources_remain_unchanged(self):
+        workspace = self.root / "v1-workspace"
+        workspace.mkdir()
+        (workspace / "workspace.json").write_text(
+            '{"schemaVersion":1}',
+            encoding="utf-8",
+        )
+        key = self.root / "v1-key.pem"
+        key.write_text("fixture", encoding="utf-8")
+        report = mock.Mock(publishable=True)
+        report.to_dict.return_value = {"publishable": True}
+        result = mock.Mock(bundle_package=self.root / "v1.hbundle")
+
+        with (
+            mock.patch("tools.agent_builder.cli.validate_workspace", return_value=report) as validate_v1,
+            mock.patch("tools.agent_builder.cli.validate_workspace_v2") as validate_v2,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(0, main(["validate", str(workspace)]))
+        validate_v1.assert_called_once_with(workspace)
+        validate_v2.assert_not_called()
+
+        with (
+            mock.patch("tools.agent_builder.cli.pack_workspace", return_value=result) as pack_v1,
+            mock.patch("tools.agent_builder.cli.pack_workspace_v2") as pack_v2,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "pack",
+                        str(workspace),
+                        "--output",
+                        str(self.root / "v1-dist"),
+                        "--key",
+                        str(key),
+                        "--include-sources",
+                    ]
+                ),
+            )
+        pack_v1.assert_called_once_with(
+            workspace,
+            self.root / "v1-dist",
+            key,
+            True,
+        )
+        pack_v2.assert_not_called()
+
+        with (
+            mock.patch("tools.agent_builder.cli.pack_workspace") as pack_v1,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertNotEqual(
+                0,
+                main(
+                    [
+                        "pack",
+                        str(workspace),
+                        "--output",
+                        str(self.root / "v1-profile"),
+                        "--key",
+                        str(key),
+                        "--profile",
+                        "balanced",
+                    ]
+                ),
+            )
+        pack_v1.assert_not_called()
 
     def _prepare(self, name: str = "workspace") -> Path:
         return prepare_workspace_v2(

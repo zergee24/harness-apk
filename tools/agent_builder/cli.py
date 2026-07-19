@@ -9,11 +9,19 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from .builder import (
     BuildError,
     pack_workspace,
+    pack_workspace_v2,
     prepare_workspace,
     prepare_workspace_v2,
     validate_workspace,
     validate_workspace_v2,
 )
+from .recommendation import build_recommendation, format_recommendation_summary
+
+
+class _ProfileAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "profile_explicit", True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,11 +49,23 @@ def build_parser() -> argparse.ArgumentParser:
     validate_v2 = subparsers.add_parser("validate-v2", help="验证 V2 人物资产工作区")
     validate_v2.add_argument("workspace", type=Path)
 
+    recommend = subparsers.add_parser("recommend", help="生成四种安装方案的准确签名体积")
+    recommend.add_argument("workspace", type=Path)
+    recommend.add_argument("--key", type=Path)
+    recommend.add_argument("--json", action="store_true")
+
     pack = subparsers.add_parser("pack", help="签名并输出 hagent/hcorpus/hsource/hbundle")
     pack.add_argument("workspace", type=Path)
     pack.add_argument("--output", required=True, type=Path)
     pack.add_argument("--key", type=Path)
     pack.add_argument("--include-sources", action="store_true")
+    pack.add_argument(
+        "--profile",
+        choices=("lite", "balanced", "complete", "source"),
+        default="balanced",
+        action=_ProfileAction,
+    )
+    pack.set_defaults(profile_explicit=False)
     return parser
 
 
@@ -68,13 +88,52 @@ def main(argv: list[str] | None = None) -> int:
             print(workspace)
             return 0
         if args.command == "validate":
-            report = validate_workspace(args.workspace)
+            report = (
+                validate_workspace_v2(args.workspace)
+                if _workspace_schema_version(args.workspace) == 2
+                else validate_workspace(args.workspace)
+            )
             print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
             return 0 if report.publishable else 2
         if args.command == "validate-v2":
             report = validate_workspace_v2(args.workspace)
             print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
             return 0 if report.publishable else 2
+        if args.command == "recommend":
+            if _workspace_schema_version(args.workspace) != 2:
+                raise BuildError("recommend 仅支持 schemaVersion 2 工作区")
+            if args.key is None or not args.key.is_file():
+                raise BuildError("recommend 必须提供已存在的 publisher --key")
+            recommendation = build_recommendation(args.workspace, args.key)
+            if args.json:
+                print(
+                    json.dumps(
+                        recommendation,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            else:
+                print(format_recommendation_summary(recommendation))
+            return 0
+        schema_version = _workspace_schema_version(args.workspace)
+        if schema_version == 2:
+            if args.include_sources:
+                raise BuildError("V2 不接受 V1 --include-sources；请使用 --profile source")
+            if args.key is None or not args.key.is_file():
+                raise BuildError("V2 pack 必须提供已存在的 --key")
+            result = pack_workspace_v2(
+                args.workspace,
+                args.output,
+                args.key,
+                profile_id=args.profile,
+                emit_sources=args.profile == "source",
+            )
+            print(result.bundle_package)
+            return 0
+        if args.profile_explicit:
+            raise BuildError("V1 pack 不接受 V2 --profile")
         key_path = args.key or args.workspace / "publisher-key.pem"
         if not key_path.exists():
             key_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +152,17 @@ def main(argv: list[str] | None = None) -> int:
     except BuildError as error:
         print(f"构建失败：{error}", file=sys.stderr)
         return 1
+
+
+def _workspace_schema_version(workspace: Path) -> int:
+    try:
+        manifest = json.loads((Path(workspace) / "workspace.json").read_text("utf-8"))
+        schema_version = manifest.get("schemaVersion")
+    except (OSError, json.JSONDecodeError, RecursionError) as error:
+        raise BuildError(f"workspace.json 无法读取：{error}") from error
+    if isinstance(schema_version, bool) or schema_version not in {1, 2}:
+        raise BuildError(f"不支持的 schemaVersion：{schema_version}")
+    return schema_version
 
 
 if __name__ == "__main__":
