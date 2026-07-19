@@ -21,6 +21,7 @@ import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FilterInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
@@ -168,12 +169,15 @@ class AgentBundleReader(
         ZipFile(stagedFile).use { archive ->
             val entry = archive.getEntry(corpus.chunksPath)
                 ?: throw AgentBundleException("缺少资料块文件：${corpus.chunksPath}")
-            val ids = mutableSetOf<String>()
-            archive.getInputStream(entry).use { input ->
-                input.forEachUtf8JsonLine(corpus.chunksPath) { line, lineNumber ->
-                    val chunk = parseV1Chunk(line, corpus, lineNumber)
-                    if (!ids.add(chunk.id)) throw AgentBundleException("资料块包含重复 id：${chunk.id}")
-                    block(chunk)
+            AgentCorpusValidationIndex(requireNotNull(stagedFile.parentFile)).use { index ->
+                archive.getInputStream(entry).use { input ->
+                    input.forEachUtf8JsonLine(corpus.chunksPath) { line, lineNumber ->
+                        val chunk = parseV1Chunk(line, corpus, lineNumber)
+                        if (!index.putUnique(v1ChunkKey(chunk.id))) {
+                            throw AgentBundleException("资料块包含重复 id：${chunk.id}")
+                        }
+                        block(chunk)
+                    }
                 }
             }
         }
@@ -209,13 +213,16 @@ class AgentBundleReader(
         ZipFile(stagedFile).use { archive ->
             val entry = archive.getEntry(corpus.chunksPath)
                 ?: throw AgentBundleException("缺少资料块文件：${corpus.chunksPath}")
-            val ids = mutableSetOf<String>()
-            archive.getInputStream(entry).use { input ->
-                input.forEachUtf8JsonLineSuspending(corpus.chunksPath) { line, lineNumber ->
-                    currentCoroutineContext().ensureActive()
-                    val chunk = parseV1Chunk(line, corpus, lineNumber)
-                    if (!ids.add(chunk.id)) throw AgentBundleException("资料块包含重复 id：${chunk.id}")
-                    block(chunk)
+            AgentCorpusValidationIndex(requireNotNull(stagedFile.parentFile)).use { index ->
+                archive.getInputStream(entry).use { input ->
+                    input.forEachUtf8JsonLineSuspending(corpus.chunksPath) { line, lineNumber ->
+                        currentCoroutineContext().ensureActive()
+                        val chunk = parseV1Chunk(line, corpus, lineNumber)
+                        if (!index.putUnique(v1ChunkKey(chunk.id))) {
+                            throw AgentBundleException("资料块包含重复 id：${chunk.id}")
+                        }
+                        block(chunk)
+                    }
                 }
             }
         }
@@ -262,19 +269,20 @@ class AgentBundleReader(
         rejectUnsafeCentralDirectory(stagedFile)
         return ZipFile(stagedFile).use { archive ->
             val entries = validateBasicEntries(archive)
-            val checksumsBytes = archive.readRequired(CHECKSUMS_PATH, MAX_CHECKSUMS_BYTES)
-            val signatureBytes = archive.readRequired(SIGNATURE_PATH, MAX_SIGNATURE_BYTES)
-            val checksumMap = parseCanonicalChecksums(checksumsBytes)
-            val signature = parseSignature(signatureBytes)
-            verifySignature(signature, checksumsBytes)
-            verifyChecksums(archive, entries, checksumMap)
-
             val hasBundleManifest = entries.any { it.name == BUNDLE_MANIFEST_PATH }
             val hasPackageManifest = entries.any { it.name == PACKAGE_MANIFEST_PATH }
             if (hasBundleManifest == hasPackageManifest) {
                 throw AgentBundleException("人格包必须且只能包含一个顶层 manifest")
             }
             val manifestPath = if (hasBundleManifest) BUNDLE_MANIFEST_PATH else PACKAGE_MANIFEST_PATH
+            val runtimeAssetPaths = validateDeclaredV2AgentRuntimeAssets(archive, manifestPath)
+            val checksumsBytes = archive.readRequired(CHECKSUMS_PATH, MAX_CHECKSUMS_BYTES)
+            val signatureBytes = archive.readRequired(SIGNATURE_PATH, MAX_SIGNATURE_BYTES)
+            val checksumMap = parseCanonicalChecksums(checksumsBytes)
+            val signature = parseSignature(signatureBytes)
+            verifySignature(signature, checksumsBytes)
+            verifyChecksums(archive, entries, checksumMap, runtimeAssetPaths)
+
             val manifestBytes = archive.readRequired(manifestPath, MAX_MANIFEST_BYTES)
             val manifestObject = parseObject(manifestBytes.decodeToString(), manifestPath)
             val schemaVersion = manifestObject.requiredPositiveInt("schemaVersion", manifestPath)
@@ -542,20 +550,22 @@ class AgentBundleReader(
         if (manifest.runnableWithoutCorpora && manifest.requiredCorpora.isNotEmpty()) {
             throw AgentBundleException("hagent runnableWithoutCorpora 与 requiredCorpora 冲突")
         }
-        val persona = archive.readRequired(V2_PERSONA_PATH, MAX_AGENT_ASSET_BYTES).decodeToString().trim()
+        val assetBudget = AgentRuntimeAssetBudget()
+        val persona = assetBudget.read(archive, V2_PERSONA_PATH).decodeToString().trim()
         if (persona.isBlank()) throw AgentBundleException("$V2_PERSONA_PATH 不能为空")
-        val identity = parseIdentity(archive.readJsonObject(V2_IDENTITY_PATH))
-        val voice = parseVoice(archive.readJsonObject(V2_VOICE_PATH))
-        val worldview = archive.readJsonl(V2_WORLDVIEW_PATH, ::parseWorldview)
-        val episodes = archive.readJsonl(V2_EPISODES_PATH, ::parseEpisode)
-        val conceptsRoot = archive.readJsonObject(V2_CONCEPTS_PATH)
+        val identity = parseIdentity(archive.readAgentJsonObject(V2_IDENTITY_PATH, assetBudget))
+        val voice = parseVoice(archive.readAgentJsonObject(V2_VOICE_PATH, assetBudget))
+        val worldview = archive.readAgentJsonl(V2_WORLDVIEW_PATH, assetBudget, ::parseWorldview)
+        val episodes = archive.readAgentJsonl(V2_EPISODES_PATH, assetBudget, ::parseEpisode)
+        val conceptsRoot = archive.readAgentJsonObject(V2_CONCEPTS_PATH, assetBudget)
         val concepts = conceptsRoot.requiredArray("concepts", V2_CONCEPTS_PATH)
             .mapIndexed { index, element -> parseConcept(element.asObject("$V2_CONCEPTS_PATH[$index]")) }
+            .also { assetBudget.addRecords(V2_CONCEPTS_PATH, it.size) }
         rejectDuplicates(concepts.map(V2Concept::id), "concept id")
-        val examples = archive.readJsonl(V2_EXAMPLES_PATH, ::parseExample)
-        val openers = parseOpeners(archive.readJsonObject(V2_OPENERS_PATH))
-        val evaluations = archive.readJsonl(V2_EVAL_PATH, ::parseEvaluation)
-        val installPlanBytes = archive.readRequired(V2_INSTALL_PLAN_PATH, MAX_AGENT_ASSET_BYTES)
+        val examples = archive.readAgentJsonl(V2_EXAMPLES_PATH, assetBudget, ::parseExample)
+        val openers = parseOpeners(archive.readAgentJsonObject(V2_OPENERS_PATH, assetBudget))
+        val evaluations = archive.readAgentJsonl(V2_EVAL_PATH, assetBudget, ::parseEvaluation)
+        val installPlanBytes = assetBudget.read(archive, V2_INSTALL_PLAN_PATH)
         val installPlan = parseInstallPlan(parseObject(installPlanBytes.decodeToString(), V2_INSTALL_PLAN_PATH))
         if (installPlan.requiredCorpusIds.toSet() != manifest.requiredCorpora.toSet()) {
             throw AgentBundleException("hagent requiredCorpora 与 install plan 不一致")
@@ -1195,6 +1205,7 @@ class AgentBundleReader(
         archive: ZipFile,
         entries: List<ZipEntry>,
         checksums: Map<String, String>,
+        runtimeAssetPaths: Set<String>,
     ) {
         val contentEntries = entries.filterNot { it.name in COMMON_PACKAGE_FILES }
         val contentNames = contentEntries.mapTo(mutableSetOf(), ZipEntry::getName)
@@ -1202,8 +1213,17 @@ class AgentBundleReader(
         val missing = checksums.keys - contentNames
         if (undeclared.isNotEmpty()) throw AgentBundleException("存在未声明 SHA-256 的文件：${undeclared.first()}")
         if (missing.isNotEmpty()) throw AgentBundleException("checksums.json 引用了不存在的文件：${missing.first()}")
+        var remainingRuntimeAssetBytes = MAX_AGENT_RUNTIME_ASSET_BYTES.toLong()
         contentEntries.forEach { entry ->
-            val actual = archive.getInputStream(entry).use(InputStream::sha256)
+            val actual = if (entry.name in runtimeAssetPaths) {
+                val hashed = archive.getInputStream(entry).use { input ->
+                    input.sha256Limited(remainingRuntimeAssetBytes, entry.name)
+                }
+                remainingRuntimeAssetBytes -= hashed.bytes
+                hashed.sha256
+            } else {
+                archive.getInputStream(entry).use(InputStream::sha256)
+            }
             if (actual != checksums.getValue(entry.name)) {
                 throw AgentBundleException("SHA-256 校验失败：${entry.name}")
             }
@@ -1495,23 +1515,30 @@ class AgentBundleReader(
             throw AgentBundleException("资料块第 $lineNumber 行格式无效", error)
         }
 
-    private fun ZipFile.readJsonObject(path: String): JsonObject =
-        parseObject(readRequired(path, MAX_AGENT_ASSET_BYTES).decodeToString(), path)
+    private fun ZipFile.readAgentJsonObject(path: String, budget: AgentRuntimeAssetBudget): JsonObject =
+        parseObject(budget.read(this, path).decodeToString(), path)
 
-    private fun <T> ZipFile.readJsonl(path: String, parser: (JsonObject) -> T): List<T> {
+    private fun <T> ZipFile.readAgentJsonl(
+        path: String,
+        budget: AgentRuntimeAssetBudget,
+        parser: (JsonObject) -> T,
+    ): List<T> {
         val rows = mutableListOf<T>()
         val ids = mutableSetOf<String>()
-        streamJsonl(path) { row, _ ->
-            val parsed = parser(row)
-            val id = when (parsed) {
-                is V2Worldview -> parsed.id
-                is V2Episode -> parsed.id
-                is V2Example -> parsed.id
-                is V2Evaluation -> parsed.id
-                else -> null
+        budget.open(this, path).use { input ->
+            input.forEachUtf8JsonLine(path) { line, lineNumber ->
+                budget.addRecords(path, 1)
+                val parsed = parser(parseObject(line, "$path 第 $lineNumber 行"))
+                val id = when (parsed) {
+                    is V2Worldview -> parsed.id
+                    is V2Episode -> parsed.id
+                    is V2Example -> parsed.id
+                    is V2Evaluation -> parsed.id
+                    else -> null
+                }
+                if (id != null && !ids.add(id)) throw AgentBundleException("$path 包含重复 id：$id")
+                rows += parsed
             }
-            if (id != null && !ids.add(id)) throw AgentBundleException("$path 包含重复 id：$id")
-            rows += parsed
         }
         return rows
     }
@@ -1534,6 +1561,68 @@ class AgentBundleReader(
 
     private fun ZipFile.requireEntry(name: String) {
         if (getEntry(safePath(name)) == null) throw AgentBundleException("缺少运行时资源：$name")
+    }
+
+    private fun validateDeclaredV2AgentRuntimeAssets(archive: ZipFile, manifestPath: String): Set<String> {
+        val manifest = parseObject(archive.readRequired(manifestPath, MAX_MANIFEST_BYTES).decodeToString(), manifestPath)
+        if (manifest.optionalString("type", manifestPath) != "hagent" || manifest["schemaVersion"]?.jsonPrimitive?.intOrNull != 2) {
+            return emptySet()
+        }
+        var total = 0L
+        V2_AGENT_RUNTIME_ASSET_FILES.forEach { path ->
+            val entry = archive.getEntry(path) ?: throw AgentBundleException("缺少包内文件：$path")
+            if (entry.size < 0 || entry.size > MAX_AGENT_RUNTIME_ASSET_BYTES) {
+                throw AgentBundleException("运行时资产超过大小上限：$path")
+            }
+            total = Math.addExact(total, entry.size)
+            if (total > MAX_AGENT_RUNTIME_ASSET_BYTES) {
+                throw AgentBundleException("运行时资产总字节超过大小上限")
+            }
+        }
+        return V2_AGENT_RUNTIME_ASSET_FILES
+    }
+
+    private class AgentRuntimeAssetBudget {
+        private var consumedBytes = 0L
+        private var recordCount = 0L
+
+        fun read(archive: ZipFile, path: String): ByteArray =
+            open(archive, path).use { input -> input.readBytesLimited(MAX_AGENT_RUNTIME_ASSET_BYTES, path) }
+
+        fun open(archive: ZipFile, path: String): InputStream {
+            val safePath = safePath(path)
+            val entry = archive.getEntry(safePath) ?: throw AgentBundleException("缺少包内文件：$safePath")
+            if (entry.size < 0 || entry.size > MAX_AGENT_RUNTIME_ASSET_BYTES) {
+                throw AgentBundleException("运行时资产超过大小上限：$safePath")
+            }
+            return object : FilterInputStream(archive.getInputStream(entry)) {
+                override fun read(): Int {
+                    val value = super.read()
+                    if (value >= 0) addBytes(safePath, 1)
+                    return value
+                }
+
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                    val count = super.read(buffer, offset, length)
+                    if (count > 0) addBytes(safePath, count)
+                    return count
+                }
+            }
+        }
+
+        fun addRecords(path: String, count: Int) {
+            recordCount = Math.addExact(recordCount, count.toLong())
+            if (recordCount > MAX_AGENT_RUNTIME_ASSET_RECORDS) {
+                throw AgentBundleException("运行时资产记录数超过上限：$path")
+            }
+        }
+
+        private fun addBytes(path: String, count: Int) {
+            consumedBytes = Math.addExact(consumedBytes, count.toLong())
+            if (consumedBytes > MAX_AGENT_RUNTIME_ASSET_BYTES) {
+                throw AgentBundleException("运行时资产超过大小上限：$path")
+            }
+        }
     }
 
     private fun validateInputFile(file: File) {
@@ -1566,7 +1655,8 @@ class AgentBundleReader(
         private const val MAX_SIGNATURE_BYTES = 64 * 1024
         private const val MAX_PERSONA_BYTES = 2 * 1024 * 1024
         private const val MAX_WORLDVIEW_BYTES = 32 * 1024 * 1024
-        private const val MAX_AGENT_ASSET_BYTES = 16 * 1024 * 1024
+        private const val MAX_AGENT_RUNTIME_ASSET_BYTES = 8 * 1024 * 1024
+        private const val MAX_AGENT_RUNTIME_ASSET_RECORDS = 10_000L
         private const val MAX_CORPUS_METADATA_BYTES = 16 * 1024 * 1024
         private const val MAX_JSONL_LINE_BYTES = 4 * 1024 * 1024
         private const val MAX_EOCD_SEARCH_BYTES = 65_557
@@ -1614,8 +1704,7 @@ class AgentBundleReader(
         private const val V2_DUPLICATES_PATH = "duplicates.jsonl"
         private val COMMON_PACKAGE_FILES = setOf(CHECKSUMS_PATH, SIGNATURE_PATH)
         private val PACKAGE_SUFFIXES = setOf("hagent", "hcorpus", "hsource")
-        private val V2_AGENT_FILES = COMMON_PACKAGE_FILES + setOf(
-            PACKAGE_MANIFEST_PATH,
+        private val V2_AGENT_RUNTIME_ASSET_FILES = setOf(
             V2_PERSONA_PATH,
             V2_IDENTITY_PATH,
             V2_VOICE_PATH,
@@ -1627,6 +1716,7 @@ class AgentBundleReader(
             V2_EVAL_PATH,
             V2_INSTALL_PLAN_PATH,
         )
+        private val V2_AGENT_FILES = COMMON_PACKAGE_FILES + V2_AGENT_RUNTIME_ASSET_FILES + PACKAGE_MANIFEST_PATH
         private val V2_CORPUS_FILES = COMMON_PACKAGE_FILES + setOf(
             PACKAGE_MANIFEST_PATH,
             V2_SOURCES_PATH,
@@ -1684,6 +1774,7 @@ private data class ChunkIndexRecord(
 private fun sourceKey(sourceId: String): String = "source\u001f$sourceId"
 private fun nodeKey(nodeId: String): String = "node\u001f$nodeId"
 private fun chunkKeyForValidation(chunkId: String): String = "chunk\u001f$chunkId"
+private fun v1ChunkKey(chunkId: String): String = "v1-chunk\u001f$chunkId"
 private fun chunkSourceKey(chunkId: String, sourceId: String): String = "chunk-source\u001f$chunkId\u001f$sourceId"
 private fun duplicateKey(chunkId: String): String = "duplicate\u001f$chunkId"
 private fun provenanceKey(dimension: String, value: String): String =
@@ -2068,6 +2159,25 @@ private fun InputStream.sha256(): String {
     }
     return digest.digest().toHex()
 }
+
+private fun InputStream.sha256Limited(maxBytes: Long, name: String): HashedBytes {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var total = 0L
+    while (true) {
+        val read = read(buffer)
+        if (read < 0) break
+        total += read
+        if (total > maxBytes) throw AgentBundleException("运行时资产超过大小上限：$name")
+        digest.update(buffer, 0, read)
+    }
+    return HashedBytes(digest.digest().toHex(), total)
+}
+
+private data class HashedBytes(
+    val sha256: String,
+    val bytes: Long,
+)
 
 private fun File.sha256(): String = inputStream().buffered().use(InputStream::sha256)
 

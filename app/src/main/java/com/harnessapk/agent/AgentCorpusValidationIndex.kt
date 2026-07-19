@@ -14,10 +14,14 @@ import java.io.FileOutputStream
 import java.nio.file.Files
 import java.security.MessageDigest
 
-internal class AgentCorpusValidationIndex(parent: File) : Closeable {
+internal class AgentCorpusValidationIndex(
+    parent: File,
+    private val maxRecordCount: Long = MAX_INDEX_RECORDS,
+) : Closeable {
     private val root = Files.createTempDirectory(parent.toPath(), ".corpus-index-").toFile()
     private val diskBudgetBytes = minOf(MAX_INDEX_BYTES, root.usableSpace / 2)
     private var bytesWritten = 0L
+    private var recordCount = 0L
 
     init {
         if (diskBudgetBytes < MIN_INDEX_BUDGET_BYTES) {
@@ -30,6 +34,9 @@ internal class AgentCorpusValidationIndex(parent: File) : Closeable {
         validateRecord(key, value)
         val bucket = bucketFile(key)
         if (find(bucket, key) != null) return false
+        if (recordCount >= maxRecordCount) {
+            throw AgentBundleException("语料校验磁盘索引记录数超过安全预算")
+        }
         val recordBytes = RECORD_HEADER_BYTES + key.encodeToByteArray().size + value.size
         if (bytesWritten + recordBytes > diskBudgetBytes) {
             throw AgentBundleException("语料校验磁盘索引超过安全预算")
@@ -45,6 +52,7 @@ internal class AgentCorpusValidationIndex(parent: File) : Closeable {
             output.write(value)
         }
         bytesWritten += recordBytes
+        recordCount += 1
         return true
     }
 
@@ -56,6 +64,8 @@ internal class AgentCorpusValidationIndex(parent: File) : Closeable {
     fun contains(key: String): Boolean = get(key) != null
 
     fun diskBytes(): Long = bytesWritten
+
+    fun records(): Long = recordCount
 
     override fun close() {
         root.deleteRecursively()
@@ -101,6 +111,7 @@ internal class AgentCorpusValidationIndex(parent: File) : Closeable {
         private const val MAX_BUCKET_BYTES = 64L * 1024 * 1024
         private const val MAX_INDEX_BYTES = 6L * 1024 * 1024 * 1024
         private const val MIN_INDEX_BUDGET_BYTES = 64L * 1024 * 1024
+        private const val MAX_INDEX_RECORDS = 1_000_000L
     }
 }
 

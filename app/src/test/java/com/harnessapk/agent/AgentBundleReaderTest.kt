@@ -102,6 +102,28 @@ class AgentBundleReaderTest {
     }
 
     @Test
+    fun v1StreamingUsesDiskIndexRejectsDuplicatesAndCleansTemporaryFiles() {
+        val chunkLines = (1..2_000).joinToString(separator = "") { v1Chunk("chunk-$it") } + v1Chunk("chunk-1")
+        val temporaryRoot = Files.createTempDirectory("agent-v1-disk-index").toFile()
+        val reader = AgentBundleReader(temporaryDirectory = temporaryRoot)
+        val parsed = reader.readBundle(signedBundle(chunkLines = chunkLines))
+        var sawDiskIndex = false
+
+        assertBundleFailure("重复 id") {
+            reader.forEachChunk(parsed, parsed.corpora.single()) {
+                if (it.id == "chunk-2000") {
+                    sawDiskIndex = temporaryRoot.walkTopDown().any { file ->
+                        file.name.startsWith(".corpus-index-") && file.isDirectory && file.listFiles().orEmpty().isNotEmpty()
+                    }
+                }
+            }
+        }
+
+        assertTrue(sawDiskIndex)
+        assertTrue(temporaryRoot.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
     fun rejectsPathTraversalEntry() {
         val bundle = signedBundle(extraEntries = mapOf("../escape.txt" to "escape".encodeToByteArray()))
 

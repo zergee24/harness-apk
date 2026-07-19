@@ -95,6 +95,89 @@ class AgentV2BundleReaderTest {
     }
 
     @Test
+    fun rejectsAgentRuntimeJsonlEntryAboveSmallAssetLimitBeforeParsing() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val oversizedWorldview = worldviewRecords(count = 9_000, statementLength = 1_024)
+
+        assertPackageFailure("运行时资产") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus,
+                    runtimeAssets = mapOf("agent/worldview.jsonl" to oversizedWorldview.encodeToByteArray()),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun rejectsDeclaredOversizedAgentAssetBeforeChecksumOrSignatureVerification() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+
+        assertPackageFailure("运行时资产") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus,
+                    runtimeAssets = mapOf(
+                        "agent/worldview.jsonl" to worldviewRecords(count = 9_000, statementLength = 1_024).encodeToByteArray(),
+                    ),
+                    corruptSignature = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun rejectsAgentRuntimeJsonlWhenCumulativeRecordCountExceedsLimit() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val worldview = (1..10_001).joinToString(separator = "") { index ->
+            worldviewJson("stance-$index", "调查先于结论")
+        }
+
+        assertPackageFailure("记录数") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus,
+                    runtimeAssets = mapOf("agent/worldview.jsonl" to worldview.encodeToByteArray()),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun rejectsAgentRuntimeJsonlWhenZipSizeMetadataUnderstatesStream() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val agent = fixture.agentPackage(
+            corpus,
+            runtimeAssets = mapOf(
+                "agent/worldview.jsonl" to worldviewRecords(count = 9_000, statementLength = 1_024).encodeToByteArray(),
+            ),
+        )
+        patchCentralUncompressedSizeAndDescriptor(agent, "agent/worldview.jsonl", 1)
+
+        assertPackageFailure("运行时资产") { AgentBundleReader().readPackage(agent) }
+    }
+
+    @Test
+    fun rejectsUnderstatedAgentAssetWhileHashingBeforeChecksumMismatch() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val agent = fixture.agentPackage(
+            corpus,
+            runtimeAssets = mapOf(
+                "agent/worldview.jsonl" to worldviewRecords(count = 9_000, statementLength = 1_024).encodeToByteArray(),
+            ),
+            corruptChecksums = true,
+        )
+        patchCentralUncompressedSizeAndDescriptor(agent, "agent/worldview.jsonl", 1)
+
+        assertPackageFailure("运行时资产") { AgentBundleReader().readPackage(agent) }
+    }
+
+    @Test
     fun rejectsCrossSourceAndOpenCorpusGraphs() {
         val fixture = Fixture()
         val sources = sourceJson(
@@ -429,6 +512,9 @@ class AgentV2BundleReaderTest {
             declaredCorpusSize: Long = corpus.length(),
             requiredCorpusIds: List<String> = listOf(CORE_ID),
             manifestRequiredCorpora: List<String> = requiredCorpusIds,
+            runtimeAssets: Map<String, ByteArray> = emptyMap(),
+            corruptSignature: Boolean = false,
+            corruptChecksums: Boolean = false,
         ): File {
             val profiles = listOf(
                 "lite" to listOf(CORE_ID),
@@ -441,23 +527,27 @@ class AgentV2BundleReaderTest {
             val plan = """
                 {"packages":[{"dependencies":[],"fileName":"${corpus.name}","id":"$CORE_ID","installClass":"required","sha256":"$declaredCorpusHash","sizeBytes":$declaredCorpusSize,"type":"hcorpus"}],"profiles":[$profiles],"recommendedProfileId":"balanced","requiredCorpusIds":${requiredCorpusIds.jsonArray()},"schemaVersion":2}
             """.trimIndent()
+            val assets = linkedMapOf(
+                "manifest.json" to """
+                    {"agent":{"id":"person.fixture","name":"测试人物","version":2},"requiredCorpora":${manifestRequiredCorpora.jsonArray()},"runnableWithoutCorpora":false,"schemaVersion":2,"type":"hagent"}
+                """.trimIndent().encodeToByteArray(),
+                "agent/persona.md" to "只依据证据回答。".encodeToByteArray(),
+                "agent/identity.json" to """{"relationships":[],"roles":["调查者"],"selfNames":["我"],"timeHorizon":"1926"}""".encodeToByteArray(),
+                "agent/voice.json" to """{"avoidPatterns":[],"defaultForm":"直接","evidence":["chunk-core"],"preferredTerms":["调查"],"rhetoricalMoves":[],"sentenceRhythm":["短句"]}""".encodeToByteArray(),
+                "agent/worldview.jsonl" to worldviewJson("stance-1", "调查先于结论").encodeToByteArray(),
+                "agent/episodes.jsonl" to ("""{"evidence":["chunk-core"],"id":"episode-1","location":"现场","meaning":"掌握事实","participants":[],"period":"1926","summary":"完成调查"}""" + "\n").encodeToByteArray(),
+                "agent/concepts.json" to """{"concepts":[{"aliases":[],"evidence":["chunk-core"],"id":"concept-1","keywords":["事实"],"name":"调查"}]}""".encodeToByteArray(),
+                "agent/examples.jsonl" to ("""{"assistant":"先调查。","evidence":["chunk-core"],"generationType":"synthesized","id":"example-1","intent":"方法","styleTags":["直接"],"user":"如何判断"}""" + "\n").encodeToByteArray(),
+                "agent/openers.json" to """{"alternatives":[],"default":"你好"}""".encodeToByteArray(),
+                "agent/eval.jsonl" to ("""{"category":"grounding","corpusId":"core-evidence","expectedEvidence":["chunk-core"],"id":"eval-1","period":"1926","question":"如何调查"}""" + "\n").encodeToByteArray(),
+                "install-plan.json" to plan.encodeToByteArray(),
+            )
+            assets.putAll(runtimeAssets)
             return signedPackage(
                 "person.fixture-v2.hagent",
-                linkedMapOf(
-                    "manifest.json" to """
-                        {"agent":{"id":"person.fixture","name":"测试人物","version":2},"requiredCorpora":${manifestRequiredCorpora.jsonArray()},"runnableWithoutCorpora":false,"schemaVersion":2,"type":"hagent"}
-                    """.trimIndent().encodeToByteArray(),
-                    "agent/persona.md" to "只依据证据回答。".encodeToByteArray(),
-                    "agent/identity.json" to """{"relationships":[],"roles":["调查者"],"selfNames":["我"],"timeHorizon":"1926"}""".encodeToByteArray(),
-                    "agent/voice.json" to """{"avoidPatterns":[],"defaultForm":"直接","evidence":["chunk-core"],"preferredTerms":["调查"],"rhetoricalMoves":[],"sentenceRhythm":["短句"]}""".encodeToByteArray(),
-                    "agent/worldview.jsonl" to ("""{"aliases":[],"conditions":[],"confidence":1.0,"evidence":["chunk-core"],"id":"stance-1","period":"1926","statement":"调查先于结论","topic":"调查"}""" + "\n").encodeToByteArray(),
-                    "agent/episodes.jsonl" to ("""{"evidence":["chunk-core"],"id":"episode-1","location":"现场","meaning":"掌握事实","participants":[],"period":"1926","summary":"完成调查"}""" + "\n").encodeToByteArray(),
-                    "agent/concepts.json" to """{"concepts":[{"aliases":[],"evidence":["chunk-core"],"id":"concept-1","keywords":["事实"],"name":"调查"}]}""".encodeToByteArray(),
-                    "agent/examples.jsonl" to ("""{"assistant":"先调查。","evidence":["chunk-core"],"generationType":"synthesized","id":"example-1","intent":"方法","styleTags":["直接"],"user":"如何判断"}""" + "\n").encodeToByteArray(),
-                    "agent/openers.json" to """{"alternatives":[],"default":"你好"}""".encodeToByteArray(),
-                    "agent/eval.jsonl" to ("""{"category":"grounding","corpusId":"core-evidence","expectedEvidence":["chunk-core"],"id":"eval-1","period":"1926","question":"如何调查"}""" + "\n").encodeToByteArray(),
-                    "install-plan.json" to plan.encodeToByteArray(),
-                ),
+                assets,
+                corruptSignature,
+                corruptChecksums,
             )
         }
 
@@ -490,6 +580,7 @@ class AgentV2BundleReaderTest {
             name: String,
             files: Map<String, ByteArray>,
             corruptSignature: Boolean = false,
+            corruptChecksums: Boolean = false,
         ): File {
             val directory = Files.createTempDirectory("agent-v2-fixture").toFile().apply { deleteOnExit() }
             val target = File(directory, name).apply { deleteOnExit() }
@@ -497,7 +588,11 @@ class AgentV2BundleReaderTest {
                 prefix = "{\"files\":{",
                 postfix = "}}",
                 separator = ",",
-            ) { (path, bytes) -> "\"$path\":\"${bytes.sha256()}\"" }.encodeToByteArray()
+            ) { (path, bytes) -> "\"$path\":\"${bytes.sha256()}\"" }
+                .let { canonical ->
+                    if (corruptChecksums) canonical.replaceFirst(Regex("[0-9a-f]{64}"), "0".repeat(64)) else canonical
+                }
+                .encodeToByteArray()
             val signer = Signature.getInstance("Ed25519")
             signer.initSign(keyPair.private)
             signer.update(checksums)
@@ -562,6 +657,22 @@ class AgentV2BundleReaderTest {
 }
 
 private fun List<String>.jsonArray(): String = joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
+
+private fun worldviewJson(id: String, statement: String): String =
+    """{"aliases":[],"conditions":[],"confidence":1.0,"evidence":["chunk-core"],"id":"$id","period":"1926","statement":"$statement","topic":"调查"}""" + "\n"
+
+private fun worldviewRecords(count: Int, statementLength: Int): String =
+    buildString(count * (statementLength + 160)) {
+        repeat(count) { index -> append(worldviewJson("asset-$index", randomAscii(statementLength, index))) }
+    }
+
+private fun randomAscii(length: Int, seed: Int): String = buildString(length) {
+    var state = seed.toLong() + 1
+    repeat(length) {
+        state = (state * 1_103_515_245 + 12_345) and 0x7fff_ffff
+        append(('a'.code + (state % 26).toInt()).toChar())
+    }
+}
 
 private fun sourceJson(vararg records: String): String = records.joinToString(prefix = "[", postfix = "]")
 
@@ -792,4 +903,14 @@ private fun ByteArray.writeIntLeV2(offset: Int, value: Int) {
 private fun ByteArray.writeShortLeV2(offset: Int, value: Int) {
     this[offset] = value.toByte()
     this[offset + 1] = (value ushr 8).toByte()
+}
+
+private fun patchCentralUncompressedSizeAndDescriptor(file: File, targetName: String, size: Int) {
+    val bytes = file.readBytes()
+    val layout = bytes.zipLayouts().single { it.name == targetName }
+    bytes.writeIntLeV2(layout.centralHeaderOffset + 24, size)
+    val descriptorOffset = layout.payloadOffset + layout.compressedSize
+    assertEquals(0x08074b50, bytes.readIntLeV2(descriptorOffset))
+    bytes.writeIntLeV2(descriptorOffset + 12, size)
+    file.writeBytes(bytes)
 }
