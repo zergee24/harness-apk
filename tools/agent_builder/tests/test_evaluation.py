@@ -11,7 +11,6 @@ from unittest import mock
 from tools.agent_builder.builder import prepare_workspace_v2, validate_workspace_v2
 from tools.agent_builder import evaluation
 from tools.agent_builder.evaluation import (
-    MAX_INDEX_TERMS_PER_CHUNK,
     MAX_JSONL_LINE_BYTES,
     MINIMUM_EVAL_COUNTS,
     MIN_GROUNDING_RATE,
@@ -27,6 +26,11 @@ class EvaluationTest(unittest.TestCase):
         self.root = Path(self.temp_dir.name)
         self.source = self.root / "source.md"
         self.source.write_text("# 调查\n\n调查以后再下结论。", encoding="utf-8")
+        self.companion_source = self.root / "companion.md"
+        self.companion_source.write_text(
+            "# 组织\n\n调查要从组织实际出发，不能借旧结论代替事实。",
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -181,15 +185,94 @@ class EvaluationTest(unittest.TestCase):
         report = evaluate_workspace(workspace)
         self.assertIn("第 1 行超过", "\n".join(report.errors))
 
-    def test_index_terms_have_a_deterministic_hard_cap(self):
-        terms = evaluation._bounded_index_terms(
-            [f"keyword-{index:03d}" for index in range(MAX_INDEX_TERMS_PER_CHUNK + 10)],
-            [f"ngram-{index:03d}" for index in range(MAX_INDEX_TERMS_PER_CHUNK + 10)],
+    def test_fts_retrieves_a_tail_term_without_truncating_chunk_terms(self):
+        workspace = self._complete_workspace()
+        chunks = self._chunks_path(workspace)
+        rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
+        rows[0]["keywords"] = [f"leading{index:03d}" for index in range(400)] + ["tailgroundingterm"]
+        rows[0]["ngrams"] = []
+        chunks.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as directory:
+            connection = sqlite3.connect(Path(directory) / "evaluation.sqlite")
+            connection.row_factory = sqlite3.Row
+            try:
+                evaluation._create_index(connection)
+                errors: list[str] = []
+                manifest = evaluation._load_workspace(workspace, errors)
+                self.assertIsNotNone(manifest)
+                source_hashes = {source.source_id: source.source_hash for source in manifest.sources}
+                evaluation._stream_node_index(workspace, connection, source_hashes, errors)
+                evaluation._stream_chunk_index(workspace, connection, errors, source_hashes)
+                self.assertEqual([], errors)
+                self.assertIn(rows[0]["id"], evaluation._SqliteChunks(connection).retrieve("tailgroundingterm"))
+            finally:
+                connection.close()
+
+    def test_diversity_and_global_reject_one_attributable_expected_chunk(self):
+        workspace = self._complete_workspace()
+        eval_path = self._asset(workspace, "eval.jsonl")
+        rows = [json.loads(line) for line in eval_path.read_text("utf-8").splitlines()]
+        for row in rows:
+            if row["category"] in {"diversity", "global"}:
+                row["expectedEvidence"] = [row["expectedEvidence"][0]]
+        eval_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+        report = validate_workspace_v2(workspace)
+
+        joined = "\n".join(report.errors)
+        self.assertFalse(report.publishable)
+        self.assertIn("diversity 至少需要 2 条可归因 expectedEvidence", joined)
+        self.assertIn("global 至少需要 2 条可归因 expectedEvidence", joined)
+
+    def test_runtime_asset_shapes_and_coverage_summaries_are_explicit(self):
+        workspace = self._complete_workspace()
+        identity = json.loads(self._asset(workspace, "identity.json").read_text("utf-8"))
+        identity["selfNames"] = "我"
+        identity["relationships"] = [{"subject": [], "relation": 17, "period": "1926", "evidence": []}]
+        self._asset(workspace, "identity.json").write_text(json.dumps(identity, ensure_ascii=False), encoding="utf-8")
+        voice = json.loads(self._asset(workspace, "voice.json").read_text("utf-8"))
+        voice["defaultForm"] = []
+        self._asset(workspace, "voice.json").write_text(json.dumps(voice, ensure_ascii=False), encoding="utf-8")
+        worldview = json.loads(self._asset(workspace, "worldview.jsonl").read_text("utf-8"))
+        worldview.update({"topic": [], "conditions": "bad", "aliases": [7], "confidence": True})
+        self._asset(workspace, "worldview.jsonl").write_text(json.dumps(worldview, ensure_ascii=False) + "\n", encoding="utf-8")
+        episode = json.loads(self._asset(workspace, "episodes.jsonl").read_text("utf-8"))
+        episode.update({"location": [], "participants": "群众"})
+        self._asset(workspace, "episodes.jsonl").write_text(json.dumps(episode, ensure_ascii=False) + "\n", encoding="utf-8")
+        example = json.loads(self._asset(workspace, "examples.jsonl").read_text("utf-8"))
+        example.update({"intent": [], "user": 1, "styleTags": "bad"})
+        self._asset(workspace, "examples.jsonl").write_text(json.dumps(example, ensure_ascii=False) + "\n", encoding="utf-8")
+        self._asset(workspace, "concepts.json").write_text(
+            json.dumps({"concepts": [{"id": [], "name": 1, "aliases": "bad", "keywords": [7], "evidence": []}]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self._asset(workspace, "openers.json").write_text(
+            json.dumps({"default": [], "alternatives": ["一", "二", "三"]}, ensure_ascii=False), encoding="utf-8"
         )
 
-        self.assertEqual(MAX_INDEX_TERMS_PER_CHUNK, len(terms))
-        self.assertEqual("keyword-000", terms[0])
-        self.assertEqual(f"keyword-{MAX_INDEX_TERMS_PER_CHUNK - 1:03d}", terms[-1])
+        report = validate_workspace_v2(workspace)
+
+        joined = "\n".join(report.errors)
+        self.assertFalse(report.publishable)
+        for label in (
+            "identity.selfNames",
+            "identity.relationships[1].subject",
+            "voice.defaultForm",
+            "worldview[1].topic",
+            "worldview[1].confidence",
+            "episodes[1].participants",
+            "examples[1].styleTags",
+            "concepts[1].keywords",
+            "openers.alternatives",
+        ):
+            self.assertIn(label, joined)
+
+        clean = self._complete_workspace("clean")
+        metrics = evaluate_workspace(clean).metrics()
+        self.assertIn("assetItems", metrics["factualCoverage"])
+        self.assertIn("evidence", metrics["factualCoverage"])
+        self.assertIn("periods", metrics["stanceCoverage"])
 
     def test_all_evidence_entry_points_and_corpus_id_are_validated(self):
         workspace = self._complete_workspace()
@@ -217,16 +300,13 @@ class EvaluationTest(unittest.TestCase):
         workspace = self._complete_workspace()
         chunks = self._chunks_path(workspace)
         rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
-        second = dict(rows[0])
-        second.update({"id": "chunk-secondary", "authorship": "secondary", "period": "1927"})
-        rows.append(second)
-        chunks.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        secondary_id = next(row["id"] for row in rows if row["sourceId"] == "source-companion")
         eval_path = self._asset(workspace, "eval.jsonl")
         eval_rows = [json.loads(line) for line in eval_path.read_text("utf-8").splitlines()]
         for index in range(2):
             eval_rows.append({
-                "id": f"grounding-secondary-{index}", "category": "grounding", "question": "调查以后再下结论",
-                "period": "1927", "expectedEvidence": ["chunk-secondary"], "corpusId": "archive-a",
+                "id": f"grounding-secondary-{index}", "category": "grounding", "question": "调查",
+                "period": "1927", "expectedEvidence": [secondary_id], "corpusId": "archive-a",
             })
         eval_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in eval_rows) + "\n", encoding="utf-8")
 
@@ -250,6 +330,40 @@ class EvaluationTest(unittest.TestCase):
 
         self.assertEqual(first_process, second_process)
 
+    def test_rejects_chunk_source_id_or_hash_outside_workspace_manifest(self):
+        workspace = self._complete_workspace()
+        chunks = self._chunks_path(workspace)
+        rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
+
+        rows[0]["sourceId"] = "source-ghost"
+        chunks.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        ghost_report = evaluate_workspace(workspace)
+        self.assertIn("sourceId 不在 workspace.json sources 中：source-ghost", "\n".join(ghost_report.errors))
+
+        workspace = self._complete_workspace("hash-mismatch")
+        chunks = self._chunks_path(workspace)
+        rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
+        rows[0]["sourceHash"] = "incorrect-source-hash"
+        chunks.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        hash_report = evaluate_workspace(workspace)
+        self.assertIn("sourceHash 与 workspace.json sources 不一致", "\n".join(hash_report.errors))
+
+    def test_rejects_missing_chunk_parent_and_duplicate_node_id(self):
+        workspace = self._complete_workspace()
+        chunks = self._chunks_path(workspace)
+        rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
+        rows[0]["parentIds"] = ["node-does-not-exist"]
+        chunks.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        missing_parent = evaluate_workspace(workspace)
+        self.assertIn("parentIds 引用了不存在的 node ID：node-does-not-exist", "\n".join(missing_parent.errors))
+
+        workspace = self._complete_workspace("duplicate-node")
+        nodes = self._nodes_path(workspace)
+        first = nodes.read_bytes().splitlines()[0]
+        nodes.write_bytes(first + b"\n" + first + b"\n")
+        duplicate_node = evaluate_workspace(workspace)
+        self.assertIn("第 2 行存在重复 node ID", "\n".join(duplicate_node.errors))
+
     def test_temporary_index_is_cleaned_when_sqlite_setup_fails(self):
         workspace = self._complete_workspace()
         before = set(Path(tempfile.gettempdir()).glob(".harness-evaluation-*"))
@@ -270,20 +384,32 @@ class EvaluationTest(unittest.TestCase):
         self.assertIn("V2 评测无法完成", "\n".join(report.errors))
         self.assertEqual(before, after)
 
-    def _complete_workspace(self) -> Path:
+    def _complete_workspace(self, name: str = "workspace") -> Path:
         catalog = self.root / "catalog.json"
-        catalog.write_text(json.dumps({"sources": [{
-            "sourceId": "source-research", "fileName": "source.md", "title": "调查研究",
-            "genre": "speech", "authorship": "direct", "period": "1926",
-        }]}, ensure_ascii=False), encoding="utf-8")
+        catalog.write_text(json.dumps({"sources": [
+            {
+                "sourceId": "source-research", "fileName": "source.md", "title": "调查研究",
+                "genre": "speech", "authorship": "direct", "period": "1926",
+            },
+            {
+                "sourceId": "source-companion", "fileName": "companion.md", "title": "组织实际",
+                "genre": "secondary", "authorship": "secondary", "period": "1927",
+            },
+        ]}, ensure_ascii=False), encoding="utf-8")
         workspace = prepare_workspace_v2(
-            [self.source], self.root / "workspace", agent_id="person.researcher", name="资料研究者", version=2,
+            [self.source, self.companion_source], self.root / name,
+            agent_id="person.researcher", name="资料研究者", version=2,
             source_catalog_path=catalog,
         )
         chunks = self._chunks_path(workspace)
         rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
-        self.assertEqual(1, len(rows))
-        chunk_id = rows[0]["id"]
+        self.assertGreaterEqual(len(rows), 1)
+        chunk_id = next(
+            row["id"]
+            for row in rows
+            if row["sourceId"] == "source-research" and "调查" in row["keywords"]
+        )
+        companion_id = next(row["id"] for row in rows if row["sourceId"] == "source-companion")
         self._asset(workspace, "identity.json").write_text(json.dumps({
             "selfNames": ["我"], "timeHorizon": "1926", "roles": ["组织者"], "relationships": [],
         }, ensure_ascii=False), encoding="utf-8")
@@ -292,7 +418,8 @@ class EvaluationTest(unittest.TestCase):
             "preferredTerms": ["调查"], "avoidPatterns": [], "evidence": [chunk_id],
         }, ensure_ascii=False), encoding="utf-8")
         self._asset(workspace, "worldview.jsonl").write_text(json.dumps({
-            "id": "stance-001", "topic": "调查", "statement": "调查以后再下结论", "period": "1926", "evidence": [chunk_id],
+            "id": "stance-001", "topic": "调查", "statement": "调查以后再下结论", "conditions": [],
+            "period": "1926", "aliases": [], "confidence": 1.0, "evidence": [chunk_id],
         }, ensure_ascii=False) + "\n", encoding="utf-8")
         self._asset(workspace, "episodes.jsonl").write_text(json.dumps({
             "id": "episode-001", "period": "1926", "location": "湖南", "participants": ["群众"],
@@ -308,8 +435,11 @@ class EvaluationTest(unittest.TestCase):
             for index in range(total):
                 rows.append({
                     "id": f"{category}-{index:03d}", "category": category,
-                    "question": "调查以后再下结论", "period": "1926",
-                    "expectedEvidence": [chunk_id], "corpusId": "unassigned",
+                    "question": "调查", "period": "1926",
+                    "expectedEvidence": [chunk_id, companion_id]
+                    if category in {"diversity", "global"}
+                    else [chunk_id],
+                    "corpusId": "unassigned",
                 })
         self._asset(workspace, "eval.jsonl").write_text(
             "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8"
@@ -321,6 +451,9 @@ class EvaluationTest(unittest.TestCase):
 
     def _chunks_path(self, workspace: Path) -> Path:
         return workspace / "corpora" / "index" / "chunks.jsonl"
+
+    def _nodes_path(self, workspace: Path) -> Path:
+        return workspace / "corpora" / "index" / "nodes.jsonl"
 
 
 if __name__ == "__main__":

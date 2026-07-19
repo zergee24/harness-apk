@@ -25,6 +25,11 @@ class WorkspaceV2Test(unittest.TestCase):
             "# 调查研究\n\n没有调查，没有发言权。\n\n# 实践\n\n认识来源于实践。",
             encoding="utf-8",
         )
+        self.companion_source = self.root / "companion.md"
+        self.companion_source.write_text(
+            "# 组织实际\n\n调查需要从组织实际出发，不能借旧结论代替事实。",
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -687,6 +692,20 @@ class WorkspaceV2Test(unittest.TestCase):
                     self.assertFalse(report.publishable)
                     self.assertTrue(any("JSON 对象" in error for error in report.errors))
 
+    def test_validate_v2_bounds_concepts_and_openers_with_the_shared_safe_reader(self):
+        for asset, value in (
+            ("concepts.json", {"concepts": ["x" * (4 * 1024 * 1024)]}),
+            ("openers.json", {"default": "x" * (4 * 1024 * 1024), "alternatives": []}),
+        ):
+            with self.subTest(asset=asset):
+                workspace = self._prepare_publishable(f"oversized-{asset}")
+                (workspace / "agent" / asset).write_text(json.dumps(value), encoding="utf-8")
+
+                report = validate_workspace_v2(workspace)
+
+                self.assertFalse(report.publishable)
+                self.assertTrue(any("超过 4194304 字节上限" in error for error in report.errors))
+
     def test_validate_v2_converts_deep_json_recursion_errors_to_reports_and_cli_exit_two(self):
         deep_value = "[" * 2000 + "0" + "]" * 2000
         cases = (
@@ -802,6 +821,14 @@ class WorkspaceV2Test(unittest.TestCase):
                             "genre": "speech",
                             "authorship": "direct",
                             "period": "1926",
+                        },
+                        {
+                            "sourceId": "source-companion",
+                            "fileName": "companion.md",
+                            "title": "组织实际",
+                            "genre": "secondary",
+                            "authorship": "secondary",
+                            "period": "1927",
                         }
                     ]
                 },
@@ -810,7 +837,7 @@ class WorkspaceV2Test(unittest.TestCase):
             encoding="utf-8",
         )
         workspace = prepare_workspace_v2(
-            [self.source],
+            [self.source, self.companion_source],
             self.root / name,
             agent_id="person.researcher",
             name="资料研究者",
@@ -829,9 +856,14 @@ class WorkspaceV2Test(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        chunk_id = json.loads(
-            (workspace / "corpora" / "index" / "chunks.jsonl").read_text("utf-8").splitlines()[0]
-        )["id"]
+        chunks_path = workspace / "corpora" / "index" / "chunks.jsonl"
+        chunk_rows = [json.loads(line) for line in chunks_path.read_text("utf-8").splitlines()]
+        chunk_id = next(
+            row["id"]
+            for row in chunk_rows
+            if row["sourceId"] == "source-research" and "调查" in row["keywords"]
+        )
+        companion_id = next(row["id"] for row in chunk_rows if row["sourceId"] == "source-companion")
         (workspace / "agent" / "voice.json").write_text(
             json.dumps(
                 {
@@ -852,7 +884,10 @@ class WorkspaceV2Test(unittest.TestCase):
                     "id": "stance-method-001",
                     "topic": "调查",
                     "statement": "认识来源于实践",
+                    "conditions": [],
                     "period": "1926",
+                    "aliases": [],
+                    "confidence": 1.0,
                     "evidence": [chunk_id],
                 },
                 ensure_ascii=False,
@@ -904,9 +939,11 @@ class WorkspaceV2Test(unittest.TestCase):
             {
                 "id": f"{category}-{index:03d}",
                 "category": category,
-                "question": "认识来源于实践",
+                "question": "调查",
                 "period": "1926",
-                "expectedEvidence": [chunk_id],
+                "expectedEvidence": [chunk_id, companion_id]
+                if category in {"diversity", "global"}
+                else [chunk_id],
             }
             for category, total in minimums.items()
             for index in range(total)

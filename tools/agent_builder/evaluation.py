@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 import sqlite3
 import stat
@@ -34,7 +35,6 @@ MINIMUM_EVAL_COUNTS = {
 }
 MIN_GROUNDING_RATE = 0.85
 MIN_STANCE_RATE = 1.0
-MAX_INDEX_TERMS_PER_CHUNK = 128
 MAX_JSONL_LINE_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 4 * 1024 * 1024
 _DIRECT_AUTHORSHIPS = frozenset(("direct", "edited_direct"))
@@ -59,6 +59,8 @@ class EvaluationReport:
     by_authorship: dict[str, CategoryMetric]
     by_corpus: dict[str, CategoryMetric]
     errors: tuple[str, ...] = ()
+    factual_coverage: dict[str, object] = field(default_factory=dict)
+    stance_coverage: dict[str, object] = field(default_factory=dict)
     dialogue_material_coverage: dict[str, object] = field(default_factory=dict)
     voice_availability: dict[str, object] = field(default_factory=dict)
     minimum_grounding_rate: float = MIN_GROUNDING_RATE
@@ -71,18 +73,17 @@ class EvaluationReport:
                 for name, item in sorted(values.items())
             }
 
-        categories = encode(self.category_metrics)
         return {
             "evaluation": {
                 "byAuthorship": encode(self.by_authorship),
                 "byCorpus": encode(self.by_corpus),
                 "byPeriod": encode(self.by_period),
-                "categories": categories,
+                "categories": encode(self.category_metrics),
                 "minimumGroundingRate": self.minimum_grounding_rate,
                 "minimumStanceRate": self.minimum_stance_rate,
             },
-            "factualCoverage": categories.get("grounding", _empty_metric()),
-            "stanceCoverage": categories.get("stance", _empty_metric()),
+            "factualCoverage": self.factual_coverage,
+            "stanceCoverage": self.stance_coverage,
             "dialogueMaterialCoverage": self.dialogue_material_coverage,
             "voiceAvailability": self.voice_availability,
         }
@@ -98,7 +99,12 @@ class _SqliteChunks:
 
     def get(self, chunk_id: str) -> dict[str, str] | None:
         row = self._connection.execute(
-            "SELECT id, authorship, period, genre, corpus_id FROM chunks WHERE id = ?", (chunk_id,)
+            """
+            SELECT id, authorship, period, genre, corpus_id, source_id,
+                   duplicate_group, parent_ids, route
+            FROM chunks WHERE id = ?
+            """,
+            (chunk_id,),
         ).fetchone()
         return dict(row) if row else None
 
@@ -106,61 +112,76 @@ class _SqliteChunks:
         terms = _query_terms(question)
         if not terms:
             return ()
-        placeholders = ",".join("?" for _ in terms)
+        query = " OR ".join(_quote_fts_term(term) for term in terms)
         rows = self._connection.execute(
-            f"""
-            SELECT chunk_id, COUNT(*) AS score
-            FROM chunk_terms
-            WHERE term IN ({placeholders})
-            GROUP BY chunk_id
-            ORDER BY score DESC, chunk_id ASC
+            """
+            SELECT chunk_id
+            FROM chunk_search
+            WHERE chunk_search MATCH ?
+            ORDER BY bm25(chunk_search), chunk_id COLLATE BINARY ASC
             LIMIT ?
             """,
-            (*terms, _TOP_K),
+            (query, _TOP_K),
         )
         return tuple(row["chunk_id"] for row in rows)
 
-    def coverage_summaries(self, voice_evidence: tuple[str, ...]) -> tuple[dict[str, object], dict[str, object]]:
+    def coverage_summaries(
+        self, voice_evidence: tuple[str, ...]
+    ) -> tuple[dict[str, object], dict[str, object]]:
         total = int(self._connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
-        direct_dialogue = int(
-            self._connection.execute(
-                """
-                SELECT COUNT(*) FROM chunks
-                WHERE authorship IN ('direct', 'edited_direct')
-                  AND genre IN ('speech', 'conversation', 'letter', 'interview')
-                """
-            ).fetchone()[0]
+        total_sources = int(self._connection.execute("SELECT COUNT(DISTINCT source_id) FROM chunks").fetchone()[0])
+        direct_dialogue = self._connection.execute(
+            """
+            SELECT COUNT(*) AS chunks, COUNT(DISTINCT source_id) AS sources
+            FROM chunks
+            WHERE authorship IN ('direct', 'edited_direct')
+              AND genre IN ('speech', 'conversation', 'letter', 'interview')
+            """
+        ).fetchone()
+        authorship_rows = self._connection.execute(
+            """
+            SELECT authorship, COUNT(*) AS chunks, COUNT(DISTINCT source_id) AS sources
+            FROM chunks GROUP BY authorship ORDER BY authorship
+            """
         )
+        by_authorship = {
+            row["authorship"]: {"chunks": int(row["chunks"]), "sources": int(row["sources"])}
+            for row in authorship_rows
+        }
         evidence = tuple(sorted(set(voice_evidence)))
         if evidence:
             placeholders = ",".join("?" for _ in evidence)
-            row = self._connection.execute(
+            voice = self._connection.execute(
                 f"""
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN authorship IN ('direct', 'edited_direct') THEN 1 ELSE 0 END) AS direct_total,
-                    SUM(CASE WHEN authorship IN ('direct', 'edited_direct')
-                                   AND genre IN ('speech', 'conversation', 'letter', 'interview')
-                             THEN 1 ELSE 0 END) AS direct_dialogue_total
+                SELECT COUNT(*) AS chunks,
+                       COUNT(DISTINCT source_id) AS sources,
+                       SUM(CASE WHEN authorship IN ('direct', 'edited_direct') THEN 1 ELSE 0 END) AS direct_chunks,
+                       COUNT(DISTINCT CASE WHEN authorship IN ('direct', 'edited_direct') THEN source_id END) AS direct_sources,
+                       SUM(CASE WHEN authorship IN ('direct', 'edited_direct')
+                                    AND genre IN ('speech', 'conversation', 'letter', 'interview')
+                                THEN 1 ELSE 0 END) AS direct_dialogue_chunks
                 FROM chunks WHERE id IN ({placeholders})
                 """,
                 evidence,
             ).fetchone()
-            voice_total = int(row["total"] or 0)
-            direct_voice = int(row["direct_total"] or 0)
-            direct_dialogue_voice = int(row["direct_dialogue_total"] or 0)
         else:
-            voice_total = direct_voice = direct_dialogue_voice = 0
+            voice = {"chunks": 0, "sources": 0, "direct_chunks": 0, "direct_sources": 0, "direct_dialogue_chunks": 0}
         dialogue = {
-            "directDialogueChunks": direct_dialogue,
-            "rate": round(direct_dialogue / total, 6) if total else 0.0,
+            "byAuthorship": by_authorship,
+            "directDialogueChunks": int(direct_dialogue["chunks"] or 0),
+            "directDialogueSources": int(direct_dialogue["sources"] or 0),
+            "rate": round(int(direct_dialogue["chunks"] or 0) / total, 6) if total else 0.0,
+            "sourceRate": round(int(direct_dialogue["sources"] or 0) / total_sources, 6) if total_sources else 0.0,
             "totalChunks": total,
+            "totalSources": total_sources,
         }
         availability = {
-            "available": direct_voice > 0,
-            "directDialogueEvidenceChunks": direct_dialogue_voice,
-            "directEvidenceChunks": direct_voice,
-            "referencedVoiceChunks": voice_total,
+            "available": int(voice["direct_chunks"] or 0) > 0,
+            "directDialogueEvidenceChunks": int(voice["direct_dialogue_chunks"] or 0),
+            "directEvidenceChunks": int(voice["direct_chunks"] or 0),
+            "directEvidenceSources": int(voice["direct_sources"] or 0),
+            "referencedVoiceChunks": int(voice["chunks"] or 0),
+            "referencedVoiceSources": int(voice["sources"] or 0),
         }
         return dialogue, availability
 
@@ -174,70 +195,45 @@ class _EvalRow:
     question: str
 
 
-def validate_agent_assets(workspace: Path, chunks_by_id: _ChunkLookup | Mapping[str, Mapping[str, str]]) -> list[str]:
-    """Validate semantic V2 assets against an existing chunk metadata lookup."""
+def validate_agent_assets(
+    workspace: Path, chunks_by_id: _ChunkLookup | Mapping[str, Mapping[str, str]]
+) -> list[str]:
+    """Validate every V2 runtime asset against the immutable chunk metadata lookup."""
     workspace = Path(workspace).expanduser().resolve()
     errors: list[str] = []
     assets = _load_asset_paths(workspace, errors)
     if assets is None:
         return errors
+    return _validate_agent_assets(workspace, assets, chunks_by_id, errors)
+
+
+def _validate_agent_assets(
+    workspace: Path,
+    assets: AgentAssetPaths,
+    chunks_by_id: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> list[str]:
+    persona = _read_text_asset(workspace, assets.persona, "persona", errors)
     identity = _read_json_asset(workspace, assets.identity, "identity", errors)
     voice = _read_json_asset(workspace, assets.voice, "voice", errors)
     worldview = _read_jsonl_asset(workspace, assets.worldview, "worldview", errors)
     episodes = _read_jsonl_asset(workspace, assets.episodes, "episodes", errors)
+    concepts = _read_json_asset(workspace, assets.concepts, "concepts", errors)
     examples = _read_jsonl_asset(workspace, assets.examples, "examples", errors)
+    openers = _read_json_asset(workspace, assets.openers, "openers", errors)
     evaluations = _read_jsonl_asset(workspace, assets.eval, "eval", errors)
 
-    if isinstance(identity, dict):
-        relationships = identity.get("relationships", [])
-        if not isinstance(relationships, list):
-            errors.append("identity.relationships 必须是数组")
-        else:
-            for index, relation in enumerate(relationships, start=1):
-                label = f"identity.relationships[{index}]"
-                if not isinstance(relation, dict):
-                    errors.append(f"{label} 必须是对象")
-                    continue
-                evidence = _validate_evidence(relation.get("evidence"), label, chunks_by_id, errors)
-                _validate_period_compatibility(relation.get("period"), evidence, label, chunks_by_id, errors)
-
-    if isinstance(voice, dict):
-        evidence = _validate_evidence(voice.get("evidence"), "voice", chunks_by_id, errors)
-        for chunk_id in evidence:
-            chunk = _chunk(chunks_by_id, chunk_id)
-            if chunk and chunk.get("authorship") not in _DIRECT_AUTHORSHIPS:
-                errors.append("voice 只能引用 direct 或 edited_direct")
-
-    _validate_records(worldview, "worldview", chunks_by_id, errors, required_text="statement", require_period=True)
-    _validate_records(
-        episodes,
-        "episodes",
-        chunks_by_id,
-        errors,
-        required_text="summary",
-        require_period=True,
-        require_direct_evidence=True,
-    )
-    _validate_records(
-        examples,
-        "examples",
-        chunks_by_id,
-        errors,
-        required_text="assistant",
-        require_generation_type=True,
-    )
-    _validate_records(
-        evaluations,
-        "eval",
-        chunks_by_id,
-        errors,
-        required_text="question",
-        evidence_field="expectedEvidence",
-        require_period=True,
-        validate_category=True,
-        validate_corpus_id=True,
-    )
-    return errors
+    if isinstance(persona, str) and not persona.strip():
+        errors.append(f"persona 不能为空：{assets.persona}")
+    _validate_identity(identity, chunks_by_id, errors)
+    _validate_voice(voice, chunks_by_id, errors)
+    _validate_worldview(worldview, chunks_by_id, errors)
+    _validate_episodes(episodes, chunks_by_id, errors)
+    _validate_concepts(concepts, chunks_by_id, errors)
+    _validate_examples(examples, chunks_by_id, errors)
+    _validate_openers(openers, errors)
+    _validate_evaluations(evaluations, chunks_by_id, errors)
+    return _unique(errors)
 
 
 def evaluate_workspace(workspace: Path) -> EvaluationReport:
@@ -252,28 +248,42 @@ def evaluate_workspace(workspace: Path) -> EvaluationReport:
                 connection = sqlite3.connect(Path(temp_dir) / "chunks.sqlite")
                 connection.row_factory = sqlite3.Row
                 _create_index(connection)
-                _stream_chunk_index(workspace, connection, errors)
+                manifest = _load_workspace(workspace, errors)
+                source_hashes = (
+                    {source.source_id: source.source_hash for source in manifest.sources}
+                    if manifest is not None
+                    else None
+                )
+                if source_hashes is not None:
+                    nodes_are_valid = _stream_node_index(workspace, connection, source_hashes, errors)
+                    _stream_chunk_index(
+                        workspace, connection, errors, source_hashes, validate_parents=nodes_are_valid
+                    )
                 lookup = _SqliteChunks(connection)
-                errors.extend(validate_agent_assets(workspace, lookup))
-                assets = _load_asset_paths(workspace, errors)
+                assets = manifest.assets if manifest is not None else None
+                if assets is not None:
+                    errors.extend(_validate_agent_assets(workspace, assets, lookup, []))
                 rows = _read_eval_rows(workspace, assets, errors) if assets else ()
                 category, periods, authorships, corpora = _evaluate_rows(rows, lookup)
                 _append_release_errors(category, errors)
-                voice_evidence = _voice_evidence(workspace, assets, errors) if assets else ()
+                voice_evidence = _voice_evidence(workspace, assets) if assets else ()
+                factual, stance = _asset_coverage(workspace, assets, lookup) if assets else ({}, {})
                 dialogue, availability = lookup.coverage_summaries(voice_evidence)
                 return EvaluationReport(
-                    category,
-                    periods,
-                    authorships,
-                    corpora,
-                    tuple(_unique(errors)),
-                    dialogue,
-                    availability,
+                    category_metrics=category,
+                    by_period=periods,
+                    by_authorship=authorships,
+                    by_corpus=corpora,
+                    errors=tuple(_unique(errors)),
+                    factual_coverage=factual,
+                    stance_coverage=stance,
+                    dialogue_material_coverage=dialogue,
+                    voice_availability=availability,
                 )
             finally:
                 if connection is not None:
                     connection.close()
-    except (sqlite3.Error, OSError, UnicodeError, RecursionError, ValueError) as error:
+    except (BuildError, sqlite3.Error, OSError, UnicodeError, RecursionError, ValueError) as error:
         errors.append(f"V2 评测无法完成：{error}")
     return EvaluationReport(empty, {}, {}, {}, tuple(_unique(errors)))
 
@@ -293,6 +303,7 @@ def validate_declared_corpus_question_coverage(
 
 
 def _create_index(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA foreign_keys = ON")
     connection.executescript(
         """
         CREATE TABLE chunks (
@@ -300,19 +311,82 @@ def _create_index(connection: sqlite3.Connection) -> None:
             authorship TEXT NOT NULL,
             period TEXT NOT NULL,
             genre TEXT NOT NULL,
-            corpus_id TEXT NOT NULL
+            corpus_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            duplicate_group TEXT NOT NULL,
+            parent_ids TEXT NOT NULL,
+            route TEXT NOT NULL
         );
-        CREATE TABLE chunk_terms (
-            term TEXT NOT NULL,
-            chunk_id TEXT NOT NULL,
-            PRIMARY KEY (term, chunk_id)
-        ) WITHOUT ROWID;
-        CREATE INDEX chunk_terms_term ON chunk_terms(term, chunk_id);
+        CREATE TABLE nodes (
+            id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE chunk_search USING fts5(
+            chunk_id UNINDEXED,
+            terms,
+            tokenize='unicode61'
+        );
         """
     )
 
 
-def _stream_chunk_index(workspace: Path, connection: sqlite3.Connection, errors: list[str]) -> None:
+def _stream_node_index(
+    workspace: Path, connection: sqlite3.Connection, source_hashes: Mapping[str, str], errors: list[str]
+) -> bool:
+    descriptor: int | None = None
+    valid = True
+    try:
+        descriptor = _open_regular_relative(workspace, ("corpora", "index", "nodes.jsonl"))
+        before = os.fstat(descriptor)
+        for line_number, raw_line, line_error in _iter_bounded_jsonl_lines(descriptor):
+            if line_error:
+                errors.append(f"资料节点 JSONL 第 {line_number} 行{line_error}")
+                valid = False
+                continue
+            if raw_line is None or not raw_line.strip():
+                continue
+            try:
+                value = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+                errors.append(f"资料节点 JSONL 第 {line_number} 行无法读取：{error}")
+                valid = False
+                continue
+            node = _node_row(value, line_number, source_hashes, errors)
+            if node is None:
+                valid = False
+                continue
+            try:
+                connection.execute("INSERT INTO nodes(id, source_id) VALUES (?, ?)", node)
+            except sqlite3.IntegrityError:
+                errors.append(f"资料节点 JSONL 第 {line_number} 行存在重复 node ID：{node[0]}")
+                valid = False
+        after = os.fstat(descriptor)
+        if not _same_file_identity(before, after):
+            errors.append("资料节点在读取期间发生变化：corpora/index/nodes.jsonl")
+            valid = False
+        connection.commit()
+    except (OSError, sqlite3.Error) as error:
+        errors.append(f"资料节点无法读取：corpora/index/nodes.jsonl：{error}")
+        valid = False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    return valid
+
+
+def _stream_chunk_index(
+    workspace: Path,
+    connection: sqlite3.Connection,
+    errors: list[str],
+    source_hashes: Mapping[str, str] | None = None,
+    *,
+    validate_parents: bool = True,
+) -> None:
+    if source_hashes is None:
+        manifest = _load_workspace(workspace, errors)
+        if manifest is None:
+            return
+        source_hashes = {source.source_id: source.source_hash for source in manifest.sources}
     descriptor: int | None = None
     try:
         descriptor = _open_regular_relative(workspace, ("corpora", "index", "chunks.jsonl"))
@@ -331,19 +405,62 @@ def _stream_chunk_index(workspace: Path, connection: sqlite3.Connection, errors:
             row = _chunk_row(value, line_number, errors)
             if row is None:
                 continue
-            chunk_id, authorship, period, genre, corpus_id, terms = row
+            (
+                chunk_id,
+                authorship,
+                period,
+                genre,
+                corpus_id,
+                source_id,
+                source_hash,
+                duplicate_group,
+                parent_ids,
+                route,
+                terms,
+                parent_id_values,
+            ) = row
+            declared_hash = source_hashes.get(source_id)
+            if declared_hash is None:
+                errors.append(
+                    f"资料索引 JSONL 第 {line_number} 行 sourceId 不在 workspace.json sources 中：{source_id}"
+                )
+                continue
+            if source_hash != declared_hash:
+                errors.append(
+                    f"资料索引 JSONL 第 {line_number} 行 sourceHash 与 workspace.json sources 不一致：{source_id}"
+                )
+                continue
+            if validate_parents:
+                parent_rows = _node_rows(connection, parent_id_values)
+                missing_parents = sorted(set(parent_id_values) - set(parent_rows))
+                if missing_parents:
+                    errors.append(
+                        f"资料索引 JSONL 第 {line_number} 行 parentIds 引用了不存在的 node ID：{', '.join(missing_parents)}"
+                    )
+                    continue
+                foreign_parents = sorted(
+                    parent_id for parent_id, parent_source_id in parent_rows.items() if parent_source_id != source_id
+                )
+                if foreign_parents:
+                    errors.append(
+                        f"资料索引 JSONL 第 {line_number} 行 parentIds 与 chunk sourceId 不一致：{', '.join(foreign_parents)}"
+                    )
+                    continue
             try:
                 connection.execute(
-                    "INSERT INTO chunks(id, authorship, period, genre, corpus_id) VALUES (?, ?, ?, ?, ?)",
-                    (chunk_id, authorship, period, genre, corpus_id),
+                    """
+                    INSERT INTO chunks(
+                        id, authorship, period, genre, corpus_id, source_id,
+                        duplicate_group, parent_ids, route
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (chunk_id, authorship, period, genre, corpus_id, source_id, duplicate_group, parent_ids, route),
+                )
+                connection.execute(
+                    "INSERT INTO chunk_search(chunk_id, terms) VALUES (?, ?)", (chunk_id, terms)
                 )
             except sqlite3.IntegrityError:
                 errors.append(f"资料索引 JSONL 第 {line_number} 行存在重复 chunk ID：{chunk_id}")
-                continue
-            connection.executemany(
-                "INSERT OR IGNORE INTO chunk_terms(term, chunk_id) VALUES (?, ?)",
-                ((term, chunk_id) for term in terms),
-            )
         after = os.fstat(descriptor)
         if not _same_file_identity(before, after):
             errors.append("资料索引在读取期间发生变化：corpora/index/chunks.jsonl")
@@ -391,11 +508,20 @@ def _iter_bounded_jsonl_lines(descriptor: int):
 
 def _chunk_row(
     value: object, line_number: int, errors: list[str]
-) -> tuple[str, str, str, str, str, tuple[str, ...]] | None:
+) -> tuple[str, str, str, str, str, str, str, str, str, str, str, tuple[str, ...]] | None:
     if not isinstance(value, dict):
         errors.append(f"资料索引 JSONL 第 {line_number} 行必须是对象")
         return None
-    required_strings = ("id", "authorship", "period", "genre", "sourceId", "sourceHash", "text")
+    required_strings = (
+        "id",
+        "authorship",
+        "period",
+        "genre",
+        "sourceId",
+        "sourceHash",
+        "duplicateGroup",
+        "text",
+    )
     values: dict[str, str] = {}
     for field_name in required_strings:
         candidate = value.get(field_name)
@@ -412,6 +538,12 @@ def _chunk_row(
     if values["period"] == "unknown":
         errors.append(f"资料索引 JSONL 第 {line_number} 行 period 无效：unknown")
         return None
+    parent_ids = value.get("parentIds")
+    if not isinstance(parent_ids, list) or not parent_ids or any(
+        not isinstance(item, str) or not item.strip() for item in parent_ids
+    ):
+        errors.append(f"资料索引 JSONL 第 {line_number} 行 parentIds 必须是非空字符串数组")
+        return None
     field_values: list[list[str]] = []
     for field_name in ("keywords", "ngrams"):
         candidate = value.get(field_name)
@@ -419,48 +551,102 @@ def _chunk_row(
             errors.append(f"资料索引 JSONL 第 {line_number} 行 {field_name} 必须是字符串数组")
             return None
         field_values.append(candidate)
-    terms = _bounded_index_terms(field_values[0], field_values[1])
-    return values["id"], values["authorship"], values["period"], values["genre"], "unassigned", terms
+    normalized_parent_ids = tuple(item.strip() for item in parent_ids)
+    top_level = normalized_parent_ids[1] if len(normalized_parent_ids) > 1 else normalized_parent_ids[0]
+    route = f"{values['sourceId']}:{top_level.strip()}"
+    return (
+        values["id"],
+        values["authorship"],
+        values["period"],
+        values["genre"],
+        "unassigned",
+        values["sourceId"],
+        values["sourceHash"],
+        values["duplicateGroup"],
+        json.dumps(normalized_parent_ids, ensure_ascii=False, separators=(",", ":")),
+        route,
+        _fts_terms(field_values[0], field_values[1]),
+        normalized_parent_ids,
+    )
 
 
-def _bounded_index_terms(keywords: list[str], ngrams: list[str]) -> tuple[str, ...]:
-    """Keep the disk index bounded: ranked keywords precede n-gram recall terms."""
-    terms: list[str] = []
-    for value in (*keywords, *ngrams):
-        normalized = value.strip().lower()
-        if normalized and normalized not in terms:
-            terms.append(normalized)
-            if len(terms) == MAX_INDEX_TERMS_PER_CHUNK:
-                break
-    return tuple(terms)
+def _node_row(
+    value: object, line_number: int, source_hashes: Mapping[str, str], errors: list[str]
+) -> tuple[str, str] | None:
+    if not isinstance(value, dict):
+        errors.append(f"资料节点 JSONL 第 {line_number} 行必须是对象")
+        return None
+    node_id = value.get("id")
+    source_id = value.get("sourceId")
+    if not isinstance(node_id, str) or not node_id.strip():
+        errors.append(f"资料节点 JSONL 第 {line_number} 行缺少或包含无效 id")
+        return None
+    if not isinstance(source_id, str) or not source_id.strip():
+        errors.append(f"资料节点 JSONL 第 {line_number} 行缺少或包含无效 sourceId")
+        return None
+    source_id = source_id.strip()
+    if source_id not in source_hashes:
+        errors.append(f"资料节点 JSONL 第 {line_number} 行 sourceId 不在 workspace.json sources 中：{source_id}")
+        return None
+    return node_id.strip(), source_id
+
+
+def _node_rows(connection: sqlite3.Connection, parent_ids: tuple[str, ...]) -> dict[str, str]:
+    unique_ids = tuple(sorted(set(parent_ids)))
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = connection.execute(
+        f"SELECT id, source_id FROM nodes WHERE id IN ({placeholders})", unique_ids
+    )
+    return {row["id"]: row["source_id"] for row in rows}
+
+
+def _fts_terms(keywords: list[str], ngrams: list[str]) -> str:
+    """One bounded chunk row retains every B2 keyword and n-gram for FTS recall."""
+    return " ".join(value.strip().lower() for value in (*keywords, *ngrams) if value.strip())
+
+
+def _load_workspace(workspace: Path, errors: list[str]) -> WorkspaceV2 | None:
+    try:
+        payload = json.loads(_read_regular_relative(workspace, ("workspace.json",), MAX_ASSET_BYTES).decode("utf-8"))
+        return WorkspaceV2.from_dict(payload)
+    except (BuildError, OSError, UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
+        errors.append(f"V2 workspace 无法读取：{error}")
+        return None
 
 
 def _load_asset_paths(workspace: Path, errors: list[str]) -> AgentAssetPaths | None:
+    manifest = _load_workspace(workspace, errors)
+    return manifest.assets if manifest is not None else None
+
+
+def _read_text_asset(workspace: Path, asset_path: str, name: str, errors: list[str]) -> str | None:
     try:
-        payload = json.loads(_read_regular_relative(workspace, ("workspace.json",), MAX_ASSET_BYTES).decode("utf-8"))
-        return WorkspaceV2.from_dict(payload).assets
-    except (BuildError, OSError, UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
-        errors.append(f"V2 workspace 资产路径无法读取：{error}")
+        return read_v2_asset_bytes(workspace, asset_path).decode("utf-8")
+    except (OSError, UnicodeError, ValueError) as error:
+        errors.append(f"{name} 无法读取：{asset_path}：{error}")
         return None
 
 
 def _read_json_asset(workspace: Path, asset_path: str, name: str, errors: list[str]) -> dict[str, Any] | None:
+    text = _read_text_asset(workspace, asset_path, name, errors)
+    if text is None:
+        return None
     try:
-        value = json.loads(_read_asset_bytes(workspace, asset_path).decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
-        errors.append(f"{name} 无法读取：{error}")
+        value = json.loads(text)
+    except (json.JSONDecodeError, RecursionError) as error:
+        errors.append(f"{name} 无法读取：{asset_path}：{error}")
         return None
     if not isinstance(value, dict):
-        errors.append(f"{name} 必须是 JSON 对象")
+        errors.append(f"{name} 必须是 JSON 对象：{asset_path}")
         return None
     return value
 
 
 def _read_jsonl_asset(workspace: Path, asset_path: str, name: str, errors: list[str]) -> list[dict[str, Any]] | None:
     try:
-        payload = _read_asset_bytes(workspace, asset_path)
+        payload = read_v2_asset_bytes(workspace, asset_path)
     except (OSError, ValueError) as error:
-        errors.append(f"{name} 无法读取：{error}")
+        errors.append(f"{name} 无法读取：{asset_path}：{error}")
         return None
     rows: list[dict[str, Any]] = []
     for line_number, raw_line in enumerate(payload.splitlines(), start=1):
@@ -469,20 +655,21 @@ def _read_jsonl_asset(workspace: Path, asset_path: str, name: str, errors: list[
         try:
             value = json.loads(raw_line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-            errors.append(f"{name} JSONL 第 {line_number} 行无法读取：{error}")
+            errors.append(f"{name} JSONL 第 {line_number} 行无法读取：{asset_path}：{error}")
             continue
         if not isinstance(value, dict):
-            errors.append(f"{name} JSONL 第 {line_number} 行必须是对象")
+            errors.append(f"{name} JSONL 第 {line_number} 行必须是 JSON 对象：{asset_path}")
             continue
         rows.append(value)
     return rows
 
 
-def _read_asset_bytes(workspace: Path, asset_path: str) -> bytes:
+def read_v2_asset_bytes(workspace: Path, asset_path: str) -> bytes:
+    """Read a bounded agent asset via no-follow descriptors for builder and evaluator."""
     path = PurePosixPath(asset_path)
     if len(path.parts) < 2 or path.parts[0] != "agent" or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError("人物资产必须位于 agent 目录内")
-    return _read_regular_relative(workspace, tuple(path.parts), MAX_ASSET_BYTES)
+    return _read_regular_relative(Path(workspace).expanduser().resolve(), tuple(path.parts), MAX_ASSET_BYTES)
 
 
 def _read_regular_relative(workspace: Path, parts: tuple[str, ...], max_bytes: int) -> bytes:
@@ -512,65 +699,217 @@ def _open_regular_relative(workspace: Path, parts: tuple[str, ...]) -> int:
         if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
             raise OSError("工作区必须是目录")
         for part in parts[:-1]:
+            if stat.S_ISLNK(os.stat(part, dir_fd=descriptor, follow_symlinks=False).st_mode):
+                raise OSError(f"不安全的符号链接：{'/'.join(parts)}")
             child = os.open(part, directory_flags, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
             if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
                 raise OSError(f"路径必须是目录：{part}")
+        if stat.S_ISLNK(os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False).st_mode):
+            raise OSError(f"不安全的符号链接：{'/'.join(parts)}")
         leaf = os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=descriptor)
         if not stat.S_ISREG(os.fstat(leaf).st_mode):
             os.close(leaf)
             raise OSError(f"路径必须是普通文件：{'/'.join(parts)}")
         return leaf
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise OSError(f"不安全的符号链接：{'/'.join(parts)}") from error
+        raise
     finally:
         os.close(descriptor)
 
 
-def _validate_records(
-    rows: list[dict[str, Any]] | None,
-    asset: str,
+def _validate_identity(
+    identity: dict[str, Any] | None,
     chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
     errors: list[str],
-    *,
-    required_text: str,
-    evidence_field: str = "evidence",
-    require_period: bool = False,
-    require_direct_evidence: bool = False,
-    require_generation_type: bool = False,
-    validate_category: bool = False,
-    validate_corpus_id: bool = False,
 ) -> None:
-    if rows is None:
+    if identity is None:
         return
-    ids: set[str] = set()
-    for index, row in enumerate(rows, start=1):
-        label = f"{asset}[{index}]"
-        record_id = row.get("id")
-        if not isinstance(record_id, str) or not record_id.strip():
-            errors.append(f"{label}.id 必须是非空字符串")
-        elif record_id in ids:
-            errors.append(f"{asset} 存在重复语义 ID：{record_id}")
-        else:
-            ids.add(record_id)
-        value = row.get(required_text)
-        if not isinstance(value, str) or not value.strip():
-            errors.append(f"{label}.{required_text} 必须是非空字符串")
-        evidence = _validate_evidence(row.get(evidence_field), label, chunks, errors, evidence_field)
-        if require_period:
-            _validate_period_compatibility(row.get("period"), evidence, label, chunks, errors)
-        if require_direct_evidence and evidence and not any(
+    _validate_string_list(identity.get("selfNames"), "identity.selfNames", errors)
+    _validate_non_empty_string(identity.get("timeHorizon"), "identity.timeHorizon", errors)
+    _validate_string_list(identity.get("roles"), "identity.roles", errors)
+    relationships = identity.get("relationships")
+    if not isinstance(relationships, list):
+        errors.append("identity.relationships 必须是数组")
+        return
+    for index, relation in enumerate(relationships, start=1):
+        label = f"identity.relationships[{index}]"
+        if not isinstance(relation, dict):
+            errors.append(f"{label} 必须是对象")
+            continue
+        _validate_non_empty_string(relation.get("subject"), f"{label}.subject", errors)
+        _validate_non_empty_string(relation.get("relation"), f"{label}.relation", errors)
+        evidence = _validate_evidence(relation.get("evidence"), label, chunks, errors)
+        _validate_period_compatibility(relation.get("period"), evidence, label, chunks, errors)
+
+
+def _validate_voice(
+    voice: dict[str, Any] | None,
+    chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> None:
+    if voice is None:
+        return
+    _validate_non_empty_string(voice.get("defaultForm"), "voice.defaultForm", errors)
+    for field_name in ("sentenceRhythm", "rhetoricalMoves", "preferredTerms", "avoidPatterns"):
+        _validate_string_list(voice.get(field_name), f"voice.{field_name}", errors)
+    evidence = _validate_evidence(voice.get("evidence"), "voice", chunks, errors)
+    for chunk_id in evidence:
+        chunk = _chunk(chunks, chunk_id)
+        if chunk and chunk.get("authorship") not in _DIRECT_AUTHORSHIPS:
+            errors.append("voice 只能引用 direct 或 edited_direct")
+
+
+def _validate_worldview(
+    rows: list[dict[str, Any]] | None,
+    chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> None:
+    for index, row in _records(rows, "worldview", errors):
+        label = f"worldview[{index}]"
+        _validate_non_empty_string(row.get("topic"), f"{label}.topic", errors)
+        _validate_non_empty_string(row.get("statement"), f"{label}.statement", errors)
+        _validate_string_list(row.get("conditions"), f"{label}.conditions", errors)
+        _validate_string_list(row.get("aliases"), f"{label}.aliases", errors)
+        _validate_confidence(row.get("confidence"), f"{label}.confidence", errors)
+        evidence = _validate_evidence(row.get("evidence"), label, chunks, errors)
+        _validate_period_compatibility(row.get("period"), evidence, label, chunks, errors)
+
+
+def _validate_episodes(
+    rows: list[dict[str, Any]] | None,
+    chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> None:
+    for index, row in _records(rows, "episodes", errors):
+        label = f"episodes[{index}]"
+        _validate_non_empty_string(row.get("location"), f"{label}.location", errors)
+        _validate_string_list(row.get("participants"), f"{label}.participants", errors)
+        _validate_non_empty_string(row.get("summary"), f"{label}.summary", errors)
+        _validate_non_empty_string(row.get("meaning"), f"{label}.meaning", errors)
+        evidence = _validate_evidence(row.get("evidence"), label, chunks, errors)
+        _validate_period_compatibility(row.get("period"), evidence, label, chunks, errors)
+        if evidence and not any(
             (chunk := _chunk(chunks, chunk_id)) and chunk.get("authorship") in _DIRECT_AUTHORSHIPS
             for chunk_id in evidence
         ):
             errors.append("episode 至少需要一条 direct 或 edited_direct 证据")
-        if require_generation_type and row.get("generationType") != "synthesized":
+
+
+def _validate_concepts(
+    concepts: dict[str, Any] | None,
+    chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> None:
+    if concepts is None:
+        return
+    values = concepts.get("concepts")
+    if not isinstance(values, list):
+        errors.append("concepts.concepts 必须是数组")
+        return
+    ids: set[str] = set()
+    for index, row in enumerate(values, start=1):
+        label = f"concepts[{index}]"
+        if not isinstance(row, dict):
+            errors.append(f"{label} 必须是对象")
+            continue
+        _validate_semantic_id(row.get("id"), label, "concepts", ids, errors)
+        _validate_non_empty_string(row.get("name"), f"{label}.name", errors)
+        _validate_string_list(row.get("aliases"), f"{label}.aliases", errors)
+        _validate_string_list(row.get("keywords"), f"{label}.keywords", errors)
+        if "evidence" in row:
+            _validate_evidence(row.get("evidence"), label, chunks, errors)
+
+
+def _validate_examples(
+    rows: list[dict[str, Any]] | None,
+    chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> None:
+    for index, row in _records(rows, "examples", errors):
+        label = f"examples[{index}]"
+        _validate_non_empty_string(row.get("intent"), f"{label}.intent", errors)
+        _validate_non_empty_string(row.get("user"), f"{label}.user", errors)
+        _validate_non_empty_string(row.get("assistant"), f"{label}.assistant", errors)
+        _validate_string_list(row.get("styleTags"), f"{label}.styleTags", errors)
+        _validate_evidence(row.get("evidence"), label, chunks, errors)
+        if row.get("generationType") != "synthesized":
             errors.append("examples.generationType 必须是 synthesized")
-        if validate_category and row.get("category") not in EVALUATION_CATEGORIES:
-            errors.append(f"{label}.category 无效：{row.get('category')}")
-        if validate_corpus_id and "corpusId" in row and (
-            not isinstance(row["corpusId"], str) or not row["corpusId"].strip()
-        ):
+
+
+def _validate_openers(openers: dict[str, Any] | None, errors: list[str]) -> None:
+    if openers is None:
+        return
+    if not isinstance(openers.get("default"), str):
+        errors.append("openers.default 必须是字符串")
+    alternatives = _validate_string_list(openers.get("alternatives"), "openers.alternatives", errors)
+    if len(alternatives) > 2:
+        errors.append("openers.alternatives 最多只能包含 2 条")
+
+
+def _validate_evaluations(
+    rows: list[dict[str, Any]] | None,
+    chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> None:
+    for index, row in _records(rows, "eval", errors):
+        label = f"eval[{index}]"
+        category = row.get("category")
+        if category not in EVALUATION_CATEGORIES:
+            errors.append(f"{label}.category 无效：{category}")
+        _validate_non_empty_string(row.get("question"), f"{label}.question", errors)
+        evidence = _validate_evidence(row.get("expectedEvidence"), label, chunks, errors, "expectedEvidence")
+        _validate_period_compatibility(row.get("period"), evidence, label, chunks, errors)
+        if "corpusId" in row and (not isinstance(row["corpusId"], str) or not row["corpusId"].strip()):
             errors.append(f"{label}.corpusId 必须是非空字符串，或省略为 unassigned")
+        if category in {"diversity", "global"}:
+            _validate_structural_eval_category(category, evidence, label, chunks, errors)
+
+
+def _records(
+    rows: list[dict[str, Any]] | None, asset: str, errors: list[str]
+) -> tuple[tuple[int, dict[str, Any]], ...]:
+    if rows is None:
+        return ()
+    seen: set[str] = set()
+    values: list[tuple[int, dict[str, Any]]] = []
+    for index, row in enumerate(rows, start=1):
+        _validate_semantic_id(row.get("id"), f"{asset}[{index}]", asset, seen, errors)
+        values.append((index, row))
+    return tuple(values)
+
+
+def _validate_semantic_id(
+    value: object, label: str, asset: str, seen: set[str], errors: list[str]
+) -> None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{label}.id 必须是非空字符串")
+    elif value in seen:
+        errors.append(f"{asset} 存在重复语义 ID：{value}")
+    else:
+        seen.add(value)
+
+
+def _validate_non_empty_string(value: object, label: str, errors: list[str]) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{label} 必须是非空字符串")
+        return None
+    return value.strip()
+
+
+def _validate_string_list(value: object, label: str, errors: list[str]) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        errors.append(f"{label} 必须是字符串数组")
+        return ()
+    return tuple(value)
+
+
+def _validate_confidence(value: object, label: str, errors: list[str]) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+        errors.append(f"{label} 必须是 0 到 1 之间的数值")
 
 
 def _validate_evidence(
@@ -615,31 +954,49 @@ def _validate_period_compatibility(
         errors.append(f"{label}.period 与 evidence 时期不兼容")
 
 
+def _validate_structural_eval_category(
+    category: object,
+    evidence: tuple[str, ...],
+    label: str,
+    chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> None:
+    metadata = [_chunk(chunks, chunk_id) for chunk_id in sorted(set(evidence))]
+    metadata = [chunk for chunk in metadata if chunk is not None]
+    if len(metadata) < 2:
+        errors.append(f"{category} 至少需要 2 条可归因 expectedEvidence：{label}")
+        return
+    if category == "diversity":
+        if len({chunk["source_id"] for chunk in metadata}) < 2:
+            errors.append(f"diversity expectedEvidence 必须来自至少 2 个 sourceId：{label}")
+        if len({chunk["duplicate_group"] for chunk in metadata}) < 2:
+            errors.append(f"diversity expectedEvidence 必须来自至少 2 个 duplicateGroup：{label}")
+    elif category == "global" and len({chunk["route"] for chunk in metadata}) < 2:
+        errors.append(f"global expectedEvidence 必须来自至少 2 条 source/top-level route：{label}")
+
+
 def _read_eval_rows(workspace: Path, assets: AgentAssetPaths, errors: list[str]) -> tuple[_EvalRow, ...]:
     raw_rows = _read_jsonl_asset(workspace, assets.eval, "eval", errors)
     if raw_rows is None:
         return ()
     rows: list[_EvalRow] = []
-    for index, row in enumerate(raw_rows, start=1):
+    for row in raw_rows:
         category = row.get("category")
         question = row.get("question")
         period = row.get("period")
         evidence = row.get("expectedEvidence")
         corpus_id = row.get("corpusId", "unassigned")
-        label = f"eval[{index}]"
-        valid = True
-        if category not in EVALUATION_CATEGORIES:
-            valid = False
-        if not isinstance(question, str) or not question.strip():
-            valid = False
-        if not isinstance(period, str) or not period.strip():
-            valid = False
-        if not isinstance(evidence, list) or not evidence or any(not isinstance(item, str) or not item.strip() for item in evidence):
-            valid = False
-        if "corpusId" in row and (not isinstance(corpus_id, str) or not corpus_id.strip()):
-            errors.append(f"{label}.corpusId 必须是非空字符串，或省略为 unassigned")
-            valid = False
-        if not valid:
+        if (
+            category not in EVALUATION_CATEGORIES
+            or not isinstance(question, str)
+            or not question.strip()
+            or not isinstance(period, str)
+            or not period.strip()
+            or not isinstance(evidence, list)
+            or not evidence
+            or any(not isinstance(item, str) or not item.strip() for item in evidence)
+            or ("corpusId" in row and (not isinstance(corpus_id, str) or not corpus_id.strip()))
+        ):
             continue
         rows.append(
             _EvalRow(
@@ -653,11 +1010,77 @@ def _read_eval_rows(workspace: Path, assets: AgentAssetPaths, errors: list[str])
     return tuple(rows)
 
 
-def _voice_evidence(workspace: Path, assets: AgentAssetPaths, errors: list[str]) -> tuple[str, ...]:
+def _voice_evidence(workspace: Path, assets: AgentAssetPaths) -> tuple[str, ...]:
+    values: list[str] = []
+    errors: list[str] = []
     voice = _read_json_asset(workspace, assets.voice, "voice", errors)
-    if not isinstance(voice, dict) or not isinstance(voice.get("evidence"), list):
-        return ()
-    return tuple(item for item in voice["evidence"] if isinstance(item, str) and item.strip())
+    if isinstance(voice, dict) and isinstance(voice.get("evidence"), list):
+        values.extend(item for item in voice["evidence"] if isinstance(item, str) and item.strip())
+    return tuple(values)
+
+
+def _asset_coverage(
+    workspace: Path, assets: AgentAssetPaths, chunks: _ChunkLookup | Mapping[str, Mapping[str, str]]
+) -> tuple[dict[str, object], dict[str, object]]:
+    errors: list[str] = []
+    identity = _read_json_asset(workspace, assets.identity, "identity", errors) or {}
+    voice = _read_json_asset(workspace, assets.voice, "voice", errors) or {}
+    worldview = _read_jsonl_asset(workspace, assets.worldview, "worldview", errors) or []
+    episodes = _read_jsonl_asset(workspace, assets.episodes, "episodes", errors) or []
+    concepts = _read_json_asset(workspace, assets.concepts, "concepts", errors) or {}
+    examples = _read_jsonl_asset(workspace, assets.examples, "examples", errors) or []
+    relationships = identity.get("relationships") if isinstance(identity.get("relationships"), list) else []
+    concept_rows = concepts.get("concepts") if isinstance(concepts.get("concepts"), list) else []
+    factual_rows = [
+        *[row for row in relationships if isinstance(row, dict)],
+        *([voice] if isinstance(voice, dict) else []),
+        *worldview,
+        *episodes,
+        *[row for row in concept_rows if isinstance(row, dict)],
+        *examples,
+    ]
+    stance_rows = list(worldview)
+    return _coverage_from_rows(factual_rows, chunks), _coverage_from_rows(stance_rows, chunks)
+
+
+def _coverage_from_rows(
+    rows: list[dict[str, Any]], chunks: _ChunkLookup | Mapping[str, Mapping[str, str]]
+) -> dict[str, object]:
+    evidence_lists = [
+        row.get("expectedEvidence", row.get("evidence", []))
+        for row in rows
+        if isinstance(row.get("expectedEvidence", row.get("evidence", [])), list)
+    ]
+    all_evidence = [
+        item for values in evidence_lists for item in values if isinstance(item, str) and item.strip()
+    ]
+    covered_evidence = [item for item in all_evidence if _chunk(chunks, item) is not None]
+    item_covered = sum(
+        1
+        for values in evidence_lists
+        if any(isinstance(item, str) and _chunk(chunks, item) is not None for item in values)
+    )
+    periods = sorted({row["period"] for row in rows if isinstance(row.get("period"), str) and row["period"].strip()})
+    covered_periods = sum(
+        1
+        for period in periods
+        if any(
+            isinstance(item, str)
+            and (chunk := _chunk(chunks, item)) is not None
+            and chunk.get("period") == period
+            for values in evidence_lists
+            for item in values
+        )
+    )
+    return {
+        "assetItems": _coverage_metric(len(rows), item_covered),
+        "evidence": _coverage_metric(len(all_evidence), len(covered_evidence)),
+        "periods": _coverage_metric(len(periods), covered_periods),
+    }
+
+
+def _coverage_metric(total: int, covered: int) -> dict[str, object]:
+    return {"total": total, "covered": covered, "rate": round(covered / total, 6) if total else 0.0}
 
 
 def _evaluate_rows(
@@ -665,19 +1088,44 @@ def _evaluate_rows(
 ) -> tuple[dict[str, CategoryMetric], dict[str, CategoryMetric], dict[str, CategoryMetric], dict[str, CategoryMetric]]:
     results: list[tuple[_EvalRow, bool, str]] = []
     for row in rows:
-        expected = [lookup.get(chunk_id) for chunk_id in row.expected_evidence]
-        expected = [chunk for chunk in expected if chunk is not None]
-        found = set(lookup.retrieve(row.question))
-        passed = bool(found.intersection(row.expected_evidence))
-        if row.category == "stance" and expected and all(chunk["period"] != row.period for chunk in expected):
-            passed = False
-        authorship = "+".join(sorted({chunk["authorship"] for chunk in expected})) or "unassigned"
+        expected = {chunk_id: lookup.get(chunk_id) for chunk_id in row.expected_evidence}
+        expected = {chunk_id: chunk for chunk_id, chunk in expected.items() if chunk is not None}
+        retrieved_expected = {
+            chunk_id: expected[chunk_id]
+            for chunk_id in lookup.retrieve(row.question)
+            if chunk_id in expected
+        }
+        passed = _category_passes(row, retrieved_expected)
+        authorship = "+".join(sorted({chunk["authorship"] for chunk in expected.values()})) or "unassigned"
         results.append((row, passed, authorship))
     category = _metrics_by(((row.category, passed) for row, passed, _ in results), include=EVALUATION_CATEGORIES)
     periods = _metrics_by((row.period, passed) for row, passed, _ in results)
     authorships = _metrics_by((authorship, passed) for _, passed, authorship in results)
     corpora = _metrics_by((row.corpus_id, passed) for row, passed, _ in results)
     return category, periods, authorships, corpora
+
+
+def _category_passes(row: _EvalRow, retrieved: Mapping[str, Mapping[str, str]]) -> bool:
+    if not retrieved:
+        return False
+    values = tuple(retrieved.values())
+    if row.category == "grounding":
+        return True
+    if row.category == "stance":
+        return any(chunk["period"] == row.period for chunk in values)
+    if row.category == "voice":
+        return any(chunk["authorship"] in _DIRECT_AUTHORSHIPS for chunk in values)
+    if row.category == "temporal":
+        return all(chunk["period"] == row.period for chunk in values)
+    if row.category == "diversity":
+        return (
+            len(values) >= 2
+            and len({chunk["source_id"] for chunk in values}) >= 2
+            and len({chunk["duplicate_group"] for chunk in values}) >= 2
+        )
+    if row.category == "global":
+        return len(values) >= 2 and len({chunk["route"] for chunk in values}) >= 2
+    return False
 
 
 def _metrics_by(rows: Any, *, include: tuple[str, ...] = ()) -> dict[str, CategoryMetric]:
@@ -727,6 +1175,10 @@ def _query_terms(text: str) -> tuple[str, ...]:
     return tuple(sorted(set(terms))[:_MAX_RETRIEVAL_TERMS])
 
 
+def _quote_fts_term(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
 def _cjk_runs(text: str) -> tuple[str, ...]:
     runs: list[str] = []
     current: list[str] = []
@@ -757,10 +1209,6 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
 
 def _new_metrics() -> dict[str, CategoryMetric]:
     return {name: CategoryMetric(0, 0, 0.0) for name in EVALUATION_CATEGORIES}
-
-
-def _empty_metric() -> dict[str, object]:
-    return {"total": 0, "passed": 0, "rate": 0.0}
 
 
 def _unique(values: list[str]) -> list[str]:
