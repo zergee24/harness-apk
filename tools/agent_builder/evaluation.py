@@ -319,7 +319,12 @@ def _create_index(connection: sqlite3.Connection) -> None:
         );
         CREATE TABLE nodes (
             id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL
+            source_id TEXT NOT NULL,
+            parent_id TEXT,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            path TEXT NOT NULL
         );
         CREATE VIRTUAL TABLE chunk_search USING fts5(
             chunk_id UNINDEXED,
@@ -356,13 +361,21 @@ def _stream_node_index(
                 valid = False
                 continue
             try:
-                connection.execute("INSERT INTO nodes(id, source_id) VALUES (?, ?)", node)
+                connection.execute(
+                    """
+                    INSERT INTO nodes(id, source_id, parent_id, kind, title, summary, path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    node,
+                )
             except sqlite3.IntegrityError:
                 errors.append(f"资料节点 JSONL 第 {line_number} 行存在重复 node ID：{node[0]}")
                 valid = False
         after = os.fstat(descriptor)
         if not _same_file_identity(before, after):
             errors.append("资料节点在读取期间发生变化：corpora/index/nodes.jsonl")
+            valid = False
+        if not _validate_node_graph(connection, source_hashes, errors):
             valid = False
         connection.commit()
     except (OSError, sqlite3.Error) as error:
@@ -431,21 +444,12 @@ def _stream_chunk_index(
                 )
                 continue
             if validate_parents:
-                parent_rows = _node_rows(connection, parent_id_values)
-                missing_parents = sorted(set(parent_id_values) - set(parent_rows))
-                if missing_parents:
-                    errors.append(
-                        f"资料索引 JSONL 第 {line_number} 行 parentIds 引用了不存在的 node ID：{', '.join(missing_parents)}"
-                    )
+                verified_route = _verified_chunk_route(connection, source_id, parent_id_values, line_number, errors)
+                if verified_route is None:
                     continue
-                foreign_parents = sorted(
-                    parent_id for parent_id, parent_source_id in parent_rows.items() if parent_source_id != source_id
-                )
-                if foreign_parents:
-                    errors.append(
-                        f"资料索引 JSONL 第 {line_number} 行 parentIds 与 chunk sourceId 不一致：{', '.join(foreign_parents)}"
-                    )
-                    continue
+                route = verified_route
+            else:
+                route = ""
             try:
                 connection.execute(
                     """
@@ -572,7 +576,7 @@ def _chunk_row(
 
 def _node_row(
     value: object, line_number: int, source_hashes: Mapping[str, str], errors: list[str]
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str | None, str, str, str, str] | None:
     if not isinstance(value, dict):
         errors.append(f"资料节点 JSONL 第 {line_number} 行必须是对象")
         return None
@@ -588,16 +592,135 @@ def _node_row(
     if source_id not in source_hashes:
         errors.append(f"资料节点 JSONL 第 {line_number} 行 sourceId 不在 workspace.json sources 中：{source_id}")
         return None
-    return node_id.strip(), source_id
+    parent_id = value.get("parentId")
+    valid = True
+    if parent_id is not None and (not isinstance(parent_id, str) or not parent_id.strip()):
+        errors.append(f"资料节点 JSONL 第 {line_number} 行缺少或包含无效 parentId")
+        valid = False
+    strings: dict[str, str] = {}
+    for field_name in ("kind", "title", "summary"):
+        candidate = value.get(field_name)
+        if not isinstance(candidate, str) or not candidate.strip():
+            errors.append(f"资料节点 JSONL 第 {line_number} 行缺少或包含无效 {field_name}")
+            valid = False
+            continue
+        strings[field_name] = candidate.strip()
+    path = value.get("path")
+    if not isinstance(path, list) or not path or any(not isinstance(item, str) or not item.strip() for item in path):
+        errors.append(f"资料节点 JSONL 第 {line_number} 行 path 必须是非空字符串数组")
+        valid = False
+    if not valid:
+        return None
+    return (
+        node_id.strip(),
+        source_id,
+        parent_id.strip() if isinstance(parent_id, str) else None,
+        strings["kind"],
+        strings["title"],
+        strings["summary"],
+        json.dumps(tuple(item.strip() for item in path), ensure_ascii=False, separators=(",", ":")),
+    )
 
 
-def _node_rows(connection: sqlite3.Connection, parent_ids: tuple[str, ...]) -> dict[str, str]:
+def _node_records(connection: sqlite3.Connection, parent_ids: tuple[str, ...]) -> dict[str, dict[str, str | None]]:
     unique_ids = tuple(sorted(set(parent_ids)))
+    if not unique_ids:
+        return {}
     placeholders = ",".join("?" for _ in unique_ids)
     rows = connection.execute(
-        f"SELECT id, source_id FROM nodes WHERE id IN ({placeholders})", unique_ids
+        f"SELECT id, source_id, parent_id, kind FROM nodes WHERE id IN ({placeholders})", unique_ids
     )
-    return {row["id"]: row["source_id"] for row in rows}
+    return {row["id"]: dict(row) for row in rows}
+
+
+def _validate_node_graph(
+    connection: sqlite3.Connection, source_hashes: Mapping[str, str], errors: list[str]
+) -> bool:
+    rows = [dict(row) for row in connection.execute("SELECT id, source_id, parent_id, kind FROM nodes")]
+    by_id = {row["id"]: row for row in rows}
+    valid = True
+    roots_by_source: dict[str, list[str]] = {source_id: [] for source_id in source_hashes}
+    for row in rows:
+        node_id = str(row["id"])
+        source_id = str(row["source_id"])
+        parent_id = row["parent_id"]
+        if row["kind"] == "source":
+            roots_by_source.setdefault(source_id, []).append(node_id)
+            if parent_id is not None:
+                errors.append(f"资料节点 {node_id} 为 source root，parentId 必须为 null")
+                valid = False
+            continue
+        if parent_id is None:
+            errors.append(f"资料节点 {node_id} 不是 source root，parentId 必须存在")
+            valid = False
+            continue
+        parent = by_id.get(str(parent_id))
+        if parent is None:
+            errors.append(f"资料节点 {node_id} parentId 引用了不存在的 node ID：{parent_id}")
+            valid = False
+        elif parent["source_id"] != source_id:
+            errors.append(f"资料节点 {node_id} parentId 与 node sourceId 不一致：{parent_id}")
+            valid = False
+    for source_id, roots in sorted(roots_by_source.items()):
+        if len(roots) != 1:
+            errors.append(f"资料节点 sourceId {source_id} 必须恰有一个 source root，实际 {len(roots)}")
+            valid = False
+    visited: set[str] = set()
+    reported_cycles: set[tuple[str, ...]] = set()
+    for node_id in sorted(by_id):
+        if node_id in visited:
+            continue
+        chain: list[str] = []
+        positions: dict[str, int] = {}
+        current: str | None = node_id
+        while current is not None and current in by_id and current not in visited:
+            if current in positions:
+                cycle = tuple(sorted(chain[positions[current] :]))
+                if cycle not in reported_cycles:
+                    errors.append(f"资料节点存在 parentId 环：{', '.join(cycle)}")
+                    reported_cycles.add(cycle)
+                valid = False
+                break
+            positions[current] = len(chain)
+            chain.append(current)
+            parent = by_id[current]["parent_id"]
+            current = str(parent) if parent is not None else None
+        visited.update(chain)
+    return valid
+
+
+def _verified_chunk_route(
+    connection: sqlite3.Connection,
+    source_id: str,
+    parent_ids: tuple[str, ...],
+    line_number: int,
+    errors: list[str],
+) -> str | None:
+    parent_rows = _node_records(connection, parent_ids)
+    missing_parents = sorted(set(parent_ids) - set(parent_rows))
+    if missing_parents:
+        errors.append(
+            f"资料索引 JSONL 第 {line_number} 行 parentIds 引用了不存在的 node ID：{', '.join(missing_parents)}"
+        )
+        return None
+    foreign_parents = sorted(
+        parent_id for parent_id, parent in parent_rows.items() if parent["source_id"] != source_id
+    )
+    if foreign_parents:
+        errors.append(
+            f"资料索引 JSONL 第 {line_number} 行 parentIds 与 chunk sourceId 不一致：{', '.join(foreign_parents)}"
+        )
+        return None
+    first = parent_rows[parent_ids[0]]
+    if first["kind"] != "source" or first["parent_id"] is not None:
+        errors.append(f"资料索引 JSONL 第 {line_number} 行 parentIds 必须从 source root 逐级连接")
+        return None
+    for previous_id, current_id in zip(parent_ids, parent_ids[1:]):
+        if parent_rows[current_id]["parent_id"] != previous_id:
+            errors.append(f"资料索引 JSONL 第 {line_number} 行 parentIds 必须从 source root 逐级连接")
+            return None
+    top_level = parent_ids[1] if len(parent_ids) > 1 else parent_ids[0]
+    return f"{source_id}:{top_level}"
 
 
 def _fts_terms(keywords: list[str], ngrams: list[str]) -> str:
@@ -862,7 +985,10 @@ def _validate_evaluations(
             errors.append(f"{label}.category 无效：{category}")
         _validate_non_empty_string(row.get("question"), f"{label}.question", errors)
         evidence = _validate_evidence(row.get("expectedEvidence"), label, chunks, errors, "expectedEvidence")
-        _validate_period_compatibility(row.get("period"), evidence, label, chunks, errors)
+        if category in {"stance", "temporal"}:
+            _validate_period_compatibility(row.get("period"), evidence, label, chunks, errors)
+        if category == "voice":
+            _validate_direct_evidence(evidence, f"{label}.voice expectedEvidence", chunks, errors)
         if "corpusId" in row and (not isinstance(row["corpusId"], str) or not row["corpusId"].strip()):
             errors.append(f"{label}.corpusId 必须是非空字符串，或省略为 unassigned")
         if category in {"diversity", "global"}:
@@ -950,8 +1076,21 @@ def _validate_period_compatibility(
         return
     known = [_chunk(chunks, item) for item in evidence if isinstance(item, str)]
     known = [item for item in known if item is not None]
-    if known and all(item.get("period") != period for item in known):
+    if known and any(item.get("period") != period for item in known):
         errors.append(f"{label}.period 与 evidence 时期不兼容")
+
+
+def _validate_direct_evidence(
+    evidence: tuple[str, ...],
+    label: str,
+    chunks: _ChunkLookup | Mapping[str, Mapping[str, str]],
+    errors: list[str],
+) -> None:
+    if any(
+        (chunk := _chunk(chunks, chunk_id)) is not None and chunk.get("authorship") not in _DIRECT_AUTHORSHIPS
+        for chunk_id in evidence
+    ):
+        errors.append(f"{label} 只能引用 direct 或 edited_direct")
 
 
 def _validate_structural_eval_category(
@@ -971,8 +1110,11 @@ def _validate_structural_eval_category(
             errors.append(f"diversity expectedEvidence 必须来自至少 2 个 sourceId：{label}")
         if len({chunk["duplicate_group"] for chunk in metadata}) < 2:
             errors.append(f"diversity expectedEvidence 必须来自至少 2 个 duplicateGroup：{label}")
-    elif category == "global" and len({chunk["route"] for chunk in metadata}) < 2:
-        errors.append(f"global expectedEvidence 必须来自至少 2 条 source/top-level route：{label}")
+    elif category == "global":
+        if len({chunk["source_id"] for chunk in metadata}) < 2:
+            errors.append(f"global expectedEvidence 必须来自至少 2 个 sourceId：{label}")
+        if len({chunk["route"] for chunk in metadata}) < 2:
+            errors.append(f"global expectedEvidence 必须来自至少 2 条 source/top-level route：{label}")
 
 
 def _read_eval_rows(workspace: Path, assets: AgentAssetPaths, errors: list[str]) -> tuple[_EvalRow, ...]:
@@ -1112,9 +1254,9 @@ def _category_passes(row: _EvalRow, retrieved: Mapping[str, Mapping[str, str]]) 
     if row.category == "grounding":
         return True
     if row.category == "stance":
-        return any(chunk["period"] == row.period for chunk in values)
+        return all(chunk["period"] == row.period for chunk in values)
     if row.category == "voice":
-        return any(chunk["authorship"] in _DIRECT_AUTHORSHIPS for chunk in values)
+        return all(chunk["authorship"] in _DIRECT_AUTHORSHIPS for chunk in values)
     if row.category == "temporal":
         return all(chunk["period"] == row.period for chunk in values)
     if row.category == "diversity":
@@ -1124,7 +1266,11 @@ def _category_passes(row: _EvalRow, retrieved: Mapping[str, Mapping[str, str]]) 
             and len({chunk["duplicate_group"] for chunk in values}) >= 2
         )
     if row.category == "global":
-        return len(values) >= 2 and len({chunk["route"] for chunk in values}) >= 2
+        return (
+            len(values) >= 2
+            and len({chunk["source_id"] for chunk in values}) >= 2
+            and len({chunk["route"] for chunk in values}) >= 2
+        )
     return False
 
 

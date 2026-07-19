@@ -225,6 +225,188 @@ class EvaluationTest(unittest.TestCase):
         self.assertIn("diversity 至少需要 2 条可归因 expectedEvidence", joined)
         self.assertIn("global 至少需要 2 条可归因 expectedEvidence", joined)
 
+    def test_stance_temporal_and_period_assets_reject_mixed_period_evidence(self):
+        workspace = self._complete_workspace()
+        chunk_id, companion_id = self._source_chunk_ids(workspace)
+        eval_path = self._asset(workspace, "eval.jsonl")
+        rows = [json.loads(line) for line in eval_path.read_text("utf-8").splitlines()]
+        for row in rows:
+            if row["category"] in {"stance", "temporal"}:
+                row["expectedEvidence"] = [chunk_id, companion_id]
+        eval_path.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8"
+        )
+        worldview_path = self._asset(workspace, "worldview.jsonl")
+        worldview = json.loads(worldview_path.read_text("utf-8"))
+        worldview["evidence"] = [chunk_id, companion_id]
+        worldview_path.write_text(json.dumps(worldview, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        report = validate_workspace_v2(workspace)
+
+        joined = "\n".join(report.errors)
+        self.assertFalse(report.publishable)
+        self.assertGreaterEqual(joined.count("period 与 evidence 时期不兼容"), 3)
+        evaluation_report = evaluate_workspace(workspace)
+        self.assertEqual(0, evaluation_report.category_metrics["stance"].passed)
+        self.assertEqual(0, evaluation_report.category_metrics["temporal"].passed)
+
+    def test_voice_evaluation_rejects_any_secondary_expected_evidence(self):
+        workspace = self._complete_workspace()
+        chunk_id, companion_id = self._source_chunk_ids(workspace)
+        eval_path = self._asset(workspace, "eval.jsonl")
+        rows = [json.loads(line) for line in eval_path.read_text("utf-8").splitlines()]
+        for row in rows:
+            if row["category"] == "voice":
+                row["expectedEvidence"] = [chunk_id, companion_id]
+        eval_path.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8"
+        )
+
+        report = validate_workspace_v2(workspace)
+
+        joined = "\n".join(report.errors)
+        self.assertFalse(report.publishable)
+        self.assertIn("voice expectedEvidence 只能引用 direct 或 edited_direct", joined)
+        self.assertEqual(0, evaluate_workspace(workspace).category_metrics["voice"].passed)
+
+    def test_global_rejects_two_routes_from_one_source(self):
+        workspace = self._complete_workspace()
+        chunk_id, _ = self._source_chunk_ids(workspace)
+        chunks = self._chunks_path(workspace)
+        rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
+        primary = next(row for row in rows if row["id"] == chunk_id)
+        nodes = self._nodes_path(workspace)
+        node_rows = [json.loads(line) for line in nodes.read_text("utf-8").splitlines()]
+        source_root = next(
+            row for row in node_rows if row["sourceId"] == "source-research" and row["kind"] == "source"
+        )
+        alternate_node = {
+            "id": "node-same-source-alternate-route",
+            "kind": "section",
+            "parentId": source_root["id"],
+            "path": [source_root["title"], "旁证"],
+            "sourceId": "source-research",
+            "summary": "调查的另一条路径",
+            "title": "旁证",
+        }
+        node_rows.append(alternate_node)
+        nodes.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in node_rows) + "\n", encoding="utf-8"
+        )
+        clone = dict(primary)
+        clone.update(
+            {
+                "id": "chunk-same-source-alternate-route",
+                "duplicateGroup": "alternate-route",
+                "parentIds": [source_root["id"], alternate_node["id"]],
+            }
+        )
+        rows.append(clone)
+        chunks.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8"
+        )
+        eval_path = self._asset(workspace, "eval.jsonl")
+        eval_rows = [json.loads(line) for line in eval_path.read_text("utf-8").splitlines()]
+        for row in eval_rows:
+            if row["category"] == "global":
+                row["expectedEvidence"] = [chunk_id, clone["id"]]
+        eval_path.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in eval_rows) + "\n", encoding="utf-8"
+        )
+
+        report = validate_workspace_v2(workspace)
+
+        joined = "\n".join(report.errors)
+        self.assertFalse(report.publishable)
+        self.assertIn("global expectedEvidence 必须来自至少 2 个 sourceId", joined)
+        self.assertEqual(0, evaluate_workspace(workspace).category_metrics["global"].passed)
+
+    def test_rejects_invalid_node_graphs_and_chunk_parent_chains(self):
+        workspace = self._complete_workspace("missing-node-parent")
+        nodes = self._nodes_path(workspace)
+        rows = [json.loads(line) for line in nodes.read_text("utf-8").splitlines()]
+        section = next(row for row in rows if row["sourceId"] == "source-research" and row["kind"] == "section")
+        section["parentId"] = "missing-node-parent"
+        nodes.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        self.assertIn("parentId 引用了不存在的 node ID", "\n".join(evaluate_workspace(workspace).errors))
+
+        workspace = self._complete_workspace("cross-source-node-parent")
+        nodes = self._nodes_path(workspace)
+        rows = [json.loads(line) for line in nodes.read_text("utf-8").splitlines()]
+        section = next(row for row in rows if row["sourceId"] == "source-research" and row["kind"] == "section")
+        foreign_root = next(row for row in rows if row["sourceId"] == "source-companion" and row["kind"] == "source")
+        section["parentId"] = foreign_root["id"]
+        nodes.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        self.assertIn("parentId 与 node sourceId 不一致", "\n".join(evaluate_workspace(workspace).errors))
+
+        workspace = self._complete_workspace("cyclic-node-parent")
+        nodes = self._nodes_path(workspace)
+        rows = [json.loads(line) for line in nodes.read_text("utf-8").splitlines()]
+        section = next(row for row in rows if row["sourceId"] == "source-research" and row["kind"] == "section")
+        section["parentId"] = section["id"]
+        nodes.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        self.assertIn("存在 parentId 环", "\n".join(evaluate_workspace(workspace).errors))
+
+        workspace = self._complete_workspace("source-root-parent")
+        nodes = self._nodes_path(workspace)
+        rows = [json.loads(line) for line in nodes.read_text("utf-8").splitlines()]
+        source_root = next(
+            row for row in rows if row["sourceId"] == "source-research" and row["kind"] == "source"
+        )
+        source_root["parentId"] = source_root["id"]
+        nodes.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        self.assertIn("source root，parentId 必须为 null", "\n".join(evaluate_workspace(workspace).errors))
+
+        workspace = self._complete_workspace("unordered-chunk-chain")
+        chunks = self._chunks_path(workspace)
+        rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
+        rows[0]["parentIds"] = list(reversed(rows[0]["parentIds"]))
+        chunks.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        self.assertIn("parentIds 必须从 source root 逐级连接", "\n".join(evaluate_workspace(workspace).errors))
+
+        workspace = self._complete_workspace("jumped-chunk-chain")
+        nodes = self._nodes_path(workspace)
+        node_rows = [json.loads(line) for line in nodes.read_text("utf-8").splitlines()]
+        source_root = next(
+            row for row in node_rows if row["sourceId"] == "source-research" and row["kind"] == "source"
+        )
+        section = next(row for row in node_rows if row["sourceId"] == "source-research" and row["kind"] == "section")
+        node_rows.append(
+            {
+                "id": "node-jumped-chain-leaf",
+                "kind": "section",
+                "parentId": section["id"],
+                "path": [source_root["title"], section["title"], "叶节点"],
+                "sourceId": "source-research",
+                "summary": "跳级测试叶节点",
+                "title": "叶节点",
+            }
+        )
+        nodes.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in node_rows) + "\n", encoding="utf-8"
+        )
+        chunks = self._chunks_path(workspace)
+        rows = [json.loads(line) for line in chunks.read_text("utf-8").splitlines()]
+        rows[0]["parentIds"] = [source_root["id"], "node-jumped-chain-leaf"]
+        chunks.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        self.assertIn("parentIds 必须从 source root 逐级连接", "\n".join(evaluate_workspace(workspace).errors))
+
+    def test_rejects_node_with_invalid_declared_shape(self):
+        workspace = self._complete_workspace("invalid-node-shape")
+        nodes = self._nodes_path(workspace)
+        rows = [json.loads(line) for line in nodes.read_text("utf-8").splitlines()]
+        rows[0]["title"] = ""
+        rows[0]["summary"] = []
+        rows[0]["path"] = []
+        nodes.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+        report = evaluate_workspace(workspace)
+
+        joined = "\n".join(report.errors)
+        self.assertIn("缺少或包含无效 title", joined)
+        self.assertIn("缺少或包含无效 summary", joined)
+        self.assertIn("path 必须是非空字符串数组", joined)
+
     def test_runtime_asset_shapes_and_coverage_summaries_are_explicit(self):
         workspace = self._complete_workspace()
         identity = json.loads(self._asset(workspace, "identity.json").read_text("utf-8"))
@@ -448,6 +630,12 @@ class EvaluationTest(unittest.TestCase):
 
     def _asset(self, workspace: Path, name: str) -> Path:
         return workspace / "agent" / name
+
+    def _source_chunk_ids(self, workspace: Path) -> tuple[str, str]:
+        rows = [json.loads(line) for line in self._chunks_path(workspace).read_text("utf-8").splitlines()]
+        primary = next(row["id"] for row in rows if row["sourceId"] == "source-research")
+        companion = next(row["id"] for row in rows if row["sourceId"] == "source-companion")
+        return primary, companion
 
     def _chunks_path(self, workspace: Path) -> Path:
         return workspace / "corpora" / "index" / "chunks.jsonl"
