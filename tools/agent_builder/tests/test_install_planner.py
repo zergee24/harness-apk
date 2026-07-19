@@ -385,6 +385,24 @@ class InstallPlannerTest(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "不属于声明 corpus"):
             pack_workspace_v2(workspace, self.root / "dist-wrong-corpus", self.private_key_path)
 
+    def test_pack_rejects_question_with_any_cross_shard_expected_evidence(self):
+        rows = self._jsonl_rows("eval.jsonl")
+        direct_id = install_planner._shard_id(
+            "source-direct",
+            "1926",
+            "node-direct-top",
+        )
+        row = next(item for item in rows if item["corpusId"] == direct_id)
+        row["expectedEvidence"].append("chunk-background")
+        self._write_jsonl(self.workspace / "agent" / "eval.jsonl", rows)
+
+        with self.assertRaisesRegex(BuildError, "不属于声明 corpus"):
+            pack_workspace_v2(
+                self.workspace,
+                self.root / "dist-cross-shard-question",
+                self.private_key_path,
+            )
+
     def test_pack_requires_two_true_questions_for_required_and_recommended_corpora(self):
         rows = self._jsonl_rows("eval.jsonl")
         dialogue_id = install_planner._shard_id("source-dialogue", "1930", "node-dialogue-top")

@@ -648,9 +648,14 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
             if not isinstance(corpus_id, str) or corpus_id not in known:
                 errors.append(f"评估题 {line_number} 声明了未知 corpusId：{corpus_id}")
                 continue
-            if not isinstance(evidence, list) or not any(
-                isinstance(chunk_id, str) and self._chunk_in_shard(chunk_id, known[corpus_id])
-                for chunk_id in evidence
+            if (
+                not isinstance(evidence, list)
+                or not evidence
+                or not all(
+                    isinstance(chunk_id, str)
+                    and self._chunk_in_shard(chunk_id, known[corpus_id])
+                    for chunk_id in evidence
+                )
             ):
                 errors.append(f"评估题 {line_number} 的 expectedEvidence 不属于声明 corpus：{corpus_id}")
                 continue
