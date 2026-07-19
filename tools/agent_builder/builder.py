@@ -18,8 +18,9 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat,
 
 from .corpus_pipeline import build_corpus_index_streaming
 from .evaluation import evaluate_workspace
+from .evaluation import read_v2_asset_bytes
 from .extractors import extract_document, iter_v2_source_sections_stream
-from .models import BuildError, BuildReport, ExtractedDocument, PackResult
+from .models import BuildError, BuildReport, CorpusShard, ExtractedDocument, PackResult
 from .schema_v2 import (
     AgentAssetPaths,
     Authorship,
@@ -796,6 +797,660 @@ def pack_workspace(
     report_path = output / f"{stem}-build-report.json"
     report_path.write_bytes(_canonical_json_bytes(report.to_dict()))
     return PackResult(agent_package, corpus_packages, source_packages, bundle_package, report_path)
+
+
+def pack_workspace_v2(
+    workspace: Path,
+    output_dir: Path,
+    private_key_path: Path,
+    profile_id: str = "balanced",
+    emit_sources: bool = False,
+) -> PackResult:
+    from .install_planner import CorpusPlanIndex, choose_install_profiles
+
+    if profile_id not in {"lite", "balanced", "complete", "source"}:
+        raise BuildError(f"未知 profile：{profile_id}")
+    workspace = Path(workspace).expanduser().resolve()
+    manifest, validation = _validate_workspace_v2_for_pack(workspace)
+    if not validation.publishable:
+        raise BuildError("构建验证未通过：" + "；".join(validation.errors))
+    output = Path(output_dir).expanduser().resolve()
+    output_parent = output.parent
+    output_parent.mkdir(parents=True, exist_ok=True)
+    private_key = _load_private_key(Path(private_key_path))
+    stem = f"{_safe_filename(manifest.agent_id)}-v{manifest.version}"
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output_parent))
+    published: list[Path] = []
+    created_output = False
+    try:
+        package_root = staging / "packages"
+        package_root.mkdir()
+        with CorpusPlanIndex(workspace) as planner:
+            logical_shards = planner.shards(materialize_ids=False)
+            logical_sources = [
+                CorpusShard.source(
+                    package_id=f"source-{source.source_id}",
+                    source_ids=(source.source_id,),
+                    source_hashes=(source.source_hash,),
+                )
+                for source in sorted(manifest.sources, key=lambda item: item.source_id)
+            ] if emit_sources else []
+            logical_plan = choose_install_profiles([*logical_shards, *logical_sources])
+            install_classes = {
+                package.package_id: package.install_class
+                for package in logical_plan.packages
+            }
+            logical_shards = [
+                replace(shard, install_class=install_classes[shard.package_id])
+                for shard in logical_shards
+            ]
+            corpus_artifacts: list[CorpusShard] = []
+            corpus_paths: dict[str, Path] = {}
+            for shard in logical_shards:
+                target = package_root / shard.file_name
+                _pack_corpus_shard_v2(planner, shard, target, private_key, staging)
+                sha256, size_bytes = _hash_regular_file(target)
+                artifact = shard.with_artifact(target.name, size_bytes, sha256)
+                corpus_artifacts.append(artifact)
+                corpus_paths[artifact.package_id] = target
+
+            source_artifacts: list[CorpusShard] = []
+            source_paths: dict[str, Path] = {}
+            if emit_sources:
+                for source in sorted(manifest.sources, key=lambda item: item.source_id):
+                    package_id = f"source-{source.source_id}"
+                    target = package_root / f"{package_id}.hsource"
+                    _pack_source_v2(
+                        workspace,
+                        manifest.agent_id,
+                        manifest.version,
+                        source,
+                        target,
+                        private_key,
+                    )
+                    sha256, size_bytes = _hash_regular_file(target)
+                    artifact = CorpusShard.source(
+                        package_id=package_id,
+                        source_ids=(source.source_id,),
+                        source_hashes=(source.source_hash,),
+                        file_name=target.name,
+                        size_bytes=size_bytes,
+                        sha256=sha256,
+                    )
+                    source_artifacts.append(artifact)
+                    source_paths[package_id] = target
+
+            install_plan = choose_install_profiles([*corpus_artifacts, *source_artifacts])
+            install_plan_bytes = _canonical_json_bytes(
+                install_plan.to_dict(require_artifacts=True)
+            )
+            agent_target = package_root / f"{stem}.hagent"
+            _pack_agent_v2(
+                workspace,
+                manifest,
+                install_plan_bytes,
+                agent_target,
+                private_key,
+            )
+            agent_sha256, agent_size = _hash_regular_file(agent_target)
+
+            selected_ids = install_plan.profile(profile_id).package_ids
+            child_paths = {**corpus_paths, **source_paths}
+            selected_paths = []
+            for package_id in selected_ids:
+                child = child_paths.get(package_id)
+                if child is None:
+                    raise BuildError(f"profile 引用了未生成安装包：{package_id}")
+                selected_paths.append(child)
+            bundle_target = package_root / f"{stem}-{profile_id}.hbundle"
+            _pack_bundle_v2(
+                manifest,
+                profile_id,
+                agent_target,
+                agent_sha256,
+                agent_size,
+                install_plan,
+                selected_paths,
+                bundle_target,
+                private_key,
+            )
+            _, bundle_size = _hash_regular_file(bundle_target)
+            index_metrics = _read_small_json(
+                workspace / "corpora" / "index" / "report.json"
+            )
+            report_target = package_root / f"{stem}-{profile_id}-build-report.json"
+            _write_json(
+                report_target,
+                {
+                    "agentId": manifest.agent_id,
+                    "bundleSizeBytes": bundle_size,
+                    "children": [
+                        {
+                            "fileName": package.file_name,
+                            "id": package.package_id,
+                            "sha256": package.sha256,
+                            "sizeBytes": package.size_bytes,
+                            "type": package.package_type,
+                        }
+                        for package in install_plan.packages
+                    ],
+                    "corpusMetrics": {
+                        "deduplicatedChunks": index_metrics.get(
+                            "chunksAfterDeduplication", 0
+                        ),
+                        "extractedCharacters": index_metrics.get(
+                            "extractedCharacters", 0
+                        ),
+                        "rawBytes": index_metrics.get("rawBytes", 0),
+                        "sourceChunks": index_metrics.get(
+                            "chunksBeforeDeduplication", 0
+                        ),
+                    },
+                    "profile": profile_id,
+                    "selectedPackageIds": list(selected_ids),
+                    "sourcesEmitted": emit_sources,
+                    "version": manifest.version,
+                },
+            )
+
+        final_names = sorted(path.name for path in package_root.iterdir())
+        if output.exists():
+            if not output.is_dir():
+                raise BuildError(f"输出路径不是目录：{output}")
+        else:
+            output.mkdir()
+            created_output = True
+        conflicts = [name for name in final_names if (output / name).exists()]
+        if conflicts:
+            raise BuildError("输出文件已存在：" + ", ".join(conflicts))
+        try:
+            for name in final_names:
+                source = package_root / name
+                destination = output / name
+                os.link(source, destination, follow_symlinks=False)
+                published.append(destination)
+                source.unlink()
+        except BaseException:
+            for path in published:
+                path.unlink(missing_ok=True)
+            raise
+
+        corpus_packages = [
+            output / corpus_paths[shard.package_id].name for shard in corpus_artifacts
+        ]
+        source_packages = [
+            output / source_paths[shard.package_id].name for shard in source_artifacts
+        ]
+        return PackResult(
+            output / agent_target.name,
+            corpus_packages,
+            source_packages,
+            output / bundle_target.name,
+            output / report_target.name,
+        )
+    except BuildError:
+        for path in published:
+            path.unlink(missing_ok=True)
+        raise
+    except BaseException as error:
+        for path in published:
+            path.unlink(missing_ok=True)
+        raise BuildError(f"V2 打包失败：{error}") from error
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        if created_output:
+            try:
+                output.rmdir()
+            except OSError:
+                pass
+
+
+def _validate_workspace_v2_for_pack(
+    workspace: Path,
+) -> tuple[WorkspaceV2, BuildReport]:
+    manifest = load_workspace_v2(workspace)
+    errors: list[str] = []
+    if any(
+        source.genre == SourceGenre.UNKNOWN
+        or source.authorship == Authorship.UNKNOWN
+        or source.period == "unknown"
+        for source in manifest.sources
+    ):
+        errors.append("来源元数据仍有未确认项")
+    try:
+        _validate_v2_source_types_without_read(workspace, manifest.sources)
+    except BuildError as error:
+        errors.append(str(error))
+    evaluation = evaluate_workspace(workspace)
+    errors.extend(error for error in evaluation.errors if error not in errors)
+    metrics = {
+        "sourceCount": len(manifest.sources),
+        "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+    }
+    metrics.update(evaluation.metrics())
+    return manifest, BuildReport(not errors, errors=errors, metrics=metrics)
+
+
+def _validate_v2_source_types_without_read(
+    workspace: Path,
+    sources: tuple[SourceRecord, ...],
+) -> None:
+    source_root = workspace / "sources"
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source_root, flags)
+    except OSError as error:
+        raise BuildError(f"来源目录缺失或不安全：sources：{error}") from error
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise BuildError("来源目录必须是普通目录：sources")
+        for source in sources:
+            try:
+                info = os.stat(
+                    source.stored_name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise BuildError(f"来源文件无法检查：{source.stored_name}：{error}") from error
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                raise BuildError(f"来源文件必须是普通文件：{source.stored_name}")
+    finally:
+        os.close(descriptor)
+
+
+def _pack_corpus_shard_v2(
+    planner: Any,
+    shard: CorpusShard,
+    target: Path,
+    private_key: Ed25519PrivateKey,
+    staging: Path,
+) -> None:
+    entry_root = Path(tempfile.mkdtemp(prefix=".corpus-", dir=staging))
+    try:
+        sources_path = entry_root / "sources.json"
+        nodes_path = entry_root / "nodes.jsonl"
+        chunks_path = entry_root / "chunks.jsonl"
+        duplicates_path = entry_root / "duplicates.jsonl"
+        source_rows = list(planner.iter_sources(shard))
+        _write_json(sources_path, source_rows)
+        _write_jsonl_stream(nodes_path, planner.iter_nodes(shard))
+        _write_jsonl_stream(chunks_path, planner.iter_chunks(shard))
+        _write_jsonl_stream(duplicates_path, planner.iter_duplicates(shard))
+        metrics = planner.metrics(shard)
+        manifest = {
+            "agentId": planner.manifest.agent_id,
+            "chunkCount": metrics["chunkCount"],
+            "id": shard.package_id,
+            "installClass": shard.install_class,
+            "periods": list(shard.periods),
+            "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+            "sourceIds": [row["sourceId"] for row in source_rows],
+            "sourceHashes": [row["sourceHash"] for row in source_rows],
+            "topLevelIds": list(shard.top_level_ids),
+            "type": "hcorpus",
+            "version": planner.manifest.version,
+        }
+        _write_signed_package_v2(
+            target,
+            {
+                "chunks.jsonl": chunks_path,
+                "duplicates.jsonl": duplicates_path,
+                "manifest.json": _canonical_json_bytes(manifest),
+                "nodes.jsonl": nodes_path,
+                "sources.json": sources_path,
+            },
+            private_key,
+        )
+    finally:
+        shutil.rmtree(entry_root, ignore_errors=True)
+
+
+def _pack_source_v2(
+    workspace: Path,
+    agent_id: str,
+    version: int,
+    source: SourceRecord,
+    target: Path,
+    private_key: Ed25519PrivateKey,
+) -> None:
+    source_path = workspace / "sources" / source.stored_name
+    actual_hash, actual_size = _hash_regular_file(source_path)
+    if actual_hash != source.source_hash or actual_size != source.raw_size_bytes:
+        raise BuildError(f"来源文件大小或哈希不匹配：{source.stored_name}")
+    _write_signed_package_v2(
+        target,
+        {
+            f"files/{source.stored_name}": source_path,
+            "manifest.json": _canonical_json_bytes(
+                {
+                    "agentId": agent_id,
+                    "fileName": source.file_name,
+                    "id": f"source-{source.source_id}",
+                    "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+                    "sourceHash": source.source_hash,
+                    "sourceId": source.source_id,
+                    "storedName": source.stored_name,
+                    "type": "hsource",
+                    "version": version,
+                }
+            ),
+        },
+        private_key,
+        expected_files={
+            f"files/{source.stored_name}": (
+                source.source_hash,
+                source.raw_size_bytes,
+            )
+        },
+    )
+
+
+def _pack_agent_v2(
+    workspace: Path,
+    manifest: WorkspaceV2,
+    install_plan: bytes,
+    target: Path,
+    private_key: Ed25519PrivateKey,
+) -> None:
+    asset_entries = {
+        "agent/persona.md": manifest.assets.persona,
+        "agent/identity.json": manifest.assets.identity,
+        "agent/voice.json": manifest.assets.voice,
+        "agent/worldview.jsonl": manifest.assets.worldview,
+        "agent/episodes.jsonl": manifest.assets.episodes,
+        "agent/concepts.json": manifest.assets.concepts,
+        "agent/examples.jsonl": manifest.assets.examples,
+        "agent/openers.json": manifest.assets.openers,
+        "agent/eval.jsonl": manifest.assets.eval,
+    }
+    entries: dict[str, bytes | Path] = {
+        path: read_v2_asset_bytes(workspace, source)
+        for path, source in asset_entries.items()
+    }
+    entries["install-plan.json"] = install_plan
+    entries["manifest.json"] = _canonical_json_bytes(
+        {
+            "agent": {
+                "id": manifest.agent_id,
+                "name": manifest.name,
+                "version": manifest.version,
+            },
+            "requiredCorpora": ["core-evidence"],
+            "runnableWithoutCorpora": False,
+            "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+            "type": "hagent",
+        }
+    )
+    _write_signed_package_v2(target, entries, private_key)
+
+
+def _pack_bundle_v2(
+    manifest: WorkspaceV2,
+    profile_id: str,
+    agent_path: Path,
+    agent_sha256: str,
+    agent_size: int,
+    install_plan: Any,
+    selected_paths: list[Path],
+    target: Path,
+    private_key: Ed25519PrivateKey,
+) -> None:
+    package_by_name = {
+        package.file_name: package for package in install_plan.packages
+    }
+    if len(package_by_name) != len(install_plan.packages):
+        raise BuildError("安装计划存在重复子包文件名")
+    selected_ids = install_plan.profile(profile_id).package_ids
+    if len(selected_paths) != len(selected_ids):
+        raise BuildError("bundle 子包与安装计划不一致")
+    entries: dict[str, bytes | Path] = {
+        f"packages/{agent_path.name}": agent_path,
+    }
+    expected_files = {
+        f"packages/{agent_path.name}": (agent_sha256, agent_size),
+    }
+    for path in selected_paths:
+        declared = package_by_name.get(path.name)
+        if declared is None:
+            raise BuildError(f"bundle 包含未声明子包：{path.name}")
+        actual_hash, actual_size = _hash_regular_file(path)
+        if actual_hash != declared.sha256 or actual_size != declared.size_bytes:
+            raise BuildError(f"bundle 子包大小或哈希不匹配：{path.name}")
+        entries[f"packages/{path.name}"] = path
+        expected_files[f"packages/{path.name}"] = (
+            declared.sha256,
+            declared.size_bytes,
+        )
+    entries["bundle-manifest.json"] = _canonical_json_bytes(
+        {
+            "agent": {
+                "fileName": agent_path.name,
+                "id": manifest.agent_id,
+                "sha256": agent_sha256,
+                "sizeBytes": agent_size,
+                "version": manifest.version,
+            },
+            "profile": profile_id,
+            "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+            "selectedPackageIds": list(selected_ids),
+            "type": "hbundle",
+        }
+    )
+    _write_signed_package_v2(
+        target,
+        entries,
+        private_key,
+        expected_files=expected_files,
+    )
+
+
+def _write_signed_package_v2(
+    target: Path,
+    files: dict[str, bytes | Path],
+    private_key: Ed25519PrivateKey,
+    *,
+    expected_files: dict[str, tuple[str, int]] | None = None,
+) -> Path:
+    normalized: dict[str, bytes | Path] = {}
+    for raw_path, payload in files.items():
+        path = _safe_package_path_v2(raw_path)
+        if path in normalized or path in {"checksums.json", "signature.json"}:
+            raise BuildError(f"重复或保留的包内路径：{path}")
+        normalized[path] = payload
+    expected = {
+        _safe_package_path_v2(path): value
+        for path, value in (expected_files or {}).items()
+    }
+    if any(path not in normalized or isinstance(normalized[path], bytes) for path in expected):
+        raise BuildError("预期哈希只能绑定已声明的文件条目")
+    checksums: dict[str, str] = {}
+    expected_identities: dict[str, os.stat_result] = {}
+    for path, payload in sorted(normalized.items()):
+        if isinstance(payload, bytes):
+            checksums[path] = hashlib.sha256(payload).hexdigest()
+        else:
+            digest, size, identity = _hash_regular_file(payload, return_identity=True)
+            if path in expected and expected[path] != (digest, size):
+                raise BuildError(f"文件与声明大小或哈希不匹配：{path}")
+            checksums[path] = digest
+            expected_identities[path] = identity
+    checksums_bytes = _canonical_json_bytes({"files": checksums})
+    public_key = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    signature_bytes = _canonical_json_bytes(
+        {
+            "algorithm": "Ed25519",
+            "publicKey": base64.b64encode(public_key).decode("ascii"),
+            "signature": base64.b64encode(
+                private_key.sign(checksums_bytes)
+            ).decode("ascii"),
+            "signedFile": "checksums.json",
+        }
+    )
+    package_files: dict[str, bytes | Path] = {
+        **normalized,
+        "checksums.json": checksums_bytes,
+        "signature.json": signature_bytes,
+    }
+    try:
+        with zipfile.ZipFile(
+            target,
+            "x",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+            allowZip64=True,
+        ) as archive:
+            for path, payload in sorted(package_files.items()):
+                if isinstance(payload, bytes):
+                    _write_bytes_into_zip(archive, path, payload)
+                else:
+                    _stream_file_into_zip(
+                        archive,
+                        path,
+                        payload,
+                        expected_identities.get(path),
+                    )
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def _write_bytes_into_zip(
+    archive: zipfile.ZipFile,
+    path: str,
+    payload: bytes,
+) -> None:
+    info = _zip_info(path)
+    archive.writestr(
+        info,
+        payload,
+        compress_type=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    )
+
+
+def _stream_file_into_zip(
+    archive: zipfile.ZipFile,
+    path: str,
+    source_path: Path,
+    expected_identity: os.stat_result | None = None,
+) -> None:
+    source_path = Path(source_path)
+    descriptor = _open_regular_nofollow(source_path)
+    try:
+        before = os.fstat(descriptor)
+        if expected_identity is not None and not _same_file_identity(
+            expected_identity, before
+        ):
+            raise BuildError(f"文件在写入 ZIP 前发生变化：{source_path}")
+        with archive.open(_zip_info(path), "w", force_zip64=True) as target:
+            with os.fdopen(os.dup(descriptor), "rb") as source:
+                while block := source.read(SOURCE_HASH_BUFFER_SIZE):
+                    target.write(block)
+        after = os.fstat(descriptor)
+        if not _same_file_identity(before, after):
+            raise BuildError(f"文件在写入 ZIP 期间发生变化：{source_path}")
+    finally:
+        os.close(descriptor)
+
+
+def _zip_info(path: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(path, ZIP_TIMESTAMP)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o100644 << 16
+    info.create_system = 3
+    return info
+
+
+def _hash_regular_file(
+    path: Path,
+    *,
+    return_identity: bool = False,
+) -> tuple[Any, ...]:
+    descriptor = _open_regular_nofollow(Path(path))
+    try:
+        before = os.fstat(descriptor)
+        digest = hashlib.sha256()
+        size = 0
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            while block := stream.read(SOURCE_HASH_BUFFER_SIZE):
+                digest.update(block)
+                size += len(block)
+        after = os.fstat(descriptor)
+        if not _same_file_identity(before, after):
+            raise BuildError(f"文件在哈希期间发生变化：{path}")
+        if return_identity:
+            return digest.hexdigest(), size, after
+        return digest.hexdigest(), size
+    finally:
+        os.close(descriptor)
+
+
+def _open_regular_nofollow(path: Path) -> int:
+    try:
+        expected = path.lstat()
+    except OSError as error:
+        raise BuildError(f"文件无法读取：{path}：{error}") from error
+    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
+        raise BuildError(f"文件必须是普通文件：{path}")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        raise BuildError(f"文件无法安全打开：{path}：{error}") from error
+    actual = os.fstat(descriptor)
+    if not _same_file_identity(expected, actual):
+        os.close(descriptor)
+        raise BuildError(f"文件在打开期间发生变化：{path}")
+    return descriptor
+
+
+def _safe_package_path_v2(value: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
+        raise BuildError(f"不安全的包内路径：{value}")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or ":" in path.parts[0]
+    ):
+        raise BuildError(f"不安全的包内路径：{value}")
+    normalized = str(path)
+    if normalized != value:
+        raise BuildError(f"未规范化的包内路径：{value}")
+    return normalized
+
+
+def _write_jsonl_stream(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    with path.open("x", encoding="utf-8", newline="\n") as stream:
+        for row in rows:
+            stream.write(
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            stream.write("\n")
+
+
+def _read_small_json(path: Path) -> dict[str, Any]:
+    descriptor = _open_regular_nofollow(path)
+    try:
+        before = os.fstat(descriptor)
+        if before.st_size > 4 * 1024 * 1024:
+            raise BuildError(f"报告文件过大：{path}")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            value = json.load(stream)
+        after = os.fstat(descriptor)
+        if not _same_file_identity(before, after):
+            raise BuildError(f"报告文件在读取期间发生变化：{path}")
+    finally:
+        os.close(descriptor)
+    if not isinstance(value, dict):
+        raise BuildError(f"报告必须是 JSON 对象：{path}")
+    return value
 
 
 def _write_signed_package(
