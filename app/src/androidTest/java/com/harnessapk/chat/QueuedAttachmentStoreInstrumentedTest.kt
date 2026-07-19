@@ -504,6 +504,58 @@ class QueuedAttachmentStoreInstrumentedTest {
     }
 
     @Test
+    fun persistAllRechecksRootIdentityBeforeReturnAndReclaimsThePinnedBatch() = runBlocking {
+        val originalRoot = File(context.cacheDir, "queued-store-return-original-root").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val pinnedRoot = File(context.cacheDir, "queued-store-return-pinned-root").apply { deleteRecursively() }
+        val replacementRoot = File(context.cacheDir, "queued-store-return-replacement-root").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        lateinit var generatedNames: List<String>
+        val replacementContents = mutableMapOf<String, String>()
+        val store = QueuedAttachmentStore(
+            context = context,
+            onBatchPersisted = {
+                generatedNames = File(originalRoot, "chat-attachments").list().orEmpty().toList()
+                assertTrue(originalRoot.renameTo(pinnedRoot))
+                Files.createSymbolicLink(originalRoot.toPath(), replacementRoot.toPath())
+
+                val replacementDirectory = File(replacementRoot, "chat-attachments").apply { mkdirs() }
+                (generatedNames + "replacement-decoy.jpg").forEach { name ->
+                    val content = "replacement content for $name"
+                    File(replacementDirectory, name).writeText(content)
+                    replacementContents[name] = content
+                }
+            },
+            filesDirectoryProvider = { originalRoot },
+        )
+
+        try {
+            try {
+                store.persistAll(listOf(sourceAttachment("return-root-replacement.jpg")))
+                fail("Expected a root replacement before return to invalidate the batch")
+            } catch (_: IllegalStateException) {
+            }
+
+            replacementContents.forEach { (name, content) ->
+                assertEquals(content, File(replacementRoot, "chat-attachments/$name").readText())
+            }
+            assertTrue(generatedNames.isNotEmpty())
+            assertTrue(
+                "The original pinned directory must reclaim this batch's queued and temporary files",
+                File(pinnedRoot, "chat-attachments").listFiles().orEmpty().isEmpty(),
+            )
+        } finally {
+            originalRoot.delete()
+            pinnedRoot.deleteRecursively()
+            replacementRoot.deleteRecursively()
+        }
+    }
+
+    @Test
     fun persistedBatchAttachmentsCannotBeMutatedAndCleanupStillDeletesEveryFile() = runBlocking {
         val store = QueuedAttachmentStore(context)
         val batch = store.persistAll(

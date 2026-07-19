@@ -85,6 +85,7 @@ class QueuedAttachmentStore internal constructor(
                     }
                     onBatchPersisted()
                     requireCurrentDirectoryFileKey(parent, record.directoryFileKey)
+                    requireCurrentRootIdentity(trustedFilesPath, trustedRootIdentity, "应用文件目录在保存期间发生变化")
                     PersistedAttachmentBatch(
                         attachments = record.attachments,
                         ownerToken = record.ownerToken,
