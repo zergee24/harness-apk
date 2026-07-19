@@ -156,6 +156,51 @@ class WorkspaceV2Test(unittest.TestCase):
                 self.assertEqual(1, len(Path(loaded.sources[0].stored_name).parts))
                 self.assertTrue((workspace / "sources" / loaded.sources[0].stored_name).is_file())
 
+    def test_prepare_v2_preserves_exact_macos_display_names_when_reusing_catalog(self):
+        file_names = (
+            " leading.md",
+            "C:portable.md",
+            r"notes\\draft.md",
+            " .md",
+        )
+        for index, file_name in enumerate(file_names):
+            with self.subTest(file_name=file_name):
+                source = self.root / file_name
+                source.write_text("# 资料\n\n可被读取。", encoding="utf-8")
+                initial = prepare_workspace_v2(
+                    [source],
+                    self.root / f"initial-{index}",
+                    agent_id="person.researcher",
+                    name="资料研究者",
+                    version=2,
+                )
+                catalog_path = initial / "source-catalog.json"
+                catalog = json.loads(catalog_path.read_text("utf-8"))
+                catalog_row = catalog["sources"][0]
+                self.assertEqual(file_name, catalog_row["fileName"])
+                self.assertTrue(catalog_row["title"].strip())
+                catalog_row.update(
+                    {
+                        "genre": "speech",
+                        "authorship": "direct",
+                        "period": "1926",
+                    }
+                )
+                catalog_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+
+                reused = prepare_workspace_v2(
+                    [source],
+                    self.root / f"reused-{index}",
+                    agent_id="person.researcher",
+                    name="资料研究者",
+                    version=2,
+                    source_catalog_path=catalog_path,
+                )
+                loaded = load_workspace_v2(reused)
+
+                self.assertEqual(file_name, loaded.sources[0].file_name)
+                self.assertEqual(catalog_row["title"], loaded.sources[0].title)
+
     def test_load_rejects_absolute_and_traversal_asset_or_source_paths(self):
         workspace = self._prepare()
         manifest_path = workspace / "workspace.json"
@@ -204,6 +249,28 @@ class WorkspaceV2Test(unittest.TestCase):
                 manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
                 with self.assertRaisesRegex(BuildError, "不安全"):
                     load_workspace_v2(workspace)
+
+    def test_load_rejects_nul_workspace_paths_before_validation_or_cli(self):
+        workspace = self._prepare()
+        manifest_path = workspace / "workspace.json"
+        base_manifest = json.loads(manifest_path.read_text("utf-8"))
+
+        for field in ("assets.persona", "sources.storedName"):
+            with self.subTest(field=field):
+                manifest = json.loads(json.dumps(base_manifest))
+                if field == "assets.persona":
+                    manifest["assets"]["persona"] = "agent/bad\u0000name.md"
+                else:
+                    manifest["sources"][0]["storedName"] = "bad\u0000name.md"
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(BuildError, "不安全"):
+                    load_workspace_v2(workspace)
+                report = validate_workspace_v2(workspace)
+
+                self.assertFalse(report.publishable)
+                self.assertTrue(any("不安全" in error for error in report.errors))
+                self.assertEqual(2, main(["validate-v2", str(workspace)]))
 
     def test_load_rejects_duplicate_source_ids_and_stored_names(self):
         workspace = self._prepare()
@@ -464,6 +531,49 @@ class WorkspaceV2Test(unittest.TestCase):
         self.assertFalse(report.publishable)
         self.assertTrue(any("workspace.json" in error for error in report.errors))
         self.assertEqual(2, main(["validate-v2", str(workspace)]))
+
+    def test_prepare_v2_converts_deep_source_catalog_recursion_to_build_error_without_output(self):
+        catalog = self.root / "deep-source-catalog.json"
+        catalog.write_text(
+            "{\"sources\":[{\"sourceId\":\"source-research\",\"fileName\":\"source.md\","
+            "\"title\":\"调查研究\",\"genre\":\"speech\",\"authorship\":\"direct\","
+            "\"period\":\"1926\"}],\"ignored\":" + "[" * 10000 + "0" + "]" * 10000 + "}",
+            encoding="utf-8",
+        )
+        api_output = self.root / "deep-catalog-api"
+        cli_output = self.root / "deep-catalog-cli"
+
+        with self.assertRaisesRegex(BuildError, "来源目录无法读取"):
+            prepare_workspace_v2(
+                [self.source],
+                api_output,
+                agent_id="person.researcher",
+                name="资料研究者",
+                version=2,
+                source_catalog_path=catalog,
+            )
+
+        self.assertFalse(api_output.exists())
+        self.assertEqual(
+            1,
+            main(
+                [
+                    "prepare-v2",
+                    "--agent-id",
+                    "person.researcher",
+                    "--name",
+                    "资料研究者",
+                    "--version",
+                    "2",
+                    "--output",
+                    str(cli_output),
+                    "--source-catalog",
+                    str(catalog),
+                    str(self.source),
+                ]
+            ),
+        )
+        self.assertFalse(cli_output.exists())
 
     def test_cli_prepare_v2_writes_source_catalog_for_one_batch_clarification(self):
         output = self.root / "cli-workspace"

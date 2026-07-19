@@ -191,6 +191,8 @@ def _string(value: Any, label: str) -> str:
 
 def _workspace_path(value: Any, label: str) -> str:
     raw = _string(value, label)
+    if "\x00" in raw:
+        raise BuildError(f"不安全的工作区路径：{raw}")
     normalized = raw.replace("\\", "/")
     path = PurePosixPath(normalized)
     windows_path = PureWindowsPath(raw)

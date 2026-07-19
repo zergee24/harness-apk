@@ -225,7 +225,7 @@ def validate_workspace_v2(workspace: Path) -> BuildReport:
 def _load_source_catalog(path: Path) -> dict[str, dict[str, str]]:
     try:
         catalog = _read_json(Path(path))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, json.JSONDecodeError, RecursionError) as error:
         raise BuildError(f"来源目录无法读取：{error}") from error
     if not isinstance(catalog, dict):
         raise BuildError("来源目录必须是 JSON 对象")
@@ -245,7 +245,11 @@ def _load_source_catalog(path: Path) -> dict[str, dict[str, str]]:
         if not isinstance(row, dict):
             raise BuildError("来源目录中的 source 必须是对象")
         values = {
-            key: _catalog_string(row.get(key), f"来源目录 {key}")
+            key: (
+                _catalog_file_name(row.get(key), f"来源目录 {key}")
+                if key == "fileName"
+                else _catalog_string(row.get(key), f"来源目录 {key}")
+            )
             for key in ("sourceId", "fileName", "title", "genre", "authorship", "period")
         }
         try:
@@ -286,7 +290,7 @@ def _build_source_records(
                     if metadata
                     else f"source-{document.source_hash[:16]}-{_safe_filename(document.source_path.name)}"
                 ),
-                title=metadata["title"] if metadata else document.title,
+                title=metadata["title"] if metadata else _default_source_title(document),
                 file_name=document.source_path.name,
                 stored_name=stored_name,
                 source_hash=document.source_hash,
@@ -311,6 +315,17 @@ def _catalog_string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BuildError(f"{label} 必须是非空字符串")
     return value.strip()
+
+
+def _catalog_file_name(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise BuildError(f"{label} 必须是非空字符串")
+    return value
+
+
+def _default_source_title(document: Any) -> str:
+    title = document.title.strip()
+    return title or f"资料-{document.source_hash[:16]}"
 
 
 def _write_workspace_v2(workspace: Path, manifest: WorkspaceV2, documents: list[Any]) -> None:
