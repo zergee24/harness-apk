@@ -306,6 +306,44 @@ interface AgentDao {
     )
     suspend fun searchHierarchyNodeKeys(ftsQuery: String, limit: Int): List<String>
 
+    @Query(
+        """
+        SELECT DISTINCT agent_hierarchy_fts.nodeKey
+        FROM agent_hierarchy_fts
+        INNER JOIN agent_corpus_hierarchy
+            ON agent_corpus_hierarchy.nodeKey = agent_hierarchy_fts.nodeKey
+        WHERE agent_hierarchy_fts MATCH :ftsQuery
+          AND (agent_corpus_hierarchy.corpusId || ':' || agent_corpus_hierarchy.corpusHash) IN (:corpusKeys)
+        LIMIT :limit
+        """,
+    )
+    suspend fun searchHierarchyNodeKeysForCorpora(
+        corpusKeys: List<String>,
+        ftsQuery: String,
+        limit: Int,
+    ): List<String>
+
+    @Query(
+        """
+        SELECT MIN(chunks.chunkKey) AS chunkKey
+        FROM agent_chunks AS chunks
+        INNER JOIN agent_corpus_chunks AS corpusChunks ON corpusChunks.chunkKey = chunks.chunkKey
+        INNER JOIN agent_hierarchy_nodes AS hierarchy
+            ON hierarchy.nodeKey IN (:nodeKeys)
+           AND hierarchy.sourceHash = chunks.sourceHash
+        WHERE (corpusChunks.corpusId || ':' || corpusChunks.corpusHash) IN (:corpusKeys)
+          AND ('/' || chunks.parentPath || '/') LIKE ('%/' || hierarchy.nodeId || '/%')
+        GROUP BY hierarchy.nodeKey
+        ORDER BY hierarchy.sourceId, hierarchy.nodeId, chunkKey
+        LIMIT :limit
+        """,
+    )
+    suspend fun listChunkKeysForHierarchyNodes(
+        corpusKeys: List<String>,
+        nodeKeys: List<String>,
+        limit: Int,
+    ): List<String>
+
     @Query("SELECT * FROM agent_chunks WHERE chunkKey IN (:chunkKeys)")
     suspend fun listChunks(chunkKeys: List<String>): List<AgentChunkEntity>
 

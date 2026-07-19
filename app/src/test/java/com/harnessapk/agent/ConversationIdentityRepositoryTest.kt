@@ -320,6 +320,16 @@ private class IdentityFakeAgentDao : AgentDao {
     override suspend fun listChunks(chunkKeys: List<String>): List<AgentChunkEntity> = emptyList()
     override suspend fun countRequiredEvidenceChunk(agentId: String, version: Int, chunkId: String) = 0
     override suspend fun searchHierarchyNodeKeys(ftsQuery: String, limit: Int): List<String> = emptyList()
+    override suspend fun searchHierarchyNodeKeysForCorpora(
+        corpusKeys: List<String>,
+        ftsQuery: String,
+        limit: Int,
+    ): List<String> = emptyList()
+    override suspend fun listChunkKeysForHierarchyNodes(
+        corpusKeys: List<String>,
+        nodeKeys: List<String>,
+        limit: Int,
+    ): List<String> = emptyList()
     override suspend fun listHierarchyNodes(nodeKeys: List<String>): List<AgentHierarchyNodeEntity> = emptyList()
     override suspend fun deleteOrphanChunkSearchRows(): Int = 0
     override suspend fun deleteOrphanChunks(): Int = 0

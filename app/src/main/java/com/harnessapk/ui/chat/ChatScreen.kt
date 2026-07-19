@@ -265,6 +265,7 @@ fun ChatScreen(
     var persistedUserMessage by remember(conversationId) { mutableStateOf(false) }
     var showIdentityDetails by remember { mutableStateOf(false) }
     var fixedVersionCoverage by remember(conversationId) { mutableStateOf<AgentVersionCoverage?>(null) }
+    var agentOpening by remember(conversationId) { mutableStateOf<String?>(null) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
     var deliverables by remember { mutableStateOf<List<MarkdownDeliverable>>(emptyList()) }
@@ -470,6 +471,24 @@ fun ChatScreen(
             if (isAgentConversation) webSearchEnabled = false
         }
         identityControllerState.failure?.let { errorText = it.toUserMessage() }
+    }
+
+    LaunchedEffect(
+        conversationId,
+        conversation?.agentId,
+        conversation?.agentVersion,
+        identityMessageStateKnown,
+        messages.isEmpty(),
+    ) {
+        val agentId = conversation?.agentId
+        val version = conversation?.agentVersion
+        agentOpening = if (
+            identityMessageStateKnown && messages.isEmpty() && agentId != null && version != null
+        ) {
+            container.agentRepository.opening(agentId, version)
+        } else {
+            null
+        }
     }
 
     LaunchedEffect(conversationId, initialProjectId) {
@@ -1481,7 +1500,10 @@ fun ChatScreen(
                 if (messages.isEmpty()) {
                     item {
                         ChatContentRail(contentMaxWidth = contentMaxWidth) {
-                            EmptyChatState(showProviderHint = !isAgentConversation)
+                            EmptyChatState(
+                                showProviderHint = !isAgentConversation,
+                                agentOpening = agentOpening,
+                            )
                         }
                     }
                 }
@@ -3845,7 +3867,10 @@ private fun InlineStatus(text: String) {
 }
 
 @Composable
-private fun EmptyChatState(showProviderHint: Boolean) {
+private fun EmptyChatState(
+    showProviderHint: Boolean,
+    agentOpening: String?,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -3854,9 +3879,13 @@ private fun EmptyChatState(showProviderHint: Boolean) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            text = "开始一段对话",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.SemiBold,
+            text = emptyChatPrimaryText(agentOpening),
+            style = if (agentOpening.isNullOrBlank()) {
+                MaterialTheme.typography.titleLarge
+            } else {
+                MaterialTheme.typography.bodyLarge
+            },
+            fontWeight = if (agentOpening.isNullOrBlank()) FontWeight.SemiBold else FontWeight.Normal,
         )
         if (showProviderHint) {
             Text(
@@ -3872,3 +3901,6 @@ private fun EmptyChatState(showProviderHint: Boolean) {
         )
     }
 }
+
+internal fun emptyChatPrimaryText(agentOpening: String?): String =
+    agentOpening?.trim()?.takeIf(String::isNotBlank) ?: "开始一段对话"

@@ -131,6 +131,48 @@ data class AgentEvidence(
     val chunkKey: String = chunkId,
 )
 
+enum class AgentQueryIntent {
+    RELATIONSHIP,
+    EXACT_FACT,
+    STANCE_METHOD,
+    TEMPORAL,
+    GLOBAL,
+}
+
+data class AgentRetrievalBudget(
+    val stanceCount: Int,
+    val episodeCount: Int,
+    val exampleCount: Int,
+    val chunkCount: Int,
+    val characterCount: Int,
+    val perSourceCount: Int,
+    val requirePeriodDiversity: Boolean,
+)
+
+data class AgentContextRequest(
+    val agentId: String,
+    val version: Int,
+    val query: String,
+    val conversationMemory: String = "",
+    val relationshipMemory: String = "",
+    val projectContext: String = "",
+    val sessionContext: String = "",
+)
+
+data class AgentRuntimeDiagnostics(
+    val intent: AgentQueryIntent = AgentQueryIntent.EXACT_FACT,
+    val selectedAssetIds: List<String> = emptyList(),
+    val selectedChunkKeys: List<String> = emptyList(),
+    val selectedRouteIds: List<String> = emptyList(),
+    val sourceCount: Int = 0,
+    val periodCount: Int = 0,
+    val duplicateGroupCount: Int = 0,
+    val characterBudget: Int = 0,
+    val selectedCharacterCount: Int = 0,
+    val missingOptionalCoverage: List<String> = emptyList(),
+    val hierarchyRoutingUsed: Boolean = false,
+)
+
 enum class AgentCorpusRemovalOutcome {
     REMOVED,
     REMOVED_CLEANUP_PENDING,
@@ -168,6 +210,7 @@ data class AgentRuntimeContext(
     val version: Int,
     val systemPrompt: String,
     val evidence: List<AgentEvidence>,
+    val diagnostics: AgentRuntimeDiagnostics = AgentRuntimeDiagnostics(),
 )
 
 class AgentBundleException(message: String, cause: Throwable? = null) :

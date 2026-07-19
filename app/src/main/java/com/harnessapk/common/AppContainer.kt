@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import androidx.room.withTransaction
 import com.harnessapk.agent.AgentRepository
+import com.harnessapk.agent.AgentContextAssembler
 import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agent.ConversationIdentityRepository
@@ -21,6 +22,7 @@ import com.harnessapk.chat.ManualContextCompressionUseCase
 import com.harnessapk.chat.NewConversationUseCase
 import com.harnessapk.chat.QueuedAttachmentStore
 import com.harnessapk.chat.SendMessageUseCase
+import com.harnessapk.chat.assembleAgentContextForConversation
 import com.harnessapk.chat.webSearchAllowedForAgentConversation
 import com.harnessapk.git.GitCredentialStore
 import com.harnessapk.git.JGitEngine
@@ -114,6 +116,7 @@ class AppContainer(context: Context) {
         timeProvider = SystemTimeProvider,
         lifecycleCoordinator = agentLifecycleCoordinator,
     )
+    private val agentContextAssembler = AgentContextAssembler(agentRepository)
     val newConversationUseCase = NewConversationUseCase(
         chatRepository = chatRepository,
         identityRepository = conversationIdentityRepository,
@@ -151,15 +154,16 @@ class AppContainer(context: Context) {
             settingsStore.providerCapabilityCatalogSnapshot.first().rawJson
                 ?.let { rawJson -> runCatching { parseProviderCapabilityCatalogJson(rawJson, json) }.getOrNull() }
         },
-        agentContextProvider = { conversationId, query ->
+        agentContextProvider = { conversationId, request ->
             val conversation = chatRepository.conversation(conversationId)
             val agentId = conversation?.agentId
             val agentVersion = conversation?.agentVersion
-            if (agentId == null || agentVersion == null) {
-                null
-            } else {
-                agentRepository.runtimeContext(agentId, agentVersion, query)
-            }
+            assembleAgentContextForConversation(
+                agentId = agentId,
+                agentVersion = agentVersion,
+                request = request,
+                assembler = agentContextAssembler::assemble,
+            )
         },
         agentSourcePartWriter = AgentSourcePartWriter(
             dao = database.agentDao(),

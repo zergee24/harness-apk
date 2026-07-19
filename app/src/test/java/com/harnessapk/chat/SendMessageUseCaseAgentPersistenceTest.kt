@@ -128,7 +128,7 @@ class SendMessageUseCaseAgentPersistenceTest {
         executeAndReadParts(
             response = "收到。",
             agentContext = null,
-            agentContextProvider = { _, query -> agentRepository.runtimeContext("agent-1", 1, query) },
+            agentContextProvider = { _, request -> agentRepository.runtimeContext("agent-1", 1, request.query) },
             onRequestBody = { requestBody = it },
         )
 
@@ -410,7 +410,7 @@ class SendMessageUseCaseAgentPersistenceTest {
         includeToolResult: Boolean = false,
         realJobCancellationAfterMarker: Boolean = false,
         cancelCurrentContextAfterSourceWrite: Boolean = false,
-        agentContextProvider: suspend (conversationId: String, query: String) -> AgentRuntimeContext? = { _, _ -> agentContext },
+        agentContextProvider: suspend (conversationId: String, request: com.harnessapk.agent.AgentContextRequest) -> AgentRuntimeContext? = { _, _ -> agentContext },
         onRequestBody: ((String) -> Unit)? = null,
     ): Pair<MessageStatus, List<UiMessagePartDraft>> {
         val server = MockWebServer()

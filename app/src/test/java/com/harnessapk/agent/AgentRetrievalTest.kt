@@ -1703,6 +1703,20 @@ internal class FakeAgentDao : AgentDao {
         return before - agents.value.size
     }
     override suspend fun searchHierarchyNodeKeys(ftsQuery: String, limit: Int): List<String> = emptyList()
+    override suspend fun searchHierarchyNodeKeysForCorpora(
+        corpusKeys: List<String>,
+        ftsQuery: String,
+        limit: Int,
+    ): List<String> = hierarchySearchRows.map(AgentHierarchyFtsEntity::nodeKey).take(limit)
+    override suspend fun listChunkKeysForHierarchyNodes(
+        corpusKeys: List<String>,
+        nodeKeys: List<String>,
+        limit: Int,
+    ): List<String> {
+        return nodeKeys.mapNotNull(hierarchyNodes::get).mapNotNull { node ->
+            chunks.values.firstOrNull { chunk -> node.nodeId in chunk.parentPath.split('/') }?.chunkKey
+        }.distinct().take(limit)
+    }
     override suspend fun listHierarchyNodes(nodeKeys: List<String>): List<AgentHierarchyNodeEntity> =
         nodeKeys.mapNotNull(hierarchyNodes::get)
     override suspend fun deleteOrphanChunkSearchRows(): Int {

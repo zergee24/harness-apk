@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
 import com.harnessapk.agent.AgentEvidence
+import com.harnessapk.agent.AgentContextRequest
 import com.harnessapk.agent.AgentRuntimeContext
 import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.sanitizeAgentCitationMarkers
@@ -49,7 +50,7 @@ class SendMessageUseCase(
     private val imageCompressionPolicy: ImageCompressionPolicy = ImageCompressionPolicy(),
     private val requestBuilder: ModelAwareRequestBuilder = ModelAwareRequestBuilder(),
     private val remoteCapabilityCatalog: suspend () -> ProviderCapabilityCatalog? = { null },
-    private val agentContextProvider: suspend (conversationId: String, query: String) -> AgentRuntimeContext? = { _, _ -> null },
+    private val agentContextProvider: suspend (conversationId: String, request: AgentContextRequest) -> AgentRuntimeContext? = { _, _ -> null },
     private val outputTransformerPipelineFactory: () -> StreamEventTransformerPipeline = {
         StreamEventTransformerPipeline(listOf(ThinkTagStreamTransformer()))
     },
@@ -150,14 +151,21 @@ class SendMessageUseCase(
         var receivedChars = 0
 
         try {
-            agentContext = agentContextProvider(entry.conversationId, text)
+            val existingMemory = chatRepository.memoryForConversation(entry.conversationId)
+            agentContext = agentContextProvider(
+                entry.conversationId,
+                agentContextRequestForSend(
+                    query = text,
+                    conversationMemory = existingMemory?.summary.orEmpty(),
+                    sessionContext = entry.requestContext.sessionContext,
+                ),
+            )
             val effectiveSearchContexts = effectiveAgentSearchContexts(
                 agentContext = agentContext,
                 webSearchContext = webSearchContext,
                 nativeWebSearchMode = nativeWebSearchMode,
             )
             val imageDataUrls = attachments.map { it.toDataUrl() }
-            val existingMemory = chatRepository.memoryForConversation(entry.conversationId)
             val compressed = contextCompressor.prepare(
                 conversationId = entry.conversationId,
                 messages = executionHistoryWithCurrent(history, currentUserMessage),
@@ -192,7 +200,7 @@ class SendMessageUseCase(
                 apiKey = provider.apiKey,
                 capability = resolvedCapability,
                 messages = buildSessionOutgoingMessages(
-                    context = entry.requestContext.sessionContext,
+                    context = sessionContextOutsideAgentPrompt(entry.requestContext.sessionContext, agentContext),
                     baseMessages = compressed.messages,
                     webSearchContext = effectiveSearchContexts.webSearchContext,
                     agentSystemContext = agentContext?.systemPrompt,
@@ -413,6 +421,44 @@ internal fun effectiveAgentSearchContexts(
 }
 
 internal fun webSearchAllowedForAgentConversation(agentId: String?): Boolean = agentId.isNullOrBlank()
+
+internal suspend fun assembleAgentContextForConversation(
+    agentId: String?,
+    agentVersion: Int?,
+    request: AgentContextRequest,
+    assembler: suspend (AgentContextRequest) -> AgentRuntimeContext?,
+): AgentRuntimeContext? {
+    if (agentId.isNullOrBlank() || agentVersion == null) return null
+    return assembler(request.copy(agentId = agentId, version = agentVersion))
+}
+
+internal fun agentContextRequestForSend(
+    query: String,
+    conversationMemory: String,
+    sessionContext: SessionRequestContext?,
+): AgentContextRequest = AgentContextRequest(
+    agentId = "",
+    version = 0,
+    query = query,
+    conversationMemory = conversationMemory,
+    projectContext = sessionContext?.projectContext.orEmpty(),
+    sessionContext = sessionContext?.toAgentSessionContext().orEmpty(),
+)
+
+internal fun sessionContextOutsideAgentPrompt(
+    sessionContext: SessionRequestContext?,
+    agentContext: AgentRuntimeContext?,
+): SessionRequestContext? = if (agentContext == null) sessionContext else null
+
+private fun SessionRequestContext.toAgentSessionContext(): String = buildString {
+    finalPrompt.trim().takeIf(String::isNotBlank)?.let { appendLine("会话目标：$it") }
+    projectName?.trim()?.takeIf(String::isNotBlank)?.let { appendLine("当前项目：$it") }
+    deliverableTitle?.trim()?.takeIf(String::isNotBlank)?.let { appendLine("当前 Markdown 沉淀：$it") }
+    deliverableMarkdown.trim().takeIf(String::isNotBlank)?.let {
+        appendLine("当前 Markdown 内容：")
+        appendLine(it)
+    }
+}.trim()
 
 internal fun sanitizeAgentSnapshotIfNeeded(
     snapshot: StreamingMessageSnapshot,

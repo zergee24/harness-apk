@@ -34,6 +34,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.put
 import java.io.File
 import java.io.InputStream
@@ -59,7 +61,7 @@ class AgentRepository(
     private val fileOps: AgentFileOps = DefaultAgentFileOps(),
     private val timeProvider: TimeProvider = SystemTimeProvider,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-) {
+) : AgentContextDataSource {
     private val packageSessions = ConcurrentHashMap<String, OwnedPackageSession>()
     private val storageJson = Json { encodeDefaults = true }
 
@@ -1222,6 +1224,100 @@ class AgentRepository(
         )
     }
 
+    suspend fun opening(agentId: String, version: Int): String? = withContext(ioDispatcher) {
+        val storedVersion = dao.findVersion(agentId, version) ?: return@withContext null
+        if (storedVersion.schemaVersion < 2) return@withContext null
+        parseContextObject(storedVersion.openersJson)?.string("default")?.trim()?.takeIf(String::isNotBlank)
+    }
+
+    override suspend fun loadPackage(agentId: String, version: Int): AgentContextPackage? =
+        withContext(ioDispatcher) {
+            val storedVersion = dao.findVersion(agentId, version) ?: return@withContext null
+            val corpora = dao.listVersionCorpora(agentId, version)
+            val missingOptionalCoverage = dao.listVersionPackages(agentId, version)
+                .filter { declaration ->
+                    declaration.type == V2PackageType.CORPUS.wireName &&
+                        declaration.installClass != V2InstallClass.REQUIRED.wireName &&
+                        !declaration.installed
+                }
+                .map(AgentVersionPackageEntity::packageId)
+            storedVersion.toContextPackage(
+                installedRequiredCorpusCount = corpora.count { it.required },
+                missingOptionalCoverage = missingOptionalCoverage,
+            )
+        }
+
+    override suspend fun searchHierarchy(
+        agentId: String,
+        version: Int,
+        query: String,
+        limit: Int,
+    ): List<AgentHierarchyRoute> = withContext(ioDispatcher) {
+        val corpusKeys = versionCorpusKeys(agentId, version)
+        val ftsQuery = buildAgentFtsQuery(query)
+        if (corpusKeys.isEmpty() || ftsQuery.isBlank() || limit <= 0) return@withContext emptyList()
+        val nodeKeys = dao.searchHierarchyNodeKeysForCorpora(corpusKeys, ftsQuery, limit)
+        val nodes = dao.listHierarchyNodes(nodeKeys).associateBy(AgentHierarchyNodeEntity::nodeKey)
+        val terms = agentQueryTerms(query)
+        nodeKeys.mapNotNull(nodes::get).map { node ->
+            AgentHierarchyRoute(
+                nodeKey = node.nodeKey,
+                sourceId = node.sourceId,
+                topLevelId = node.path.substringBefore('/').ifBlank { node.nodeId },
+                physicalScore = scoreHierarchyNode(node, query, terms),
+            )
+        }
+    }
+
+    override suspend fun searchChunks(
+        agentId: String,
+        version: Int,
+        query: String,
+        limit: Int,
+        hierarchyRoutes: List<AgentHierarchyRoute>,
+    ): List<AgentRetrievalChunk> = withContext(ioDispatcher) {
+        val corpusKeys = versionCorpusKeys(agentId, version)
+        val ftsQuery = buildAgentFtsQuery(query)
+        if (corpusKeys.isEmpty() || limit <= 0) return@withContext emptyList()
+        val hierarchyKeys = hierarchyRoutes.map(AgentHierarchyRoute::nodeKey)
+        val routedKeys = if (hierarchyKeys.isEmpty()) {
+            emptyList()
+        } else {
+            dao.listChunkKeysForHierarchyNodes(corpusKeys, hierarchyKeys, limit)
+        }
+        val ftsKeys = if (ftsQuery.isBlank()) {
+            emptyList()
+        } else {
+            dao.searchChunkKeys(corpusKeys, ftsQuery, limit)
+        }
+        val candidateKeys = (routedKeys + ftsKeys).distinct().take(limit)
+        val chunks = dao.listChunks(candidateKeys).associateBy(AgentChunkEntity::chunkKey)
+        val terms = agentQueryTerms(query)
+        candidateKeys.mapNotNull(chunks::get).map { chunk ->
+            val parentIds = chunk.parentPath.split('/').filter(String::isNotBlank).toSet()
+            AgentRetrievalChunk(
+                chunkKey = chunk.chunkKey,
+                chunkId = chunk.chunkId,
+                sourceId = chunk.sourceId.ifBlank { chunk.sourceHash },
+                sourceTitle = chunk.sourceTitle,
+                period = chunk.period,
+                authorship = V2Authorship.entries.firstOrNull { it.wireName == chunk.authorship }
+                    ?: V2Authorship.UNKNOWN,
+                location = chunk.location,
+                text = chunk.text,
+                duplicateGroup = chunk.duplicateGroup,
+                physicalScore = scoreChunk(chunk, query, terms),
+                routeIds = hierarchyRoutes.filter { route ->
+                    route.sourceId == chunk.sourceId &&
+                        (route.topLevelId in parentIds || route.nodeKey.substringAfter(':') in parentIds)
+                }.map(AgentHierarchyRoute::topLevelId).toSet(),
+            )
+        }
+    }
+
+    private suspend fun versionCorpusKeys(agentId: String, version: Int): List<String> =
+        dao.listVersionCorpora(agentId, version).map { corpusKey(it.corpusId, it.sourceHash) }
+
     private suspend fun installCorpus(
         bundle: ParsedAgentBundle,
         corpus: AgentCorpusManifest,
@@ -1568,6 +1664,145 @@ private fun scoreChunk(chunk: AgentChunkEntity, rawQuery: String, terms: List<St
     val textScore = terms.count(chunk.text::contains) * 2
     val phraseScore = if (rawQuery.isNotBlank() && chunk.text.contains(rawQuery.trim())) 8 else 0
     return keywordScore + textScore + phraseScore
+}
+
+private fun scoreHierarchyNode(
+    node: AgentHierarchyNodeEntity,
+    rawQuery: String,
+    terms: List<String>,
+): Int {
+    val searchable = "${node.title} ${node.summary}"
+    val termScore = terms.count(searchable::contains) * 2
+    val phraseScore = if (rawQuery.isNotBlank() && searchable.contains(rawQuery.trim())) 8 else 0
+    return termScore + phraseScore
+}
+
+private fun AgentVersionEntity.toContextPackage(
+    installedRequiredCorpusCount: Int,
+    missingOptionalCoverage: List<String>,
+): AgentContextPackage {
+    val stances = parseContextJsonLines(worldviewJsonl).mapNotNull(JsonObject::toWorldview)
+    return AgentContextPackage(
+        agentId = agentId,
+        version = version,
+        schemaVersion = schemaVersion,
+        persona = persona,
+        identity = if (schemaVersion >= 2) parseContextObject(identityJson)?.toIdentity() else null,
+        voice = if (schemaVersion >= 2) parseContextObject(voiceJson)?.toVoice() else null,
+        stances = stances,
+        episodes = if (schemaVersion >= 2) {
+            parseContextJsonLines(episodesJsonl).mapNotNull(JsonObject::toEpisode)
+        } else {
+            emptyList()
+        },
+        examples = if (schemaVersion >= 2) {
+            parseContextJsonLines(examplesJsonl).mapNotNull(JsonObject::toExample)
+        } else {
+            emptyList()
+        },
+        opener = if (schemaVersion >= 2) parseContextObject(openersJson)?.string("default") else null,
+        requiredCorpusCount = requiredCorpusCount,
+        installedRequiredCorpusCount = installedRequiredCorpusCount,
+        missingOptionalCoverage = missingOptionalCoverage,
+    )
+}
+
+private val contextJson = Json { ignoreUnknownKeys = true }
+
+private fun parseContextObject(raw: String): JsonObject? = raw.trim().takeIf(String::isNotBlank)?.let { value ->
+    runCatching { contextJson.parseToJsonElement(value) as? JsonObject }.getOrNull()
+}
+
+private fun parseContextJsonLines(raw: String): List<JsonObject> = raw.lineSequence()
+    .filter(String::isNotBlank)
+    .mapNotNull(::parseContextObject)
+    .toList()
+
+private fun JsonObject.toIdentity(): V2Identity? {
+    val selfNames = strings("selfNames")
+    val timeHorizon = string("timeHorizon").orEmpty()
+    val roles = strings("roles")
+    if (selfNames.isEmpty() && timeHorizon.isBlank() && roles.isEmpty()) return null
+    val relationships = (this["relationships"] as? JsonArray).orEmpty().mapNotNull { value ->
+        val relationship = value as? JsonObject ?: return@mapNotNull null
+        val subject = relationship.string("subject") ?: return@mapNotNull null
+        V2Relationship(
+            subject = subject,
+            relation = relationship.string("relation").orEmpty(),
+            period = relationship.string("period").orEmpty(),
+            evidence = relationship.strings("evidence"),
+        )
+    }
+    return V2Identity(selfNames, timeHorizon, roles, relationships)
+}
+
+private fun JsonObject.toVoice(): V2Voice? {
+    val defaultForm = string("defaultForm").orEmpty()
+    val rhythm = strings("sentenceRhythm")
+    val moves = strings("rhetoricalMoves")
+    val terms = strings("preferredTerms")
+    val avoid = strings("avoidPatterns")
+    val evidence = strings("evidence")
+    if (defaultForm.isBlank() && rhythm.isEmpty() && moves.isEmpty() && terms.isEmpty() && avoid.isEmpty()) return null
+    return V2Voice(defaultForm, rhythm, moves, terms, avoid, evidence)
+}
+
+private fun JsonObject.toWorldview(): V2Worldview? {
+    val statement = string("statement") ?: return null
+    return V2Worldview(
+        id = string("id").orEmpty().ifBlank { "stance-${statement.hashCode()}" },
+        topic = string("topic").orEmpty(),
+        statement = statement,
+        conditions = stringsOrSingle("conditions"),
+        period = string("period").orEmpty(),
+        aliases = strings("aliases"),
+        confidence = (this["confidence"] as? JsonPrimitive)?.doubleOrNull ?: 0.0,
+        evidence = strings("evidence"),
+    )
+}
+
+private fun JsonObject.toEpisode(): V2Episode? {
+    val id = string("id") ?: return null
+    return V2Episode(
+        id = id,
+        period = string("period").orEmpty(),
+        location = string("location").orEmpty(),
+        participants = strings("participants"),
+        summary = string("summary").orEmpty(),
+        meaning = string("meaning").orEmpty(),
+        evidence = strings("evidence"),
+    )
+}
+
+private fun JsonObject.toExample(): V2Example? {
+    val id = string("id") ?: return null
+    return V2Example(
+        id = id,
+        intent = string("intent").orEmpty(),
+        user = string("user").orEmpty(),
+        assistant = string("assistant").orEmpty(),
+        styleTags = strings("styleTags"),
+        generationType = string("generationType").orEmpty(),
+        evidence = strings("evidence"),
+    )
+}
+
+private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)
+    ?.takeIf(JsonPrimitive::isString)
+    ?.contentOrNull
+    ?.trim()
+    ?.takeIf(String::isNotBlank)
+
+private fun JsonObject.strings(key: String): List<String> = (this[key] as? JsonArray).orEmpty()
+    .mapNotNull { value ->
+        (value as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.contentOrNull?.trim()
+    }
+    .filter(String::isNotBlank)
+
+private fun JsonObject.stringsOrSingle(key: String): List<String> = when (this[key]) {
+    is JsonArray -> strings(key)
+    is JsonPrimitive -> listOfNotNull(string(key))
+    else -> emptyList()
 }
 
 internal fun purgeStaleImportFiles(directory: File, nowMillis: Long) {
