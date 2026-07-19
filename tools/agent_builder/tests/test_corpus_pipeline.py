@@ -5,12 +5,14 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from tools.agent_builder import corpus_pipeline
+from tools.agent_builder import builder as builder_module
 from tools.agent_builder.corpus_pipeline import build_corpus_index, write_corpus_index
 from tools.agent_builder.builder import prepare_workspace_v2
 from tools.agent_builder.extractors import iter_v2_plain_text_sections
@@ -65,6 +67,15 @@ class CorpusPipelineTest(unittest.TestCase):
         self.assertEqual(1, len(result.chunks))
         self.assertEqual(1, result.stats.near_duplicate_count)
         self.assertEqual("near", result.duplicates[0].match_type)
+
+    def test_distinct_punctuation_only_chunks_do_not_collapse_to_one_exact_duplicate(self):
+        result = build_corpus_index(
+            [self._document("period", "。"), self._document("exclamation", "！")],
+            [self._source("period", period="1926"), self._source("exclamation", period="1926")],
+        )
+
+        self.assertEqual(2, len(result.chunks))
+        self.assertEqual(0, result.stats.exact_duplicate_count)
 
     def test_different_or_unknown_periods_do_not_merge_across_sources(self):
         text = "组织形式应当调整。"
@@ -132,27 +143,42 @@ class CorpusPipelineTest(unittest.TestCase):
         chunks = (root / "corpora" / "index" / "chunks.jsonl").read_text("utf-8").splitlines()
         self.assertEqual(2, len(chunks))
 
-    def test_streaming_simhash_bands_recall_a_distance_sixteen_candidate(self):
+    def test_streaming_index_recalls_representative_near_pair_with_strict_verification(self):
+        root = self.root / "streaming-near"
+        first = "调查研究必须从事实出发，先摸清情况再作决定。"
+        second = "调查研究应从事实出发，先摸清情况再作决定。"
+        sources = [self._source("a", period="1926"), self._source("b", period="1926")]
+
+        stats = corpus_pipeline.build_corpus_index_streaming(
+            root,
+            sources,
+            lambda source: [
+                ExtractedSection("正文", first if source.source_id == "a" else second)
+            ],
+        )
+
+        chunks = (root / "corpora" / "index" / "chunks.jsonl").read_text("utf-8").splitlines()
+        self.assertEqual(1, len(chunks))
+        self.assertEqual(1, stats.near_duplicate_count)
+        self.assertEqual(["a", "b"], json.loads(chunks[0])["sourceAliases"])
+
+    def test_streaming_near_candidate_still_requires_simhash_and_jaccard_match(self):
         base = build_corpus_index(
             [self._document("a", "调查研究必须从事实出发，先摸清情况再作决定。")],
             [self._source("a", period="1926")],
         ).chunks[0]
-        changed_bits = 0
-        offset = 0
-        for band_index, width in enumerate((4,) * 13 + (3,) * 4):
-            if band_index < 16:
-                changed_bits |= 1 << offset
-            offset += width
         primary = replace(base, simhash=0)
         candidate = replace(
             base,
-            id="chunk-distance-sixteen",
+            id="chunk-different-anchor-collision",
             source_id="b",
             source_hash="hash-b",
             source_aliases=("b",),
-            simhash=changed_bits,
+            text="完全不同的资料内容，不应该仅因索引锚点而合并。",
+            normalized_hash="different",
+            simhash=0,
         )
-        database = sqlite3.connect(self.root / "bands.sqlite3")
+        database = sqlite3.connect(self.root / "strict-near.sqlite3")
         database.row_factory = sqlite3.Row
         try:
             corpus_pipeline._create_streaming_schema(database)
@@ -165,9 +191,113 @@ class CorpusPipelineTest(unittest.TestCase):
         finally:
             database.close()
 
-        self.assertEqual(16, (primary.simhash ^ candidate.simhash).bit_count())
-        self.assertTrue(set(corpus_pipeline._simhash_bands(primary.simhash)) & set(corpus_pipeline._simhash_bands(candidate.simhash)))
-        self.assertEqual(primary.id, found.id)
+        self.assertIsNone(found)
+
+    def test_streaming_near_candidate_index_has_a_constant_collision_bound(self):
+        base = build_corpus_index(
+            [self._document("a", "调查研究必须从事实出发，先摸清情况再作决定。")],
+            [self._source("a", period="1926")],
+        ).chunks[0]
+        candidate = replace(
+            base,
+            id="chunk-collision-candidate",
+            source_id="b",
+            source_hash="hash-b",
+            source_aliases=("b",),
+            simhash=0,
+        )
+        database = sqlite3.connect(self.root / "bands.sqlite3")
+        database.row_factory = sqlite3.Row
+        try:
+            corpus_pipeline._create_streaming_schema(database)
+            band_index, band_value = corpus_pipeline._simhash_bands(candidate.simhash)[0]
+            database.executemany(
+                """
+                INSERT INTO simhash_bands(
+                    physical_chunk_id, band_index, band_value, period, conflict_key,
+                    genre, authorship, source_id, source_hash, location, sort_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        f"collision-{index:06d}",
+                        band_index,
+                        band_value,
+                        candidate.period,
+                        candidate.conflict_key,
+                        candidate.genre,
+                        candidate.authorship,
+                        candidate.source_id,
+                        candidate.source_hash,
+                        candidate.location,
+                        f"collision-{index:06d}",
+                    )
+                    for index in range(100_000)
+                ),
+            )
+            database.commit()
+            started = time.monotonic()
+            identifiers = list(corpus_pipeline._bounded_near_candidate_ids(database, candidate))
+            elapsed = time.monotonic() - started
+        finally:
+            database.close()
+
+        self.assertEqual(
+            [f"collision-{index:06d}" for index in range(corpus_pipeline.NEAR_CANDIDATE_LIMIT)],
+            identifiers,
+        )
+        self.assertLessEqual(
+            len(identifiers),
+            corpus_pipeline.NEAR_CANDIDATE_LIMIT * len(corpus_pipeline._simhash_bands(candidate.simhash)),
+        )
+        self.assertLess(elapsed, 5.0)
+
+    def test_unknown_period_exact_query_uses_source_scoped_exact_index(self):
+        candidate = build_corpus_index(
+            [self._document("unknown", "共同的模板材料。")],
+            [self._source("unknown", period="unknown")],
+        ).chunks[0]
+        database = sqlite3.connect(self.root / "unknown-exact.sqlite3")
+        database.row_factory = sqlite3.Row
+        try:
+            corpus_pipeline._create_streaming_schema(database)
+            where, params = corpus_pipeline._streaming_match_constraints(
+                candidate,
+                "physical_chunks",
+            )
+            plan = database.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM physical_chunks WHERE "
+                + where
+                + " AND physical_chunks.normalized_hash = ? ORDER BY sort_key LIMIT 1",
+                (*params, candidate.normalized_hash),
+            ).fetchall()
+        finally:
+            database.close()
+
+        self.assertTrue(
+            any("physical_exact_unknown_index" in row[3] for row in plan),
+            [row[3] for row in plan],
+        )
+
+    def test_streaming_index_does_not_publish_partial_files_when_writing_fails(self):
+        root = self.root / "atomic-index"
+        source = self._source("a", period="1926")
+
+        with mock.patch.object(
+            corpus_pipeline,
+            "_write_jsonl_cursor",
+            side_effect=OSError("injected index write failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "injected index write failure"):
+                corpus_pipeline.build_corpus_index_streaming(
+                    root,
+                    [source],
+                    lambda _: [ExtractedSection("正文", "调查以后再下结论。")],
+                )
+
+        index_parent = root / "corpora"
+        self.assertFalse((index_parent / "index").exists())
+        self.assertFalse(any(path.name.startswith(".index-staging-") for path in index_parent.iterdir()))
 
     def test_chunks_include_bounded_context_and_hierarchy(self):
         result = build_corpus_index(
@@ -266,7 +396,8 @@ class CorpusPipelineTest(unittest.TestCase):
 
     def test_v2_plain_text_reader_caps_a_multi_megabyte_single_line(self):
         source = self.root / "single-line.txt"
-        source.write_text("资料" * 1_100_000, encoding="utf-8")
+        original = "资料" * 1_100_000
+        source.write_text(original, encoding="utf-8")
 
         with (
             mock.patch.object(Path, "read_bytes", side_effect=AssertionError("whole-file read_bytes")),
@@ -276,7 +407,19 @@ class CorpusPipelineTest(unittest.TestCase):
 
         self.assertGreater(len(sections), 100)
         self.assertTrue(all(len(section.text) <= 16_384 for section in sections))
-        self.assertGreaterEqual(sum(len(section.text) for section in sections), 2_100_000)
+        self.assertEqual(original, "".join(section.text for section in sections))
+        self.assertEqual(len(original), sum(len(section.text) for section in sections))
+
+    def test_v2_plain_text_reader_does_not_inject_newlines_into_windowed_single_line(self):
+        source = self.root / "windowed-single-line.txt"
+        original = "甲" * 1_000
+        source.write_text(original, encoding="utf-8")
+
+        sections = list(
+            iter_v2_plain_text_sections(source, read_chars=17, max_section_chars=128)
+        )
+
+        self.assertEqual(original, "".join(section.text for section in sections))
 
     def test_index_bytes_are_identical_across_fresh_python_processes(self):
         script = textwrap.dedent(
@@ -329,6 +472,61 @@ class CorpusPipelineTest(unittest.TestCase):
                 prepare_workspace_v2(
                     [source],
                     self.root / "changed-workspace",
+                    agent_id="person.researcher",
+                    name="资料研究者",
+                    version=2,
+                )
+
+    def test_prepare_v2_rejects_staged_source_replaced_before_index_publish(self):
+        source = self.root / "replace-between-phases.md"
+        original = "# 原始\n\n原始资料。".encode("utf-8")
+        replacement = "# 替换\n\n替换资料。".encode("utf-8")
+        source.write_bytes(original)
+        real_build = builder_module.build_corpus_index_streaming
+
+        def replace_before_index(workspace, sources, sections_for_source):
+            staged_source = Path(workspace) / "sources" / sources[0].stored_name
+            staged_source.write_bytes(replacement)
+            return real_build(workspace, sources, sections_for_source)
+
+        with mock.patch.object(
+            builder_module,
+            "build_corpus_index_streaming",
+            side_effect=replace_before_index,
+        ):
+            with self.assertRaisesRegex(Exception, "来源文件.*不匹配|来源文件在读取期间发生变化"):
+                prepare_workspace_v2(
+                    [source],
+                    self.root / "replaced-workspace",
+                    agent_id="person.researcher",
+                    name="资料研究者",
+                    version=2,
+                )
+
+    def test_prepare_v2_rejects_same_inode_same_size_mtime_restored_change(self):
+        source = self.root / "ctime-change.md"
+        original = b"# Original\n\nAAAAAA"
+        replacement = b"# Modified\n\nBBBBBB"
+        self.assertEqual(len(original), len(replacement))
+        source.write_bytes(original)
+        source_stat = source.stat()
+        real_fstat = os.fstat
+        changed = False
+
+        def fstat_then_change(descriptor):
+            nonlocal changed
+            observed = real_fstat(descriptor)
+            if not changed:
+                changed = True
+                source.write_bytes(replacement)
+                os.utime(source, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+            return observed
+
+        with mock.patch("tools.agent_builder.builder.os.fstat", side_effect=fstat_then_change):
+            with self.assertRaisesRegex(Exception, "输入来源在读取期间发生变化"):
+                prepare_workspace_v2(
+                    [source],
+                    self.root / "ctime-workspace",
                     agent_id="person.researcher",
                     name="资料研究者",
                     version=2,

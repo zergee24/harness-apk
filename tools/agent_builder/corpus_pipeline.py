@@ -7,6 +7,7 @@ import json
 import math
 import re
 import os
+import shutil
 import sqlite3
 import tempfile
 import unicodedata
@@ -23,6 +24,9 @@ CHUNK_TARGET_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 120
 MAX_CONTEXT_CHARS = 320
 NEAR_DUPLICATE_DISTANCE = 16
+NEAR_ANCHOR_WIDTH = 15
+NEAR_ANCHOR_COUNT = 4
+NEAR_CANDIDATE_LIMIT = 32
 
 
 @dataclass(frozen=True)
@@ -256,7 +260,13 @@ def build_corpus_index_streaming(
     records = tuple(sorted(source_records, key=_source_key))
     workspace = Path(workspace)
     output_root = workspace / "corpora" / "index"
-    output_root.mkdir(parents=True, exist_ok=True)
+    output_parent = output_root.parent
+    output_parent.mkdir(parents=True, exist_ok=True)
+    if output_root.exists():
+        raise BuildError(f"语料索引输出目录已存在：{output_root}")
+    temporary_output_root = Path(
+        tempfile.mkdtemp(prefix=".index-staging-", dir=output_parent)
+    )
     descriptor, database_name = tempfile.mkstemp(prefix=".corpus-index-", suffix=".sqlite3", dir=workspace)
     os.close(descriptor)
     database_path = Path(database_name)
@@ -319,11 +329,14 @@ def build_corpus_index_streaming(
             extraction_failures=(),
             metadata_coverage=_metadata_coverage(records),
         )
-        _write_streaming_index_files(connection, output_root, stats)
+        _write_streaming_index_files(connection, temporary_output_root, stats)
+        temporary_output_root.replace(output_root)
         return stats
     finally:
         connection.close()
         database_path.unlink(missing_ok=True)
+        if temporary_output_root.exists():
+            shutil.rmtree(temporary_output_root)
 
 
 def _create_streaming_schema(connection: sqlite3.Connection) -> None:
@@ -350,14 +363,36 @@ def _create_streaming_schema(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX physical_exact_index
             ON physical_chunks(period, conflict_key, genre, authorship, normalized_hash);
+        CREATE INDEX physical_exact_unknown_index
+            ON physical_chunks(
+                period, conflict_key, genre, authorship,
+                source_id, source_hash, location, normalized_hash, sort_key
+            );
         CREATE TABLE simhash_bands (
             physical_chunk_id TEXT NOT NULL,
             band_index INTEGER NOT NULL,
             band_value INTEGER NOT NULL,
+            period TEXT NOT NULL,
+            conflict_key TEXT NOT NULL,
+            genre TEXT NOT NULL,
+            authorship TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            location TEXT NOT NULL,
+            sort_key TEXT NOT NULL,
             PRIMARY KEY (physical_chunk_id, band_index)
         );
-        CREATE INDEX simhash_band_index
-            ON simhash_bands(band_index, band_value, physical_chunk_id);
+        CREATE INDEX simhash_candidate_index
+            ON simhash_bands(
+                period, conflict_key, genre, authorship,
+                band_index, band_value, sort_key, physical_chunk_id
+            );
+        CREATE INDEX simhash_unknown_candidate_index
+            ON simhash_bands(
+                period, conflict_key, genre, authorship,
+                source_id, source_hash, location,
+                band_index, band_value, sort_key, physical_chunk_id
+            );
         CREATE TABLE duplicates (
             duplicate_chunk_id TEXT PRIMARY KEY,
             payload TEXT NOT NULL
@@ -377,7 +412,7 @@ def _insert_nodes(connection: sqlite3.Connection, nodes: Iterable[HierarchyNode]
 def _find_exact_streaming_match(
     connection: sqlite3.Connection, candidate: ContextualChunk
 ) -> ContextualChunk | None:
-    where, params = _streaming_match_constraints(candidate)
+    where, params = _streaming_match_constraints(candidate, "physical_chunks")
     row = connection.execute(
         "SELECT * FROM physical_chunks WHERE "
         + where
@@ -390,31 +425,56 @@ def _find_exact_streaming_match(
 def _find_near_streaming_match(
     connection: sqlite3.Connection, candidate: ContextualChunk
 ) -> ContextualChunk | None:
-    where, params = _streaming_match_constraints(candidate)
     best: ContextualChunk | None = None
     best_sort_key: str | None = None
-    for band_index, band_value in _simhash_bands(candidate.simhash):
-        rows = connection.execute(
-            "SELECT physical_chunks.* FROM physical_chunks "
-            "JOIN simhash_bands ON physical_chunks.id = simhash_bands.physical_chunk_id "
-            "WHERE "
-            + where
-            + " AND simhash_bands.band_index = ? AND simhash_bands.band_value = ? "
-            "ORDER BY physical_chunks.sort_key",
-            (*params, band_index, band_value),
-        )
-        for row in rows:
-            if best_sort_key is not None and row["sort_key"] >= best_sort_key:
-                continue
-            stored = _chunk_from_streaming_row(row)
-            if _near_duplicate(stored, candidate):
-                best = stored
-                best_sort_key = row["sort_key"]
+    for chunk_id in _bounded_near_candidate_ids(connection, candidate):
+        row = connection.execute(
+            "SELECT * FROM physical_chunks WHERE id = ?", (chunk_id,)
+        ).fetchone()
+        if row is None or (best_sort_key is not None and row["sort_key"] >= best_sort_key):
+            continue
+        stored = _chunk_from_streaming_row(row)
+        if _near_duplicate(stored, candidate):
+            best = stored
+            best_sort_key = row["sort_key"]
     return best
 
 
-def _streaming_match_constraints(candidate: ContextualChunk) -> tuple[str, tuple[str, ...]]:
-    where = "period = ? AND conflict_key = ? AND genre = ? AND authorship = ?"
+def _bounded_near_candidate_ids(
+    connection: sqlite3.Connection, candidate: ContextualChunk
+) -> Iterable[str]:
+    """Return a deterministic, bounded high-recall candidate set.
+
+    Exact normalized hashes are complete. Near duplicate recall intentionally uses
+    only long SimHash anchors, so adversarial SimHash collisions cannot turn the
+    disk-backed index into a quadratic scan. Every returned row still passes the
+    strict SimHash and Jaccard check in ``_near_duplicate``.
+    """
+    where, params = _streaming_match_constraints(candidate, "simhash_bands")
+    seen: set[str] = set()
+    for band_index, band_value in _simhash_bands(candidate.simhash):
+        rows = connection.execute(
+            "SELECT physical_chunk_id FROM simhash_bands WHERE "
+            + where
+            + " AND band_index = ? AND band_value = ? "
+            "ORDER BY sort_key, physical_chunk_id LIMIT ?",
+            (*params, band_index, band_value, NEAR_CANDIDATE_LIMIT),
+        )
+        for row in rows:
+            chunk_id = str(row["physical_chunk_id"])
+            if chunk_id not in seen:
+                seen.add(chunk_id)
+                yield chunk_id
+
+
+def _streaming_match_constraints(
+    candidate: ContextualChunk, table: str
+) -> tuple[str, tuple[str, ...]]:
+    prefix = f"{table}."
+    where = (
+        f"{prefix}period = ? AND {prefix}conflict_key = ? AND "
+        f"{prefix}genre = ? AND {prefix}authorship = ?"
+    )
     params: tuple[str, ...] = (
         candidate.period,
         candidate.conflict_key,
@@ -422,7 +482,10 @@ def _streaming_match_constraints(candidate: ContextualChunk) -> tuple[str, tuple
         candidate.authorship,
     )
     if candidate.period == "unknown":
-        where += " AND source_id = ? AND source_hash = ? AND location = ?"
+        where += (
+            f" AND {prefix}source_id = ? AND {prefix}source_hash = ? "
+            f"AND {prefix}location = ?"
+        )
         params += (candidate.source_id, candidate.source_hash, candidate.location)
     return where, params
 
@@ -454,8 +517,28 @@ def _insert_physical_chunk(
         ),
     )
     connection.executemany(
-        "INSERT INTO simhash_bands(physical_chunk_id, band_index, band_value) VALUES (?, ?, ?)",
-        ((chunk.id, band_index, band_value) for band_index, band_value in _simhash_bands(chunk.simhash)),
+        """
+        INSERT INTO simhash_bands(
+            physical_chunk_id, band_index, band_value, period, conflict_key,
+            genre, authorship, source_id, source_hash, location, sort_key
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                chunk.id,
+                band_index,
+                band_value,
+                chunk.period,
+                chunk.conflict_key,
+                chunk.genre,
+                chunk.authorship,
+                chunk.source_id,
+                chunk.source_hash,
+                chunk.location,
+                sort_key,
+            )
+            for band_index, band_value in _simhash_bands(chunk.simhash)
+        ),
     )
 
 
@@ -506,13 +589,11 @@ def _chunk_from_streaming_row(row: sqlite3.Row) -> ContextualChunk:
 
 
 def _simhash_bands(value: int) -> tuple[tuple[int, int], ...]:
-    widths = (4,) * 13 + (3,) * 4
-    offset = 0
-    bands: list[tuple[int, int]] = []
-    for index, width in enumerate(widths):
-        bands.append((index, (value >> offset) & ((1 << width) - 1)))
-        offset += width
-    return tuple(bands)
+    mask = (1 << NEAR_ANCHOR_WIDTH) - 1
+    return tuple(
+        (index, (value >> (index * NEAR_ANCHOR_WIDTH)) & mask)
+        for index in range(NEAR_ANCHOR_COUNT)
+    )
 
 
 def _stream_sort_key(chunk: ContextualChunk) -> str:
@@ -549,7 +630,11 @@ def _canonical_json_text(value: object) -> str:
 
 
 def normalize_for_dedup(text: str) -> str:
-    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", text)).lower()
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    normalized = re.sub(r"[\W_]+", "", folded)
+    # A punctuation-only chunk has no lexical feature. Preserve a deterministic
+    # fallback so distinct source evidence never shares an empty exact-hash key.
+    return normalized or "\x00" + folded
 
 
 def simhash64(text: str) -> int:

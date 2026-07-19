@@ -3,6 +3,7 @@ import html
 import codecs
 import re
 import zipfile
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree
@@ -15,6 +16,14 @@ from .models import BuildError, ExtractedDocument, ExtractedSection
 SUPPORTED_SUFFIXES = {".txt", ".md", ".markdown", ".epub", ".pdf"}
 V2_TEXT_READ_BYTES = 64 * 1024
 V2_MAX_SECTION_CHARS = 16 * 1024
+
+
+@dataclass(frozen=True)
+class _DecodedLinePart:
+    text: str
+    starts_line: bool
+    ends_line: bool
+    continues_line: bool
 
 
 class _TextHtmlParser(HTMLParser):
@@ -91,29 +100,54 @@ def _v2_detect_text_encoding(path: Path, buffer_size: int) -> str:
 def _iter_decoded_lines(path: Path, encoding: str, buffer_size: int, max_line_chars: int):
     decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
     pending = ""
+    starts_line = True
+
+    def drain(final: bool):
+        nonlocal pending, starts_line
+        while pending:
+            newline = re.search(r"\r\n|[\r\n]", pending)
+            waits_for_lf = (
+                newline is not None
+                and newline.group() == "\r"
+                and newline.end() == len(pending)
+                and not final
+            )
+            if newline is not None and not waits_for_lf:
+                yield _DecodedLinePart(
+                    pending[: newline.start()],
+                    starts_line=starts_line,
+                    ends_line=True,
+                    continues_line=False,
+                )
+                pending = pending[newline.end() :]
+                starts_line = True
+                continue
+            if len(pending) >= max_line_chars:
+                yield _DecodedLinePart(
+                    pending[:max_line_chars],
+                    starts_line=starts_line,
+                    ends_line=False,
+                    continues_line=True,
+                )
+                pending = pending[max_line_chars:]
+                starts_line = False
+                continue
+            if final:
+                yield _DecodedLinePart(
+                    pending,
+                    starts_line=starts_line,
+                    ends_line=False,
+                    continues_line=False,
+                )
+                pending = ""
+            break
+
     with path.open("rb") as stream:
         while block := stream.read(buffer_size):
             pending += decoder.decode(block)
-            while pending:
-                newline = re.search(r"\r\n|[\r\n]", pending)
-                if newline:
-                    yield pending[: newline.start()]
-                    pending = pending[newline.end() :]
-                    continue
-                if len(pending) >= max_line_chars:
-                    yield pending[:max_line_chars]
-                    pending = pending[max_line_chars:]
-                    continue
-                break
+            yield from drain(final=False)
         pending += decoder.decode(b"", final=True)
-    while pending:
-        newline = re.search(r"\r\n|[\r\n]", pending)
-        if newline:
-            yield pending[: newline.start()]
-            pending = pending[newline.end() :]
-        else:
-            yield pending[:max_line_chars]
-            pending = pending[max_line_chars:]
+    yield from drain(final=True)
 
 
 def _iter_v2_sections_from_decoded_lines(lines, max_section_chars: int):
@@ -149,8 +183,13 @@ def _iter_v2_sections_from_decoded_lines(lines, max_section_chars: int):
                 if emitted is not None:
                     yield emitted
 
-    for line in lines:
-        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+    for part in lines:
+        line = part.text
+        heading = (
+            re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+            if part.starts_line and not part.continues_line
+            else None
+        )
         if heading:
             emitted = flush()
             if emitted is not None:
@@ -160,7 +199,9 @@ def _iter_v2_sections_from_decoded_lines(lines, max_section_chars: int):
             headings[:] = headings[: level - 1]
             headings.append(title)
             location = " / ".join(headings)
-        yield from append(line + "\n")
+        yield from append(line)
+        if part.ends_line:
+            yield from append("\n")
     emitted = flush()
     if emitted is not None:
         yield emitted

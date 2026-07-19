@@ -212,16 +212,26 @@ def prepare_workspace_v2(
             snapshot.snapshot_path.replace(source_dir / source.stored_name)
         shutil.rmtree(staging / ".incoming", ignore_errors=True)
 
-        indexed_sources: list[SourceRecord] = []
-        for source in sources:
-            extracted_chars = sum(
-                len(section.text)
-                for section in _iter_v2_source_sections(source_dir / source.stored_name)
-            )
+        index_snapshot_dir = staging / ".index-input"
+        index_snapshot_paths = _snapshot_v2_index_inputs(source_dir, sources, index_snapshot_dir)
+        extracted_chars_by_source: dict[str, int] = {}
+
+        def sections_for_index(source: SourceRecord):
+            extracted_chars = 0
+            for section in _iter_v2_source_sections(index_snapshot_paths[source.source_id]):
+                if section.text.strip():
+                    extracted_chars += len(section.text)
+                yield section
             if not extracted_chars:
                 raise BuildError(f"没有可提取文本：{source.file_name}")
-            indexed_sources.append(replace(source, extracted_chars=extracted_chars))
-        sources = indexed_sources
+            extracted_chars_by_source[source.source_id] = extracted_chars
+
+        build_corpus_index_streaming(staging, sources, sections_for_index)
+        sources = [
+            replace(source, extracted_chars=extracted_chars_by_source[source.source_id])
+            for source in sources
+        ]
+        shutil.rmtree(index_snapshot_dir, ignore_errors=True)
         manifest = WorkspaceV2(
             agent_id=agent_id,
             name=name,
@@ -230,11 +240,7 @@ def prepare_workspace_v2(
             sources=tuple(sources),
         )
         _write_workspace_v2(staging, manifest, documents, copy_sources=False)
-        build_corpus_index_streaming(
-            staging,
-            sources,
-            lambda source: _iter_v2_source_sections(source_dir / source.stored_name),
-        )
+        _verify_staged_v2_sources(staging, manifest.sources)
         if workspace.exists():
             workspace.rmdir()
         staging.replace(workspace)
@@ -402,11 +408,13 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
         left.st_ino,
         left.st_size,
         left.st_mtime_ns,
+        left.st_ctime_ns,
     ) == (
         right.st_dev,
         right.st_ino,
         right.st_size,
         right.st_mtime_ns,
+        right.st_ctime_ns,
     )
 
 
@@ -416,6 +424,33 @@ def _iter_v2_source_sections(path: Path):
         yield from iter_v2_plain_text_sections(path)
         return
     yield from extract_document(path).sections
+
+
+def _snapshot_v2_index_inputs(
+    source_dir: Path,
+    sources: Iterable[SourceRecord],
+    snapshot_dir: Path,
+) -> dict[str, Path]:
+    """Freeze each staged source before the single index/extraction pass."""
+    snapshot_dir.mkdir()
+    snapshots: dict[str, Path] = {}
+    for source in sources:
+        snapshot_path = snapshot_dir / source.stored_name
+        source_hash, raw_size_bytes = _copy_v2_source(
+            source_dir / source.stored_name,
+            snapshot_path,
+        )
+        if source_hash != source.source_hash or raw_size_bytes != source.raw_size_bytes:
+            raise BuildError(f"来源文件在索引前发生变化：{source.stored_name}")
+        snapshots[source.source_id] = snapshot_path
+    return snapshots
+
+
+def _verify_staged_v2_sources(workspace: Path, sources: tuple[SourceRecord, ...]) -> None:
+    errors: list[str] = []
+    _validate_v2_source_files(workspace, sources, errors)
+    if errors:
+        raise BuildError("来源快照验证失败：" + "；".join(errors))
 
 
 def _build_source_records(
