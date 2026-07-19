@@ -829,6 +829,92 @@ class WorkspaceV2Test(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        chunk_id = json.loads(
+            (workspace / "corpora" / "index" / "chunks.jsonl").read_text("utf-8").splitlines()[0]
+        )["id"]
+        (workspace / "agent" / "voice.json").write_text(
+            json.dumps(
+                {
+                    "defaultForm": "先判断",
+                    "sentenceRhythm": ["短句"],
+                    "rhetoricalMoves": ["对比"],
+                    "preferredTerms": ["调查"],
+                    "avoidPatterns": [],
+                    "evidence": [chunk_id],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (workspace / "agent" / "worldview.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": "stance-method-001",
+                    "topic": "调查",
+                    "statement": "认识来源于实践",
+                    "period": "1926",
+                    "evidence": [chunk_id],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (workspace / "agent" / "episodes.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": "episode-001",
+                    "period": "1926",
+                    "location": "湖南",
+                    "participants": ["群众"],
+                    "summary": "我在调查中形成判断。",
+                    "meaning": "调查先于结论。",
+                    "evidence": [chunk_id],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (workspace / "agent" / "examples.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": "example-001",
+                    "intent": "方法",
+                    "user": "如何判断",
+                    "assistant": "先调查。",
+                    "styleTags": ["判断优先"],
+                    "generationType": "synthesized",
+                    "evidence": [chunk_id],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        minimums = {
+            "grounding": 20,
+            "stance": 30,
+            "voice": 20,
+            "temporal": 12,
+            "diversity": 10,
+            "global": 8,
+        }
+        evaluation_rows = [
+            {
+                "id": f"{category}-{index:03d}",
+                "category": category,
+                "question": "认识来源于实践",
+                "period": "1926",
+                "expectedEvidence": [chunk_id],
+            }
+            for category, total in minimums.items()
+            for index in range(total)
+        ]
+        (workspace / "agent" / "eval.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in evaluation_rows) + "\n",
+            encoding="utf-8",
+        )
         self.assertTrue(validate_workspace_v2(workspace).publishable)
         return workspace
 

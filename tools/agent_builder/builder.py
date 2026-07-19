@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_private_key
 
 from .corpus_pipeline import build_corpus_index_streaming
+from .evaluation import evaluate_workspace
 from .extractors import extract_document, iter_v2_source_sections_stream
 from .models import BuildError, BuildReport, ExtractedDocument, PackResult
 from .schema_v2 import (
@@ -282,10 +283,17 @@ def validate_workspace_v2(workspace: Path) -> BuildReport:
     semantic_assets = _validate_v2_asset_files(workspace, manifest.assets, errors)
     if semantic_assets is not None and _v2_semantic_assets_are_empty(*semantic_assets):
         errors.append("人物语义资产尚未完成")
+    evaluation = evaluate_workspace(workspace)
+    errors.extend(error for error in evaluation.errors if error not in errors)
+    metrics = {
+        "sourceCount": len(manifest.sources),
+        "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+    }
+    metrics.update(evaluation.metrics())
     return BuildReport(
         publishable=not errors,
         errors=errors,
-        metrics={"sourceCount": len(manifest.sources), "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION},
+        metrics=metrics,
     )
 
 
