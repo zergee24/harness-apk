@@ -147,6 +147,104 @@ class AgentV2BundleReaderTest {
     }
 
     @Test
+    fun rejectsOpenersAlternativesBeforeDomParsing() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val alternatives = List(10_001) { "opener-$it" }.jsonArray()
+
+        assertPackageFailure("记录数") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus,
+                    runtimeAssets = minimalRuntimeAssets(
+                        corpus,
+                        openers = "{\"alternatives\":$alternatives,\"default\":\"hello\"} trailing",
+                    ),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun rejectsNestedInstallPlanPackageIdsAndDependenciesBeforeDomParsing() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val dependencies = List(5_000) { "dependency-$it" }.jsonArray()
+        val packageIds = List(5_000) { "package-$it" }.jsonArray()
+        val plan = """
+            {"packages":[{"dependencies":$dependencies,"fileName":"${corpus.name}","id":"$CORE_ID","installClass":"required","sha256":"${corpus.sha256()}","sizeBytes":${corpus.length()},"type":"hcorpus"}],"profiles":[{"id":"balanced","packageIds":$packageIds,"recommended":true}],"recommendedProfileId":"balanced","requiredCorpusIds":["$CORE_ID"],"schemaVersion":2} trailing
+        """.trimIndent()
+
+        assertPackageFailure("记录数") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus,
+                    runtimeAssets = minimalRuntimeAssets(corpus, installPlan = plan),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun rejectsConceptAliasesBeforeDomParsing() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val aliases = List(10_000) { "alias-$it" }.jsonArray()
+
+        assertPackageFailure("记录数") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus,
+                    runtimeAssets = minimalRuntimeAssets(
+                        corpus,
+                        concepts = "{\"concepts\":[{\"aliases\":$aliases,\"evidence\":[],\"id\":\"concept-1\",\"keywords\":[],\"name\":\"concept\"}]} trailing",
+                    ),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun acceptsExactAggregateArrayLimitWithEscapedStrings() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val alternatives = List(9_996) { index ->
+            if (index == 0) "\"escaped\\\" quote \\\\ slash \\u4e2d\"" else "\"opener-$index\""
+        }.joinToString(prefix = "[", postfix = "]")
+
+        val parsed = AgentBundleReader().readPackage(
+            fixture.agentPackage(
+                corpus,
+                runtimeAssets = minimalRuntimeAssets(
+                    corpus,
+                    openers = "{\"alternatives\":$alternatives,\"default\":\"hello\"}",
+                ),
+            ),
+        ) as V2Agent
+
+        assertEquals(9_996, parsed.openers.alternatives.size)
+        assertEquals("escaped\" quote \\ slash 中", parsed.openers.alternatives.first())
+    }
+
+    @Test
+    fun rejectsTrailingGarbageInRuntimeJson() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+
+        assertPackageFailure("JSON 格式") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus,
+                    runtimeAssets = minimalRuntimeAssets(
+                        corpus,
+                        concepts = "{\"concepts\":[]} trailing",
+                    ),
+                ),
+            )
+        }
+    }
+
+    @Test
     fun rejectsAgentRuntimeJsonlWhenZipSizeMetadataUnderstatesStream() {
         val fixture = Fixture()
         val corpus = fixture.corpusPackage()
@@ -657,6 +755,26 @@ class AgentV2BundleReaderTest {
 }
 
 private fun List<String>.jsonArray(): String = joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
+
+private fun minimalRuntimeAssets(
+    corpus: File,
+    concepts: String = "{\"concepts\":[]}",
+    openers: String = "{\"alternatives\":[],\"default\":\"hello\"}",
+    installPlan: String = minimalInstallPlan(corpus),
+): Map<String, ByteArray> = mapOf(
+    "agent/identity.json" to "{\"relationships\":[],\"roles\":[],\"selfNames\":[],\"timeHorizon\":\"\"}".encodeToByteArray(),
+    "agent/voice.json" to "{\"avoidPatterns\":[],\"defaultForm\":\"\",\"evidence\":[],\"preferredTerms\":[],\"rhetoricalMoves\":[],\"sentenceRhythm\":[]}".encodeToByteArray(),
+    "agent/worldview.jsonl" to byteArrayOf(),
+    "agent/episodes.jsonl" to byteArrayOf(),
+    "agent/concepts.json" to concepts.encodeToByteArray(),
+    "agent/examples.jsonl" to byteArrayOf(),
+    "agent/openers.json" to openers.encodeToByteArray(),
+    "agent/eval.jsonl" to byteArrayOf(),
+    "install-plan.json" to installPlan.encodeToByteArray(),
+)
+
+private fun minimalInstallPlan(corpus: File): String =
+    """{"packages":[{"dependencies":[],"fileName":"${corpus.name}","id":"core-evidence","installClass":"required","sha256":"${corpus.sha256()}","sizeBytes":${corpus.length()},"type":"hcorpus"}],"profiles":[{"id":"balanced","packageIds":["core-evidence"],"recommended":true}],"recommendedProfileId":"balanced","requiredCorpusIds":["core-evidence"],"schemaVersion":2}"""
 
 private fun worldviewJson(id: String, statement: String): String =
     """{"aliases":[],"conditions":[],"confidence":1.0,"evidence":["chunk-core"],"id":"$id","period":"1926","statement":"$statement","topic":"调查"}""" + "\n"

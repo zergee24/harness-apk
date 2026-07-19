@@ -25,8 +25,11 @@ import java.io.FilterInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.zip.ZipEntry
@@ -560,13 +563,14 @@ class AgentBundleReader(
         val conceptsRoot = archive.readAgentJsonObject(V2_CONCEPTS_PATH, assetBudget)
         val concepts = conceptsRoot.requiredArray("concepts", V2_CONCEPTS_PATH)
             .mapIndexed { index, element -> parseConcept(element.asObject("$V2_CONCEPTS_PATH[$index]")) }
-            .also { assetBudget.addRecords(V2_CONCEPTS_PATH, it.size) }
         rejectDuplicates(concepts.map(V2Concept::id), "concept id")
         val examples = archive.readAgentJsonl(V2_EXAMPLES_PATH, assetBudget, ::parseExample)
         val openers = parseOpeners(archive.readAgentJsonObject(V2_OPENERS_PATH, assetBudget))
         val evaluations = archive.readAgentJsonl(V2_EVAL_PATH, assetBudget, ::parseEvaluation)
-        val installPlanBytes = assetBudget.read(archive, V2_INSTALL_PLAN_PATH)
-        val installPlan = parseInstallPlan(parseObject(installPlanBytes.decodeToString(), V2_INSTALL_PLAN_PATH))
+        var installPlanJson = ""
+        val installPlan = parseInstallPlan(
+            archive.readAgentJsonObject(V2_INSTALL_PLAN_PATH, assetBudget) { installPlanJson = it },
+        )
         if (installPlan.requiredCorpusIds.toSet() != manifest.requiredCorpora.toSet()) {
             throw AgentBundleException("hagent requiredCorpora 与 install plan 不一致")
         }
@@ -588,7 +592,7 @@ class AgentBundleReader(
             examples = examples,
             openers = openers,
             evaluations = evaluations,
-            installPlanJson = installPlanBytes.decodeToString(),
+            installPlanJson = installPlanJson,
             installPlan = installPlan,
             isRunnable = manifest.runnableWithoutCorpora || manifest.requiredCorpora.isEmpty(),
         )
@@ -1515,8 +1519,18 @@ class AgentBundleReader(
             throw AgentBundleException("资料块第 $lineNumber 行格式无效", error)
         }
 
-    private fun ZipFile.readAgentJsonObject(path: String, budget: AgentRuntimeAssetBudget): JsonObject =
-        parseObject(budget.read(this, path).decodeToString(), path)
+    private fun ZipFile.readAgentJsonObject(
+        path: String,
+        budget: AgentRuntimeAssetBudget,
+        onJsonText: (String) -> Unit = {},
+    ): JsonObject {
+        val bytes = budget.open(this, path).use { input ->
+            AgentRuntimeJsonPreflight(input, path, budget).readJsonBytes()
+        }
+        val text = bytes.decodeStrictUtf8(path)
+        onJsonText(text)
+        return parseObject(text, path)
+    }
 
     private fun <T> ZipFile.readAgentJsonl(
         path: String,
@@ -1625,6 +1639,176 @@ class AgentBundleReader(
         }
     }
 
+    /** Counts every JSON array element before kotlinx.serialization creates a JSON DOM. */
+    private class AgentRuntimeJsonPreflight(
+        private val input: InputStream,
+        private val path: String,
+        private val budget: AgentRuntimeAssetBudget,
+    ) {
+        private val bytes = ByteArrayOutputStream()
+        private var lookahead = UNSET
+
+        fun readJsonBytes(): ByteArray {
+            skipWhitespace()
+            parseValue(depth = 0)
+            skipWhitespace()
+            if (next() != EOF) invalidJson()
+            return bytes.toByteArray()
+        }
+
+        private fun parseValue(depth: Int) {
+            if (depth > MAX_RUNTIME_JSON_NESTING) {
+                throw AgentBundleException("$path JSON 嵌套超过上限")
+            }
+            skipWhitespace()
+            when (peek()) {
+                '{'.code -> parseObject(depth + 1)
+                '['.code -> parseArray(depth + 1)
+                '"'.code -> parseString()
+                't'.code -> parseLiteral("true")
+                'f'.code -> parseLiteral("false")
+                'n'.code -> parseLiteral("null")
+                '-'.code, in '0'.code..'9'.code -> parseNumber()
+                else -> invalidJson()
+            }
+        }
+
+        private fun parseObject(depth: Int) {
+            expect('{'.code)
+            skipWhitespace()
+            if (peek() == '}'.code) {
+                next()
+                return
+            }
+            while (true) {
+                parseString()
+                skipWhitespace()
+                expect(':'.code)
+                parseValue(depth)
+                skipWhitespace()
+                when (next()) {
+                    ','.code -> {
+                        skipWhitespace()
+                        if (peek() == '}'.code) invalidJson()
+                    }
+                    '}'.code -> return
+                    else -> invalidJson()
+                }
+            }
+        }
+
+        private fun parseArray(depth: Int) {
+            expect('['.code)
+            skipWhitespace()
+            if (peek() == ']'.code) {
+                next()
+                return
+            }
+            while (true) {
+                budget.addRecords(path, 1)
+                parseValue(depth)
+                skipWhitespace()
+                when (next()) {
+                    ','.code -> {
+                        skipWhitespace()
+                        if (peek() == ']'.code) invalidJson()
+                    }
+                    ']'.code -> return
+                    else -> invalidJson()
+                }
+            }
+        }
+
+        private fun parseString() {
+            expect('"'.code)
+            while (true) {
+                when (val value = next()) {
+                    EOF -> invalidJson()
+                    '"'.code -> return
+                    '\\'.code -> parseEscape()
+                    in 0..0x1f -> invalidJson()
+                    else -> Unit
+                }
+            }
+        }
+
+        private fun parseEscape() {
+            when (next()) {
+                '"'.code, '\\'.code, '/'.code, 'b'.code, 'f'.code, 'n'.code, 'r'.code, 't'.code -> Unit
+                'u'.code -> repeat(4) {
+                    if (!isHexDigit(next())) invalidJson()
+                }
+                else -> invalidJson()
+            }
+        }
+
+        private fun parseNumber() {
+            if (peek() == '-'.code) next()
+            when (peek()) {
+                '0'.code -> next()
+                in '1'.code..'9'.code -> consumeDigits()
+                else -> invalidJson()
+            }
+            if (peek() == '.'.code) {
+                next()
+                requireDigit()
+                consumeDigits()
+            }
+            if (peek() == 'e'.code || peek() == 'E'.code) {
+                next()
+                if (peek() == '+'.code || peek() == '-'.code) next()
+                requireDigit()
+                consumeDigits()
+            }
+        }
+
+        private fun parseLiteral(literal: String) {
+            literal.forEach { expected -> expect(expected.code) }
+        }
+
+        private fun consumeDigits() {
+            while (peek() in '0'.code..'9'.code) next()
+        }
+
+        private fun requireDigit() {
+            if (peek() !in '0'.code..'9'.code) invalidJson()
+        }
+
+        private fun isHexDigit(value: Int): Boolean =
+            value in '0'.code..'9'.code || value in 'a'.code..'f'.code || value in 'A'.code..'F'.code
+
+        private fun skipWhitespace() {
+            while (peek() in JSON_WHITESPACE) next()
+        }
+
+        private fun expect(expected: Int) {
+            if (next() != expected) invalidJson()
+        }
+
+        private fun peek(): Int {
+            if (lookahead == UNSET) lookahead = readByte()
+            return lookahead
+        }
+
+        private fun next(): Int {
+            val value = if (lookahead == UNSET) readByte() else lookahead
+            lookahead = UNSET
+            return value
+        }
+
+        private fun readByte(): Int = input.read().also { value ->
+            if (value != EOF) bytes.write(value)
+        }
+
+        private fun invalidJson(): Nothing = throw AgentBundleException("$path JSON 格式无效")
+
+        private companion object {
+            const val EOF = -1
+            const val UNSET = -2
+            val JSON_WHITESPACE = setOf(' '.code, '\t'.code, '\n'.code, '\r'.code)
+        }
+    }
+
     private fun validateInputFile(file: File) {
         if (!Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
             throw AgentBundleException("人格包不存在或不是普通文件")
@@ -1657,6 +1841,7 @@ class AgentBundleReader(
         private const val MAX_WORLDVIEW_BYTES = 32 * 1024 * 1024
         private const val MAX_AGENT_RUNTIME_ASSET_BYTES = 8 * 1024 * 1024
         private const val MAX_AGENT_RUNTIME_ASSET_RECORDS = 10_000L
+        private const val MAX_RUNTIME_JSON_NESTING = 256
         private const val MAX_CORPUS_METADATA_BYTES = 16 * 1024 * 1024
         private const val MAX_JSONL_LINE_BYTES = 4 * 1024 * 1024
         private const val MAX_EOCD_SEARCH_BYTES = 65_557
@@ -1922,6 +2107,17 @@ private fun displayFileName(value: String): String {
     }
     return trimmed
 }
+
+private fun ByteArray.decodeStrictUtf8(path: String): String =
+    try {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(this))
+            .toString()
+    } catch (error: CharacterCodingException) {
+        throw AgentBundleException("$path JSON 格式无效", error)
+    }
 
 private fun parseObject(text: String, label: String): JsonObject =
     try {
