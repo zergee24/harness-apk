@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import PurePosixPath
-import re
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .models import BuildError
@@ -194,9 +193,11 @@ def _workspace_path(value: Any, label: str) -> str:
     raw = _string(value, label)
     normalized = raw.replace("\\", "/")
     path = PurePosixPath(normalized)
+    windows_path = PureWindowsPath(raw)
     if (
         path.is_absolute()
-        or re.match(r"^[A-Za-z]:/", normalized)
+        or windows_path.drive
+        or windows_path.root
         or ".." in path.parts
         or not path.parts
     ):

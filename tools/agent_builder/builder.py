@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import shutil
+import tempfile
 import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
@@ -28,6 +29,7 @@ CHUNK_TARGET_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 120
 ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
 ALLOWED_PACKAGE_SUFFIXES = {".json", ".jsonl", ".md", ".txt"}
+SOURCE_HASH_BUFFER_SIZE = 1024 * 1024
 
 
 def prepare_workspace(
@@ -149,8 +151,8 @@ def prepare_workspace_v2(
     name = name.strip()
     if not name:
         raise BuildError("智能体名称不能为空")
-    if version < 1:
-        raise BuildError("版本必须大于 0")
+    if type(version) is not int or version < 1:
+        raise BuildError("版本必须是正整数")
     input_paths = [Path(item) for item in inputs]
     if not input_paths:
         raise BuildError("至少需要一个输入文件")
@@ -165,14 +167,6 @@ def prepare_workspace_v2(
     catalog = _load_source_catalog(source_catalog_path) if source_catalog_path else None
     sources = _build_source_records(documents, catalog)
 
-    workspace.mkdir(parents=True, exist_ok=True)
-    agent_dir = workspace / "agent"
-    source_dir = workspace / "sources"
-    agent_dir.mkdir()
-    source_dir.mkdir()
-    for document, source in zip(documents, sources, strict=True):
-        shutil.copyfile(document.source_path, source_dir / source.stored_name)
-
     manifest = WorkspaceV2(
         agent_id=agent_id,
         name=name,
@@ -180,40 +174,16 @@ def prepare_workspace_v2(
         assets=AgentAssetPaths(),
         sources=tuple(sources),
     )
-    _write_json(workspace / "workspace.json", manifest.to_dict())
-    _write_json(
-        workspace / "source-catalog.json",
-        {
-            "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
-            "sources": [source.to_dict() for source in sources],
-        },
-    )
-    (agent_dir / "persona.md").write_text(
-        f"我是{name}，属于基于用户所选资料构建的模拟代理。\n\n"
-        "我必须使用第一人称表达，但只依据已提供资料形成判断；资料不足时明确说明。\n",
-        encoding="utf-8",
-    )
-    _write_json(
-        agent_dir / "identity.json",
-        {"selfNames": [], "timeHorizon": "", "roles": [], "relationships": []},
-    )
-    _write_json(
-        agent_dir / "voice.json",
-        {
-            "defaultForm": "",
-            "sentenceRhythm": [],
-            "rhetoricalMoves": [],
-            "preferredTerms": [],
-            "avoidPatterns": [],
-            "evidence": [],
-        },
-    )
-    (agent_dir / "worldview.jsonl").write_text("", encoding="utf-8")
-    (agent_dir / "episodes.jsonl").write_text("", encoding="utf-8")
-    _write_json(agent_dir / "concepts.json", {"concepts": []})
-    (agent_dir / "examples.jsonl").write_text("", encoding="utf-8")
-    _write_json(agent_dir / "openers.json", {"default": "", "alternatives": []})
-    (agent_dir / "eval.jsonl").write_text("", encoding="utf-8")
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{workspace.name}.staging-", dir=workspace.parent))
+    try:
+        _write_workspace_v2(staging, manifest, documents)
+        if workspace.exists():
+            workspace.rmdir()
+        staging.replace(workspace)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return workspace
 
 
@@ -240,9 +210,8 @@ def validate_workspace_v2(workspace: Path) -> BuildReport:
         for source in manifest.sources
     ):
         errors.append("来源元数据仍有未确认项")
-    for path in manifest.assets.to_dict().values():
-        if not (workspace / path).is_file():
-            errors.append(f"人物资产缺失：{path}")
+    _validate_v2_source_files(workspace, manifest.sources, errors)
+    _validate_v2_asset_files(workspace, manifest.assets, errors)
     if _v2_semantic_assets_are_empty(workspace, manifest.assets):
         errors.append("人物语义资产尚未完成")
     return BuildReport(
@@ -341,6 +310,118 @@ def _catalog_string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BuildError(f"{label} 必须是非空字符串")
     return value.strip()
+
+
+def _write_workspace_v2(workspace: Path, manifest: WorkspaceV2, documents: list[Any]) -> None:
+    agent_dir = workspace / "agent"
+    source_dir = workspace / "sources"
+    agent_dir.mkdir()
+    source_dir.mkdir()
+    for document, source in zip(documents, manifest.sources, strict=True):
+        shutil.copyfile(document.source_path, source_dir / source.stored_name)
+    _write_json(workspace / "workspace.json", manifest.to_dict())
+    _write_json(
+        workspace / "source-catalog.json",
+        {
+            "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+            "sources": [source.to_dict() for source in manifest.sources],
+        },
+    )
+    (agent_dir / "persona.md").write_text(
+        f"我是{manifest.name}，属于基于用户所选资料构建的模拟代理。\n\n"
+        "我必须使用第一人称表达，但只依据已提供资料形成判断；资料不足时明确说明。\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        agent_dir / "identity.json",
+        {"selfNames": [], "timeHorizon": "", "roles": [], "relationships": []},
+    )
+    _write_json(
+        agent_dir / "voice.json",
+        {
+            "defaultForm": "",
+            "sentenceRhythm": [],
+            "rhetoricalMoves": [],
+            "preferredTerms": [],
+            "avoidPatterns": [],
+            "evidence": [],
+        },
+    )
+    (agent_dir / "worldview.jsonl").write_text("", encoding="utf-8")
+    (agent_dir / "episodes.jsonl").write_text("", encoding="utf-8")
+    _write_json(agent_dir / "concepts.json", {"concepts": []})
+    (agent_dir / "examples.jsonl").write_text("", encoding="utf-8")
+    _write_json(agent_dir / "openers.json", {"default": "", "alternatives": []})
+    (agent_dir / "eval.jsonl").write_text("", encoding="utf-8")
+
+
+def _validate_v2_source_files(workspace: Path, sources: tuple[SourceRecord, ...], errors: list[str]) -> None:
+    source_root = workspace / "sources"
+    if not source_root.is_dir() or source_root.is_symlink():
+        errors.append("来源目录缺失或不安全：sources")
+        return
+    try:
+        resolved_source_root = source_root.resolve(strict=True)
+    except OSError as error:
+        errors.append(f"来源目录无法读取：{error}")
+        return
+
+    for source in sources:
+        source_path = source_root / source.stored_name
+        try:
+            if not source_path.exists():
+                errors.append(f"来源文件缺失：sources/{source.stored_name}")
+                continue
+            if source_path.is_symlink() or not source_path.is_file():
+                errors.append(f"来源文件必须是 sources 内的普通文件：{source.stored_name}")
+                continue
+            if not source_path.resolve(strict=True).is_relative_to(resolved_source_root):
+                errors.append(f"来源文件不在 sources 目录内：{source.stored_name}")
+                continue
+            source_hash, raw_size_bytes = _sha256_and_size(source_path)
+        except OSError as error:
+            errors.append(f"来源文件无法读取：{source.stored_name}：{error}")
+            continue
+        if raw_size_bytes != source.raw_size_bytes:
+            errors.append(f"来源文件字节数不匹配：{source.stored_name}")
+        if source_hash != source.source_hash:
+            errors.append(f"来源文件 SHA-256 不匹配：{source.stored_name}")
+
+
+def _sha256_and_size(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    raw_size_bytes = 0
+    with path.open("rb") as source:
+        while chunk := source.read(SOURCE_HASH_BUFFER_SIZE):
+            digest.update(chunk)
+            raw_size_bytes += len(chunk)
+    return digest.hexdigest(), raw_size_bytes
+
+
+def _validate_v2_asset_files(workspace: Path, assets: AgentAssetPaths, errors: list[str]) -> None:
+    json_assets = (assets.identity, assets.voice, assets.concepts, assets.openers)
+    jsonl_assets = (assets.worldview, assets.episodes, assets.examples, assets.eval)
+    for path in assets.to_dict().values():
+        if not (workspace / path).is_file():
+            errors.append(f"人物资产缺失：{path}")
+    for path in json_assets:
+        _validate_v2_json_asset(workspace, path, errors)
+    for path in jsonl_assets:
+        _validate_v2_jsonl_asset(workspace, path, errors)
+
+
+def _validate_v2_json_asset(workspace: Path, path: str, errors: list[str]) -> None:
+    try:
+        _read_json(workspace / path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        errors.append(f"人物资产无法读取：{path}：{error}")
+
+
+def _validate_v2_jsonl_asset(workspace: Path, path: str, errors: list[str]) -> None:
+    try:
+        _read_jsonl(workspace / path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        errors.append(f"人物资产无法读取：{path}：{error}")
 
 
 def _v2_semantic_assets_are_empty(workspace: Path, assets: AgentAssetPaths) -> bool:

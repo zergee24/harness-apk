@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.agent_builder.builder import (
     BuildError,
@@ -155,6 +156,30 @@ class WorkspaceV2Test(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "不安全"):
             load_workspace_v2(workspace)
 
+    def test_load_rejects_windows_asset_and_source_paths(self):
+        workspace = self._prepare()
+        manifest_path = workspace / "workspace.json"
+        base_manifest = json.loads(manifest_path.read_text("utf-8"))
+        windows_paths = ("C:foo", "C:/foo", r"C:\\foo", r"\\\\server\\share\\foo")
+
+        for field, value in (
+            ("assets.persona", path) for path in windows_paths
+        ):
+            with self.subTest(field=field, value=value):
+                manifest = json.loads(json.dumps(base_manifest))
+                manifest["assets"]["persona"] = value
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(BuildError, "不安全"):
+                    load_workspace_v2(workspace)
+
+        for value in windows_paths:
+            with self.subTest(field="sources.storedName", value=value):
+                manifest = json.loads(json.dumps(base_manifest))
+                manifest["sources"][0]["storedName"] = value
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(BuildError, "不安全"):
+                    load_workspace_v2(workspace)
+
     def test_load_rejects_duplicate_source_ids_and_stored_names(self):
         workspace = self._prepare()
         manifest_path = workspace / "workspace.json"
@@ -191,6 +216,116 @@ class WorkspaceV2Test(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "genre"):
             load_workspace_v2(workspace)
 
+    def test_prepare_v2_rejects_non_positive_integer_versions_before_creating_output(self):
+        for index, version in enumerate((True, 2.0, "2", 0, -1)):
+            with self.subTest(version=version):
+                output = self.root / f"invalid-version-{index}"
+                with self.assertRaisesRegex(BuildError, "版本必须是正整数"):
+                    prepare_workspace_v2(
+                        [self.source],
+                        output,
+                        agent_id="person.researcher",
+                        name="资料研究者",
+                        version=version,
+                    )
+                self.assertFalse(output.exists())
+
+        workspace = prepare_workspace_v2(
+            [self.source],
+            self.root / "valid-version",
+            agent_id="person.researcher",
+            name="资料研究者",
+            version=2,
+        )
+        self.assertEqual(2, load_workspace_v2(workspace).version)
+
+    def test_prepare_v2_cleans_output_after_copy_failure(self):
+        output = self.root / "copy-failure"
+
+        with mock.patch("tools.agent_builder.builder.shutil.copyfile", side_effect=OSError("copy failed")):
+            with self.assertRaisesRegex(OSError, "copy failed"):
+                self._prepare("copy-failure")
+
+        self.assertFalse(output.exists())
+        self.assertEqual(output.resolve(), self._prepare("copy-failure"))
+
+    def test_prepare_v2_cleans_output_after_manifest_write_failure(self):
+        output = self.root / "write-failure"
+
+        with mock.patch("tools.agent_builder.builder._write_json", side_effect=OSError("write failed")):
+            with self.assertRaisesRegex(OSError, "write failed"):
+                self._prepare("write-failure")
+
+        self.assertFalse(output.exists())
+        self.assertEqual(output.resolve(), self._prepare("write-failure"))
+
+    def test_validate_v2_rejects_missing_source_and_cli_exits_nonzero(self):
+        workspace = self._prepare_publishable("missing-source")
+        source = workspace / "sources" / load_workspace_v2(workspace).sources[0].stored_name
+        source.unlink()
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("来源文件缺失" in error for error in report.errors))
+        self.assertEqual(2, main(["validate-v2", str(workspace)]))
+
+    def test_validate_v2_rejects_source_hash_mutation(self):
+        workspace = self._prepare_publishable("source-hash-mutation")
+        source = workspace / "sources" / load_workspace_v2(workspace).sources[0].stored_name
+        data = source.read_bytes()
+        source.write_bytes(bytes([data[0] ^ 1]) + data[1:])
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("SHA-256" in error for error in report.errors))
+
+    def test_validate_v2_rejects_source_size_mutation(self):
+        workspace = self._prepare_publishable("source-size-mutation")
+        source = workspace / "sources" / load_workspace_v2(workspace).sources[0].stored_name
+        source.write_bytes(source.read_bytes() + b"x")
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("字节数" in error for error in report.errors))
+
+    def test_validate_v2_rejects_symlink_source(self):
+        workspace = self._prepare_publishable("symlink-source")
+        stored_source = workspace / "sources" / load_workspace_v2(workspace).sources[0].stored_name
+        stored_source.unlink()
+        stored_source.symlink_to(self.source)
+
+        report = validate_workspace_v2(workspace)
+
+        self.assertFalse(report.publishable)
+        self.assertTrue(any("普通文件" in error for error in report.errors))
+
+    def test_validate_v2_rejects_unreadable_structured_assets(self):
+        json_assets = ("identity.json", "voice.json", "concepts.json", "openers.json")
+        jsonl_assets = ("worldview.jsonl", "episodes.jsonl", "examples.jsonl", "eval.jsonl")
+
+        for asset in json_assets:
+            with self.subTest(asset=asset):
+                workspace = self._prepare_publishable(f"invalid-json-{asset}")
+                (workspace / "agent" / asset).write_text("{", encoding="utf-8")
+
+                report = validate_workspace_v2(workspace)
+
+                self.assertFalse(report.publishable)
+                self.assertTrue(any(f"agent/{asset}" in error for error in report.errors))
+
+        for asset in jsonl_assets:
+            with self.subTest(asset=asset):
+                workspace = self._prepare_publishable(f"invalid-jsonl-{asset}")
+                (workspace / "agent" / asset).write_text("not json\n", encoding="utf-8")
+
+                report = validate_workspace_v2(workspace)
+
+                self.assertFalse(report.publishable)
+                self.assertTrue(any(f"agent/{asset}" in error for error in report.errors))
+
     def test_cli_prepare_v2_writes_source_catalog_for_one_batch_clarification(self):
         output = self.root / "cli-workspace"
 
@@ -222,6 +357,49 @@ class WorkspaceV2Test(unittest.TestCase):
             name="资料研究者",
             version=2,
         )
+
+    def _prepare_publishable(self, name: str) -> Path:
+        catalog = self.root / f"{name}-catalog.json"
+        catalog.write_text(
+            json.dumps(
+                {
+                    "sources": [
+                        {
+                            "sourceId": "source-research",
+                            "fileName": "source.md",
+                            "title": "调查研究",
+                            "genre": "speech",
+                            "authorship": "direct",
+                            "period": "1926",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        workspace = prepare_workspace_v2(
+            [self.source],
+            self.root / name,
+            agent_id="person.researcher",
+            name="资料研究者",
+            version=2,
+            source_catalog_path=catalog,
+        )
+        (workspace / "agent" / "identity.json").write_text(
+            json.dumps(
+                {
+                    "selfNames": ["我"],
+                    "timeHorizon": "1926",
+                    "roles": [],
+                    "relationships": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self.assertTrue(validate_workspace_v2(workspace).publishable)
+        return workspace
 
 
 if __name__ == "__main__":
