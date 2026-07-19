@@ -211,6 +211,21 @@ class AgentRepository(
             if (chunkBatch.isEmpty()) return
             val chunks = chunkBatch.toList()
             val insertResults = dao.insertChunks(chunks)
+            val ignoredChunks = chunks.zip(insertResults)
+                .filter { (_, rowId) -> rowId == -1L }
+                .map { (chunk, _) -> chunk }
+            if (ignoredChunks.isNotEmpty()) {
+                val existingByKey = dao.listChunks(ignoredChunks.map(AgentChunkEntity::chunkKey))
+                    .associateBy(AgentChunkEntity::chunkKey)
+                ignoredChunks.forEach { candidate ->
+                    val existing = existingByKey[candidate.chunkKey]
+                    if (existing == null || !existing.hasSameImmutableEvidence(candidate)) {
+                        throw AgentBundleException(
+                            "physical chunk immutable evidence 冲突：${candidate.chunkKey}",
+                        )
+                    }
+                }
+            }
             dao.insertCorpusChunkRefs(
                 chunks.map { chunk ->
                     AgentCorpusChunkCrossRef(
@@ -334,6 +349,22 @@ private fun safeFileSegment(value: String): String =
 private fun corpusKey(corpusId: String, sourceHash: String): String = "$corpusId:$sourceHash"
 
 private fun chunkKey(sourceHash: String, chunkId: String): String = "$sourceHash:$chunkId"
+
+private fun AgentChunkEntity.hasSameImmutableEvidence(other: AgentChunkEntity): Boolean =
+    chunkKey == other.chunkKey &&
+        sourceId == other.sourceId &&
+        sourceHash == other.sourceHash &&
+        chunkId == other.chunkId &&
+        sourceTitle == other.sourceTitle &&
+        period == other.period &&
+        genre == other.genre &&
+        authorship == other.authorship &&
+        location == other.location &&
+        parentPath == other.parentPath &&
+        context == other.context &&
+        text == other.text &&
+        keywordsText == other.keywordsText &&
+        duplicateGroup == other.duplicateGroup
 
 private fun AgentEntity.toDomain(): Agent = Agent(
     id = id,

@@ -121,6 +121,33 @@ class AgentRetrievalTest {
     }
 
     @Test
+    fun reusesIdenticalPhysicalChunkAcrossCorpora() = runTest {
+        val fixture = twoCorpusInstallFixture(conflictingSecondChunk = false)
+
+        fixture.repository.install(fixture.session)
+
+        assertEquals(1, fixture.dao.chunks.size)
+        assertEquals(1, fixture.dao.searchRows.size)
+        assertEquals(2, fixture.dao.corpusChunkRefs.size)
+    }
+
+    @Test
+    fun rejectsConflictingPhysicalChunkBeforeAddingSecondCorpusReference() = runTest {
+        val fixture = twoCorpusInstallFixture(conflictingSecondChunk = true)
+
+        try {
+            fixture.repository.install(fixture.session)
+            throw AssertionError("Expected immutable physical evidence conflict")
+        } catch (error: AgentBundleException) {
+            assertTrue(error.message.orEmpty().contains("immutable evidence"))
+        }
+
+        assertEquals(1, fixture.dao.chunks.size)
+        assertEquals(1, fixture.dao.corpusChunkRefs.size)
+        assertEquals(1, fixture.dao.searchRows.size)
+    }
+
+    @Test
     fun buildsNaturalFirstPersonContextFromCurrentVersionEvidence() = runTest {
         val dao = FakeAgentDao().apply {
             version = AgentVersionEntity(
@@ -212,7 +239,81 @@ class AgentRetrievalTest {
             ioDispatcher = Dispatchers.Unconfined,
         )
     }
+
+    private fun twoCorpusInstallFixture(conflictingSecondChunk: Boolean): TwoCorpusInstallFixture {
+        val root = Files.createTempDirectory("agent-physical-reuse-test").toFile().apply { deleteOnExit() }
+        val staged = root.resolve("staged.hbundle").apply { writeText("validated package") }
+        val corpora = listOf("corpus-core", "corpus-full").map { id ->
+            AgentCorpusManifest(
+                id = id,
+                title = id,
+                sourceHash = "corpus-$id",
+                sourcesPath = "$id/sources.json",
+                chunksPath = "$id/chunks.jsonl",
+                required = id == "corpus-core",
+            )
+        }
+        fun chunk(text: String) = AgentCorpusChunk(
+            id = "chunk-1",
+            sourceTitle = "同一来源",
+            sourceHash = "a".repeat(64),
+            location = "第一章",
+            text = text,
+            keywords = listOf("调查"),
+            ngrams = listOf("调查"),
+        )
+        val reader = FakeAgentBundleAccess(
+            chunksByCorpus = mapOf(
+                "corpus-core" to listOf(chunk("相同证据")),
+                "corpus-full" to listOf(chunk(if (conflictingSecondChunk) "冲突证据" else "相同证据")),
+            ),
+        )
+        val parsed = ParsedAgentBundle(
+            file = staged,
+            packageSha256 = "bundle-sha",
+            publisherPublicKey = byteArrayOf(1),
+            publisherFingerprint = "publisher-fingerprint",
+            manifestJson = "{}",
+            agent = AgentPackageManifest(
+                id = "agent-physical",
+                name = "物理去重代理",
+                version = 1,
+                summary = "",
+                personaPath = "agent/persona.md",
+                worldviewPath = "agent/worldview.jsonl",
+                conceptsPath = "agent/concepts.json",
+                examplesPath = "agent/examples.jsonl",
+                evalPath = "agent/eval.jsonl",
+                requiredCorpora = listOf("corpus-core"),
+            ),
+            corpora = corpora,
+            persona = "只依据证据",
+            worldviewJsonl = "",
+            compressedSizeBytes = staged.length(),
+            uncompressedSizeBytes = staged.length(),
+        )
+        val dao = FakeAgentDao()
+        val repository = AgentRepository(
+            filesDir = root.resolve("files"),
+            cacheDir = root.resolve("cache"),
+            dao = dao,
+            reader = reader,
+            timeProvider = TimeProvider { 20L },
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+        return TwoCorpusInstallFixture(
+            repository,
+            AgentImportSession("session-physical", staged, parsed, reader.inspect(staged)),
+            dao,
+        )
+    }
 }
+
+private data class TwoCorpusInstallFixture(
+    val repository: AgentRepository,
+    val session: AgentImportSession,
+    val dao: FakeAgentDao,
+)
 
 internal class FakeAgentDao : AgentDao {
     private val agents = MutableStateFlow<List<AgentEntity>>(emptyList())
@@ -265,8 +366,14 @@ internal class FakeAgentDao : AgentDao {
         return 1L
     }
     override suspend fun insertChunks(entities: List<AgentChunkEntity>): List<Long> {
-        entities.forEach { chunks[it.chunkKey] = it }
-        return entities.map { 1L }
+        return entities.map { entity ->
+            if (chunks.containsKey(entity.chunkKey)) {
+                -1L
+            } else {
+                chunks[entity.chunkKey] = entity
+                1L
+            }
+        }
     }
     override suspend fun insertCorpusChunkRefs(entities: List<AgentCorpusChunkCrossRef>): List<Long> {
         corpusChunkRefs += entities
@@ -300,7 +407,8 @@ internal class FakeAgentDao : AgentDao {
 }
 
 private class FakeAgentBundleAccess(
-    private val chunks: List<AgentCorpusChunk>,
+    private val chunks: List<AgentCorpusChunk> = emptyList(),
+    private val chunksByCorpus: Map<String, List<AgentCorpusChunk>> = emptyMap(),
 ) : AgentBundleAccess {
     override fun read(file: File): ParsedAgentBundle = error("Not used")
 
@@ -321,6 +429,6 @@ private class FakeAgentBundleAccess(
         block: suspend (AgentCorpusChunk) -> Unit,
     ) {
         check(bundle.file.isFile) { "bundle file must remain readable while indexing" }
-        chunks.forEach { block(it) }
+        (chunksByCorpus[corpus.id] ?: chunks).forEach { block(it) }
     }
 }

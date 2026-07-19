@@ -2,13 +2,25 @@ package com.harnessapk.storage
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.harnessapk.agent.AgentBundleAccess
+import com.harnessapk.agent.AgentBundleException
+import com.harnessapk.agent.AgentCorpusChunk
+import com.harnessapk.agent.AgentCorpusManifest
+import com.harnessapk.agent.AgentImportPreview
+import com.harnessapk.agent.AgentImportSession
+import com.harnessapk.agent.AgentPackageManifest
+import com.harnessapk.agent.AgentRepository
+import com.harnessapk.agent.ParsedAgentBundle
+import com.harnessapk.common.TimeProvider
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.UiMessagePartType
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -16,6 +28,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
@@ -144,6 +157,119 @@ class AppDatabaseTest {
         assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
         assertEquals(2, db.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
         db.close()
+    }
+
+    @Test
+    fun repositoryReusesIdenticalPhysicalChunkAfterInsertIgnore() = runBlocking {
+        val fixture = repositoryChunkConflictFixture(conflicting = false)
+
+        fixture.repository.install(fixture.session)
+
+        assertEquals(1, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(1, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
+        assertEquals(1, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
+        fixture.close()
+        Unit
+    }
+
+    @Test
+    fun repositoryRollsBackCorpusInstallWhenPhysicalEvidenceConflicts() = runBlocking {
+        val fixture = repositoryChunkConflictFixture(conflicting = true)
+
+        try {
+            fixture.repository.install(fixture.session)
+            fail("Expected immutable physical evidence conflict")
+        } catch (error: AgentBundleException) {
+            assertTrue(error.message.orEmpty().contains("immutable evidence"))
+        }
+
+        assertEquals(1, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(1, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
+        assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
+        assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_corpora"))
+        assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agents"))
+        fixture.close()
+        Unit
+    }
+
+    private suspend fun repositoryChunkConflictFixture(conflicting: Boolean): RepositoryConflictFixture {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val sourceHash = "a".repeat(64)
+        val existing = AgentChunkEntity(
+            chunkKey = "$sourceHash:chunk-1",
+            sourceId = sourceHash,
+            sourceHash = sourceHash,
+            chunkId = "chunk-1",
+            sourceTitle = "同一来源",
+            location = "第一章",
+            text = "原始证据",
+            keywordsText = "调查",
+        )
+        db.agentDao().insertChunks(listOf(existing))
+        db.agentDao().insertChunkSearchRows(
+            listOf(AgentChunkFtsEntity(existing.chunkKey, "调查 原始证据")),
+        )
+        val root = context.cacheDir.resolve("repository-conflict-${System.nanoTime()}").apply { mkdirs() }
+        val staged = root.resolve("staged.hbundle").apply { writeText("validated") }
+        val corpus = AgentCorpusManifest(
+            id = "corpus-new",
+            title = "新语料",
+            sourceHash = "corpus-hash",
+            sourcesPath = "sources.json",
+            chunksPath = "chunks.jsonl",
+            required = true,
+        )
+        val parsed = ParsedAgentBundle(
+            file = staged,
+            packageSha256 = "bundle-sha",
+            publisherPublicKey = byteArrayOf(1),
+            publisherFingerprint = "publisher",
+            manifestJson = "{}",
+            agent = AgentPackageManifest(
+                id = "agent-room-conflict",
+                name = "事务测试代理",
+                version = 1,
+                summary = "",
+                personaPath = "persona.md",
+                worldviewPath = "worldview.jsonl",
+                conceptsPath = "concepts.json",
+                examplesPath = "examples.jsonl",
+                evalPath = "eval.jsonl",
+                requiredCorpora = listOf(corpus.id),
+            ),
+            corpora = listOf(corpus),
+            persona = "只依据证据",
+            worldviewJsonl = "",
+            compressedSizeBytes = staged.length(),
+            uncompressedSizeBytes = staged.length(),
+        )
+        val reader = RepositoryConflictReader(
+            AgentCorpusChunk(
+                id = "chunk-1",
+                sourceTitle = "同一来源",
+                sourceHash = sourceHash,
+                location = "第一章",
+                text = if (conflicting) "冲突证据" else "原始证据",
+                keywords = listOf("调查"),
+                ngrams = listOf("调查"),
+            ),
+        )
+        val repository = AgentRepository(
+            filesDir = root.resolve("files"),
+            cacheDir = root.resolve("cache"),
+            dao = db.agentDao(),
+            reader = reader,
+            transactionRunner = { block -> db.withTransaction { block() } },
+            timeProvider = TimeProvider { 1L },
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+        return RepositoryConflictFixture(
+            db = db,
+            root = root,
+            repository = repository,
+            session = AgentImportSession("session", staged, parsed, reader.inspect(staged)),
+        )
     }
 
     @Test
@@ -752,6 +878,43 @@ class AppDatabaseTest {
             "CREATE INDEX index_agent_chunks_corpusId_sourceHash ON agent_chunks(corpusId, sourceHash)",
             "CREATE VIRTUAL TABLE agent_chunk_fts USING FTS4(chunkKey TEXT NOT NULL, corpusKey TEXT NOT NULL, searchableText TEXT NOT NULL, tokenize=unicode61)",
         )
+    }
+}
+
+private data class RepositoryConflictFixture(
+    val db: AppDatabase,
+    val root: File,
+    val repository: AgentRepository,
+    val session: AgentImportSession,
+) {
+    fun close() {
+        db.close()
+        root.deleteRecursively()
+    }
+}
+
+private class RepositoryConflictReader(
+    private val chunk: AgentCorpusChunk,
+) : AgentBundleAccess {
+    override fun inspect(file: File): AgentImportPreview = AgentImportPreview(
+        agentId = "agent-room-conflict",
+        name = "事务测试代理",
+        version = 1,
+        summary = "",
+        publisherFingerprint = "publisher",
+        corpora = listOf("新语料"),
+        compressedSizeBytes = file.length(),
+        includesOriginalSources = false,
+    )
+
+    override fun read(file: File): ParsedAgentBundle = error("Not used")
+
+    override suspend fun forEachChunkSuspending(
+        bundle: ParsedAgentBundle,
+        corpus: AgentCorpusManifest,
+        block: suspend (AgentCorpusChunk) -> Unit,
+    ) {
+        block(chunk)
     }
 }
 

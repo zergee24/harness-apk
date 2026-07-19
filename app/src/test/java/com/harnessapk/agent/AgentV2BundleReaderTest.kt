@@ -34,6 +34,141 @@ class AgentV2BundleReaderTest {
     }
 
     @Test
+    fun streamsStandaloneAndNestedCorpusFromVerifiedStagedBytes() {
+        val fixture = Fixture()
+        val secondChunk = CHUNK_JSON.replace("chunk-core", "chunk-second")
+        val corpus = fixture.corpusPackage(chunks = CHUNK_JSON + secondChunk, chunkCount = 2)
+        val agent = fixture.agentPackage(corpus)
+        val bundle = fixture.bundlePackage(agent, listOf(corpus), selectedPackageIds = listOf(CORE_ID))
+        val standaloneIds = mutableListOf<String>()
+
+        AgentBundleReader().forEachV2Chunk(corpus) { chunk ->
+            standaloneIds += chunk.id
+            if (standaloneIds.size == 1) corpus.writeText("replaced after validation")
+        }
+        val nestedIds = mutableListOf<String>()
+        AgentBundleReader().forEachV2Chunk(bundle, CORE_ID) { nestedIds += it.id }
+
+        assertEquals(listOf("chunk-core", "chunk-second"), standaloneIds)
+        assertEquals(listOf("chunk-core", "chunk-second"), nestedIds)
+    }
+
+    @Test
+    fun requiredDeclarationsExactlyMatchRequiredIdsAndEveryProfile() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+
+        assertPackageFailure("required") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus = corpus,
+                    requiredCorpusIds = emptyList(),
+                    manifestRequiredCorpora = emptyList(),
+                ),
+            )
+        }
+        assertPackageFailure("profile") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus = corpus,
+                    balancedIds = emptyList(),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun corpusValidationUsesBoundedDiskIndex() {
+        val fixture = Fixture()
+        val chunks = (1..2_000).joinToString("") { index ->
+            CHUNK_JSON.replace("chunk-core", "chunk-$index")
+        }
+
+        val parsed = AgentBundleReader().readPackage(
+            fixture.corpusPackage(chunks = chunks, chunkCount = 2_000),
+        ) as V2Corpus
+
+        assertEquals("disk", parsed.validationDiagnostics.backend)
+        assertEquals(2_002L, parsed.validationDiagnostics.indexedRecordCount)
+        assertTrue(parsed.validationDiagnostics.peakInMemoryRecordCount <= 1)
+        assertTrue(parsed.validationDiagnostics.diskBytes > 0L)
+    }
+
+    @Test
+    fun rejectsCrossSourceAndOpenCorpusGraphs() {
+        val fixture = Fixture()
+        val sources = sourceJson(
+            sourceRecord("source-a", "来源 A", "a".repeat(64), "speech", "direct", "1926"),
+            sourceRecord("source-b", "来源 B", "b".repeat(64), "letter", "secondary", "1930"),
+        )
+        val rootA = nodeJson("root-a", "source-a")
+        val rootB = nodeJson("root-b", "source-b")
+        val validChunk = chunkJson("chunk-a", "source-a", "a".repeat(64), "来源 A", "speech", "direct", "1926", listOf("root-a"))
+        val cases = listOf(
+            fixture.corpusPackage(
+                sources = sources,
+                nodes = rootA,
+                chunks = validChunk.replace("\"sourceHash\":\"${"a".repeat(64)}\"", "\"sourceHash\":\"${"b".repeat(64)}\""),
+                sourceIds = listOf("source-a", "source-b"),
+                sourceHashes = listOf("a".repeat(64), "b".repeat(64)),
+                topLevelIds = listOf("root-a"),
+            ) to "来源",
+            fixture.corpusPackage(
+                sources = sources,
+                nodes = rootA + nodeJson("child-b", "source-b", "root-a"),
+                chunks = validChunk,
+                sourceIds = listOf("source-a", "source-b"),
+                sourceHashes = listOf("a".repeat(64), "b".repeat(64)),
+                topLevelIds = listOf("root-a"),
+            ) to "parent",
+            fixture.corpusPackage(
+                sources = sources,
+                nodes = rootA + rootB,
+                chunks = validChunk.replace("[\"root-a\"]", "[\"root-b\"]"),
+                sourceIds = listOf("source-a", "source-b"),
+                sourceHashes = listOf("a".repeat(64), "b".repeat(64)),
+                topLevelIds = listOf("root-a", "root-b"),
+            ) to "hierarchy",
+            fixture.corpusPackage(
+                sources = sources,
+                nodes = rootA + rootB,
+                chunks = validChunk,
+                duplicates = duplicateJson("duplicate-b", "chunk-a", "source-b", "source-a", "1926"),
+                sourceIds = listOf("source-a", "source-b"),
+                sourceHashes = listOf("a".repeat(64), "b".repeat(64)),
+                topLevelIds = listOf("root-a", "root-b"),
+            ) to "duplicates.jsonl",
+            fixture.corpusPackage(
+                sources = sources,
+                nodes = rootA + rootB,
+                chunks = validChunk,
+                sourceIds = listOf("source-a", "source-b"),
+                sourceHashes = listOf("a".repeat(64), "b".repeat(64)),
+                topLevelIds = listOf("missing-root"),
+            ) to "topLevelIds",
+        )
+
+        cases.forEach { (file, message) ->
+            assertPackageFailure(message) { AgentBundleReader().readPackage(file) }
+        }
+    }
+
+    @Test
+    fun rejectsFakeEocdBypassAndCentralDirectoryMismatches() {
+        val fixture = Fixture()
+        val fakeEocd = fixture.sourcePackage()
+        patchUnixMode(fakeEocd, "files/source.txt", 0x81ED)
+        appendFakeCentralDirectoryComment(fakeEocd)
+        assertPackageFailure("central directory") { AgentBundleReader().readPackage(fakeEocd) }
+
+        listOf(EocdField.ENTRY_COUNT, EocdField.CENTRAL_OFFSET, EocdField.CENTRAL_SIZE).forEach { field ->
+            val malformed = fixture.sourcePackage()
+            corruptEocdField(malformed, field)
+            assertPackageFailure("central directory") { AgentBundleReader().readPackage(malformed) }
+        }
+    }
+
+    @Test
     fun dispatchesStandaloneV2PackagesAndKeepsV1Wrapper() {
         val fixture = Fixture()
         val corpusFile = fixture.corpusPackage()
@@ -202,17 +337,24 @@ class AgentV2BundleReaderTest {
             agentId: String = "person.fixture",
             version: Int = 2,
             chunks: String = CHUNK_JSON,
+            chunkCount: Int = 1,
+            sources: String = SOURCE_JSON,
+            nodes: String = NODE_JSON,
+            duplicates: String = "",
+            sourceIds: List<String> = listOf("source-direct"),
+            sourceHashes: List<String> = listOf("a".repeat(64)),
+            topLevelIds: List<String> = listOf("node-root"),
             corruptSignature: Boolean = false,
         ): File = signedPackage(
             "core-evidence.hcorpus",
             linkedMapOf(
                 "manifest.json" to """
-                    {"agentId":"$agentId","authorship":["direct"],"chunkCount":1,"coverage":["identity:self"],"genres":["speech"],"id":"$CORE_ID","installClass":"required","periods":["1926"],"schemaVersion":2,"sourceHashes":["${"a".repeat(64)}"],"sourceIds":["source-direct"],"topLevelIds":["node-root"],"type":"$type","version":$version}
+                    {"agentId":"$agentId","authorship":["direct"],"chunkCount":$chunkCount,"coverage":["identity:self"],"genres":["speech"],"id":"$CORE_ID","installClass":"required","periods":["1926"],"schemaVersion":2,"sourceHashes":${sourceHashes.jsonArray()},"sourceIds":${sourceIds.jsonArray()},"topLevelIds":${topLevelIds.jsonArray()},"type":"$type","version":$version}
                 """.trimIndent().encodeToByteArray(),
-                "sources.json" to SOURCE_JSON.encodeToByteArray(),
-                "nodes.jsonl" to NODE_JSON.encodeToByteArray(),
+                "sources.json" to sources.encodeToByteArray(),
+                "nodes.jsonl" to nodes.encodeToByteArray(),
                 "chunks.jsonl" to chunks.encodeToByteArray(),
-                "duplicates.jsonl" to byteArrayOf(),
+                "duplicates.jsonl" to duplicates.encodeToByteArray(),
             ),
             corruptSignature,
         )
@@ -222,6 +364,8 @@ class AgentV2BundleReaderTest {
             balancedIds: List<String> = listOf(CORE_ID),
             declaredCorpusHash: String = corpus.sha256(),
             declaredCorpusSize: Long = corpus.length(),
+            requiredCorpusIds: List<String> = listOf(CORE_ID),
+            manifestRequiredCorpora: List<String> = requiredCorpusIds,
         ): File {
             val profiles = listOf(
                 "lite" to listOf(CORE_ID),
@@ -232,13 +376,13 @@ class AgentV2BundleReaderTest {
                 """{"id":"$id","packageIds":[${ids.joinToString(",") { "\"$it\"" }}],"recommended":${id == "balanced"}}"""
             }
             val plan = """
-                {"packages":[{"dependencies":[],"fileName":"${corpus.name}","id":"$CORE_ID","installClass":"required","sha256":"$declaredCorpusHash","sizeBytes":$declaredCorpusSize,"type":"hcorpus"}],"profiles":[$profiles],"recommendedProfileId":"balanced","requiredCorpusIds":["$CORE_ID"],"schemaVersion":2}
+                {"packages":[{"dependencies":[],"fileName":"${corpus.name}","id":"$CORE_ID","installClass":"required","sha256":"$declaredCorpusHash","sizeBytes":$declaredCorpusSize,"type":"hcorpus"}],"profiles":[$profiles],"recommendedProfileId":"balanced","requiredCorpusIds":${requiredCorpusIds.jsonArray()},"schemaVersion":2}
             """.trimIndent()
             return signedPackage(
                 "person.fixture-v2.hagent",
                 linkedMapOf(
                     "manifest.json" to """
-                        {"agent":{"id":"person.fixture","name":"测试人物","version":2},"requiredCorpora":["$CORE_ID"],"runnableWithoutCorpora":false,"schemaVersion":2,"type":"hagent"}
+                        {"agent":{"id":"person.fixture","name":"测试人物","version":2},"requiredCorpora":${manifestRequiredCorpora.jsonArray()},"runnableWithoutCorpora":false,"schemaVersion":2,"type":"hagent"}
                     """.trimIndent().encodeToByteArray(),
                     "agent/persona.md" to "只依据证据回答。".encodeToByteArray(),
                     "agent/identity.json" to """{"relationships":[],"roles":["调查者"],"selfNames":["我"],"timeHorizon":"1926"}""".encodeToByteArray(),
@@ -354,6 +498,96 @@ class AgentV2BundleReaderTest {
     }
 }
 
+private fun List<String>.jsonArray(): String = joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
+
+private fun sourceJson(vararg records: String): String = records.joinToString(prefix = "[", postfix = "]")
+
+private fun sourceRecord(
+    id: String,
+    title: String,
+    hash: String,
+    genre: String,
+    authorship: String,
+    period: String,
+): String =
+    """{"authorship":"$authorship","extractedChars":100,"fileName":"$id.txt","format":"txt","genre":"$genre","period":"$period","rawSizeBytes":6,"sourceHash":"$hash","sourceId":"$id","storedName":"$id.txt","title":"$title"}"""
+
+private fun nodeJson(id: String, sourceId: String, parentId: String? = null): String =
+    """{"id":"$id","kind":"source","parentId":${parentId?.let { "\"$it\"" } ?: "null"},"path":["$id"],"sourceId":"$sourceId","summary":"来源","title":"$id"}
+    """.trimIndent() + "\n"
+
+private fun chunkJson(
+    id: String,
+    sourceId: String,
+    sourceHash: String,
+    sourceTitle: String,
+    genre: String,
+    authorship: String,
+    period: String,
+    parentIds: List<String>,
+): String =
+    """{"authorship":"$authorship","conflictKey":"","context":"$sourceTitle","duplicateGroup":"core","genre":"$genre","id":"$id","keywords":["调查"],"location":"第一章","ngrams":[],"parentIds":${parentIds.jsonArray()},"period":"$period","sourceAliases":[],"sourceHash":"$sourceHash","sourceId":"$sourceId","sourceTitle":"$sourceTitle","text":"调查以后再下结论。","simHash":"0000000000000001"}
+    """.trimIndent()
+
+private fun duplicateJson(
+    duplicateId: String,
+    physicalId: String,
+    duplicateSourceId: String,
+    primarySourceId: String,
+    period: String,
+): String =
+    """{"conflictKey":"","duplicateChunkId":"$duplicateId","duplicateSourceId":"$duplicateSourceId","matchType":"exact","period":"$period","physicalChunkId":"$physicalId","primarySourceId":"$primarySourceId"}
+    """.trimIndent()
+
+private enum class EocdField { ENTRY_COUNT, CENTRAL_OFFSET, CENTRAL_SIZE }
+
+private fun appendFakeCentralDirectoryComment(file: File) {
+    val bytes = file.readBytes()
+    val eocdOffset = bytes.findEocdOffset()
+    val fakeName = "safe.txt".encodeToByteArray()
+    val fakeCentralOffset = bytes.size
+    val fakeCentral = ByteArray(46 + fakeName.size).apply {
+        writeIntLeV2(0, 0x02014b50)
+        writeShortLeV2(4, 20)
+        writeShortLeV2(6, 20)
+        writeShortLeV2(28, fakeName.size)
+        fakeName.copyInto(this, 46)
+    }
+    val fakeEocd = ByteArray(22).apply {
+        writeIntLeV2(0, 0x06054b50)
+        writeShortLeV2(8, 1)
+        writeShortLeV2(10, 1)
+        writeIntLeV2(12, fakeCentral.size)
+        writeIntLeV2(16, fakeCentralOffset)
+    }
+    val comment = fakeCentral + fakeEocd
+    bytes.writeShortLeV2(eocdOffset + 20, comment.size)
+    file.writeBytes(bytes + comment)
+}
+
+private fun corruptEocdField(file: File, field: EocdField) {
+    val bytes = file.readBytes()
+    val offset = bytes.findEocdOffset()
+    when (field) {
+        EocdField.ENTRY_COUNT -> {
+            val count = bytes.readShortLeV2(offset + 10)
+            bytes.writeShortLeV2(offset + 8, count - 1)
+            bytes.writeShortLeV2(offset + 10, count - 1)
+        }
+        EocdField.CENTRAL_OFFSET -> bytes.writeIntLeV2(offset + 16, bytes.readIntLeV2(offset + 16) + 1)
+        EocdField.CENTRAL_SIZE -> bytes.writeIntLeV2(offset + 12, bytes.readIntLeV2(offset + 12) + 1)
+    }
+    file.writeBytes(bytes)
+}
+
+private fun ByteArray.findEocdOffset(): Int {
+    for (offset in size - 22 downTo 0) {
+        if (readIntLeV2(offset) == 0x06054b50) return offset
+    }
+    fail("EOCD not found")
+    return -1
+}
+
 private fun File.sha256(): String = inputStream().buffered().use { input ->
     val digest = MessageDigest.getInstance("SHA-256")
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -402,4 +636,9 @@ private fun ByteArray.writeIntLeV2(offset: Int, value: Int) {
     this[offset + 1] = (value ushr 8).toByte()
     this[offset + 2] = (value ushr 16).toByte()
     this[offset + 3] = (value ushr 24).toByte()
+}
+
+private fun ByteArray.writeShortLeV2(offset: Int, value: Int) {
+    this[offset] = value.toByte()
+    this[offset + 1] = (value ushr 8).toByte()
 }

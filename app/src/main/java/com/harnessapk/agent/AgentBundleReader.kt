@@ -70,6 +70,13 @@ class AgentBundleReader(
         }
 
     fun readPackage(file: File): ParsedAgentPackage {
+        return withVerifiedPackage(file) { parsed, _ -> parsed }
+    }
+
+    private fun <T> withVerifiedPackage(
+        file: File,
+        block: (ParsedAgentPackage, Map<String, File>) -> T,
+    ): T {
         validateInputFile(file)
         temporaryDirectory.mkdirs()
         val privateRoot = Files.createTempDirectory(temporaryDirectory.toPath(), ".harness-agent-reader-").toFile()
@@ -86,7 +93,9 @@ class AgentBundleReader(
                     input.copyBoundedTo(output, MAX_COMPRESSED_BYTES, "人格包")
                 }
             }
-            readVerifiedPackage(staged, file, nestingDepth = 0)
+            val stagedPackages = linkedMapOf<String, File>()
+            val parsed = readVerifiedPackage(staged, file, nestingDepth = 0, stagedPackages)
+            block(parsed, stagedPackages)
         } catch (error: AgentBundleException) {
             throw error
         } catch (error: Throwable) {
@@ -146,17 +155,31 @@ class AgentBundleReader(
     }
 
     fun forEachV2Chunk(file: File, block: (V2Chunk) -> Unit) {
-        val parsed = readPackage(file)
-        if (parsed !is V2Corpus) throw AgentBundleException("仅 hcorpus 包支持资料块流式读取")
-        ZipFile(file).use { archive ->
+        withVerifiedPackage(file) { parsed, stagedPackages ->
+            val corpus = parsed as? V2Corpus
+                ?: throw AgentBundleException("仅 hcorpus 包支持资料块流式读取")
+            streamVerifiedV2Chunks(requireNotNull(stagedPackages[corpus.packageSha256]), block)
+        }
+    }
+
+    fun forEachV2Chunk(file: File, corpusId: String, block: (V2Chunk) -> Unit) {
+        val expectedId = identifier(corpusId)
+        withVerifiedPackage(file) { parsed, stagedPackages ->
+            val bundle = parsed as? V2Bundle
+                ?: throw AgentBundleException("指定 corpus ID 的流式读取仅支持 hbundle")
+            val corpus = bundle.corpora.singleOrNull { it.manifest.id == expectedId }
+                ?: throw AgentBundleException("bundle 未选择 corpus：$expectedId")
+            streamVerifiedV2Chunks(requireNotNull(stagedPackages[corpus.packageSha256]), block)
+        }
+    }
+
+    private fun streamVerifiedV2Chunks(stagedFile: File, block: (V2Chunk) -> Unit) {
+        ZipFile(stagedFile).use { archive ->
             val entry = archive.getEntry(V2_CHUNKS_PATH)
                 ?: throw AgentBundleException("缺少包内文件：$V2_CHUNKS_PATH")
-            val ids = mutableSetOf<String>()
             archive.getInputStream(entry).use { input ->
                 input.forEachUtf8JsonLine(V2_CHUNKS_PATH) { line, lineNumber ->
-                    val chunk = parseV2Chunk(parseObject(line, "$V2_CHUNKS_PATH 第 $lineNumber 行"))
-                    if (!ids.add(chunk.id)) throw AgentBundleException("$V2_CHUNKS_PATH 包含重复 id：${chunk.id}")
-                    block(chunk)
+                    block(parseV2Chunk(parseObject(line, "$V2_CHUNKS_PATH 第 $lineNumber 行")))
                 }
             }
         }
@@ -166,6 +189,7 @@ class AgentBundleReader(
         stagedFile: File,
         displayFile: File,
         nestingDepth: Int,
+        stagedPackages: MutableMap<String, File>,
     ): ParsedAgentPackage {
         if (nestingDepth > MAX_PACKAGE_NESTING) throw AgentBundleException("人格包嵌套层级超过上限")
         rejectUnsafeCentralDirectory(stagedFile)
@@ -198,7 +222,7 @@ class AgentBundleReader(
                 uncompressedSize = entries.sumOf(ZipEntry::getSize),
             )
 
-            when (schemaVersion) {
+            val parsed = when (schemaVersion) {
                 1 -> {
                     if (!hasBundleManifest || type.isNotEmpty()) {
                         throw AgentBundleException("V1 包顶层 manifest 契约无效")
@@ -221,15 +245,23 @@ class AgentBundleReader(
                             verified,
                             requireNotNull(stagedFile.parentFile),
                             nestingDepth,
+                            stagedPackages,
                         )
                         PackageKind.V2_AGENT -> parseV2Agent(archive, manifestObject, verified)
-                        PackageKind.V2_CORPUS -> parseV2Corpus(archive, manifestObject, verified)
+                        PackageKind.V2_CORPUS -> parseV2Corpus(
+                            archive,
+                            manifestObject,
+                            verified,
+                            requireNotNull(stagedFile.parentFile),
+                        )
                         PackageKind.V2_SOURCE -> parseV2Source(archive, entries, manifestObject, verified)
                         PackageKind.V1_BUNDLE -> error("unreachable")
                     }
                 }
                 else -> throw AgentBundleException("不支持的 schemaVersion：$schemaVersion")
             }
+            stagedPackages[verified.packageSha256] = stagedFile
+            parsed
         }
     }
 
@@ -303,6 +335,7 @@ class AgentBundleReader(
         verified: VerifiedPackage,
         privateRoot: File,
         nestingDepth: Int,
+        stagedPackages: MutableMap<String, File>,
     ): V2Bundle {
         val agentObject = root.requiredObject("agent", BUNDLE_MANIFEST_PATH)
         val manifest = V2BundleManifest(
@@ -333,10 +366,10 @@ class AgentBundleReader(
             }
             childPackages[childName] = readVerifiedPackage(
                 childFile,
-                File(childName),
+                verified.file,
                 nestingDepth + 1,
+                stagedPackages,
             )
-            childFile.delete()
         }
 
         val parsedAgent = childPackages[manifest.agent.fileName]
@@ -457,7 +490,7 @@ class AgentBundleReader(
         val evaluations = archive.readJsonl(V2_EVAL_PATH, ::parseEvaluation)
         val installPlanBytes = archive.readRequired(V2_INSTALL_PLAN_PATH, MAX_AGENT_ASSET_BYTES)
         val installPlan = parseInstallPlan(parseObject(installPlanBytes.decodeToString(), V2_INSTALL_PLAN_PATH))
-        if (installPlan.requiredCorpusIds != manifest.requiredCorpora) {
+        if (installPlan.requiredCorpusIds.toSet() != manifest.requiredCorpora.toSet()) {
             throw AgentBundleException("hagent requiredCorpora 与 install plan 不一致")
         }
         return V2Agent(
@@ -488,6 +521,7 @@ class AgentBundleReader(
         archive: ZipFile,
         root: JsonObject,
         verified: VerifiedPackage,
+        validationParent: File,
     ): V2Corpus {
         val manifest = V2CorpusManifest(
             id = root.requiredIdentifier("id", PACKAGE_MANIFEST_PATH),
@@ -522,42 +556,7 @@ class AgentBundleReader(
         if (sources.map(V2SourceRecord::sourceHash) != manifest.sourceHashes) {
             throw AgentBundleException("$V2_SOURCES_PATH 与 manifest sourceHashes 不一致")
         }
-
-        val nodeIds = mutableSetOf<String>()
-        var nodeCount = 0
-        archive.streamJsonl(V2_NODES_PATH) { row, _ ->
-            val node = parseNode(row)
-            if (!nodeIds.add(node.id)) throw AgentBundleException("$V2_NODES_PATH 包含重复 id：${node.id}")
-            nodeCount += 1
-        }
-        val chunkIds = mutableSetOf<String>()
-        var chunkCount = 0
-        archive.streamJsonl(V2_CHUNKS_PATH) { row, _ ->
-            val chunk = parseV2Chunk(row)
-            if (!chunkIds.add(chunk.id)) throw AgentBundleException("$V2_CHUNKS_PATH 包含重复 id：${chunk.id}")
-            if (chunk.sourceId !in manifest.sourceIds || chunk.sourceHash !in manifest.sourceHashes) {
-                throw AgentBundleException("$V2_CHUNKS_PATH 引用了未声明来源：${chunk.id}")
-            }
-            if (chunk.parentIds.any { it !in nodeIds }) {
-                throw AgentBundleException("$V2_CHUNKS_PATH 引用了不存在的 hierarchy node：${chunk.id}")
-            }
-            chunkCount += 1
-        }
-        if (chunkCount != manifest.chunkCount) {
-            throw AgentBundleException("$V2_CHUNKS_PATH 数量与 manifest chunkCount 不一致")
-        }
-        val duplicateIds = mutableSetOf<String>()
-        var duplicateCount = 0
-        archive.streamJsonl(V2_DUPLICATES_PATH) { row, _ ->
-            val duplicate = parseDuplicate(row)
-            if (!duplicateIds.add(duplicate.duplicateChunkId)) {
-                throw AgentBundleException("$V2_DUPLICATES_PATH 包含重复 id：${duplicate.duplicateChunkId}")
-            }
-            if (duplicate.physicalChunkId !in chunkIds) {
-                throw AgentBundleException("$V2_DUPLICATES_PATH 引用了不存在的 physical chunk")
-            }
-            duplicateCount += 1
-        }
+        val validation = validateCorpusGraph(archive, manifest, sources, validationParent)
         return V2Corpus(
             file = verified.file,
             packageSha256 = verified.packageSha256,
@@ -568,10 +567,198 @@ class AgentBundleReader(
             uncompressedSizeBytes = verified.uncompressedSize,
             manifest = manifest,
             sources = sources,
-            nodeCount = nodeCount,
-            chunkCount = chunkCount,
-            duplicateCount = duplicateCount,
+            nodeCount = validation.nodeCount,
+            chunkCount = validation.chunkCount,
+            duplicateCount = validation.duplicateCount,
+            validationDiagnostics = validation.diagnostics,
         )
+    }
+
+    private fun validateCorpusGraph(
+        archive: ZipFile,
+        manifest: V2CorpusManifest,
+        sources: List<V2SourceRecord>,
+        validationParent: File,
+    ): CorpusGraphValidation {
+        val sourceById = sources.associateBy(V2SourceRecord::sourceId)
+        val topLevelIds = manifest.topLevelIds.toSet()
+        return AgentCorpusValidationIndex(validationParent).use { index ->
+            var indexedRecordCount = 0L
+            sources.forEach { source ->
+                checkUniqueIndexRecord(
+                    index,
+                    sourceKey(source.sourceId),
+                    encodeIndexFields(
+                        source.sourceHash,
+                        source.title,
+                        source.genre.wireName,
+                        source.authorship.wireName,
+                        source.period,
+                    ),
+                    "$V2_SOURCES_PATH source ID",
+                    source.sourceId,
+                )
+                indexedRecordCount += 1
+            }
+
+            var nodeCount = 0
+            archive.streamJsonl(V2_NODES_PATH) { row, _ ->
+                val node = parseNode(row)
+                if (node.path.isEmpty() || node.path.size > MAX_HIERARCHY_DEPTH || node.path.any(String::isBlank)) {
+                    throw AgentBundleException("$V2_NODES_PATH hierarchy path 无效：${node.id}")
+                }
+                if (sourceById[node.sourceId] == null) {
+                    throw AgentBundleException("$V2_NODES_PATH 引用了未声明来源：${node.id}")
+                }
+                checkUniqueIndexRecord(
+                    index,
+                    nodeKey(node.id),
+                    encodeIndexFields(node.sourceId, node.parentId.orEmpty(), node.title, *node.path.toTypedArray()),
+                    "$V2_NODES_PATH id",
+                    node.id,
+                )
+                indexedRecordCount += 1
+                nodeCount += 1
+            }
+            archive.streamJsonl(V2_NODES_PATH) { row, _ ->
+                val node = parseNode(row)
+                if (node.path.last() != node.title) {
+                    throw AgentBundleException("$V2_NODES_PATH hierarchy path 与 title 不一致：${node.id}")
+                }
+                val parentId = node.parentId
+                if (parentId == null) {
+                    if (node.id !in topLevelIds || node.path.size != 1) {
+                        throw AgentBundleException("$V2_NODES_PATH topLevelIds 与根节点不闭合：${node.id}")
+                    }
+                } else {
+                    if (node.id in topLevelIds) {
+                        throw AgentBundleException("$V2_NODES_PATH topLevelIds 包含非根节点：${node.id}")
+                    }
+                    val parent = index.get(nodeKey(parentId))?.let(::decodeNodeIndex)
+                        ?: throw AgentBundleException("$V2_NODES_PATH parent 不存在：$parentId")
+                    if (parent.sourceId != node.sourceId) {
+                        throw AgentBundleException("$V2_NODES_PATH parent 跨 source：${node.id}")
+                    }
+                    if (parent.path != node.path.dropLast(1)) {
+                        throw AgentBundleException("$V2_NODES_PATH hierarchy path 未闭合：${node.id}")
+                    }
+                }
+            }
+            manifest.topLevelIds.forEach { id ->
+                val node = index.get(nodeKey(id))?.let(::decodeNodeIndex)
+                    ?: throw AgentBundleException("manifest topLevelIds 引用了不存在的节点：$id")
+                if (node.parentId.isNotEmpty()) {
+                    throw AgentBundleException("manifest topLevelIds 引用了非根节点：$id")
+                }
+            }
+
+            var chunkCount = 0
+            archive.streamJsonl(V2_CHUNKS_PATH) { row, _ ->
+                val chunk = parseV2Chunk(row)
+                val source = sourceById[chunk.sourceId]
+                    ?: throw AgentBundleException("$V2_CHUNKS_PATH 引用了未声明来源：${chunk.id}")
+                if (
+                    chunk.sourceHash != source.sourceHash ||
+                    chunk.sourceTitle != source.title ||
+                    chunk.genre != source.genre ||
+                    chunk.authorship != source.authorship ||
+                    chunk.period != source.period
+                ) {
+                    throw AgentBundleException("$V2_CHUNKS_PATH 来源 hash/provenance 不匹配：${chunk.id}")
+                }
+                checkUniqueIndexRecord(
+                    index,
+                    chunkKeyForValidation(chunk.id),
+                    encodeIndexFields(chunk.sourceId, chunk.period, chunk.conflictKey),
+                    "$V2_CHUNKS_PATH id",
+                    chunk.id,
+                )
+                validateChunkParents(index, chunk)
+                val sourceReferences = listOf(chunk.sourceId) + chunk.sourceAliases
+                rejectDuplicates(sourceReferences, "$V2_CHUNKS_PATH source reference")
+                sourceReferences.forEach { sourceId ->
+                    if (sourceById[sourceId] == null) {
+                        throw AgentBundleException("$V2_CHUNKS_PATH sourceAliases 引用了未声明来源：$sourceId")
+                    }
+                    checkUniqueIndexRecord(
+                        index,
+                        chunkSourceKey(chunk.id, sourceId),
+                        label = "$V2_CHUNKS_PATH source reference",
+                        id = "$sourceId:${chunk.id}",
+                    )
+                }
+                indexedRecordCount += 1
+                chunkCount += 1
+            }
+            if (chunkCount != manifest.chunkCount) {
+                throw AgentBundleException("$V2_CHUNKS_PATH 数量与 manifest chunkCount 不一致")
+            }
+
+            var duplicateCount = 0
+            archive.streamJsonl(V2_DUPLICATES_PATH) { row, _ ->
+                val duplicate = parseDuplicate(row)
+                checkUniqueIndexRecord(
+                    index,
+                    duplicateKey(duplicate.duplicateChunkId),
+                    label = "$V2_DUPLICATES_PATH id",
+                    id = duplicate.duplicateChunkId,
+                )
+                if (index.contains(chunkKeyForValidation(duplicate.duplicateChunkId))) {
+                    throw AgentBundleException("$V2_DUPLICATES_PATH duplicateChunkId 与 physical chunk 冲突")
+                }
+                val physical = index.get(chunkKeyForValidation(duplicate.physicalChunkId))
+                    ?.let(::decodeChunkIndex)
+                    ?: throw AgentBundleException("$V2_DUPLICATES_PATH 引用了不存在的 physical chunk")
+                if (
+                    sourceById[duplicate.duplicateSourceId] == null ||
+                    sourceById[duplicate.primarySourceId] == null ||
+                    duplicate.primarySourceId != physical.sourceId ||
+                    duplicate.period != physical.period ||
+                    duplicate.conflictKey != physical.conflictKey ||
+                    !index.contains(chunkSourceKey(duplicate.physicalChunkId, duplicate.duplicateSourceId))
+                ) {
+                    throw AgentBundleException("$V2_DUPLICATES_PATH 引用未闭合：${duplicate.duplicateChunkId}")
+                }
+                indexedRecordCount += 1
+                duplicateCount += 1
+            }
+            CorpusGraphValidation(
+                nodeCount = nodeCount,
+                chunkCount = chunkCount,
+                duplicateCount = duplicateCount,
+                diagnostics = V2CorpusValidationDiagnostics(
+                    backend = "disk",
+                    indexedRecordCount = indexedRecordCount,
+                    peakInMemoryRecordCount = 1,
+                    diskBytes = index.diskBytes(),
+                ),
+            )
+        }
+    }
+
+    private fun validateChunkParents(index: AgentCorpusValidationIndex, chunk: V2Chunk) {
+        if (chunk.parentIds.isEmpty()) {
+            throw AgentBundleException("$V2_CHUNKS_PATH 缺少 hierarchy parent：${chunk.id}")
+        }
+        var previousId = ""
+        chunk.parentIds.forEach { nodeId ->
+            val node = index.get(nodeKey(nodeId))?.let(::decodeNodeIndex)
+                ?: throw AgentBundleException("$V2_CHUNKS_PATH 引用了不存在的 hierarchy node：${chunk.id}")
+            if (node.sourceId != chunk.sourceId || node.parentId != previousId) {
+                throw AgentBundleException("$V2_CHUNKS_PATH hierarchy 跨 source 或未闭合：${chunk.id}")
+            }
+            previousId = nodeId
+        }
+    }
+
+    private fun checkUniqueIndexRecord(
+        index: AgentCorpusValidationIndex,
+        key: String,
+        value: ByteArray = byteArrayOf(),
+        label: String,
+        id: String,
+    ) {
+        if (!index.putUnique(key, value)) throw AgentBundleException("$label 包含重复 id：$id")
     }
 
     private fun parseV2Source(
@@ -680,53 +867,157 @@ class AgentBundleReader(
     }
 
     private fun rejectUnsafeCentralDirectory(file: File) {
-        RandomAccessFile(file, "r").use { archive ->
-            val tailSize = minOf(archive.length(), MAX_EOCD_SEARCH_BYTES.toLong()).toInt()
-            if (tailSize < 22) throw AgentBundleException("ZIP central directory 无效")
-            val tail = ByteArray(tailSize)
-            archive.seek(archive.length() - tailSize)
-            archive.readFully(tail)
-            val eocdOffset = tail.findSignatureBackwards(END_OF_CENTRAL_DIRECTORY_SIGNATURE)
-            if (eocdOffset < 0) throw AgentBundleException("ZIP central directory 无效")
-            val diskNumber = tail.readUnsignedShortLe(eocdOffset + 4)
-            val centralDisk = tail.readUnsignedShortLe(eocdOffset + 6)
-            val entryCount = tail.readUnsignedShortLe(eocdOffset + 10)
-            val centralOffset = tail.readUnsignedIntLe(eocdOffset + 16)
-            if (diskNumber != 0 || centralDisk != 0) throw AgentBundleException("不支持分卷 ZIP 人格包")
-            if (entryCount == ZIP64_ENTRY_SENTINEL || centralOffset == ZIP64_OFFSET_SENTINEL) {
+        val centralEntries = try {
+            RandomAccessFile(file, "r").use(::readCentralDirectory)
+        } catch (error: AgentBundleException) {
+            throw error
+        } catch (error: Throwable) {
+            throw AgentBundleException("ZIP central directory 无效", error)
+        }
+        ZipFile(file).use { archive ->
+            val zipEntries = archive.entries().asSequence().toList()
+            if (zipEntries.size != centralEntries.size) {
+                throw AgentBundleException("ZIP central directory 与实际 entries 数量不一致")
+            }
+            centralEntries.zip(zipEntries).forEach { (central, actual) ->
+                if (
+                    central.name != actual.name ||
+                    central.compressedSize != actual.compressedSize ||
+                    central.uncompressedSize != actual.size ||
+                    central.crc != actual.crc ||
+                    central.method != actual.method
+                ) {
+                    throw AgentBundleException("ZIP central directory 与实际 entries 不一致：${central.name}")
+                }
+            }
+        }
+    }
+
+    private fun readCentralDirectory(archive: RandomAccessFile): List<CentralDirectoryEntry> {
+        val archiveLength = archive.length()
+        val tailSize = minOf(archiveLength, MAX_EOCD_SEARCH_BYTES.toLong()).toInt()
+        if (tailSize < END_OF_CENTRAL_DIRECTORY_SIZE) throw AgentBundleException("ZIP central directory 无效")
+        val tailStart = archiveLength - tailSize
+        val tail = ByteArray(tailSize)
+        archive.seek(tailStart)
+        archive.readFully(tail)
+        val candidates = (0..tail.size - END_OF_CENTRAL_DIRECTORY_SIZE).filter { offset ->
+            tail.readIntLe(offset) == END_OF_CENTRAL_DIRECTORY_SIGNATURE &&
+                offset + END_OF_CENTRAL_DIRECTORY_SIZE + tail.readUnsignedShortLe(offset + 20) == tail.size
+        }
+        if (candidates.size != 1) throw AgentBundleException("ZIP central directory EOCD/comment length 无效")
+        val eocdOffset = candidates.single()
+        val eocdAbsoluteOffset = tailStart + eocdOffset
+        val diskNumber = tail.readUnsignedShortLe(eocdOffset + 4)
+        val centralDisk = tail.readUnsignedShortLe(eocdOffset + 6)
+        val entriesOnDisk = tail.readUnsignedShortLe(eocdOffset + 8)
+        val entryCount = tail.readUnsignedShortLe(eocdOffset + 10)
+        val centralSize = tail.readUnsignedIntLe(eocdOffset + 12)
+        val centralOffset = tail.readUnsignedIntLe(eocdOffset + 16)
+        if (diskNumber != 0 || centralDisk != 0 || entriesOnDisk != entryCount) {
+            throw AgentBundleException("不支持分卷 ZIP 人格包或 entry count 不一致")
+        }
+        if (
+            entryCount == ZIP64_ENTRY_SENTINEL ||
+            centralSize == ZIP64_OFFSET_SENTINEL ||
+            centralOffset == ZIP64_OFFSET_SENTINEL
+        ) {
+            throw AgentBundleException("不支持 ZIP64 central directory")
+        }
+        val centralEnd = centralOffset + centralSize
+        if (centralEnd < centralOffset || centralEnd != eocdAbsoluteOffset || centralEnd > archiveLength) {
+            throw AgentBundleException("ZIP central directory offset/size/end 无效")
+        }
+        val entries = ArrayList<CentralDirectoryEntry>(entryCount)
+        archive.seek(centralOffset)
+        repeat(entryCount) {
+            if (archive.filePointer + CENTRAL_DIRECTORY_HEADER_SIZE > centralEnd) {
+                throw AgentBundleException("ZIP central directory header 越界")
+            }
+            val header = ByteArray(CENTRAL_DIRECTORY_HEADER_SIZE)
+            archive.readFully(header)
+            if (header.readIntLe(0) != CENTRAL_DIRECTORY_SIGNATURE) {
+                throw AgentBundleException("ZIP central directory 条目无效")
+            }
+            val hostSystem = header.readUnsignedShortLe(4) ushr 8
+            val flags = header.readUnsignedShortLe(8)
+            val method = header.readUnsignedShortLe(10)
+            val crc = header.readUnsignedIntLe(16)
+            val compressedSize = header.readUnsignedIntLe(20)
+            val uncompressedSize = header.readUnsignedIntLe(24)
+            val fileNameLength = header.readUnsignedShortLe(28)
+            val extraLength = header.readUnsignedShortLe(30)
+            val commentLength = header.readUnsignedShortLe(32)
+            val externalAttributes = header.readUnsignedIntLe(38)
+            val localHeaderOffset = header.readUnsignedIntLe(42)
+            val variableSize = fileNameLength.toLong() + extraLength + commentLength
+            if (archive.filePointer + variableSize > centralEnd) {
+                throw AgentBundleException("ZIP central directory 条目边界无效")
+            }
+            if (
+                compressedSize == ZIP64_OFFSET_SENTINEL ||
+                uncompressedSize == ZIP64_OFFSET_SENTINEL ||
+                localHeaderOffset == ZIP64_OFFSET_SENTINEL
+            ) {
                 throw AgentBundleException("不支持 ZIP64 central directory")
             }
-            archive.seek(centralOffset)
-            repeat(entryCount) {
-                val header = ByteArray(CENTRAL_DIRECTORY_HEADER_SIZE)
-                archive.readFully(header)
-                if (header.readIntLe(0) != CENTRAL_DIRECTORY_SIGNATURE) {
-                    throw AgentBundleException("ZIP central directory 条目无效")
-                }
-                val hostSystem = header.readUnsignedShortLe(4) ushr 8
-                val flags = header.readUnsignedShortLe(8)
-                val fileNameLength = header.readUnsignedShortLe(28)
-                val extraLength = header.readUnsignedShortLe(30)
-                val commentLength = header.readUnsignedShortLe(32)
-                val externalAttributes = header.readUnsignedIntLe(38)
-                val fileNameBytes = ByteArray(fileNameLength)
-                archive.readFully(fileNameBytes)
-                val fileName = fileNameBytes.decodeToString()
-                safePath(fileName)
-                if (flags and ENCRYPTED_FLAG != 0) throw AgentBundleException("人格包不允许加密条目：$fileName")
-                if (hostSystem == UNIX_HOST_SYSTEM) {
-                    val mode = (externalAttributes ushr 16).toInt()
-                    val type = mode and UNIX_FILE_TYPE_MASK
-                    if (type != 0 && type != UNIX_REGULAR_FILE_TYPE) {
-                        val label = if (type == UNIX_SYMLINK_TYPE) "符号链接" else "特殊文件"
-                        throw AgentBundleException("人格包不允许$label：$fileName")
-                    }
-                    if (mode and UNIX_EXECUTABLE_MASK != 0) {
-                        throw AgentBundleException("人格包不允许可执行文件：$fileName")
-                    }
-                }
-                archive.seek(archive.filePointer + extraLength + commentLength)
-            }
+            val fileNameBytes = ByteArray(fileNameLength)
+            archive.readFully(fileNameBytes)
+            val fileName = safePath(fileNameBytes.decodeToString())
+            if (flags and ENCRYPTED_FLAG != 0) throw AgentBundleException("人格包不允许加密条目：$fileName")
+            validateUnixMode(hostSystem, externalAttributes, fileName)
+            archive.seek(archive.filePointer + extraLength + commentLength)
+            validateLocalHeader(archive, localHeaderOffset, centralOffset, fileName)
+            entries += CentralDirectoryEntry(
+                name = fileName,
+                compressedSize = compressedSize,
+                uncompressedSize = uncompressedSize,
+                crc = crc,
+                method = method,
+            )
+        }
+        if (archive.filePointer != centralEnd) {
+            throw AgentBundleException("ZIP central directory size 与 entries 边界不一致")
+        }
+        return entries
+    }
+
+    private fun validateLocalHeader(
+        archive: RandomAccessFile,
+        localHeaderOffset: Long,
+        centralOffset: Long,
+        expectedName: String,
+    ) {
+        if (localHeaderOffset < 0 || localHeaderOffset + LOCAL_FILE_HEADER_SIZE > centralOffset) {
+            throw AgentBundleException("ZIP local header offset 无效：$expectedName")
+        }
+        val returnOffset = archive.filePointer
+        archive.seek(localHeaderOffset)
+        val header = ByteArray(LOCAL_FILE_HEADER_SIZE)
+        archive.readFully(header)
+        if (header.readIntLe(0) != LOCAL_FILE_HEADER_SIGNATURE) {
+            throw AgentBundleException("ZIP local header 无效：$expectedName")
+        }
+        val nameLength = header.readUnsignedShortLe(26)
+        val extraLength = header.readUnsignedShortLe(28)
+        if (localHeaderOffset + LOCAL_FILE_HEADER_SIZE + nameLength + extraLength > centralOffset) {
+            throw AgentBundleException("ZIP local header 边界无效：$expectedName")
+        }
+        val name = ByteArray(nameLength).also(archive::readFully).decodeToString()
+        if (name != expectedName) throw AgentBundleException("ZIP local/central 文件名不一致：$expectedName")
+        archive.seek(returnOffset)
+    }
+
+    private fun validateUnixMode(hostSystem: Int, externalAttributes: Long, fileName: String) {
+        if (hostSystem != UNIX_HOST_SYSTEM) return
+        val mode = (externalAttributes ushr 16).toInt()
+        val type = mode and UNIX_FILE_TYPE_MASK
+        if (type != 0 && type != UNIX_REGULAR_FILE_TYPE) {
+            val label = if (type == UNIX_SYMLINK_TYPE) "符号链接" else "特殊文件"
+            throw AgentBundleException("人格包不允许$label：$fileName")
+        }
+        if (mode and UNIX_EXECUTABLE_MASK != 0) {
+            throw AgentBundleException("人格包不允许可执行文件：$fileName")
         }
     }
 
@@ -862,6 +1153,12 @@ class AgentBundleReader(
         }
         val required = root.stringList("requiredCorpusIds", V2_INSTALL_PLAN_PATH).map(::identifier)
         rejectDuplicates(required, "required corpus ID")
+        val declaredRequired = packages.filter {
+            it.type == V2PackageType.CORPUS && it.installClass == V2InstallClass.REQUIRED
+        }.map(V2InstallPackage::id).toSet()
+        if (required.toSet() != declaredRequired) {
+            throw AgentBundleException("required corpus 集合与 required package 声明不一致")
+        }
         required.forEach { id ->
             val declaration = packages.singleOrNull { it.id == id }
                 ?: throw AgentBundleException("install plan 缺少 required corpus：$id")
@@ -1104,12 +1401,16 @@ class AgentBundleReader(
         private const val MAX_JSONL_LINE_BYTES = 4 * 1024 * 1024
         private const val MAX_EOCD_SEARCH_BYTES = 65_557
         private const val MAX_PATH_DEPTH = 12
+        private const val MAX_HIERARCHY_DEPTH = 128
         private const val MAX_PACKAGE_NESTING = 2
         private const val MAX_COMPRESSION_RATIO = 200L
         private const val MIN_RATIO_CHECK_BYTES = 1024 * 1024
         private const val CENTRAL_DIRECTORY_HEADER_SIZE = 46
+        private const val LOCAL_FILE_HEADER_SIZE = 30
+        private const val END_OF_CENTRAL_DIRECTORY_SIZE = 22
         private const val END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50
         private const val CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50
+        private const val LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50
         private const val ZIP64_ENTRY_SENTINEL = 0xffff
         private const val ZIP64_OFFSET_SENTINEL = 0xffffffffL
         private const val UNIX_HOST_SYSTEM = 3
@@ -1160,6 +1461,51 @@ class AgentBundleReader(
             V2_DUPLICATES_PATH,
         )
     }
+}
+
+private data class CorpusGraphValidation(
+    val nodeCount: Int,
+    val chunkCount: Int,
+    val duplicateCount: Int,
+    val diagnostics: V2CorpusValidationDiagnostics,
+)
+
+private data class CentralDirectoryEntry(
+    val name: String,
+    val compressedSize: Long,
+    val uncompressedSize: Long,
+    val crc: Long,
+    val method: Int,
+)
+
+private data class NodeIndexRecord(
+    val sourceId: String,
+    val parentId: String,
+    val path: List<String>,
+)
+
+private data class ChunkIndexRecord(
+    val sourceId: String,
+    val period: String,
+    val conflictKey: String,
+)
+
+private fun sourceKey(sourceId: String): String = "source\u001f$sourceId"
+private fun nodeKey(nodeId: String): String = "node\u001f$nodeId"
+private fun chunkKeyForValidation(chunkId: String): String = "chunk\u001f$chunkId"
+private fun chunkSourceKey(chunkId: String, sourceId: String): String = "chunk-source\u001f$chunkId\u001f$sourceId"
+private fun duplicateKey(chunkId: String): String = "duplicate\u001f$chunkId"
+
+private fun decodeNodeIndex(payload: ByteArray): NodeIndexRecord {
+    val fields = decodeIndexFields(payload)
+    if (fields.size < 4) throw AgentBundleException("语料 hierarchy 磁盘索引损坏")
+    return NodeIndexRecord(fields[0], fields[1], fields.drop(3))
+}
+
+private fun decodeChunkIndex(payload: ByteArray): ChunkIndexRecord {
+    val fields = decodeIndexFields(payload)
+    if (fields.size != 3) throw AgentBundleException("语料 chunk 磁盘索引损坏")
+    return ChunkIndexRecord(fields[0], fields[1], fields[2])
 }
 
 fun interface AgentSignatureVerifier {

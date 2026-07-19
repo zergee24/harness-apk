@@ -76,7 +76,15 @@ data class V2Corpus(
     val nodeCount: Int,
     val chunkCount: Int,
     val duplicateCount: Int,
+    val validationDiagnostics: V2CorpusValidationDiagnostics,
 ) : ParsedAgentPackage()
+
+data class V2CorpusValidationDiagnostics(
+    val backend: String,
+    val indexedRecordCount: Long,
+    val peakInMemoryRecordCount: Int,
+    val diskBytes: Long,
+)
 
 data class V2Source(
     override val file: File,
