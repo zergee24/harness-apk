@@ -16,6 +16,7 @@ import java.nio.file.Path
 import java.nio.file.SecureDirectoryStream
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributeView
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.ArrayList
 import java.util.Collections
 import java.util.UUID
@@ -23,26 +24,31 @@ import java.util.UUID
 class PersistedAttachmentBatch internal constructor(
     attachments: List<PendingImageAttachment>,
     private val ownerToken: Any,
-    generatedNames: List<String>,
+    generatedEntries: List<OwnedAttachmentEntry>,
     internal val directoryFileKey: Any,
 ) {
     val attachments: List<PendingImageAttachment> = Collections.unmodifiableList(ArrayList(attachments))
 
-    private val generatedNames: List<String> = Collections.unmodifiableList(ArrayList(generatedNames))
+    private val generatedEntries: List<OwnedAttachmentEntry> = Collections.unmodifiableList(ArrayList(generatedEntries))
 
     internal fun isOwnedBy(token: Any): Boolean = ownerToken === token
 
-    internal fun generatedEntries(): List<Pair<PendingImageAttachment, String>> = attachments.zip(generatedNames)
+    internal fun generatedEntries(): List<OwnedAttachmentEntry> = generatedEntries
 
-    internal fun hasMatchingGeneratedEntries(): Boolean = attachments.size == generatedNames.size
+    internal fun hasMatchingGeneratedEntries(): Boolean = attachments.size == generatedEntries.size
 }
+
+internal data class OwnedAttachmentEntry(
+    val name: String,
+    val fileKey: Any,
+)
 
 internal data class QueuedAttachmentStoreTestHooks(
     val beforeChildDirectoryCreate: () -> Unit = {},
     val beforeWrite: (temporaryName: String, finalName: String) -> Unit = { _, _ -> },
     val beforeFinalCreate: (temporaryName: String, finalName: String) -> Unit = { _, _ -> },
     val copyTemporaryToFinal: (InputStream, OutputStream) -> Unit = { input, output -> input.copyTo(output) },
-    val beforeCleanupDelete: (finalName: String) -> Unit = {},
+    val beforeOwnedEntryMove: (name: String) -> Unit = {},
 )
 
 class QueuedAttachmentStore internal constructor(
@@ -52,9 +58,11 @@ class QueuedAttachmentStore internal constructor(
     },
     private val onBatchPersisted: () -> Unit = {},
     private val testHooks: QueuedAttachmentStoreTestHooks = QueuedAttachmentStoreTestHooks(),
+    private val filesDirectoryProvider: () -> File = { context.applicationContext.filesDir },
 ) {
-    private val trustedFilesDirectory = context.applicationContext.filesDir.canonicalFile
-    private val trustedFilesPath = trustedFilesDirectory.toPath()
+    private val trustedRoot = initializeTrustedRoot(filesDirectoryProvider())
+    private val trustedFilesPath = trustedRoot.path
+    private val trustedRootFileKey = trustedRoot.fileKey
     private val rawManagedDirectory = trustedFilesPath.resolve(MANAGED_DIRECTORY_NAME)
     private val ownerToken = Any()
 
@@ -68,18 +76,18 @@ class QueuedAttachmentStore internal constructor(
                     sources.forEach { source ->
                         val persisted = persistOne(source, managedDirectory)
                         record.attachments += persisted.attachment
-                        record.generatedNames += persisted.finalName
+                        record.generatedEntries += persisted.finalEntry
                     }
                     onBatchPersisted()
                     requireCurrentDirectoryFileKey(parent, record.directoryFileKey)
                     PersistedAttachmentBatch(
                         attachments = record.attachments,
                         ownerToken = record.ownerToken,
-                        generatedNames = record.generatedNames,
+                        generatedEntries = record.generatedEntries,
                         directoryFileKey = record.directoryFileKey,
                     )
                 } catch (error: Throwable) {
-                    runCatching { deleteGeneratedFiles(managedDirectory, record.generatedNames) }
+                    deleteOwnedEntries(managedDirectory, record.generatedEntries)
                     throw error
                 }
             }
@@ -91,11 +99,9 @@ class QueuedAttachmentStore internal constructor(
             withTrustedParent { parent ->
                 openCurrentManagedDirectory(parent).use { managedDirectory ->
                     if (directoryFileKey(managedDirectory) != batch.directoryFileKey) return@use
-                    batch.generatedEntries().forEach { (attachment, finalName) ->
-                        if (!isCurrentManagedAttachment(attachment, finalName)) return@forEach
-                        if (!isRegularNonSymlink(managedDirectory, finalName)) return@forEach
-                        testHooks.beforeCleanupDelete(finalName)
-                        deleteFileIfPresent(managedDirectory, finalName)
+                    batch.attachments.zip(batch.generatedEntries()).forEach { (attachment, entry) ->
+                        if (!isCurrentManagedAttachment(attachment, entry.name)) return@forEach
+                        deleteOwnedEntry(managedDirectory, entry.name, entry.fileKey)
                     }
                 }
             }
@@ -114,8 +120,8 @@ class QueuedAttachmentStore internal constructor(
         val uuid = UUID.randomUUID().toString()
         val finalName = "queued-$uuid$extension"
         val temporaryName = "temporary-$uuid.tmp"
-        var temporaryCreatedByThisCall = false
-        var finalCreatedByThisCall = false
+        var temporaryEntry: OwnedAttachmentEntry? = null
+        var finalEntry: OwnedAttachmentEntry? = null
         try {
             testHooks.beforeWrite(temporaryName, finalName)
             inputOpener(source.uri).use { input ->
@@ -124,7 +130,7 @@ class QueuedAttachmentStore internal constructor(
                     Path.of(temporaryName),
                     setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
                 ).use { channel ->
-                    temporaryCreatedByThisCall = true
+                    temporaryEntry = ownedRegularFile(managedDirectory, temporaryName)
                     Channels.newOutputStream(channel).use { output -> input.copyTo(output) }
                 }
             }
@@ -133,7 +139,7 @@ class QueuedAttachmentStore internal constructor(
                 Path.of(finalName),
                 setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
             ).use { finalChannel ->
-                finalCreatedByThisCall = true
+                finalEntry = ownedRegularFile(managedDirectory, finalName)
                 managedDirectory.newByteChannel(
                     Path.of(temporaryName),
                     setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS),
@@ -144,38 +150,24 @@ class QueuedAttachmentStore internal constructor(
                     )
                 }
             }
-            deleteFileIfPresent(managedDirectory, temporaryName)
-            temporaryCreatedByThisCall = false
+            deleteOwnedEntry(managedDirectory, temporaryName, requireNotNull(temporaryEntry).fileKey)
+            temporaryEntry = null
             return PersistedAttachment(
                 attachment = PendingImageAttachment(
                     Uri.fromFile(rawManagedDirectory.resolve(finalName).toFile()),
                     source.mimeType,
                 ),
-                finalName = finalName,
+                finalEntry = requireNotNull(finalEntry),
             )
         } catch (error: Throwable) {
-            if (temporaryCreatedByThisCall) {
-                runCatching { deleteFileIfPresent(managedDirectory, temporaryName) }
-            }
-            if (finalCreatedByThisCall) {
-                runCatching { deleteFileIfPresent(managedDirectory, finalName) }
-            }
+            temporaryEntry?.let { entry -> runCatching { deleteOwnedEntry(managedDirectory, entry.name, entry.fileKey) } }
+            finalEntry?.let { entry -> runCatching { deleteOwnedEntry(managedDirectory, entry.name, entry.fileKey) } }
             throw error
         }
     }
 
     private fun openManagedDirectoryForPersist(parent: SecureDirectoryStream<Path>): SecureDirectoryStream<Path> =
-        try {
-            openCurrentManagedDirectory(parent)
-        } catch (_: NoSuchFileException) {
-            testHooks.beforeChildDirectoryCreate()
-            try {
-                Files.createDirectory(rawManagedDirectory)
-            } catch (_: FileAlreadyExistsException) {
-                // Another persist won creation; open it through the pinned parent below.
-            }
-            openCurrentManagedDirectory(parent)
-        }
+        openCurrentManagedDirectory(parent)
 
     private fun openCurrentManagedDirectory(parent: SecureDirectoryStream<Path>): SecureDirectoryStream<Path> {
         val child = try {
@@ -215,29 +207,92 @@ class QueuedAttachmentStore internal constructor(
         return attachment.uri.path == rawManagedDirectory.resolve(finalName).toString()
     }
 
-    private fun isRegularNonSymlink(directory: SecureDirectoryStream<Path>, finalName: String): Boolean = runCatching {
+    private fun ownedRegularFile(directory: SecureDirectoryStream<Path>, name: String): OwnedAttachmentEntry {
         val attributes = directory.getFileAttributeView(
-            Path.of(finalName),
+            Path.of(name),
             BasicFileAttributeView::class.java,
             LinkOption.NOFOLLOW_LINKS,
         ).readAttributes()
-        attributes.isRegularFile && !attributes.isSymbolicLink
-    }.getOrDefault(false)
-
-    private fun deleteGeneratedFiles(directory: SecureDirectoryStream<Path>, names: List<String>) {
-        names.forEach { name -> deleteFileIfPresent(directory, name) }
+        check(attributes.isRegularFile && !attributes.isSymbolicLink) { "会话图片文件无效" }
+        return OwnedAttachmentEntry(name, requireNotNull(attributes.fileKey()) { "无法确认会话图片文件身份" })
     }
 
-    private fun deleteFileIfPresent(directory: SecureDirectoryStream<Path>, name: String) {
-        try {
-            directory.deleteFile(Path.of(name))
-        } catch (_: NoSuchFileException) {
+    private fun deleteOwnedEntries(directory: SecureDirectoryStream<Path>, entries: List<OwnedAttachmentEntry>) {
+        entries.forEach { entry ->
+            runCatching { deleteOwnedEntry(directory, entry.name, entry.fileKey) }
         }
+    }
+
+    private fun deleteOwnedEntry(
+        directory: SecureDirectoryStream<Path>,
+        name: String,
+        expectedFileKey: Any,
+    ) {
+        if (!managedEntryName.matches(name)) return
+        if (currentRegularFileKey(directory, name) != expectedFileKey) return
+
+        testHooks.beforeOwnedEntryMove(name)
+        val quarantineName = availableQuarantineName(directory)
+        try {
+            directory.move(Path.of(name), directory, Path.of(quarantineName))
+        } catch (_: NoSuchFileException) {
+            return
+        }
+
+        if (currentRegularFileKey(directory, quarantineName) == expectedFileKey) {
+            try {
+                directory.deleteFile(Path.of(quarantineName))
+            } catch (_: NoSuchFileException) {
+            }
+            return
+        }
+        restoreQuarantineIfOriginalMissing(directory, quarantineName, name)
+    }
+
+    private fun currentRegularFileKey(directory: SecureDirectoryStream<Path>, name: String): Any? = try {
+        val attributes = directory.getFileAttributeView(
+            Path.of(name),
+            BasicFileAttributeView::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        ).readAttributes()
+        if (attributes.isRegularFile && !attributes.isSymbolicLink) attributes.fileKey() else null
+    } catch (_: NoSuchFileException) {
+        null
+    }
+
+    private fun availableQuarantineName(directory: SecureDirectoryStream<Path>): String {
+        repeat(MAX_QUARANTINE_NAME_ATTEMPTS) {
+            val name = "$QUARANTINE_PREFIX${UUID.randomUUID()}"
+            if (!entryExists(directory, name)) return name
+        }
+        throw IOException("无法分配附件回收隔离名")
+    }
+
+    private fun entryExists(directory: SecureDirectoryStream<Path>, name: String): Boolean = try {
+        directory.getFileAttributeView(
+            Path.of(name),
+            BasicFileAttributeView::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        ).readAttributes()
+        true
+    } catch (_: NoSuchFileException) {
+        false
+    }
+
+    private fun restoreQuarantineIfOriginalMissing(
+        directory: SecureDirectoryStream<Path>,
+        quarantineName: String,
+        originalName: String,
+    ) {
+        if (entryExists(directory, originalName)) return
+        runCatching { directory.move(Path.of(quarantineName), directory, Path.of(originalName)) }
     }
 
     private inline fun <T> withTrustedParent(block: (SecureDirectoryStream<Path>) -> T): T {
         Files.newDirectoryStream(trustedFilesPath).use { stream ->
-            return block(requireSecureDirectory(stream, "当前平台不支持安全应用文件目录句柄"))
+            val parent = requireSecureDirectory(stream, "当前平台不支持安全应用文件目录句柄")
+            check(directoryFileKey(parent) == trustedRootFileKey) { "应用文件目录在运行期间发生变化" }
+            return block(parent)
         }
     }
 
@@ -250,22 +305,66 @@ class QueuedAttachmentStore internal constructor(
         throw IllegalStateException(unsupportedMessage)
     }
 
+    private fun initializeTrustedRoot(filesDirectory: File): TrustedRoot {
+        check(filesDirectory.isAbsolute) { "应用文件目录必须是绝对路径" }
+        val absoluteDirectory = filesDirectory.absoluteFile
+        val absolutePath = absoluteDirectory.toPath()
+        check(!Files.isSymbolicLink(absolutePath)) { "应用文件目录不能是符号链接" }
+        val rootFileKey = directoryFileKey(absolutePath)
+        val canonicalPath = absoluteDirectory.canonicalFile.toPath()
+        check(!Files.isSymbolicLink(canonicalPath)) { "应用文件目录不能是符号链接" }
+        check(directoryFileKey(canonicalPath) == rootFileKey) { "应用文件目录解析结果不可信" }
+
+        synchronized(managedDirectoryInitializationLock) {
+            check(directoryFileKey(absolutePath) == rootFileKey) { "应用文件目录在初始化期间发生变化" }
+            try {
+                testHooks.beforeChildDirectoryCreate()
+                Files.createDirectory(absolutePath.resolve(MANAGED_DIRECTORY_NAME))
+            } catch (_: FileAlreadyExistsException) {
+                // Another Store constructor initialized the child first.
+            }
+            check(directoryFileKey(absolutePath) == rootFileKey) { "应用文件目录在初始化期间发生变化" }
+        }
+        return TrustedRoot(absolutePath, rootFileKey)
+    }
+
+    private fun directoryFileKey(path: Path): Any {
+        val attributes = Files.readAttributes(
+            path,
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        check(attributes.isDirectory && !attributes.isSymbolicLink) { "应用文件目录无效" }
+        return requireNotNull(attributes.fileKey()) { "无法确认应用文件目录身份" }
+    }
+
     private class BatchRecord(
         val ownerToken: Any,
         val directoryFileKey: Any,
         val attachments: MutableList<PendingImageAttachment> = mutableListOf(),
-        val generatedNames: MutableList<String> = mutableListOf(),
+        val generatedEntries: MutableList<OwnedAttachmentEntry> = mutableListOf(),
     )
 
     private data class PersistedAttachment(
         val attachment: PendingImageAttachment,
-        val finalName: String,
+        val finalEntry: OwnedAttachmentEntry,
+    )
+
+    private data class TrustedRoot(
+        val path: Path,
+        val fileKey: Any,
     )
 
     private companion object {
         const val MANAGED_DIRECTORY_NAME = "chat-attachments"
+        const val QUARANTINE_PREFIX = ".queued-cleanup-"
+        const val MAX_QUARANTINE_NAME_ATTEMPTS = 16
         val managedFileName = Regex(
             """queued-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp)""",
         )
+        val managedEntryName = Regex(
+            """(?:queued-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp)|temporary-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp)""",
+        )
+        val managedDirectoryInitializationLock = Any()
     }
 }
