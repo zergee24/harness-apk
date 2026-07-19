@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
+import re
 from typing import Any
 
 from .models import BuildError
 
 
 WORKSPACE_V2_SCHEMA_VERSION = 2
+IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{1,127}")
 
 
 class SourceGenre(StrEnum):
@@ -117,7 +119,7 @@ class SourceRecord:
         except ValueError as error:
             raise BuildError(f"source authorship 无效：{source.get('authorship')}") from error
         return cls(
-            source_id=_string(source.get("sourceId"), "source.sourceId"),
+            source_id=identifier(source.get("sourceId"), "source.sourceId"),
             title=_string(source.get("title"), "source.title"),
             file_name=_display_file_name(source.get("fileName"), "source.fileName"),
             stored_name=_stored_file_name(source.get("storedName"), "source.storedName"),
@@ -169,7 +171,7 @@ class WorkspaceV2:
         _reject_duplicates((source.source_id for source in sources), "sourceId")
         _reject_duplicates((source.stored_name for source in sources), "storedName")
         return cls(
-            agent_id=_string(agent.get("id"), "agent.id"),
+            agent_id=identifier(agent.get("id"), "agent.id"),
             name=_string(agent.get("name"), "agent.name"),
             version=_positive_int(agent.get("version"), "agent.version"),
             assets=AgentAssetPaths.from_dict(manifest.get("assets")),
@@ -187,6 +189,16 @@ def _string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BuildError(f"{label} 必须是非空字符串")
     return value.strip()
+
+
+def identifier(value: Any, label: str) -> str:
+    """Normalize and validate portable workspace identifiers."""
+    if not isinstance(value, str):
+        raise BuildError(f"{label} 只能包含字母、数字、点、下划线和连字符")
+    normalized = value.strip()
+    if not IDENTIFIER_PATTERN.fullmatch(normalized):
+        raise BuildError(f"{label} 只能包含字母、数字、点、下划线和连字符")
+    return normalized
 
 
 def _workspace_path(value: Any, label: str) -> str:

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -155,6 +157,28 @@ class WorkspaceV2Test(unittest.TestCase):
                 self.assertEqual(file_name, loaded.sources[0].file_name)
                 self.assertEqual(1, len(Path(loaded.sources[0].stored_name).parts))
                 self.assertTrue((workspace / "sources" / loaded.sources[0].stored_name).is_file())
+
+    def test_prepare_v2_round_trips_near_limit_file_name_with_fixed_length_ids(self):
+        file_name = "a" * 246 + ".md"
+        source = self.root / file_name
+        source.write_text("# 资料\n\n可被读取。", encoding="utf-8")
+
+        workspace = prepare_workspace_v2(
+            [source],
+            self.root / "long-file-name",
+            agent_id="person.researcher",
+            name="资料研究者",
+            version=2,
+        )
+        loaded = load_workspace_v2(workspace)
+        record = loaded.sources[0]
+
+        self.assertEqual(file_name, record.file_name)
+        self.assertEqual(40, len(record.source_id))
+        self.assertRegex(record.source_id, r"^source-[0-9a-f]{16}-[0-9a-f]{16}$")
+        self.assertLessEqual(len(record.stored_name.encode("utf-8")), 200)
+        self.assertTrue(record.stored_name.endswith(".md"))
+        self.assertTrue((workspace / "sources" / record.stored_name).is_file())
 
     def test_prepare_v2_preserves_exact_macos_display_names_when_reusing_catalog(self):
         file_names = (
@@ -330,6 +354,164 @@ class WorkspaceV2Test(unittest.TestCase):
             version=2,
         )
         self.assertEqual(2, load_workspace_v2(workspace).version)
+
+    def test_prepare_v2_uses_shared_agent_identifier_rule_without_output(self):
+        trimmed = prepare_workspace_v2(
+            [self.source],
+            self.root / "trimmed-agent-id",
+            agent_id=" person.researcher ",
+            name="资料研究者",
+            version=2,
+        )
+        self.assertEqual("person.researcher", load_workspace_v2(trimmed).agent_id)
+
+        for index, value in enumerate(("../invalid", "person/researcher", "person researcher", "a")):
+            with self.subTest(value=value):
+                output = self.root / f"invalid-agent-api-{index}"
+                with self.assertRaisesRegex(BuildError, "agent id 只能包含"):
+                    prepare_workspace_v2(
+                        [self.source],
+                        output,
+                        agent_id=value,
+                        name="资料研究者",
+                        version=2,
+                    )
+                self.assertFalse(output.exists())
+
+        valid_max = "a" + "x" * 127
+        invalid_max = "a" + "x" * 128
+        self.assertEqual(
+            valid_max,
+            load_workspace_v2(
+                prepare_workspace_v2(
+                    [self.source],
+                    self.root / "max-agent-id",
+                    agent_id=valid_max,
+                    name="资料研究者",
+                    version=2,
+                )
+            ).agent_id,
+        )
+        with self.assertRaisesRegex(BuildError, "agent id 只能包含"):
+            prepare_workspace_v2(
+                [self.source],
+                self.root / "too-long-agent-id",
+                agent_id=invalid_max,
+                name="资料研究者",
+                version=2,
+            )
+
+        cli_output = self.root / "invalid-agent-cli"
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(
+                1,
+                main(
+                    [
+                        "prepare-v2",
+                        "--agent-id",
+                        "../invalid",
+                        "--name",
+                        "资料研究者",
+                        "--version",
+                        "2",
+                        "--output",
+                        str(cli_output),
+                        str(self.source),
+                    ]
+                ),
+            )
+        self.assertEqual("", stdout.getvalue())
+        self.assertFalse(cli_output.exists())
+
+    def test_prepare_v2_and_loader_share_source_identifier_rule(self):
+        catalog = self.root / "invalid-source-id-catalog.json"
+        catalog.write_text(
+            json.dumps(
+                {
+                    "sources": [
+                        {
+                            "sourceId": "../invalid",
+                            "fileName": "source.md",
+                            "title": "调查研究",
+                            "genre": "speech",
+                            "authorship": "direct",
+                            "period": "1926",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        api_output = self.root / "invalid-source-id-api"
+        with self.assertRaisesRegex(BuildError, "来源目录 sourceId 只能包含"):
+            prepare_workspace_v2(
+                [self.source],
+                api_output,
+                agent_id="person.researcher",
+                name="资料研究者",
+                version=2,
+                source_catalog_path=catalog,
+            )
+        self.assertFalse(api_output.exists())
+
+        cli_output = self.root / "invalid-source-id-cli"
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(
+                1,
+                main(
+                    [
+                        "prepare-v2",
+                        "--agent-id",
+                        "person.researcher",
+                        "--name",
+                        "资料研究者",
+                        "--version",
+                        "2",
+                        "--output",
+                        str(cli_output),
+                        "--source-catalog",
+                        str(catalog),
+                        str(self.source),
+                    ]
+                ),
+            )
+        self.assertEqual("", stdout.getvalue())
+        self.assertFalse(cli_output.exists())
+
+        catalog_data = json.loads(catalog.read_text("utf-8"))
+        catalog_data["sources"][0]["sourceId"] = " source.research "
+        catalog.write_text(json.dumps(catalog_data), encoding="utf-8")
+        trimmed_workspace = prepare_workspace_v2(
+            [self.source],
+            self.root / "trimmed-source-id",
+            agent_id="person.researcher",
+            name="资料研究者",
+            version=2,
+            source_catalog_path=catalog,
+        )
+        self.assertEqual("source.research", load_workspace_v2(trimmed_workspace).sources[0].source_id)
+
+        workspace = self._prepare_publishable("invalid-loaded-identifiers")
+        manifest_path = workspace / "workspace.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        for field, label in (("agent", "agent.id"), ("source", "source.sourceId")):
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(manifest))
+                if field == "agent":
+                    changed["agent"]["id"] = "../invalid"
+                else:
+                    changed["sources"][0]["sourceId"] = "../invalid"
+                manifest_path.write_text(json.dumps(changed), encoding="utf-8")
+
+                with self.assertRaisesRegex(BuildError, label):
+                    load_workspace_v2(workspace)
+                report = validate_workspace_v2(workspace)
+                self.assertFalse(report.publishable)
+                self.assertTrue(any(label in error for error in report.errors))
+                self.assertEqual(2, main(["validate-v2", str(workspace)]))
 
     def test_prepare_v2_cleans_output_after_copy_failure(self):
         output = self.root / "copy-failure"

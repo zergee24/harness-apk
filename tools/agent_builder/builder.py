@@ -22,6 +22,7 @@ from .schema_v2 import (
     SourceRecord,
     WorkspaceV2,
     WORKSPACE_V2_SCHEMA_VERSION,
+    identifier,
 )
 
 
@@ -31,6 +32,9 @@ CHUNK_OVERLAP_CHARS = 120
 ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
 ALLOWED_PACKAGE_SUFFIXES = {".json", ".jsonl", ".md", ".txt"}
 SOURCE_HASH_BUFFER_SIZE = 1024 * 1024
+V2_STORED_NAME_MAX_BYTES = 200
+V2_SOURCE_HASH_PREFIX_LENGTH = 16
+V2_FILE_NAME_HASH_PREFIX_LENGTH = 16
 
 
 def prepare_workspace(
@@ -40,7 +44,7 @@ def prepare_workspace(
     name: str,
     version: int,
 ) -> Path:
-    agent_id = _identifier(agent_id, "agent id")
+    agent_id = identifier(agent_id, "agent id")
     name = name.strip()
     if not name:
         raise BuildError("智能体名称不能为空")
@@ -148,7 +152,7 @@ def prepare_workspace_v2(
     version: int,
     source_catalog_path: Path | None = None,
 ) -> Path:
-    agent_id = _identifier(agent_id, "agent id")
+    agent_id = identifier(agent_id, "agent id")
     name = name.strip()
     if not name:
         raise BuildError("智能体名称不能为空")
@@ -248,7 +252,11 @@ def _load_source_catalog(path: Path) -> dict[str, dict[str, str]]:
             key: (
                 _catalog_file_name(row.get(key), f"来源目录 {key}")
                 if key == "fileName"
-                else _catalog_string(row.get(key), f"来源目录 {key}")
+                else (
+                    identifier(row.get(key), f"来源目录 {key}")
+                    if key == "sourceId"
+                    else _catalog_string(row.get(key), f"来源目录 {key}")
+                )
             )
             for key in ("sourceId", "fileName", "title", "genre", "authorship", "period")
         }
@@ -282,13 +290,13 @@ def _build_source_records(
     records: list[SourceRecord] = []
     for document in documents:
         metadata = catalog.get(document.source_path.name) if catalog else None
-        stored_name = f"{document.source_hash[:16]}-{_safe_filename(document.source_path.name)}"
+        stored_name = _v2_stored_name(document)
         records.append(
             SourceRecord(
                 source_id=(
                     metadata["sourceId"]
                     if metadata
-                    else f"source-{document.source_hash[:16]}-{_safe_filename(document.source_path.name)}"
+                    else _v2_default_source_id(document)
                 ),
                 title=metadata["title"] if metadata else _default_source_title(document),
                 file_name=document.source_path.name,
@@ -804,16 +812,33 @@ def _chunk_text(text: str) -> list[str]:
     return chunks
 
 
-def _identifier(value: str, label: str) -> str:
-    normalized = value.strip()
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,127}", normalized):
-        raise BuildError(f"{label} 只能包含字母、数字、点、下划线和连字符")
-    return normalized
-
-
 def _safe_filename(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-")
     return normalized or "asset"
+
+
+def _v2_default_source_id(document: Any) -> str:
+    return (
+        f"source-{document.source_hash[:V2_SOURCE_HASH_PREFIX_LENGTH]}-"
+        f"{_v2_file_name_hash(document.source_path.name)[:V2_FILE_NAME_HASH_PREFIX_LENGTH]}"
+    )
+
+
+def _v2_stored_name(document: Any) -> str:
+    suffix = document.source_path.suffix.lower()
+    prefix = (
+        f"{document.source_hash[:V2_SOURCE_HASH_PREFIX_LENGTH]}-"
+        f"{_v2_file_name_hash(document.source_path.name)[:V2_FILE_NAME_HASH_PREFIX_LENGTH]}-"
+    )
+    available_stem_bytes = V2_STORED_NAME_MAX_BYTES - len(prefix.encode("utf-8")) - len(suffix.encode("utf-8"))
+    if available_stem_bytes < 1:
+        raise BuildError("来源文件扩展名过长，无法生成可移植 storedName")
+    stem = _safe_filename(document.source_path.stem)[:available_stem_bytes]
+    return f"{prefix}{stem}{suffix}"
+
+
+def _v2_file_name_hash(file_name: str) -> str:
+    return hashlib.sha256(file_name.encode("utf-8")).hexdigest()
 
 
 def _safe_relative_path(value: str) -> str:
