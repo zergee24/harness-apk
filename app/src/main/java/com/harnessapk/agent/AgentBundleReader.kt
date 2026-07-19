@@ -1,5 +1,6 @@
 package com.harnessapk.agent
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.serialization.json.Json
@@ -77,6 +78,43 @@ class AgentBundleReader(
         file: File,
         block: (ParsedAgentPackage, Map<String, File>) -> T,
     ): T {
+        val staging = stagePackage(file)
+        return try {
+            val stagedPackages = linkedMapOf<String, File>()
+            val parsed = readVerifiedPackage(staging.file, file, nestingDepth = 0, stagedPackages)
+            block(parsed, stagedPackages)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: AgentBundleException) {
+            throw error
+        } catch (error: Throwable) {
+            throw AgentBundleException("人格包读取失败：${error.message.orEmpty()}", error)
+        } finally {
+            staging.close()
+        }
+    }
+
+    private suspend fun <T> withVerifiedPackageSuspending(
+        file: File,
+        block: suspend (ParsedAgentPackage, Map<String, File>) -> T,
+    ): T {
+        val staging = stagePackage(file)
+        return try {
+            val stagedPackages = linkedMapOf<String, File>()
+            val parsed = readVerifiedPackage(staging.file, file, nestingDepth = 0, stagedPackages)
+            block(parsed, stagedPackages)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: AgentBundleException) {
+            throw error
+        } catch (error: Throwable) {
+            throw AgentBundleException("人格包读取失败：${error.message.orEmpty()}", error)
+        } finally {
+            staging.close()
+        }
+    }
+
+    private fun stagePackage(file: File): StagedPackage {
         validateInputFile(file)
         temporaryDirectory.mkdirs()
         val privateRoot = Files.createTempDirectory(temporaryDirectory.toPath(), ".harness-agent-reader-").toFile()
@@ -87,21 +125,16 @@ class AgentBundleReader(
         privateRoot.setWritable(true, true)
         privateRoot.setExecutable(true, true)
         val staged = File(privateRoot, "package.zip")
-        return try {
+        try {
             file.inputStream().buffered().use { input ->
                 staged.outputStream().buffered().use { output ->
                     input.copyBoundedTo(output, MAX_COMPRESSED_BYTES, "人格包")
                 }
             }
-            val stagedPackages = linkedMapOf<String, File>()
-            val parsed = readVerifiedPackage(staged, file, nestingDepth = 0, stagedPackages)
-            block(parsed, stagedPackages)
-        } catch (error: AgentBundleException) {
-            throw error
+            return StagedPackage(privateRoot, staged)
         } catch (error: Throwable) {
-            throw AgentBundleException("人格包读取失败：${error.message.orEmpty()}", error)
-        } finally {
             privateRoot.deleteRecursively()
+            throw error
         }
     }
 
@@ -111,11 +144,28 @@ class AgentBundleReader(
         block: (AgentCorpusChunk) -> Unit,
     ) {
         if (corpus !in bundle.corpora) throw AgentBundleException("资料包不属于当前智能体")
-        val fresh = readBundle(bundle.file)
-        if (fresh.packageSha256 != bundle.packageSha256) {
-            throw AgentBundleException("智能体包在校验后发生变化")
+        withVerifiedPackage(bundle.file) { parsed, stagedPackages ->
+            val fresh = (parsed as? V1Bundle)?.bundle
+                ?: throw AgentBundleException("V1 流式读取收到非 V1 人格包")
+            if (fresh.packageSha256 != bundle.packageSha256) {
+                throw AgentBundleException("智能体包在校验后发生变化")
+            }
+            val freshCorpus = fresh.corpora.singleOrNull { it == corpus }
+                ?: throw AgentBundleException("资料包在校验后发生变化")
+            streamVerifiedV1Chunks(
+                requireNotNull(stagedPackages[fresh.packageSha256]),
+                freshCorpus,
+                block,
+            )
         }
-        ZipFile(bundle.file).use { archive ->
+    }
+
+    private fun streamVerifiedV1Chunks(
+        stagedFile: File,
+        corpus: AgentCorpusManifest,
+        block: (AgentCorpusChunk) -> Unit,
+    ) {
+        ZipFile(stagedFile).use { archive ->
             val entry = archive.getEntry(corpus.chunksPath)
                 ?: throw AgentBundleException("缺少资料块文件：${corpus.chunksPath}")
             val ids = mutableSetOf<String>()
@@ -135,16 +185,33 @@ class AgentBundleReader(
         block: suspend (AgentCorpusChunk) -> Unit,
     ) {
         if (corpus !in bundle.corpora) throw AgentBundleException("资料包不属于当前智能体")
-        val fresh = readBundle(bundle.file)
-        if (fresh.packageSha256 != bundle.packageSha256) {
-            throw AgentBundleException("智能体包在校验后发生变化")
+        withVerifiedPackageSuspending(bundle.file) { parsed, stagedPackages ->
+            val fresh = (parsed as? V1Bundle)?.bundle
+                ?: throw AgentBundleException("V1 流式读取收到非 V1 人格包")
+            if (fresh.packageSha256 != bundle.packageSha256) {
+                throw AgentBundleException("智能体包在校验后发生变化")
+            }
+            val freshCorpus = fresh.corpora.singleOrNull { it == corpus }
+                ?: throw AgentBundleException("资料包在校验后发生变化")
+            streamVerifiedV1ChunksSuspending(
+                requireNotNull(stagedPackages[fresh.packageSha256]),
+                freshCorpus,
+                block,
+            )
         }
-        ZipFile(bundle.file).use { archive ->
+    }
+
+    private suspend fun streamVerifiedV1ChunksSuspending(
+        stagedFile: File,
+        corpus: AgentCorpusManifest,
+        block: suspend (AgentCorpusChunk) -> Unit,
+    ) {
+        ZipFile(stagedFile).use { archive ->
             val entry = archive.getEntry(corpus.chunksPath)
                 ?: throw AgentBundleException("缺少资料块文件：${corpus.chunksPath}")
             val ids = mutableSetOf<String>()
             archive.getInputStream(entry).use { input ->
-                input.forEachUtf8JsonLine(corpus.chunksPath) { line, lineNumber ->
+                input.forEachUtf8JsonLineSuspending(corpus.chunksPath) { line, lineNumber ->
                     currentCoroutineContext().ensureActive()
                     val chunk = parseV1Chunk(line, corpus, lineNumber)
                     if (!ids.add(chunk.id)) throw AgentBundleException("资料块包含重复 id：${chunk.id}")
@@ -544,6 +611,9 @@ class AgentBundleReader(
             manifest.sourceIds to "source ID",
             manifest.sourceHashes to "source hash",
             manifest.topLevelIds to "top-level node ID",
+            manifest.periods to "periods",
+            manifest.genres to "genres",
+            manifest.authorship to "authorship",
         ).forEach { (values, label) -> rejectDuplicates(values, label) }
         val sourcesRoot = archive.readRequired(V2_SOURCES_PATH, MAX_CORPUS_METADATA_BYTES)
         val sources = parseArray(sourcesRoot.decodeToString(), V2_SOURCES_PATH)
@@ -582,6 +652,8 @@ class AgentBundleReader(
     ): CorpusGraphValidation {
         val sourceById = sources.associateBy(V2SourceRecord::sourceId)
         val topLevelIds = manifest.topLevelIds.toSet()
+        val declaredGenres = manifest.genres.map { it.wireName }
+        val declaredAuthorship = manifest.authorship.map { it.wireName }
         return AgentCorpusValidationIndex(validationParent).use { index ->
             var indexedRecordCount = 0L
             sources.forEach { source ->
@@ -666,6 +738,14 @@ class AgentBundleReader(
                 ) {
                     throw AgentBundleException("$V2_CHUNKS_PATH 来源 hash/provenance 不匹配：${chunk.id}")
                 }
+                observeManifestProvenance(index, "periods", chunk.period, manifest.periods)
+                observeManifestProvenance(index, "genres", chunk.genre.wireName, declaredGenres)
+                observeManifestProvenance(
+                    index,
+                    "authorship",
+                    chunk.authorship.wireName,
+                    declaredAuthorship,
+                )
                 checkUniqueIndexRecord(
                     index,
                     chunkKeyForValidation(chunk.id),
@@ -693,6 +773,9 @@ class AgentBundleReader(
             if (chunkCount != manifest.chunkCount) {
                 throw AgentBundleException("$V2_CHUNKS_PATH 数量与 manifest chunkCount 不一致")
             }
+            requireManifestProvenanceClosure(index, "periods", manifest.periods)
+            requireManifestProvenanceClosure(index, "genres", declaredGenres)
+            requireManifestProvenanceClosure(index, "authorship", declaredAuthorship)
 
             var duplicateCount = 0
             archive.streamJsonl(V2_DUPLICATES_PATH) { row, _ ->
@@ -929,6 +1012,7 @@ class AgentBundleReader(
             throw AgentBundleException("ZIP central directory offset/size/end 无效")
         }
         val entries = ArrayList<CentralDirectoryEntry>(entryCount)
+        val localLayouts = ArrayList<LocalEntryLayout>(entryCount)
         archive.seek(centralOffset)
         repeat(entryCount) {
             if (archive.filePointer + CENTRAL_DIRECTORY_HEADER_SIZE > centralEnd) {
@@ -967,45 +1051,131 @@ class AgentBundleReader(
             if (flags and ENCRYPTED_FLAG != 0) throw AgentBundleException("人格包不允许加密条目：$fileName")
             validateUnixMode(hostSystem, externalAttributes, fileName)
             archive.seek(archive.filePointer + extraLength + commentLength)
-            validateLocalHeader(archive, localHeaderOffset, centralOffset, fileName)
-            entries += CentralDirectoryEntry(
+            val entry = CentralDirectoryEntry(
                 name = fileName,
+                flags = flags,
                 compressedSize = compressedSize,
                 uncompressedSize = uncompressedSize,
                 crc = crc,
                 method = method,
+                localHeaderOffset = localHeaderOffset,
             )
+            localLayouts += validateLocalHeader(archive, entry, centralOffset)
+            entries += entry
         }
         if (archive.filePointer != centralEnd) {
             throw AgentBundleException("ZIP central directory size 与 entries 边界不一致")
         }
+        validateLocalEntryBoundaries(archive, localLayouts, centralOffset)
         return entries
     }
 
     private fun validateLocalHeader(
         archive: RandomAccessFile,
-        localHeaderOffset: Long,
+        expected: CentralDirectoryEntry,
         centralOffset: Long,
-        expectedName: String,
-    ) {
+    ): LocalEntryLayout {
+        val localHeaderOffset = expected.localHeaderOffset
         if (localHeaderOffset < 0 || localHeaderOffset + LOCAL_FILE_HEADER_SIZE > centralOffset) {
-            throw AgentBundleException("ZIP local header offset 无效：$expectedName")
+            throw AgentBundleException("ZIP local header offset 无效：${expected.name}")
         }
         val returnOffset = archive.filePointer
         archive.seek(localHeaderOffset)
         val header = ByteArray(LOCAL_FILE_HEADER_SIZE)
         archive.readFully(header)
         if (header.readIntLe(0) != LOCAL_FILE_HEADER_SIGNATURE) {
-            throw AgentBundleException("ZIP local header 无效：$expectedName")
+            throw AgentBundleException("ZIP local header 无效：${expected.name}")
         }
+        val flags = header.readUnsignedShortLe(6)
+        val method = header.readUnsignedShortLe(8)
+        val crc = header.readUnsignedIntLe(14)
+        val compressedSize = header.readUnsignedIntLe(18)
+        val uncompressedSize = header.readUnsignedIntLe(22)
         val nameLength = header.readUnsignedShortLe(26)
         val extraLength = header.readUnsignedShortLe(28)
-        if (localHeaderOffset + LOCAL_FILE_HEADER_SIZE + nameLength + extraLength > centralOffset) {
-            throw AgentBundleException("ZIP local header 边界无效：$expectedName")
+        val payloadOffset = localHeaderOffset + LOCAL_FILE_HEADER_SIZE + nameLength + extraLength
+        if (payloadOffset > centralOffset) {
+            throw AgentBundleException("ZIP local header 边界无效：${expected.name}")
         }
         val name = ByteArray(nameLength).also(archive::readFully).decodeToString()
-        if (name != expectedName) throw AgentBundleException("ZIP local/central 文件名不一致：$expectedName")
+        if (name != expected.name) throw AgentBundleException("ZIP local/central 文件名不一致：${expected.name}")
+        if (flags != expected.flags || method != expected.method) {
+            throw AgentBundleException("ZIP local/central flags 或 method 不一致：${expected.name}")
+        }
+        val usesDescriptor = flags and DATA_DESCRIPTOR_FLAG != 0
+        val localValuesAreZero = crc == 0L && compressedSize == 0L && uncompressedSize == 0L
+        val localValuesMatch = crc == expected.crc &&
+            compressedSize == expected.compressedSize &&
+            uncompressedSize == expected.uncompressedSize
+        if ((!usesDescriptor && !localValuesMatch) || (usesDescriptor && !localValuesAreZero && !localValuesMatch)) {
+            throw AgentBundleException("ZIP local/central CRC 或 size 不一致：${expected.name}")
+        }
+        val payloadEnd = payloadOffset + expected.compressedSize
+        if (payloadEnd < payloadOffset || payloadEnd > centralOffset) {
+            throw AgentBundleException("ZIP payload 边界越界：${expected.name}")
+        }
         archive.seek(returnOffset)
+        return LocalEntryLayout(expected, payloadOffset, payloadEnd)
+    }
+
+    private fun validateLocalEntryBoundaries(
+        archive: RandomAccessFile,
+        layouts: List<LocalEntryLayout>,
+        centralOffset: Long,
+    ) {
+        val sorted = layouts.sortedBy { it.entry.localHeaderOffset }
+        sorted.zipWithNext().forEach { (current, next) ->
+            if (current.entry.localHeaderOffset == next.entry.localHeaderOffset) {
+                throw AgentBundleException("ZIP local header 区域重叠：${current.entry.name}")
+            }
+        }
+        sorted.forEachIndexed { index, layout ->
+            val boundary = sorted.getOrNull(index + 1)?.entry?.localHeaderOffset ?: centralOffset
+            if (layout.payloadEnd > boundary) {
+                throw AgentBundleException("ZIP payload 区域边界重叠：${layout.entry.name}")
+            }
+            val entryEnd = if (layout.entry.flags and DATA_DESCRIPTOR_FLAG != 0) {
+                validateDataDescriptor(archive, layout, boundary)
+            } else {
+                layout.payloadEnd
+            }
+            if (entryEnd > boundary) {
+                throw AgentBundleException("ZIP data descriptor 边界重叠：${layout.entry.name}")
+            }
+        }
+    }
+
+    private fun validateDataDescriptor(
+        archive: RandomAccessFile,
+        layout: LocalEntryLayout,
+        boundary: Long,
+    ): Long {
+        val descriptorOffset = layout.payloadEnd
+        if (descriptorOffset + DATA_DESCRIPTOR_SIZE_WITHOUT_SIGNATURE > boundary) {
+            throw AgentBundleException("ZIP data descriptor 边界无效：${layout.entry.name}")
+        }
+        val first = archive.readUnsignedIntLeAt(descriptorOffset)
+        val hasSignature = first == DATA_DESCRIPTOR_SIGNATURE.toLong()
+        val descriptorSize = if (hasSignature) {
+            DATA_DESCRIPTOR_SIZE_WITH_SIGNATURE
+        } else {
+            DATA_DESCRIPTOR_SIZE_WITHOUT_SIGNATURE
+        }
+        if (descriptorOffset + descriptorSize > boundary) {
+            throw AgentBundleException("ZIP data descriptor 边界无效：${layout.entry.name}")
+        }
+        val valueOffset = descriptorOffset + if (hasSignature) 4 else 0
+        val crc = archive.readUnsignedIntLeAt(valueOffset)
+        val compressedSize = archive.readUnsignedIntLeAt(valueOffset + 4)
+        val uncompressedSize = archive.readUnsignedIntLeAt(valueOffset + 8)
+        if (
+            crc != layout.entry.crc ||
+            compressedSize != layout.entry.compressedSize ||
+            uncompressedSize != layout.entry.uncompressedSize
+        ) {
+            throw AgentBundleException("ZIP data descriptor 与 central header 不一致：${layout.entry.name}")
+        }
+        return descriptorOffset + descriptorSize
     }
 
     private fun validateUnixMode(hostSystem: Int, externalAttributes: Long, fileName: String) {
@@ -1407,10 +1577,13 @@ class AgentBundleReader(
         private const val MIN_RATIO_CHECK_BYTES = 1024 * 1024
         private const val CENTRAL_DIRECTORY_HEADER_SIZE = 46
         private const val LOCAL_FILE_HEADER_SIZE = 30
+        private const val DATA_DESCRIPTOR_SIZE_WITHOUT_SIGNATURE = 12
+        private const val DATA_DESCRIPTOR_SIZE_WITH_SIGNATURE = 16
         private const val END_OF_CENTRAL_DIRECTORY_SIZE = 22
         private const val END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50
         private const val CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50
         private const val LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50
+        private const val DATA_DESCRIPTOR_SIGNATURE = 0x08074b50
         private const val ZIP64_ENTRY_SENTINEL = 0xffff
         private const val ZIP64_OFFSET_SENTINEL = 0xffffffffL
         private const val UNIX_HOST_SYSTEM = 3
@@ -1419,6 +1592,7 @@ class AgentBundleReader(
         private const val UNIX_SYMLINK_TYPE = 0xa000
         private const val UNIX_EXECUTABLE_MASK = 0x49
         private const val ENCRYPTED_FLAG = 0x1
+        private const val DATA_DESCRIPTOR_FLAG = 0x8
         private const val CHECKSUMS_PATH = "checksums.json"
         private const val SIGNATURE_PATH = "signature.json"
         private const val BUNDLE_MANIFEST_PATH = "bundle-manifest.json"
@@ -1470,12 +1644,29 @@ private data class CorpusGraphValidation(
     val diagnostics: V2CorpusValidationDiagnostics,
 )
 
+private data class StagedPackage(
+    val root: File,
+    val file: File,
+) : AutoCloseable {
+    override fun close() {
+        root.deleteRecursively()
+    }
+}
+
 private data class CentralDirectoryEntry(
     val name: String,
+    val flags: Int,
     val compressedSize: Long,
     val uncompressedSize: Long,
     val crc: Long,
     val method: Int,
+    val localHeaderOffset: Long,
+)
+
+private data class LocalEntryLayout(
+    val entry: CentralDirectoryEntry,
+    val payloadOffset: Long,
+    val payloadEnd: Long,
 )
 
 private data class NodeIndexRecord(
@@ -1495,6 +1686,32 @@ private fun nodeKey(nodeId: String): String = "node\u001f$nodeId"
 private fun chunkKeyForValidation(chunkId: String): String = "chunk\u001f$chunkId"
 private fun chunkSourceKey(chunkId: String, sourceId: String): String = "chunk-source\u001f$chunkId\u001f$sourceId"
 private fun duplicateKey(chunkId: String): String = "duplicate\u001f$chunkId"
+private fun provenanceKey(dimension: String, value: String): String =
+    "provenance\u001f$dimension\u001f${value.encodeToByteArray().sha256()}"
+
+private fun observeManifestProvenance(
+    index: AgentCorpusValidationIndex,
+    dimension: String,
+    value: String,
+    declaredValues: List<String>,
+) {
+    if (value !in declaredValues) {
+        throw AgentBundleException("chunks.jsonl 包含 manifest $dimension 未声明值：$value")
+    }
+    index.putUnique(provenanceKey(dimension, value))
+}
+
+private fun requireManifestProvenanceClosure(
+    index: AgentCorpusValidationIndex,
+    dimension: String,
+    declaredValues: List<String>,
+) {
+    declaredValues.forEach { value ->
+        if (!index.contains(provenanceKey(dimension, value))) {
+            throw AgentBundleException("manifest $dimension 包含 chunks.jsonl 未使用值：$value")
+        }
+    }
+}
 
 private fun decodeNodeIndex(payload: ByteArray): NodeIndexRecord {
     val fields = decodeIndexFields(payload)
@@ -1810,6 +2027,37 @@ private inline fun InputStream.forEachUtf8JsonLine(
     }
 }
 
+private suspend fun InputStream.forEachUtf8JsonLineSuspending(
+    path: String,
+    block: suspend (String, Int) -> Unit,
+) {
+    val line = ByteArrayOutputStream()
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var lineNumber = 1
+    while (true) {
+        val count = read(buffer)
+        if (count < 0) break
+        for (index in 0 until count) {
+            val byte = buffer[index]
+            if (byte == '\n'.code.toByte()) {
+                val text = line.toByteArray().decodeToString().trimEnd('\r')
+                if (text.isNotBlank()) block(text, lineNumber)
+                line.reset()
+                lineNumber += 1
+            } else {
+                if (line.size() >= 4 * 1024 * 1024) {
+                    throw AgentBundleException("$path 第 $lineNumber 行超过大小上限")
+                }
+                line.write(byte.toInt())
+            }
+        }
+    }
+    if (line.size() > 0) {
+        val text = line.toByteArray().decodeToString().trimEnd('\r')
+        if (text.isNotBlank()) block(text, lineNumber)
+    }
+}
+
 private fun InputStream.sha256(): String {
     val digest = MessageDigest.getInstance("SHA-256")
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -1841,3 +2089,10 @@ private fun ByteArray.readIntLe(offset: Int): Int =
     readUnsignedShortLe(offset) or (readUnsignedShortLe(offset + 2) shl 16)
 
 private fun ByteArray.readUnsignedIntLe(offset: Int): Long = readIntLe(offset).toLong() and 0xffffffffL
+
+private fun RandomAccessFile.readUnsignedIntLeAt(offset: Long): Long {
+    seek(offset)
+    val bytes = ByteArray(4)
+    readFully(bytes)
+    return bytes.readUnsignedIntLe(0)
+}

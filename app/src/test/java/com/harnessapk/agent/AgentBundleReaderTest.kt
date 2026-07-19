@@ -1,5 +1,7 @@
 package com.harnessapk.agent
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -10,6 +12,7 @@ import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.security.Signature
 import java.util.Base64
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -31,6 +34,71 @@ class AgentBundleReaderTest {
         assertEquals("chunk-investigation", chunks.single().id)
         assertEquals(listOf("调查", "事实"), chunks.single().keywords)
         assertTrue(parsed.publisherFingerprint.matches(Regex("[0-9a-f]{64}")))
+    }
+
+    @Test
+    fun synchronousV1StreamingKeepsVerifiedBytesWhenOriginalIsOverwritten() {
+        val first = v1Chunk("chunk-first", "A".repeat(20_000))
+        val original = signedBundle(chunkLines = first + v1Chunk("chunk-second", "B".repeat(20_000)), stored = true)
+        val replacement = signedBundle(chunkLines = first + v1Chunk("chunk-mutant", "B".repeat(20_000)), stored = true)
+        assertEquals(original.length(), replacement.length())
+        val temporaryRoot = Files.createTempDirectory("agent-v1-sync-race").toFile()
+        val reader = AgentBundleReader(temporaryDirectory = temporaryRoot)
+        val parsed = reader.readBundle(original)
+        val ids = mutableListOf<String>()
+
+        reader.forEachChunk(parsed, parsed.corpora.single()) { chunk ->
+            ids += chunk.id
+            if (ids.size == 1) original.writeBytes(replacement.readBytes())
+        }
+
+        assertEquals(listOf("chunk-first", "chunk-second"), ids)
+        assertTrue(temporaryRoot.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun suspendingV1StreamingKeepsVerifiedBytesWhenOriginalIsOverwritten() = runBlocking {
+        val first = v1Chunk("chunk-first", "A".repeat(20_000))
+        val original = signedBundle(chunkLines = first + v1Chunk("chunk-second", "B".repeat(20_000)), stored = true)
+        val replacement = signedBundle(chunkLines = first + v1Chunk("chunk-mutant", "B".repeat(20_000)), stored = true)
+        assertEquals(original.length(), replacement.length())
+        val temporaryRoot = Files.createTempDirectory("agent-v1-suspend-race").toFile()
+        val reader = AgentBundleReader(temporaryDirectory = temporaryRoot)
+        val parsed = reader.readBundle(original)
+        val ids = mutableListOf<String>()
+
+        reader.forEachChunkSuspending(parsed, parsed.corpora.single()) { chunk ->
+            ids += chunk.id
+            if (ids.size == 1) original.writeBytes(replacement.readBytes())
+        }
+
+        assertEquals(listOf("chunk-first", "chunk-second"), ids)
+        assertTrue(temporaryRoot.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun v1StreamingCleansStagedBytesOnCallbackFailureAndCancellation() = runBlocking {
+        val bundle = signedBundle()
+        val temporaryRoot = Files.createTempDirectory("agent-v1-callback-failure").toFile()
+        val reader = AgentBundleReader(temporaryDirectory = temporaryRoot)
+        val parsed = reader.readBundle(bundle)
+
+        assertBundleFailure("sync callback") {
+            reader.forEachChunk(parsed, parsed.corpora.single()) {
+                error("sync callback")
+            }
+        }
+        assertTrue(temporaryRoot.listFiles().orEmpty().isEmpty())
+
+        try {
+            reader.forEachChunkSuspending(parsed, parsed.corpora.single()) {
+                throw CancellationException("cancel callback")
+            }
+            fail("Expected CancellationException")
+        } catch (expected: CancellationException) {
+            assertEquals("cancel callback", expected.message)
+        }
+        assertTrue(temporaryRoot.listFiles().orEmpty().isEmpty())
     }
 
     @Test
@@ -83,15 +151,14 @@ class AgentBundleReaderTest {
         extraEntries: Map<String, ByteArray> = emptyMap(),
         tamperPersonaAfterSigning: Boolean = false,
         corruptSignature: Boolean = false,
+        chunkLines: String = v1Chunk("chunk-investigation", "没有调查，没有发言权。研究问题必须从事实出发。"),
+        stored: Boolean = false,
     ): File {
         val directory = Files.createTempDirectory("agent-bundle-test").toFile().apply { deleteOnExit() }
         val target = File(directory, "fixture.hbundle").apply { deleteOnExit() }
         val manifest = """
             {"agent":{"conceptsPath":"agent/concepts.json","evalPath":"agent/eval.jsonl","examplesPath":"agent/examples.jsonl","id":"agent-1","name":"资料研究代理","personaPath":"agent/persona.md","requiredCorpora":["corpus-1"],"summary":"基于资料模拟","version":1,"worldviewPath":"agent/worldview.jsonl"},"corpora":[{"chunksPath":"corpora/corpus-1/chunks.jsonl","id":"corpus-1","required":true,"sourceHash":"source-hash","sourcesPath":"corpora/corpus-1/sources.json","title":"测试资料"}],"schemaVersion":1}
         """.trimIndent().encodeToByteArray()
-        val chunk = """
-            {"id":"chunk-investigation","keywords":["调查","事实"],"location":"第一章 · 1","ngrams":["调查","事实"],"sourceHash":"source-hash","sourceTitle":"测试资料","text":"没有调查，没有发言权。研究问题必须从事实出发。"}
-        """.trimIndent().plus("\n").encodeToByteArray()
         val files = linkedMapOf(
             "bundle-manifest.json" to manifest,
             "agent/manifest.json" to "{}".encodeToByteArray(),
@@ -102,7 +169,7 @@ class AgentBundleReaderTest {
             "agent/eval.jsonl" to byteArrayOf(),
             "corpora/corpus-1/manifest.json" to "{}".encodeToByteArray(),
             "corpora/corpus-1/sources.json" to "[{\"title\":\"测试资料\"}]".encodeToByteArray(),
-            "corpora/corpus-1/chunks.jsonl" to chunk,
+            "corpora/corpus-1/chunks.jsonl" to chunkLines.encodeToByteArray(),
         ).apply { putAll(extraEntries) }
         val checksums = files.entries
             .sortedBy { it.key }
@@ -122,19 +189,29 @@ class AgentBundleReaderTest {
 
         ZipOutputStream(target.outputStream().buffered()).use { output ->
             files.forEach { (path, bytes) ->
-                output.putNextEntry(ZipEntry(path))
+                output.putNextEntry(zipEntry(path, bytes, stored))
                 output.write(if (tamperPersonaAfterSigning && path == "agent/persona.md") "被篡改".encodeToByteArray() else bytes)
                 output.closeEntry()
             }
-            output.putNextEntry(ZipEntry("checksums.json"))
+            output.putNextEntry(zipEntry("checksums.json", checksums, stored))
             output.write(checksums)
             output.closeEntry()
-            output.putNextEntry(ZipEntry("signature.json"))
+            output.putNextEntry(zipEntry("signature.json", signatureJson, stored))
             output.write(signatureJson)
             output.closeEntry()
         }
         return target
     }
+
+    private fun zipEntry(path: String, bytes: ByteArray, stored: Boolean): ZipEntry =
+        ZipEntry(path).apply {
+            if (stored) {
+                method = ZipEntry.STORED
+                size = bytes.size.toLong()
+                compressedSize = bytes.size.toLong()
+                crc = CRC32().apply { update(bytes) }.value
+            }
+        }
 
     private fun assertBundleFailure(expectedMessage: String, block: () -> Unit) {
         try {
@@ -168,6 +245,9 @@ class AgentBundleReaderTest {
         fail("Central directory entry not found: $targetName")
     }
 }
+
+private fun v1Chunk(id: String, text: String = "保持已验证内容"): String =
+    """{"text":"$text","keywords":["调查","事实"],"location":"第一章 · 1","ngrams":["调查","事实"],"sourceHash":"source-hash","sourceTitle":"测试资料","id":"$id"}""" + "\n"
 
 private fun ByteArray.sha256(): String =
     MessageDigest.getInstance("SHA-256").digest(this).joinToString("") { "%02x".format(it) }

@@ -154,6 +154,42 @@ class AgentV2BundleReaderTest {
     }
 
     @Test
+    fun rejectsMissingExtraAndEmptyManifestProvenanceDimensions() {
+        val fixture = Fixture()
+        val letterSource = sourceRecord(
+            "source-direct",
+            "测试来源",
+            "a".repeat(64),
+            "letter",
+            "direct",
+            "1926",
+        )
+        val letterChunk = chunkJson(
+            "chunk-core",
+            "source-direct",
+            "a".repeat(64),
+            "测试来源",
+            "letter",
+            "direct",
+            "1926",
+            listOf("node-root"),
+        )
+        val cases = listOf(
+            fixture.corpusPackage(periods = listOf("1926", "1930")) to "periods",
+            fixture.corpusPackage(
+                sources = sourceJson(letterSource),
+                chunks = letterChunk,
+                genres = listOf("speech"),
+            ) to "genres",
+            fixture.corpusPackage(authorshipValues = emptyList()) to "authorship",
+        )
+
+        cases.forEach { (file, dimension) ->
+            assertPackageFailure(dimension) { AgentBundleReader().readPackage(file) }
+        }
+    }
+
+    @Test
     fun rejectsFakeEocdBypassAndCentralDirectoryMismatches() {
         val fixture = Fixture()
         val fakeEocd = fixture.sourcePackage()
@@ -166,6 +202,30 @@ class AgentV2BundleReaderTest {
             corruptEocdField(malformed, field)
             assertPackageFailure("central directory") { AgentBundleReader().readPackage(malformed) }
         }
+    }
+
+    @Test
+    fun rejectsLocalOnlyFlagsMethodCrcAndSizeTampering() {
+        LocalHeaderField.entries.forEach { field ->
+            val fixture = Fixture().sourcePackage()
+            corruptLocalHeaderField(fixture, "files/source.txt", field)
+            assertPackageFailure("local/central") { AgentBundleReader().readPackage(fixture) }
+        }
+    }
+
+    @Test
+    fun rejectsPayloadOverlapOutOfRangeAndDescriptorBoundaryTampering() {
+        val overlap = Fixture().sourcePackage()
+        extendPayloadIntoNextLocalHeader(overlap, "manifest.json")
+        assertPackageFailure("边界") { AgentBundleReader().readPackage(overlap) }
+
+        val outOfRange = Fixture().sourcePackage()
+        extendPayloadIntoCentralDirectory(outOfRange, "files/source.txt")
+        assertPackageFailure("边界") { AgentBundleReader().readPackage(outOfRange) }
+
+        val descriptor = Fixture().sourcePackage()
+        corruptDataDescriptorSignature(descriptor, "files/source.txt")
+        assertPackageFailure("descriptor") { AgentBundleReader().readPackage(descriptor) }
     }
 
     @Test
@@ -344,12 +404,15 @@ class AgentV2BundleReaderTest {
             sourceIds: List<String> = listOf("source-direct"),
             sourceHashes: List<String> = listOf("a".repeat(64)),
             topLevelIds: List<String> = listOf("node-root"),
+            periods: List<String> = listOf("1926"),
+            genres: List<String> = listOf("speech"),
+            authorshipValues: List<String> = listOf("direct"),
             corruptSignature: Boolean = false,
         ): File = signedPackage(
             "core-evidence.hcorpus",
             linkedMapOf(
                 "manifest.json" to """
-                    {"agentId":"$agentId","authorship":["direct"],"chunkCount":$chunkCount,"coverage":["identity:self"],"genres":["speech"],"id":"$CORE_ID","installClass":"required","periods":["1926"],"schemaVersion":2,"sourceHashes":${sourceHashes.jsonArray()},"sourceIds":${sourceIds.jsonArray()},"topLevelIds":${topLevelIds.jsonArray()},"type":"$type","version":$version}
+                    {"agentId":"$agentId","authorship":${authorshipValues.jsonArray()},"chunkCount":$chunkCount,"coverage":["identity:self"],"genres":${genres.jsonArray()},"id":"$CORE_ID","installClass":"required","periods":${periods.jsonArray()},"schemaVersion":2,"sourceHashes":${sourceHashes.jsonArray()},"sourceIds":${sourceIds.jsonArray()},"topLevelIds":${topLevelIds.jsonArray()},"type":"$type","version":$version}
                 """.trimIndent().encodeToByteArray(),
                 "sources.json" to sources.encodeToByteArray(),
                 "nodes.jsonl" to nodes.encodeToByteArray(),
@@ -541,6 +604,22 @@ private fun duplicateJson(
 
 private enum class EocdField { ENTRY_COUNT, CENTRAL_OFFSET, CENTRAL_SIZE }
 
+private enum class LocalHeaderField {
+    FLAGS,
+    METHOD,
+    CRC,
+    COMPRESSED_SIZE,
+    UNCOMPRESSED_SIZE,
+}
+
+private data class TestZipLayout(
+    val name: String,
+    val centralHeaderOffset: Int,
+    val localHeaderOffset: Int,
+    val payloadOffset: Int,
+    val compressedSize: Int,
+)
+
 private fun appendFakeCentralDirectoryComment(file: File) {
     val bytes = file.readBytes()
     val eocdOffset = bytes.findEocdOffset()
@@ -578,6 +657,78 @@ private fun corruptEocdField(file: File, field: EocdField) {
         EocdField.CENTRAL_SIZE -> bytes.writeIntLeV2(offset + 12, bytes.readIntLeV2(offset + 12) + 1)
     }
     file.writeBytes(bytes)
+}
+
+private fun corruptLocalHeaderField(file: File, targetName: String, field: LocalHeaderField) {
+    val bytes = file.readBytes()
+    val layout = bytes.zipLayouts().single { it.name == targetName }
+    val offset = layout.localHeaderOffset
+    when (field) {
+        LocalHeaderField.FLAGS ->
+            bytes.writeShortLeV2(offset + 6, bytes.readShortLeV2(offset + 6) xor 0x0008)
+        LocalHeaderField.METHOD ->
+            bytes.writeShortLeV2(offset + 8, bytes.readShortLeV2(offset + 8) xor 0x0008)
+        LocalHeaderField.CRC ->
+            bytes.writeIntLeV2(offset + 14, bytes.readIntLeV2(offset + 14) + 1)
+        LocalHeaderField.COMPRESSED_SIZE ->
+            bytes.writeIntLeV2(offset + 18, bytes.readIntLeV2(offset + 18) + 1)
+        LocalHeaderField.UNCOMPRESSED_SIZE ->
+            bytes.writeIntLeV2(offset + 22, bytes.readIntLeV2(offset + 22) + 1)
+    }
+    file.writeBytes(bytes)
+}
+
+private fun extendPayloadIntoNextLocalHeader(file: File, targetName: String) {
+    val bytes = file.readBytes()
+    val layouts = bytes.zipLayouts()
+    val target = layouts.single { it.name == targetName }
+    val nextOffset = layouts.map(TestZipLayout::localHeaderOffset)
+        .filter { it > target.localHeaderOffset }
+        .minOrNull()
+        ?: error("No following local header")
+    bytes.writeIntLeV2(target.centralHeaderOffset + 20, nextOffset - target.payloadOffset + 1)
+    file.writeBytes(bytes)
+}
+
+private fun extendPayloadIntoCentralDirectory(file: File, targetName: String) {
+    val bytes = file.readBytes()
+    val target = bytes.zipLayouts().single { it.name == targetName }
+    val centralOffset = bytes.readIntLeV2(bytes.findEocdOffset() + 16)
+    bytes.writeIntLeV2(target.centralHeaderOffset + 20, centralOffset - target.payloadOffset + 1)
+    file.writeBytes(bytes)
+}
+
+private fun corruptDataDescriptorSignature(file: File, targetName: String) {
+    val bytes = file.readBytes()
+    val target = bytes.zipLayouts().single { it.name == targetName }
+    val descriptorOffset = target.payloadOffset + target.compressedSize
+    assertEquals(0x08074b50, bytes.readIntLeV2(descriptorOffset))
+    bytes[descriptorOffset] = (bytes[descriptorOffset].toInt() xor 1).toByte()
+    file.writeBytes(bytes)
+}
+
+private fun ByteArray.zipLayouts(): List<TestZipLayout> {
+    val eocdOffset = findEocdOffset()
+    val entryCount = readShortLeV2(eocdOffset + 10)
+    var centralOffset = readIntLeV2(eocdOffset + 16)
+    return List(entryCount) {
+        assertEquals(0x02014b50, readIntLeV2(centralOffset))
+        val nameLength = readShortLeV2(centralOffset + 28)
+        val extraLength = readShortLeV2(centralOffset + 30)
+        val commentLength = readShortLeV2(centralOffset + 32)
+        val localHeaderOffset = readIntLeV2(centralOffset + 42)
+        val localNameLength = readShortLeV2(localHeaderOffset + 26)
+        val localExtraLength = readShortLeV2(localHeaderOffset + 28)
+        val layout = TestZipLayout(
+            name = copyOfRange(centralOffset + 46, centralOffset + 46 + nameLength).decodeToString(),
+            centralHeaderOffset = centralOffset,
+            localHeaderOffset = localHeaderOffset,
+            payloadOffset = localHeaderOffset + 30 + localNameLength + localExtraLength,
+            compressedSize = readIntLeV2(centralOffset + 20),
+        )
+        centralOffset += 46 + nameLength + extraLength + commentLength
+        layout
+    }
 }
 
 private fun ByteArray.findEocdOffset(): Int {

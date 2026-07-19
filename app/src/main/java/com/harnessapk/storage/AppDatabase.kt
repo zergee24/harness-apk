@@ -375,6 +375,29 @@ abstract class AppDatabase : RoomDatabase() {
                     }
                 }
 
+                db.execSQL(
+                    """
+                    CREATE TABLE agent_chunk_fts_v11_physical (
+                        chunkKey TEXT NOT NULL PRIMARY KEY,
+                        searchableText TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO agent_chunk_fts_v11_physical (chunkKey, searchableText)
+                    SELECT physicalKey, GROUP_CONCAT(searchableText, ' ')
+                    FROM (
+                        SELECT chunks.sourceHash || ':' || chunks.chunkId AS physicalKey,
+                            COALESCE(fts.searchableText, chunks.keywordsText || ' ' || chunks.text)
+                                AS searchableText
+                        FROM agent_chunks AS chunks
+                        LEFT JOIN agent_chunk_fts AS fts ON fts.chunkKey = chunks.chunkKey
+                        ORDER BY physicalKey, chunks.chunkKey, fts.rowid
+                    )
+                    GROUP BY physicalKey
+                    """.trimIndent(),
+                )
                 db.execSQL("ALTER TABLE agent_chunks RENAME TO agent_chunks_v11")
                 db.execSQL("DROP TABLE agent_chunk_fts")
                 db.execSQL(
@@ -404,7 +427,7 @@ abstract class AppDatabase : RoomDatabase() {
                         genre, authorship, location, parentPath, context, text,
                         keywordsText, duplicateGroup
                     )
-                    SELECT sourceHash || ':' || chunkId, '', sourceHash, chunkId,
+                    SELECT sourceHash || ':' || chunkId, sourceHash, sourceHash, chunkId,
                         MIN(sourceTitle), '', 'unknown', 'unknown', MIN(location), '',
                         '', MIN(text), MIN(keywordsText), ''
                     FROM agent_chunks_v11
@@ -455,10 +478,11 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     """
                     INSERT INTO agent_chunk_fts (chunkKey, searchableText)
-                    SELECT chunkKey, keywordsText || ' ' || text
-                    FROM agent_chunks
+                    SELECT chunkKey, searchableText
+                    FROM agent_chunk_fts_v11_physical
                     """.trimIndent(),
                 )
+                db.execSQL("DROP TABLE agent_chunk_fts_v11_physical")
 
                 db.execSQL(
                     """

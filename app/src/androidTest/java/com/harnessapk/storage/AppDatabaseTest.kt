@@ -211,6 +211,26 @@ class AppDatabaseTest {
             listOf(AgentChunkFtsEntity(existing.chunkKey, "调查 原始证据")),
         )
         val root = context.cacheDir.resolve("repository-conflict-${System.nanoTime()}").apply { mkdirs() }
+        return repositoryFixture(
+            db = db,
+            root = root,
+            chunk = AgentCorpusChunk(
+                id = "chunk-1",
+                sourceTitle = "同一来源",
+                sourceHash = sourceHash,
+                location = "第一章",
+                text = if (conflicting) "冲突证据" else "原始证据",
+                keywords = listOf("调查"),
+                ngrams = listOf("调查"),
+            ),
+        )
+    }
+
+    private fun repositoryFixture(
+        db: AppDatabase,
+        root: File,
+        chunk: AgentCorpusChunk,
+    ): RepositoryConflictFixture {
         val staged = root.resolve("staged.hbundle").apply { writeText("validated") }
         val corpus = AgentCorpusManifest(
             id = "corpus-new",
@@ -244,17 +264,7 @@ class AppDatabaseTest {
             compressedSizeBytes = staged.length(),
             uncompressedSizeBytes = staged.length(),
         )
-        val reader = RepositoryConflictReader(
-            AgentCorpusChunk(
-                id = "chunk-1",
-                sourceTitle = "同一来源",
-                sourceHash = sourceHash,
-                location = "第一章",
-                text = if (conflicting) "冲突证据" else "原始证据",
-                keywords = listOf("调查"),
-                ngrams = listOf("调查"),
-            ),
-        )
+        val reader = RepositoryConflictReader(chunk)
         val repository = AgentRepository(
             filesDir = root.resolve("files"),
             cacheDir = root.resolve("cache"),
@@ -344,6 +354,11 @@ class AppDatabaseTest {
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
         assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
+        assertEquals("source-hash", sqlite.string("SELECT sourceId FROM agent_chunks"))
+        assertEquals(
+            "调查 legacy_core_only legacy_shared 事实 legacy_full_only legacy_shared",
+            sqlite.string("SELECT searchableText FROM agent_chunk_fts"),
+        )
         assertEquals(
             listOf("source-hash:chunk-1"),
             db.agentDao().searchChunkKeys(
@@ -352,8 +367,54 @@ class AppDatabaseTest {
                 8,
             ),
         )
+        listOf("legacy_core_only", "legacy_full_only").forEach { legacyNgram ->
+            assertEquals(
+                listOf("source-hash:chunk-1"),
+                db.agentDao().searchChunkKeys(
+                    listOf("corpus-core:source-hash", "corpus-full:source-hash"),
+                    legacyNgram,
+                    8,
+                ),
+            )
+        }
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
         db.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
+    fun migratedV1PhysicalChunkIsReusedByNormalInstallTransaction() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-11-12-reinstall-${System.nanoTime()}.db"
+        createVersion11Fixture(context, name, conflictingChunk = false)
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(AppDatabase.MIGRATION_11_12)
+            .build()
+        db.openHelper.writableDatabase
+        val root = context.cacheDir.resolve("migration-reinstall-${System.nanoTime()}").apply { mkdirs() }
+        val fixture = repositoryFixture(
+            db = db,
+            root = root,
+            chunk = AgentCorpusChunk(
+                id = "chunk-1",
+                sourceTitle = "测试资料",
+                sourceHash = "source-hash",
+                location = "第一章",
+                text = "调查以后再下结论",
+                keywords = listOf("调查", "事实"),
+                ngrams = listOf("legacy_core_only"),
+            ),
+        )
+
+        fixture.repository.install(fixture.session)
+
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
+        assertEquals(3, db.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks WHERE corpusId = 'corpus-new'"))
+        assertEquals("source-hash", db.openHelper.readableDatabase.string("SELECT sourceId FROM agent_chunks"))
+        fixture.close()
         context.deleteDatabase(name)
         Unit
     }
@@ -807,13 +868,15 @@ class AppDatabaseTest {
         db.execSQL(
             """
             INSERT INTO agent_chunk_fts (chunkKey, corpusKey, searchableText)
-            VALUES ('corpus-core:source-hash:chunk-1', 'corpus-core:source-hash', '调查 事实')
+            VALUES ('corpus-core:source-hash:chunk-1', 'corpus-core:source-hash',
+                '调查 legacy_core_only legacy_shared')
             """.trimIndent(),
         )
         db.execSQL(
             """
             INSERT INTO agent_chunk_fts (chunkKey, corpusKey, searchableText)
-            VALUES ('corpus-full:source-hash:chunk-1', 'corpus-full:source-hash', '调查 事实')
+            VALUES ('corpus-full:source-hash:chunk-1', 'corpus-full:source-hash',
+                '事实 legacy_full_only legacy_shared')
             """.trimIndent(),
         )
         db.version = 11
