@@ -278,17 +278,16 @@ class QueuedAttachmentStoreInstrumentedTest {
     }
 
     @Test
-    fun persistAllRejectsASymlinkedManagedRootWithoutWritingOutsideIt() = runBlocking {
+    fun storeConstructionRejectsASymlinkedManagedRootWithoutWritingOutsideIt() {
         val outsideDirectory = File(context.cacheDir, "symlinked-managed-root-persist").apply {
             deleteRecursively()
             mkdirs()
         }
         Files.createSymbolicLink(managedDirectory.toPath(), outsideDirectory.toPath())
-        val store = QueuedAttachmentStore(context)
 
         try {
-            store.persistAll(listOf(sourceAttachment("root-symlink-persist.jpg")))
-            fail("Expected a symlinked managed root to be rejected")
+            QueuedAttachmentStore(context)
+            fail("Expected a symlinked managed root to be rejected during construction")
         } catch (_: IllegalStateException) {
         } finally {
             managedDirectory.delete()
@@ -408,6 +407,51 @@ class QueuedAttachmentStoreInstrumentedTest {
         stores[0].cleanup(batches[0])
         stores[1].cleanup(batches[1])
         assertTrue(managedDirectory.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun storeConstructionFailsWithoutCreatingInReplacementRootWhenRootChangesBeforeChildCreation() {
+        val originalRoot = File(context.cacheDir, "queued-store-construction-original-root").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val pinnedRoot = File(context.cacheDir, "queued-store-construction-pinned-root").apply {
+            deleteRecursively()
+        }
+        val replacementRoot = File(context.cacheDir, "queued-store-construction-replacement-root").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+
+        try {
+            try {
+                QueuedAttachmentStore(
+                    context = context,
+                    testHooks = QueuedAttachmentStoreTestHooks(
+                        beforeChildDirectoryCreate = {
+                            assertTrue(originalRoot.renameTo(pinnedRoot))
+                            Files.createSymbolicLink(originalRoot.toPath(), replacementRoot.toPath())
+                        },
+                    ),
+                    filesDirectoryProvider = { originalRoot },
+                )
+                fail("Expected a files root replacement during construction to be rejected")
+            } catch (_: IllegalStateException) {
+            }
+
+            assertTrue(
+                "Construction must not create the managed child in the replacement root",
+                replacementRoot.listFiles().orEmpty().isEmpty(),
+            )
+            assertTrue(
+                "The anchored managed child may only exist in the original pinned root",
+                File(pinnedRoot, "chat-attachments").isDirectory,
+            )
+        } finally {
+            originalRoot.delete()
+            pinnedRoot.deleteRecursively()
+            replacementRoot.deleteRecursively()
+        }
     }
 
     @Test

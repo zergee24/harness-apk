@@ -2,13 +2,17 @@ package com.harnessapk.chat
 
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
+import java.io.FileDescriptor
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.channels.Channels
 import java.nio.file.DirectoryStream
-import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.NoSuchFileException
@@ -63,6 +67,7 @@ class QueuedAttachmentStore internal constructor(
     private val trustedRoot = initializeTrustedRoot(filesDirectoryProvider())
     private val trustedFilesPath = trustedRoot.path
     private val trustedRootFileKey = trustedRoot.fileKey
+    private val trustedRootIdentity = trustedRoot.identity
     private val rawManagedDirectory = trustedFilesPath.resolve(MANAGED_DIRECTORY_NAME)
     private val ownerToken = Any()
 
@@ -289,9 +294,11 @@ class QueuedAttachmentStore internal constructor(
     }
 
     private inline fun <T> withTrustedParent(block: (SecureDirectoryStream<Path>) -> T): T {
+        requireCurrentRootIdentity(trustedFilesPath, trustedRootIdentity, "应用文件目录在运行期间发生变化")
         Files.newDirectoryStream(trustedFilesPath).use { stream ->
             val parent = requireSecureDirectory(stream, "当前平台不支持安全应用文件目录句柄")
             check(directoryFileKey(parent) == trustedRootFileKey) { "应用文件目录在运行期间发生变化" }
+            requireCurrentRootIdentity(trustedFilesPath, trustedRootIdentity, "应用文件目录在运行期间发生变化")
             return block(parent)
         }
     }
@@ -309,23 +316,86 @@ class QueuedAttachmentStore internal constructor(
         check(filesDirectory.isAbsolute) { "应用文件目录必须是绝对路径" }
         val absoluteDirectory = filesDirectory.absoluteFile
         val absolutePath = absoluteDirectory.toPath()
-        check(!Files.isSymbolicLink(absolutePath)) { "应用文件目录不能是符号链接" }
-        val rootFileKey = directoryFileKey(absolutePath)
-        val canonicalPath = absoluteDirectory.canonicalFile.toPath()
-        check(!Files.isSymbolicLink(canonicalPath)) { "应用文件目录不能是符号链接" }
-        check(directoryFileKey(canonicalPath) == rootFileKey) { "应用文件目录解析结果不可信" }
+        return withOpenDirectoryNoFollow(absolutePath.toString(), "应用文件目录无效") { rootFd, rootIdentity ->
+            ParcelFileDescriptor.dup(rootFd).use { pinnedRoot ->
+                val anchoredRootPath = "/proc/self/fd/${pinnedRoot.fd}"
+                val rootFileKey = Files.newDirectoryStream(Path.of(anchoredRootPath)).use { stream ->
+                    directoryFileKey(
+                        requireSecureDirectory(stream, "当前平台不支持安全应用文件目录句柄"),
+                    )
+                }
 
-        synchronized(managedDirectoryInitializationLock) {
-            check(directoryFileKey(absolutePath) == rootFileKey) { "应用文件目录在初始化期间发生变化" }
-            try {
-                testHooks.beforeChildDirectoryCreate()
-                Files.createDirectory(absolutePath.resolve(MANAGED_DIRECTORY_NAME))
-            } catch (_: FileAlreadyExistsException) {
-                // Another Store constructor initialized the child first.
+                synchronized(managedDirectoryInitializationLock) {
+                    testHooks.beforeChildDirectoryCreate()
+                    val anchoredChildPath = "$anchoredRootPath/$MANAGED_DIRECTORY_NAME"
+                    try {
+                        Os.mkdir(anchoredChildPath, OsConstants.S_IRWXU)
+                    } catch (error: ErrnoException) {
+                        if (error.errno != OsConstants.EEXIST) {
+                            throw IllegalStateException("无法创建会话图片目录", error)
+                        }
+                    }
+                    withOpenDirectoryNoFollow(anchoredChildPath, "会话图片目录无效") { _, _ -> }
+                }
+
+                requireCurrentRootIdentity(absolutePath, rootIdentity, "应用文件目录在初始化期间发生变化")
+                TrustedRoot(absolutePath, rootFileKey, rootIdentity)
             }
-            check(directoryFileKey(absolutePath) == rootFileKey) { "应用文件目录在初始化期间发生变化" }
         }
-        return TrustedRoot(absolutePath, rootFileKey)
+    }
+
+    private inline fun <T> withOpenDirectoryNoFollow(
+        path: String,
+        errorMessage: String,
+        block: (FileDescriptor, DirectoryIdentity) -> T,
+    ): T {
+        val descriptor = try {
+            Os.open(
+                path,
+                OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+                0,
+            )
+        } catch (error: ErrnoException) {
+            throw IllegalStateException(errorMessage, error)
+        }
+        var failure: Throwable? = null
+        try {
+            return block(descriptor, directoryIdentity(descriptor, errorMessage))
+        } catch (error: Throwable) {
+            failure = error
+            throw error
+        } finally {
+            try {
+                Os.close(descriptor)
+            } catch (error: ErrnoException) {
+                val originalFailure = failure
+                if (originalFailure != null) {
+                    originalFailure.addSuppressed(error)
+                } else {
+                    throw IllegalStateException("无法关闭应用文件目录句柄", error)
+                }
+            }
+        }
+    }
+
+    private fun requireCurrentRootIdentity(
+        path: Path,
+        expectedIdentity: DirectoryIdentity,
+        errorMessage: String,
+    ) {
+        withOpenDirectoryNoFollow(path.toString(), errorMessage) { _, identity ->
+            check(identity == expectedIdentity) { errorMessage }
+        }
+    }
+
+    private fun directoryIdentity(descriptor: FileDescriptor, errorMessage: String): DirectoryIdentity {
+        val stat = try {
+            Os.fstat(descriptor)
+        } catch (error: ErrnoException) {
+            throw IllegalStateException(errorMessage, error)
+        }
+        check(OsConstants.S_ISDIR(stat.st_mode)) { errorMessage }
+        return DirectoryIdentity(stat.st_dev, stat.st_ino)
     }
 
     private fun directoryFileKey(path: Path): Any {
@@ -353,6 +423,12 @@ class QueuedAttachmentStore internal constructor(
     private data class TrustedRoot(
         val path: Path,
         val fileKey: Any,
+        val identity: DirectoryIdentity,
+    )
+
+    private data class DirectoryIdentity(
+        val device: Long,
+        val inode: Long,
     )
 
     private companion object {
