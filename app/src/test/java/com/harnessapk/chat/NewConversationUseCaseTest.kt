@@ -241,10 +241,16 @@ private class NewConversationFakeAgentDao : AgentDao {
     override suspend fun countInstalledPackagePathReferences(filePath: String) = 0
     override suspend fun countVersionBundlePathReferences(filePath: String) = 0
     override suspend fun countSourceFilePathReferences(filePath: String) = 0
+    override suspend fun countSourcePayloadReferences(sourceHash: String, filePath: String) = 0
+    override suspend fun listInstalledPackagePaths() = emptyList<String>()
     override suspend fun countSourceReferences(sourceId: String, sourceHash: String) = 0
     override suspend fun listCorpusSources(corpusId: String, corpusHash: String) = emptyList<AgentSourceFileEntity>()
-    override suspend fun listInstalledSources() = emptyList<AgentSourceFileEntity>()
-    override suspend fun updateSourcePathByHash(sourceHash: String, filePath: String) = 0
+    override suspend fun listSources() = emptyList<AgentSourceFileEntity>()
+    override suspend fun updateSourcePathsByHashAndOldPaths(
+        sourceHash: String,
+        oldPaths: List<String>,
+        filePath: String,
+    ) = 0
     override suspend fun updateVersionState(agentId: String, version: Int, state: String, expandedAt: Long?) = 0
     override suspend fun updateAgentInstallState(agentId: String, status: String, requiredCount: Int, installedCount: Int, updatedAt: Long) = 0
     override suspend fun updateAgentStatus(agentId: String, status: String, updatedAt: Long) = 0

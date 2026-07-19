@@ -159,6 +159,21 @@ interface AgentDao {
     @Query(
         """
         SELECT (
+            (SELECT COUNT(*) FROM agent_source_files
+             WHERE sourceHash = :sourceHash AND filePath = :filePath) +
+            (SELECT COUNT(*) FROM agent_version_sources WHERE sourceHash = :sourceHash) +
+            (SELECT COUNT(*) FROM agent_corpus_sources WHERE sourceHash = :sourceHash)
+        )
+        """,
+    )
+    suspend fun countSourcePayloadReferences(sourceHash: String, filePath: String): Int
+
+    @Query("SELECT filePath FROM agent_version_packages WHERE installed = 1 AND filePath != ''")
+    suspend fun listInstalledPackagePaths(): List<String>
+
+    @Query(
+        """
+        SELECT (
             (SELECT COUNT(*) FROM agent_version_sources WHERE sourceId = :sourceId AND sourceHash = :sourceHash) +
             (SELECT COUNT(*) FROM agent_corpus_sources WHERE sourceId = :sourceId AND sourceHash = :sourceHash)
         )
@@ -176,11 +191,21 @@ interface AgentDao {
     )
     suspend fun listCorpusSources(corpusId: String, corpusHash: String): List<AgentSourceFileEntity>
 
-    @Query("SELECT * FROM agent_source_files WHERE filePath != '' ORDER BY sourceHash, sourceId")
-    suspend fun listInstalledSources(): List<AgentSourceFileEntity>
+    @Query("SELECT * FROM agent_source_files ORDER BY sourceHash, sourceId")
+    suspend fun listSources(): List<AgentSourceFileEntity>
 
-    @Query("UPDATE agent_source_files SET filePath = :filePath WHERE sourceHash = :sourceHash")
-    suspend fun updateSourcePathByHash(sourceHash: String, filePath: String): Int
+    @Query(
+        """
+        UPDATE agent_source_files
+        SET filePath = :filePath
+        WHERE sourceHash = :sourceHash AND filePath IN (:oldPaths)
+        """,
+    )
+    suspend fun updateSourcePathsByHashAndOldPaths(
+        sourceHash: String,
+        oldPaths: List<String>,
+        filePath: String,
+    ): Int
 
     @Query("UPDATE agent_versions SET state = :state, lastEvidenceExpandedAt = :expandedAt WHERE agentId = :agentId AND version = :version")
     suspend fun updateVersionState(agentId: String, version: Int, state: String, expandedAt: Long?): Int

@@ -117,6 +117,8 @@ class AgentRepositoryLifecycleInstrumentedTest {
             committedCleanup.bundle.inputStream()
         }
         committedCleanup.repository.installPackage(installed)
+        val installedSourcePath = committedCleanup.db.scalarString("SELECT filePath FROM agent_source_files LIMIT 1")
+        assertTrue(File(installedSourcePath).isFile)
         committedCleanup.failureOps.failureMode = FailureMode.DELETE
 
         val removal = committedCleanup.repository.removeVersion("person.integration", 2)

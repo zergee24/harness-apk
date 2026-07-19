@@ -17,30 +17,30 @@ class AgentSourcePartWriter(
         messageId: String,
         snapshot: StreamingMessageSnapshot,
         context: AgentRuntimeContext,
+        onPrepared: (StreamingMessageSnapshot) -> Unit = {},
         onValidated: (StreamingMessageSnapshot) -> Unit = {},
     ): StreamingMessageSnapshot = lifecycleCoordinator.serialized {
-        val selectedKeys = context.evidence.map { it.chunkKey }.filter(String::isNotBlank).distinct()
-        val installedKeys = if (selectedKeys.isEmpty()) {
-            emptySet()
-        } else {
-            dao.listInstalledVersionChunkKeys(context.agentId, context.version, selectedKeys).toSet()
-        }
-        val verifiedEvidence = context.evidence.filter { it.chunkKey in installedKeys }
-        val sourceFree = sanitizeAgentCitationMarkers(snapshot).let { sanitized ->
-            sanitized.copy(
-                parts = sanitized.parts
-                    .filterNot { it.type == UiMessagePartType.AGENT_SOURCES }
-                    .mapIndexed { index, part -> part.copy(index = index) },
-            )
-        }
-        val persisted = appendAgentSourcesPart(
-            sourceFree,
-            verifiedEvidence,
-        )
-        onValidated(persisted)
+        lateinit var persisted: StreamingMessageSnapshot
         transactionRunner.run {
+            val selectedKeys = context.evidence.map { it.chunkKey }.filter(String::isNotBlank).distinct()
+            val installedKeys = if (selectedKeys.isEmpty()) {
+                emptySet()
+            } else {
+                dao.listInstalledVersionChunkKeys(context.agentId, context.version, selectedKeys).toSet()
+            }
+            val verifiedEvidence = context.evidence.filter { it.chunkKey in installedKeys }
+            val sourceFree = sanitizeAgentCitationMarkers(snapshot).let { sanitized ->
+                sanitized.copy(
+                    parts = sanitized.parts
+                        .filterNot { it.type == UiMessagePartType.AGENT_SOURCES }
+                        .mapIndexed { index, part -> part.copy(index = index) },
+                )
+            }
+            persisted = appendAgentSourcesPart(sourceFree, verifiedEvidence)
+            onPrepared(persisted)
             chatRepository.replaceMessagePartsFromSnapshot(messageId, persisted)
         }
+        onValidated(persisted)
         persisted
     }
 }

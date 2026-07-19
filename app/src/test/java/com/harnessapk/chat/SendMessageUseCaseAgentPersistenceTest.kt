@@ -36,6 +36,9 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
@@ -279,6 +282,124 @@ class SendMessageUseCaseAgentPersistenceTest {
             },
         )
     }
+
+    @Test
+    fun finalAgentSourcesValidationAndReplacementShareTransactionAndNotifyOnlyAfterCommit() = runTest {
+        val store = inMemoryChatStore()
+        val conversationId = store.repository.createConversation(agentId = "agent-1", agentVersion = 1)
+        val assistantId = store.repository.insertAssistantPending(conversationId, "provider-1", "model-1")
+        val events = mutableListOf<String>()
+        val dao = FakeAgentDao().apply {
+            persistableChunkKeys += "source-hash:chunk-1"
+            onInstalledVersionChunkKeysRead = { events += "validate" }
+        }
+        val writer = AgentSourcePartWriter(
+            dao = dao,
+            chatRepository = store.repository,
+            transactionRunner = AgentTransactionRunner { block ->
+                events += "begin"
+                block()
+                events += "commit"
+            },
+            lifecycleCoordinator = AgentLifecycleCoordinator(),
+        )
+
+        writer.persist(
+            messageId = assistantId,
+            snapshot = StreamingMessageSnapshot(
+                status = MessageStatus.PENDING,
+                parts = listOf(UiMessagePartDraft(0, UiMessagePartType.TEXT, "回答[资料1]", stable = true)),
+            ),
+            context = agentContext(
+                evidence = listOf(
+                    AgentEvidence("chunk-1", "实践论", "第一章", "调查先于结论。", 8, "source-hash:chunk-1"),
+                ),
+            ),
+            onValidated = { events += "validated" },
+        )
+
+        assertEquals(listOf("begin", "validate", "commit", "validated"), events)
+    }
+
+    @Test
+    fun finalAgentSourcesWriteRollsBackWithoutValidationCallbackWhenReplacementFails() = runTest {
+        val store = inMemoryChatStore(failureAfterSourceWrite = IllegalStateException("replace failed"))
+        val conversationId = store.repository.createConversation(agentId = "agent-1", agentVersion = 1)
+        val assistantId = store.repository.insertAssistantPending(conversationId, "provider-1", "model-1")
+        val events = mutableListOf<String>()
+        val writer = AgentSourcePartWriter(
+            dao = FakeAgentDao().apply {
+                persistableChunkKeys += "source-hash:chunk-1"
+                onInstalledVersionChunkKeysRead = { events += "validate" }
+            },
+            chatRepository = store.repository,
+            transactionRunner = AgentTransactionRunner { block ->
+                events += "begin"
+                try {
+                    block()
+                    events += "commit"
+                } catch (error: Throwable) {
+                    events += "rollback"
+                    throw error
+                }
+            },
+            lifecycleCoordinator = AgentLifecycleCoordinator(),
+        )
+
+        assertTrue(
+            runCatching {
+                writer.persist(assistantId, sourceSnapshot(), sourceContext()) { events += "validated" }
+            }.isFailure,
+        )
+        assertEquals(listOf("begin", "validate", "rollback"), events)
+    }
+
+    @Test
+    fun finalAgentSourcesWriteKeepsDaoMutationOutsideLifecycleCoordinatorOutOfTransactionWindow() = runTest {
+        val store = inMemoryChatStore()
+        val conversationId = store.repository.createConversation(agentId = "agent-1", agentVersion = 1)
+        val assistantId = store.repository.insertAssistantPending(conversationId, "provider-1", "model-1")
+        val queryRead = CompletableDeferred<Unit>()
+        val allowWrite = CompletableDeferred<Unit>()
+        val databaseLock = Mutex()
+        val dao = FakeAgentDao().apply {
+            persistableChunkKeys += "source-hash:chunk-1"
+            onInstalledVersionChunkKeysRead = {
+                queryRead.complete(Unit)
+                allowWrite.await()
+            }
+        }
+        val transactionRunner = AgentTransactionRunner { block -> databaseLock.withLock { block() } }
+        val writer = AgentSourcePartWriter(
+            dao = dao,
+            chatRepository = store.repository,
+            transactionRunner = transactionRunner,
+            lifecycleCoordinator = AgentLifecycleCoordinator(),
+        )
+
+        val write = async { writer.persist(assistantId, sourceSnapshot(), sourceContext()) }
+        queryRead.await()
+        val mutation = launch {
+            transactionRunner.run { dao.persistableChunkKeys.clear() }
+        }
+        assertFalse(mutation.isCompleted)
+        allowWrite.complete(Unit)
+        write.await()
+        mutation.join()
+
+        assertEquals(UiMessagePartType.AGENT_SOURCES, store.repository.listMessageParts(assistantId).last().type)
+    }
+
+    private fun sourceSnapshot() = StreamingMessageSnapshot(
+        status = MessageStatus.PENDING,
+        parts = listOf(UiMessagePartDraft(0, UiMessagePartType.TEXT, "回答[资料1]", stable = true)),
+    )
+
+    private fun sourceContext() = agentContext(
+        evidence = listOf(
+            AgentEvidence("chunk-1", "实践论", "第一章", "调查先于结论。", 8, "source-hash:chunk-1"),
+        ),
+    )
 
     private suspend fun executeAndReadParts(
         response: String,

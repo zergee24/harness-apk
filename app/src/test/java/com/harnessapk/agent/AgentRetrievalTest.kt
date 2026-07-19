@@ -608,6 +608,120 @@ class AgentRetrievalTest {
     }
 
     @Test
+    fun recoveryUpdatesOnlyInstalledDescriptorsWhenSameHashAlsoHasCorpusOnlyDescriptor() = runTest {
+        val fixture = v2InstallFixture()
+        val sourceDirectory = fixture.repositoryRoot.resolve("files/agents/sources/$V2_SOURCE_HASH").apply {
+            mkdirs()
+        }
+        val legacy = sourceDirectory.resolve("legacy-name.txt").apply { writeText("raw-source") }
+        val installed = AgentSourceFileEntity(
+            sourceId = "source-installed",
+            sourceHash = V2_SOURCE_HASH,
+            title = "已安装来源",
+            fileName = "source.txt",
+            storedName = "legacy-name.txt",
+            format = "txt",
+            genre = "essay",
+            authorship = "direct",
+            period = "test",
+            rawSizeBytes = legacy.length(),
+            filePath = legacy.absolutePath,
+            packageSha256 = "package",
+            installedAt = 1L,
+        )
+        val corpusOnly = installed.copy(sourceId = "source-corpus-only", filePath = "")
+        fixture.dao.sources["${installed.sourceId}:${installed.sourceHash}"] = installed
+        fixture.dao.sources["${corpusOnly.sourceId}:${corpusOnly.sourceHash}"] = corpusOnly
+
+        fixture.repository.recoverFileLifecycle()
+
+        val canonical = sourceDirectory.resolve("payload").canonicalPath
+        assertEquals(canonical, fixture.dao.sources.getValue("${installed.sourceId}:${installed.sourceHash}").filePath)
+        assertEquals("", fixture.dao.sources.getValue("${corpusOnly.sourceId}:${corpusOnly.sourceHash}").filePath)
+        assertFalse(legacy.exists())
+    }
+
+    @Test
+    fun removingOneOfTwoCorporaWithSamePayloadHashKeepsPayloadUntilLastReferenceIsRemoved() = runTest {
+        val fixture = optionalRemovalFixture(required = false)
+        val sourceHash = "a97cc769a7c4eaff85eb7322caf37f0f0189a24580a80295154d05242027916c"
+        val payload = fixture.repositoryRoot.resolve("files/agents/sources/$sourceHash/payload").apply {
+            parentFile?.mkdirs()
+            writeText("shared source")
+        }
+        fun source(sourceId: String) = AgentSourceFileEntity(
+            sourceId = sourceId,
+            sourceHash = sourceHash,
+            title = sourceId,
+            fileName = "$sourceId.txt",
+            storedName = "$sourceId.txt",
+            format = "txt",
+            genre = "essay",
+            authorship = "direct",
+            period = "test",
+            rawSizeBytes = payload.length(),
+            filePath = payload.absolutePath,
+            packageSha256 = "package-$sourceId",
+            installedAt = 1L,
+        )
+        fixture.dao.sources["source-a:$sourceHash"] = source("source-a")
+        fixture.dao.sources["source-b:$sourceHash"] = source("source-b")
+        fixture.dao.corpusSourceRefs += AgentCorpusSourceCrossRef(
+            "corpus-extra", "corpus-hash", "source-a", sourceHash,
+        )
+        fixture.dao.corpora["corpus-shared:shared-corpus-hash"] = AgentCorpusEntity(
+            "corpus-shared", "shared-corpus-hash", "共享资料", 1L, 1L,
+        )
+        fixture.dao.versionCorpora = fixture.dao.versionCorpora + AgentVersionCorpusCrossRef(
+            "agent-remove", 1, "corpus-shared", "shared-corpus-hash", false,
+        )
+        fixture.dao.corpusSourceRefs += AgentCorpusSourceCrossRef(
+            "corpus-shared", "shared-corpus-hash", "source-b", sourceHash,
+        )
+
+        assertEquals(
+            AgentCorpusRemovalOutcome.REMOVED,
+            fixture.repository.removeOptionalCorpus("agent-remove", 1, "corpus-extra").outcome,
+        )
+        assertTrue(payload.isFile)
+
+        assertEquals(
+            AgentCorpusRemovalOutcome.REMOVED,
+            fixture.repository.removeOptionalCorpus("agent-remove", 1, "corpus-shared").outcome,
+        )
+        assertFalse(payload.exists())
+    }
+
+    @Test
+    fun removingVersionKeepsPayloadReferencedByAnotherAgentVersionWithDifferentSourceId() = runTest {
+        val fixture = optionalRemovalFixture(required = false)
+        val sourceHash = "a97cc769a7c4eaff85eb7322caf37f0f0189a24580a80295154d05242027916c"
+        val payload = fixture.repositoryRoot.resolve("files/agents/sources/$sourceHash/payload").apply {
+            parentFile?.mkdirs()
+            writeText("shared source")
+        }
+        fun source(sourceId: String) = AgentSourceFileEntity(
+            sourceId, sourceHash, sourceId, "$sourceId.txt", "$sourceId.txt", "txt", "essay", "direct",
+            "test", payload.length(), payload.absolutePath, "package-$sourceId", 1L,
+        )
+        fixture.dao.sources["source-a:$sourceHash"] = source("source-a")
+        fixture.dao.sources["source-b:$sourceHash"] = source("source-b")
+        fixture.dao.versionSources += AgentVersionSourceCrossRef("agent-remove", 1, "source-a", sourceHash)
+        fixture.dao.versionSources += AgentVersionSourceCrossRef("agent-other", 2, "source-b", sourceHash)
+        val repository = AgentRepository(
+            filesDir = fixture.repositoryRoot.resolve("files"),
+            cacheDir = fixture.repositoryRoot.resolve("cache"),
+            dao = fixture.dao,
+            conversationDao = RemovalConversationDao(referenceCount = 0),
+            timeProvider = TimeProvider { 20L },
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+
+        assertEquals(AgentVersionRemovalOutcome.REMOVED, repository.removeVersion("agent-remove", 1).outcome)
+        assertTrue(payload.isFile)
+    }
+
+    @Test
     fun installingNewV1OrV2ContentNeverImplicitlyEnablesDisabledAgent() = runTest {
         val v1Root = Files.createTempDirectory("agent-v1-disabled-test").toFile().apply { deleteOnExit() }
         val v1Source = v1Root.resolve("source.hbundle").apply { writeText("validated package") }
@@ -1314,6 +1428,7 @@ internal class FakeAgentDao : AgentDao {
     val referencedChunkKeys = mutableSetOf<String>()
     val legacyAgentSourceVersions = mutableSetOf<String>()
     val persistableChunkKeys = mutableSetOf<String>()
+    var onInstalledVersionChunkKeysRead: (suspend () -> Unit)? = null
     var failChunkInsertCall: Int? = null
     var failEvidenceCheck: Boolean = false
     var failReadyTransition: Boolean = false
@@ -1353,7 +1468,10 @@ internal class FakeAgentDao : AgentDao {
         agentId: String,
         version: Int,
         chunkKeys: List<String>,
-    ): List<String> = chunkKeys.filter { it in persistableChunkKeys || it in chunks }
+    ): List<String> {
+        onInstalledVersionChunkKeysRead?.invoke()
+        return chunkKeys.filter { it in persistableChunkKeys || it in chunks }
+    }
     override suspend fun findSource(sourceId: String, sourceHash: String): AgentSourceFileEntity? =
         sources["$sourceId:$sourceHash"]
     override suspend fun listVersionSources(agentId: String, version: Int): List<AgentSourceFileEntity> =
@@ -1394,15 +1512,29 @@ internal class FakeAgentDao : AgentDao {
         if (version?.bundlePath == filePath) 1 else 0
     override suspend fun countSourceFilePathReferences(filePath: String) =
         sources.values.count { it.filePath == filePath }
+    override suspend fun countSourcePayloadReferences(sourceHash: String, filePath: String) =
+        sources.values.count { it.sourceHash == sourceHash && it.filePath == filePath } +
+            versionSources.count { it.sourceHash == sourceHash } +
+            corpusSourceRefs.count { it.sourceHash == sourceHash }
+    override suspend fun listInstalledPackagePaths() = versionPackages.values
+        .filter(AgentVersionPackageEntity::installed)
+        .map(AgentVersionPackageEntity::filePath)
+        .filter(String::isNotBlank)
     override suspend fun countSourceReferences(sourceId: String, sourceHash: String) =
         versionSources.count { it.sourceId == sourceId && it.sourceHash == sourceHash } +
             corpusSourceRefs.count { it.sourceId == sourceId && it.sourceHash == sourceHash }
     override suspend fun listCorpusSources(corpusId: String, corpusHash: String) =
         corpusSourceRefs.filter { it.corpusId == corpusId && it.corpusHash == corpusHash }
             .mapNotNull { sources["${it.sourceId}:${it.sourceHash}"] }
-    override suspend fun listInstalledSources() = sources.values.filter { it.filePath.isNotBlank() }
-    override suspend fun updateSourcePathByHash(sourceHash: String, filePath: String): Int {
-        val matching = sources.filterValues { it.sourceHash == sourceHash }
+    override suspend fun listSources() = sources.values.sortedWith(
+        compareBy(AgentSourceFileEntity::sourceHash, AgentSourceFileEntity::sourceId),
+    )
+    override suspend fun updateSourcePathsByHashAndOldPaths(
+        sourceHash: String,
+        oldPaths: List<String>,
+        filePath: String,
+    ): Int {
+        val matching = sources.filterValues { it.sourceHash == sourceHash && it.filePath in oldPaths }
         matching.forEach { (key, source) -> sources[key] = source.copy(filePath = filePath) }
         return matching.size
     }
@@ -1571,7 +1703,14 @@ internal class FakeAgentDao : AgentDao {
         hierarchyNodes.keys.removeIf { it !in referenced }
         return before - hierarchyNodes.size
     }
-    override suspend fun deleteOrphanSources(): Int = 0
+    override suspend fun deleteOrphanSources(): Int {
+        val before = sources.size
+        sources.entries.removeIf { (_, source) ->
+            versionSources.none { it.sourceId == source.sourceId && it.sourceHash == source.sourceHash } &&
+                corpusSourceRefs.none { it.sourceId == source.sourceId && it.sourceHash == source.sourceHash }
+        }
+        return before - sources.size
+    }
     override suspend fun deleteOrphanCorpora(): Int = 0
 
     fun clearInstalledState() {

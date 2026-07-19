@@ -253,7 +253,8 @@ class SendMessageUseCase(
                         nextAssistantId,
                         snapshot,
                         agentContext,
-                    ) { latestSnapshot = it }
+                        onPrepared = { latestSnapshot = it },
+                    )
                         ?: sanitizeAgentCitationMarkers(snapshot).also {
                             chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, it)
                         }

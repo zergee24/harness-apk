@@ -59,7 +59,10 @@ fun AgentPackagesScreen(
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var importSession by remember { mutableStateOf<AgentImportSession?>(null) }
+    val previewViewModel = remember {
+        AgentImportPreviewViewModel(container.agentRepository::discardImport)
+    }
+    val importSession by previewViewModel.session.collectAsState()
     var installedAgent by remember { mutableStateOf<Agent?>(null) }
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
@@ -73,8 +76,7 @@ fun AgentPackagesScreen(
                     context.contentResolver.openInputStream(uri)
                         ?: throw AgentBundleException("无法读取所选文件")
                 }
-                importSession?.let { previous -> container.agentRepository.discardImport(previous) }
-                importSession = session
+                previewViewModel.replace(session)
             } catch (error: Throwable) {
                 errorText = error.message ?: "智能体包读取失败"
             }
@@ -154,8 +156,7 @@ fun AgentPackagesScreen(
             isInstalling = isWorking,
             onDismiss = {
                 scope.launch {
-                    runCatching { container.agentRepository.discardImport(session) }
-                    importSession = null
+                    runCatching { previewViewModel.discardIfCurrent(session) }
                 }
             },
             onInstall = {
@@ -164,7 +165,7 @@ fun AgentPackagesScreen(
                     errorText = null
                     runCatching { container.agentRepository.install(session) }
                         .onSuccess { result ->
-                            importSession = null
+                            previewViewModel.clearIfCurrent(session)
                             installedAgent = result.agent
                         }
                         .onFailure { error -> errorText = error.message ?: "智能体安装失败" }

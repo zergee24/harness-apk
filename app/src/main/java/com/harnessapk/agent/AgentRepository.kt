@@ -1020,6 +1020,11 @@ class AgentRepository(
             return@serialized AgentCorpusRemovalResult(AgentCorpusRemovalOutcome.REFERENCED)
         }
         val packagePath = dao.findVersionPackage(agentId, version, corpusId)?.filePath.orEmpty()
+        val removedSources = if (dao.countVersionCorpusReferences(reference.corpusId, reference.sourceHash) <= 1) {
+            dao.listCorpusSources(reference.corpusId, reference.sourceHash)
+        } else {
+            emptyList()
+        }
         val removablePaths = buildList {
             if (
                 packagePath.isNotBlank() &&
@@ -1027,11 +1032,7 @@ class AgentRepository(
             ) {
                 add(packagePath)
             }
-            dao.listCorpusSources(reference.corpusId, reference.sourceHash).forEach { source ->
-                if (source.filePath.isNotBlank() && dao.countSourceReferences(source.sourceId, source.sourceHash) <= 1) {
-                    add(source.filePath)
-                }
-            }
+            addAll(sourcePayloadPathsToRetire(removedSources, listOf(packagePath)))
         }.distinct()
         val tombstones = stageFilesForDeletion(removablePaths)
         try {
@@ -1128,6 +1129,12 @@ class AgentRepository(
                 dao.countVersionCorpusReferences(it.corpusId, it.sourceHash) <= 1
             }
             val versionSources = dao.listVersionSources(agentId, version)
+            val removedSources = buildList {
+                addAll(versionSources)
+                orphanedCorpora.forEach { corpus ->
+                    addAll(dao.listCorpusSources(corpus.corpusId, corpus.sourceHash))
+                }
+            }
             val removablePaths = buildList {
                 add(stored.bundlePath)
                 packagePaths.distinct().forEach { path ->
@@ -1135,19 +1142,7 @@ class AgentRepository(
                         .count { it.installed && it.filePath == path }
                     if (dao.countInstalledPackagePathReferences(path) <= targetReferences) add(path)
                 }
-                versionSources.forEach { source ->
-                    val removedReferenceCount = 1 + orphanedCorpora.count { corpus ->
-                        dao.listCorpusSources(corpus.corpusId, corpus.sourceHash).any {
-                            it.sourceId == source.sourceId && it.sourceHash == source.sourceHash
-                        }
-                    }
-                    if (
-                        source.filePath.isNotBlank() &&
-                        dao.countSourceReferences(source.sourceId, source.sourceHash) <= removedReferenceCount
-                    ) {
-                        add(source.filePath)
-                    }
-                }
+                addAll(sourcePayloadPathsToRetire(removedSources, packagePaths))
             }.filter(String::isNotBlank).distinct()
             val tombstones = stageFilesForDeletion(removablePaths)
             try {
@@ -1342,7 +1337,8 @@ class AgentRepository(
     }
 
     private suspend fun canonicalizeLegacySourcePayloads() {
-        dao.listInstalledSources().groupBy(AgentSourceFileEntity::sourceHash).forEach { (sourceHash, rows) ->
+        dao.listSources().filter { it.filePath.isNotBlank() }
+            .groupBy(AgentSourceFileEntity::sourceHash).forEach { (sourceHash, rows) ->
             val expectedBytes = rows.map(AgentSourceFileEntity::rawSizeBytes).distinct()
             if (expectedBytes.size != 1) {
                 throw AgentBundleException("同一 sourceHash 的 descriptor bytes 不一致：$sourceHash")
@@ -1370,7 +1366,8 @@ class AgentRepository(
             if (legacyFiles.any { !it.isFile } && !canonicalIsValid) {
                 throw AgentBundleException("source payload 文件缺失：$sourceHash")
             }
-            if (installedFiles.all { it == canonical }) return@forEach
+            val rowsToUpdate = rows.filter { it.filePath != canonical.absolutePath }
+            if (rowsToUpdate.isEmpty()) return@forEach
 
             var movedFrom: File? = null
             if (!canonicalIsValid) {
@@ -1383,7 +1380,13 @@ class AgentRepository(
             val tombstones = stageFilesForDeletion(duplicates.map(File::getAbsolutePath))
             try {
                 transactionRunner.run {
-                    check(dao.updateSourcePathByHash(sourceHash, canonical.absolutePath) == rows.size) {
+                    check(
+                        dao.updateSourcePathsByHashAndOldPaths(
+                            sourceHash = sourceHash,
+                            oldPaths = rowsToUpdate.map(AgentSourceFileEntity::filePath).distinct(),
+                            filePath = canonical.absolutePath,
+                        ) == rowsToUpdate.size,
+                    ) {
                         "source canonical path 更新失败"
                     }
                 }
@@ -1400,8 +1403,47 @@ class AgentRepository(
         }
     }
 
+    /** Computes physical payload retirement from the database state after the pending logical removals. */
+    private suspend fun sourcePayloadPathsToRetire(
+        removedSources: List<AgentSourceFileEntity>,
+        removedPackagePaths: List<String>,
+    ): List<String> {
+        val removedReferencesBySource = removedSources.groupingBy {
+            it.sourceId to it.sourceHash
+        }.eachCount()
+        return removedSources.filter { it.filePath.isNotBlank() }
+            .groupBy { it.sourceHash to File(it.filePath).canonicalPath }
+            .mapNotNull { (payload, sources) ->
+                val (sourceHash, filePath) = payload
+                val sourceDescriptors = sources.distinctBy {
+                    it.sourceId to it.sourceHash
+                }
+                val removedDescriptorCount = sourceDescriptors.count { source ->
+                    dao.countSourceReferences(source.sourceId, source.sourceHash) <=
+                        requireNotNull(removedReferencesBySource[source.sourceId to source.sourceHash])
+                }
+                val removedReferenceCount = sourceDescriptors.sumOf { source ->
+                    requireNotNull(removedReferencesBySource[source.sourceId to source.sourceHash])
+                }
+                val removedPackageCount = removedPackagePaths.count { path ->
+                    path.isNotBlank() && File(path).canonicalPath == filePath
+                }
+                val installedPackageReferenceCount = dao.listInstalledPackagePaths().count { path ->
+                    File(path).canonicalPath == filePath
+                }
+                if (
+                    dao.countSourcePayloadReferences(sourceHash, filePath) + installedPackageReferenceCount <=
+                        removedReferenceCount + removedDescriptorCount + removedPackageCount
+                ) {
+                    filePath
+                } else {
+                    null
+                }
+            }
+    }
+
     private suspend fun stageFilesForDeletion(paths: List<String>): List<FileTombstone> {
-        val uniqueFiles = paths.map(::File).distinctBy(File::getAbsolutePath)
+        val uniqueFiles = paths.map { File(it).canonicalFile }.distinctBy(File::getAbsolutePath)
         val staged = mutableListOf<FileTombstone>()
         try {
             uniqueFiles.forEach { file ->
