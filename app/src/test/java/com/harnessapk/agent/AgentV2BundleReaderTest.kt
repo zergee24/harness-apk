@@ -147,6 +147,28 @@ class AgentV2BundleReaderTest {
     }
 
     @Test
+    fun rejectsMalformedUtf8InSignedAgentJsonl() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val worldviewText = worldviewJson("stance-invalid-utf8", "ok")
+        val statementOffset =
+            worldviewText.indexOf("\"statement\":\"ok\"") + "\"statement\":\"".length
+        val malformedWorldview = worldviewText.encodeToByteArray().also { bytes ->
+            bytes[statementOffset] = 0xc3.toByte()
+            bytes[statementOffset + 1] = 0x28
+        }
+
+        assertPackageFailure("JSON 格式无效") {
+            AgentBundleReader().readPackage(
+                fixture.agentPackage(
+                    corpus,
+                    runtimeAssets = mapOf("agent/worldview.jsonl" to malformedWorldview),
+                ),
+            )
+        }
+    }
+
+    @Test
     fun rejectsOpenersAlternativesBeforeDomParsing() {
         val fixture = Fixture()
         val corpus = fixture.corpusPackage()

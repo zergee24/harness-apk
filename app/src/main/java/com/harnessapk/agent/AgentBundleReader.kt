@@ -2296,7 +2296,9 @@ private inline fun InputStream.forEachUtf8JsonLine(
         for (index in 0 until count) {
             val byte = buffer[index]
             if (byte == '\n'.code.toByte()) {
-                val text = line.toByteArray().decodeToString().trimEnd('\r')
+                val text = line.toByteArray()
+                    .decodeStrictUtf8("$path 第 $lineNumber 行")
+                    .trimEnd('\r')
                 if (text.isNotBlank()) block(text, lineNumber)
                 line.reset()
                 lineNumber += 1
@@ -2309,7 +2311,9 @@ private inline fun InputStream.forEachUtf8JsonLine(
         }
     }
     if (line.size() > 0) {
-        val text = line.toByteArray().decodeToString().trimEnd('\r')
+        val text = line.toByteArray()
+            .decodeStrictUtf8("$path 第 $lineNumber 行")
+            .trimEnd('\r')
         if (text.isNotBlank()) block(text, lineNumber)
     }
 }
@@ -2327,7 +2331,9 @@ private suspend fun InputStream.forEachUtf8JsonLineSuspending(
         for (index in 0 until count) {
             val byte = buffer[index]
             if (byte == '\n'.code.toByte()) {
-                val text = line.toByteArray().decodeToString().trimEnd('\r')
+                val text = line.toByteArray()
+                    .decodeStrictUtf8("$path 第 $lineNumber 行")
+                    .trimEnd('\r')
                 if (text.isNotBlank()) block(text, lineNumber)
                 line.reset()
                 lineNumber += 1
@@ -2340,7 +2346,9 @@ private suspend fun InputStream.forEachUtf8JsonLineSuspending(
         }
     }
     if (line.size() > 0) {
-        val text = line.toByteArray().decodeToString().trimEnd('\r')
+        val text = line.toByteArray()
+            .decodeStrictUtf8("$path 第 $lineNumber 行")
+            .trimEnd('\r')
         if (text.isNotBlank()) block(text, lineNumber)
     }
 }
