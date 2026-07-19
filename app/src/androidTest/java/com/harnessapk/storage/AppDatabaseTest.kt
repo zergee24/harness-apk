@@ -340,11 +340,15 @@ class AppDatabaseTest {
         createVersion11Fixture(context, name, conflictingChunk = false)
 
         val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_11_12)
+            .addMigrations(AppDatabase.MIGRATION_11_12, AppDatabase.MIGRATION_12_13)
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(12, sqlite.version)
+        assertEquals(13, sqlite.version)
+        assertEquals(1, sqlite.scalarInt("SELECT requiredCorpusCount FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_version_packages"))
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_sources"))
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_hierarchy"))
         assertEquals("conversation-1", sqlite.string("SELECT id FROM conversations"))
         assertEquals("message-part-1", sqlite.string("SELECT id FROM message_parts"))
         assertEquals("notes/fixture.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
@@ -389,7 +393,7 @@ class AppDatabaseTest {
         val name = "migration-11-12-reinstall-${System.nanoTime()}.db"
         createVersion11Fixture(context, name, conflictingChunk = false)
         val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_11_12)
+            .addMigrations(AppDatabase.MIGRATION_11_12, AppDatabase.MIGRATION_12_13)
             .build()
         db.openHelper.writableDatabase
         val root = context.cacheDir.resolve("migration-reinstall-${System.nanoTime()}").apply { mkdirs() }
@@ -427,7 +431,7 @@ class AppDatabaseTest {
 
         try {
             Room.databaseBuilder(context, AppDatabase::class.java, name)
-                .addMigrations(AppDatabase.MIGRATION_11_12)
+                .addMigrations(AppDatabase.MIGRATION_11_12, AppDatabase.MIGRATION_12_13)
                 .build()
                 .openHelper
                 .writableDatabase

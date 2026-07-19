@@ -66,12 +66,22 @@ class SendMessageUseCaseAgentPersistenceTest {
         executeAndReadParts(
             response = "先调查。[资料 1]再决定。",
             agentContext = agentContext(
-                evidence = listOf(AgentEvidence("chunk-1", "实践论", "第一章", "调查先于结论。", 8)),
+                evidence = listOf(
+                    AgentEvidence(
+                        "chunk-1",
+                        "实践论",
+                        "第一章",
+                        "调查先于结论。",
+                        8,
+                        chunkKey = "source-hash:chunk-1",
+                    ),
+                ),
             ),
         ).also { (_, parts) ->
             assertEquals("先调查。再决定。", parts.first { it.type == UiMessagePartType.TEXT }.content)
             assertEquals(UiMessagePartType.AGENT_SOURCES, parts.last().type)
             assertTrue(parts.last().content.contains("资料 1 · 实践论 · 第一章"))
+            assertEquals("[\"source-hash:chunk-1\"]", parts.last().metadata["chunkKeys"])
         }
     }
 
@@ -415,6 +425,8 @@ private class ExecuteConversationDao : ConversationDao {
         }
     }
     override suspend fun archive(id: String, updatedAt: Long) = Unit
+    override suspend fun countByAgentVersion(agentId: String, version: Int) =
+        rows.values.count { it.agentId == agentId && it.agentVersion == version }
 }
 
 private class ExecuteMessageDao : MessageDao {

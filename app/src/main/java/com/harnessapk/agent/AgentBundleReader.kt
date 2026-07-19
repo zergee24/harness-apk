@@ -38,11 +38,33 @@ import java.util.zip.ZipFile
 interface AgentBundleAccess {
     fun inspect(file: File): AgentImportPreview
     fun read(file: File): ParsedAgentBundle
+    fun readPackage(file: File): ParsedAgentPackage = V1Bundle(read(file))
     suspend fun forEachChunkSuspending(
         bundle: ParsedAgentBundle,
         corpus: AgentCorpusManifest,
         block: suspend (AgentCorpusChunk) -> Unit,
     )
+    suspend fun forEachV2ChunkSuspending(
+        file: File,
+        corpusId: String? = null,
+        block: suspend (V2Chunk) -> Unit,
+    ) {
+        throw AgentBundleException("当前 reader 不支持 V2 chunk 流式读取")
+    }
+    suspend fun forEachV2HierarchyNodeSuspending(
+        file: File,
+        corpusId: String? = null,
+        block: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        throw AgentBundleException("当前 reader 不支持 V2 hierarchy 流式读取")
+    }
+    suspend fun copyV2SourcePayload(
+        file: File,
+        packageId: String? = null,
+        output: OutputStream,
+    ) {
+        throw AgentBundleException("当前 reader 不支持 V2 source 读取")
+    }
 }
 
 class AgentBundleReader(
@@ -74,7 +96,7 @@ class AgentBundleReader(
             else -> throw AgentBundleException("V2 人格包必须通过 readPackage 读取")
         }
 
-    fun readPackage(file: File): ParsedAgentPackage {
+    override fun readPackage(file: File): ParsedAgentPackage {
         return withVerifiedPackage(file) { parsed, _ -> parsed }
     }
 
@@ -249,6 +271,98 @@ class AgentBundleReader(
             streamVerifiedV2Chunks(requireNotNull(stagedPackages[corpus.packageSha256]), block)
         }
     }
+
+    override suspend fun forEachV2ChunkSuspending(
+        file: File,
+        corpusId: String?,
+        block: suspend (V2Chunk) -> Unit,
+    ) {
+        withVerifiedPackageSuspending(file) { parsed, stagedPackages ->
+            val corpus = parsed.resolveV2Corpus(corpusId)
+            val staged = requireNotNull(stagedPackages[corpus.packageSha256])
+            ZipFile(staged).use { archive ->
+                val entry = archive.getEntry(V2_CHUNKS_PATH)
+                    ?: throw AgentBundleException("缺少包内文件：$V2_CHUNKS_PATH")
+                archive.getInputStream(entry).use { input ->
+                    input.forEachUtf8JsonLineSuspending(V2_CHUNKS_PATH) { line, lineNumber ->
+                        currentCoroutineContext().ensureActive()
+                        block(parseV2Chunk(parseObject(line, "$V2_CHUNKS_PATH 第 $lineNumber 行")))
+                    }
+                }
+            }
+        }
+    }
+
+    override suspend fun forEachV2HierarchyNodeSuspending(
+        file: File,
+        corpusId: String?,
+        block: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        withVerifiedPackageSuspending(file) { parsed, stagedPackages ->
+            val corpus = parsed.resolveV2Corpus(corpusId)
+            val staged = requireNotNull(stagedPackages[corpus.packageSha256])
+            ZipFile(staged).use { archive ->
+                val entry = archive.getEntry(V2_NODES_PATH)
+                    ?: throw AgentBundleException("缺少包内文件：$V2_NODES_PATH")
+                archive.getInputStream(entry).use { input ->
+                    input.forEachUtf8JsonLineSuspending(V2_NODES_PATH) { line, lineNumber ->
+                        currentCoroutineContext().ensureActive()
+                        block(parseNode(parseObject(line, "$V2_NODES_PATH 第 $lineNumber 行")))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun ParsedAgentPackage.resolveV2Corpus(corpusId: String?): V2Corpus = when (this) {
+        is V2Corpus -> {
+            if (corpusId != null && manifest.id != identifier(corpusId)) {
+                throw AgentBundleException("hcorpus ID 不匹配：$corpusId")
+            }
+            this
+        }
+        is V2Bundle -> {
+            val expected = corpusId?.let(::identifier)
+                ?: throw AgentBundleException("hbundle 流式读取必须指定 corpus ID")
+            corpora.singleOrNull { it.manifest.id == expected }
+                ?: throw AgentBundleException("bundle 未选择 corpus：$expected")
+        }
+        else -> throw AgentBundleException("当前包不包含 V2 corpus")
+    }
+
+    override suspend fun copyV2SourcePayload(
+        file: File,
+        packageId: String?,
+        output: OutputStream,
+    ) {
+        withVerifiedPackageSuspending(file) { parsed, stagedPackages ->
+            val source = when (parsed) {
+                is V2Source -> {
+                    if (packageId != null && sourcePackageId(packageId) != parsed.manifest.id) {
+                        throw AgentBundleException("hsource package ID 不匹配：$packageId")
+                    }
+                    parsed
+                }
+                is V2Bundle -> {
+                    val expected = packageId?.let(::sourcePackageId)
+                        ?: throw AgentBundleException("hbundle 读取 source 必须指定 package ID")
+                    parsed.sources.singleOrNull { it.manifest.id == expected }
+                        ?: throw AgentBundleException("bundle 未选择 source：$expected")
+                }
+                else -> throw AgentBundleException("当前包不包含 V2 source")
+            }
+            val staged = requireNotNull(stagedPackages[source.packageSha256])
+            ZipFile(staged).use { archive ->
+                val path = "files/${source.manifest.storedName}"
+                val entry = archive.getEntry(path) ?: throw AgentBundleException("缺少包内文件：$path")
+                archive.getInputStream(entry).use { input ->
+                    input.copyBoundedTo(output, source.manifest.rawSizeBytes, path)
+                }
+            }
+        }
+    }
+
+    private fun sourcePackageId(value: String): String = identifier(value)
 
     private fun streamVerifiedV2Chunks(stagedFile: File, block: (V2Chunk) -> Unit) {
         ZipFile(stagedFile).use { archive ->

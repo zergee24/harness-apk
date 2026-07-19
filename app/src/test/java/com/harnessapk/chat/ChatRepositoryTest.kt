@@ -497,6 +497,8 @@ private class FakeConversationDao : ConversationDao {
         rows[id]?.let { rows[id] = it.copy(isArchived = true, updatedAt = updatedAt) }
         refresh()
     }
+    override suspend fun countByAgentVersion(agentId: String, version: Int) =
+        rows.values.count { it.agentId == agentId && it.agentVersion == version }
 
     private fun refresh() {
         flow.value = rows.values.filter { !it.isArchived }.sortedByDescending { it.updatedAt }

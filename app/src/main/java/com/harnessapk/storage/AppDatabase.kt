@@ -19,17 +19,20 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MarkdownChangeDraftItemEntity::class,
         AgentEntity::class,
         AgentVersionEntity::class,
+        AgentVersionPackageEntity::class,
         AgentCorpusEntity::class,
         AgentVersionCorpusCrossRef::class,
         AgentChunkEntity::class,
         AgentCorpusChunkCrossRef::class,
+        AgentCorpusSourceCrossRef::class,
         AgentChunkFtsEntity::class,
         AgentHierarchyNodeEntity::class,
         AgentHierarchyFtsEntity::class,
+        AgentCorpusHierarchyCrossRef::class,
         AgentSourceFileEntity::class,
         AgentVersionSourceCrossRef::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -555,6 +558,90 @@ abstract class AppDatabase : RoomDatabase() {
                     "CREATE INDEX IF NOT EXISTS index_agent_version_sources_sourceId_sourceHash ON agent_version_sources(sourceId, sourceHash)",
                 )
 
+                db.query("PRAGMA foreign_key_check").use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        throw IllegalStateException(
+                            "foreign_key_check failed: ${cursor.getString(0)} / row ${cursor.getLong(1)}",
+                        )
+                    }
+                }
+            }
+        }
+
+        val MIGRATION_12_13: Migration = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN requiredCorpusCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN evalJsonl TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN requiredEvidenceJson TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE agent_versions ADD COLUMN evaluationCorpusIdsJson TEXT NOT NULL DEFAULT ''")
+                db.execSQL(
+                    """
+                    UPDATE agent_versions
+                    SET requiredCorpusCount = CASE
+                        WHEN version = (SELECT activeVersion FROM agents WHERE agents.id = agent_versions.agentId)
+                            THEN COALESCE((SELECT requiredCorpusCount FROM agents WHERE agents.id = agent_versions.agentId), 0)
+                        ELSE (SELECT COUNT(*) FROM agent_version_corpora
+                              WHERE agent_version_corpora.agentId = agent_versions.agentId
+                                AND agent_version_corpora.version = agent_versions.version
+                                AND agent_version_corpora.required = 1)
+                    END
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_version_packages (
+                        agentId TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        packageId TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        fileName TEXT NOT NULL,
+                        installClass TEXT NOT NULL,
+                        packageSha256 TEXT NOT NULL,
+                        packageSizeBytes INTEGER NOT NULL,
+                        installed INTEGER NOT NULL,
+                        filePath TEXT NOT NULL,
+                        installedAt INTEGER,
+                        PRIMARY KEY(agentId, version, packageId),
+                        FOREIGN KEY(agentId, version) REFERENCES agent_versions(agentId, version)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_version_packages_agentId_version ON agent_version_packages(agentId, version)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_version_packages_packageSha256 ON agent_version_packages(packageSha256)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_corpus_sources (
+                        corpusId TEXT NOT NULL,
+                        corpusHash TEXT NOT NULL,
+                        sourceId TEXT NOT NULL,
+                        sourceHash TEXT NOT NULL,
+                        PRIMARY KEY(corpusId, corpusHash, sourceId, sourceHash),
+                        FOREIGN KEY(corpusId, corpusHash) REFERENCES agent_corpora(corpusId, sourceHash)
+                            ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(sourceId, sourceHash) REFERENCES agent_source_files(sourceId, sourceHash)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_corpus_sources_corpusId_corpusHash ON agent_corpus_sources(corpusId, corpusHash)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_corpus_sources_sourceId_sourceHash ON agent_corpus_sources(sourceId, sourceHash)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_corpus_hierarchy (
+                        corpusId TEXT NOT NULL,
+                        corpusHash TEXT NOT NULL,
+                        nodeKey TEXT NOT NULL,
+                        PRIMARY KEY(corpusId, corpusHash, nodeKey),
+                        FOREIGN KEY(corpusId, corpusHash) REFERENCES agent_corpora(corpusId, sourceHash)
+                            ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(nodeKey) REFERENCES agent_hierarchy_nodes(nodeKey)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_corpus_hierarchy_corpusId_corpusHash ON agent_corpus_hierarchy(corpusId, corpusHash)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_corpus_hierarchy_nodeKey ON agent_corpus_hierarchy(nodeKey)")
                 db.query("PRAGMA foreign_key_check").use { cursor ->
                     if (cursor.moveToFirst()) {
                         throw IllegalStateException(

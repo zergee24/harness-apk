@@ -1,11 +1,13 @@
 package com.harnessapk.agent
 
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -51,6 +53,25 @@ class AgentV2BundleReaderTest {
 
         assertEquals(listOf("chunk-core", "chunk-second"), standaloneIds)
         assertEquals(listOf("chunk-core", "chunk-second"), nestedIds)
+    }
+
+    @Test
+    fun suspendingReadersStreamChunksHierarchyAndSourcePayload() = runTest {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val source = fixture.sourcePackage()
+        val chunks = mutableListOf<String>()
+        val nodes = mutableListOf<String>()
+        val payload = ByteArrayOutputStream()
+        val reader = AgentBundleReader()
+
+        reader.forEachV2ChunkSuspending(corpus) { chunks += it.id }
+        reader.forEachV2HierarchyNodeSuspending(corpus) { nodes += it.id }
+        reader.copyV2SourcePayload(source, packageId = "source-source-direct", output = payload)
+
+        assertEquals(listOf("chunk-core"), chunks)
+        assertEquals(listOf("node-root"), nodes)
+        assertEquals("source", payload.toString(Charsets.UTF_8.name()))
     }
 
     @Test

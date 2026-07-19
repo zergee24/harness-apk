@@ -53,8 +53,39 @@ data class AgentVersionEntity(
     @ColumnInfo(defaultValue = "''") val conceptsJson: String = "",
     @ColumnInfo(defaultValue = "''") val examplesJsonl: String = "",
     @ColumnInfo(defaultValue = "''") val openersJson: String = "",
+    @ColumnInfo(defaultValue = "''") val evalJsonl: String = "",
     @ColumnInfo(defaultValue = "''") val installPlanJson: String = "",
     @ColumnInfo(defaultValue = "NULL") val lastEvidenceExpandedAt: Long? = null,
+    @ColumnInfo(defaultValue = "0") val requiredCorpusCount: Int = 0,
+    @ColumnInfo(defaultValue = "''") val requiredEvidenceJson: String = "",
+    @ColumnInfo(defaultValue = "''") val evaluationCorpusIdsJson: String = "",
+)
+
+@Entity(
+    tableName = "agent_version_packages",
+    primaryKeys = ["agentId", "version", "packageId"],
+    foreignKeys = [
+        ForeignKey(
+            entity = AgentVersionEntity::class,
+            parentColumns = ["agentId", "version"],
+            childColumns = ["agentId", "version"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("agentId", "version"), Index("packageSha256")],
+)
+data class AgentVersionPackageEntity(
+    val agentId: String,
+    val version: Int,
+    val packageId: String,
+    val type: String,
+    val fileName: String,
+    val installClass: String,
+    val packageSha256: String,
+    val packageSizeBytes: Long,
+    val installed: Boolean,
+    val filePath: String,
+    val installedAt: Long?,
 )
 
 @Entity(
@@ -155,6 +186,32 @@ data class AgentCorpusChunkCrossRef(
     val chunkKey: String,
 )
 
+@Entity(
+    tableName = "agent_corpus_sources",
+    primaryKeys = ["corpusId", "corpusHash", "sourceId", "sourceHash"],
+    foreignKeys = [
+        ForeignKey(
+            entity = AgentCorpusEntity::class,
+            parentColumns = ["corpusId", "sourceHash"],
+            childColumns = ["corpusId", "corpusHash"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = AgentSourceFileEntity::class,
+            parentColumns = ["sourceId", "sourceHash"],
+            childColumns = ["sourceId", "sourceHash"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("corpusId", "corpusHash"), Index("sourceId", "sourceHash")],
+)
+data class AgentCorpusSourceCrossRef(
+    val corpusId: String,
+    val corpusHash: String,
+    val sourceId: String,
+    val sourceHash: String,
+)
+
 @Fts4(tokenizer = FtsOptions.TOKENIZER_UNICODE61)
 @Entity(tableName = "agent_chunk_fts")
 data class AgentChunkFtsEntity(
@@ -186,6 +243,31 @@ data class AgentHierarchyNodeEntity(
 data class AgentHierarchyFtsEntity(
     val nodeKey: String,
     val searchableText: String,
+)
+
+@Entity(
+    tableName = "agent_corpus_hierarchy",
+    primaryKeys = ["corpusId", "corpusHash", "nodeKey"],
+    foreignKeys = [
+        ForeignKey(
+            entity = AgentCorpusEntity::class,
+            parentColumns = ["corpusId", "sourceHash"],
+            childColumns = ["corpusId", "corpusHash"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = AgentHierarchyNodeEntity::class,
+            parentColumns = ["nodeKey"],
+            childColumns = ["nodeKey"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("corpusId", "corpusHash"), Index("nodeKey")],
+)
+data class AgentCorpusHierarchyCrossRef(
+    val corpusId: String,
+    val corpusHash: String,
+    val nodeKey: String,
 )
 
 @Entity(

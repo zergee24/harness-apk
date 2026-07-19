@@ -62,4 +62,7 @@ interface ConversationDao {
 
     @Query("UPDATE conversations SET isArchived = 1, updatedAt = :updatedAt WHERE id = :id")
     suspend fun archive(id: String, updatedAt: Long)
+
+    @Query("SELECT COUNT(*) FROM conversations WHERE agentId = :agentId AND agentVersion = :version")
+    suspend fun countByAgentVersion(agentId: String, version: Int): Int
 }

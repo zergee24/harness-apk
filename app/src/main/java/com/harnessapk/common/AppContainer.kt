@@ -63,6 +63,7 @@ class AppContainer(context: Context) {
         AppDatabase.MIGRATION_9_10,
         AppDatabase.MIGRATION_10_11,
         AppDatabase.MIGRATION_11_12,
+        AppDatabase.MIGRATION_12_13,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -94,6 +95,7 @@ class AppContainer(context: Context) {
         filesDir = appContext.filesDir,
         cacheDir = appContext.cacheDir,
         dao = database.agentDao(),
+        conversationDao = database.conversationDao(),
         transactionRunner = AgentTransactionRunner { block ->
             database.withTransaction { block() }
         },

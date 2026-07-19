@@ -5,6 +5,7 @@ import java.io.File
 enum class AgentStatus {
     READY,
     WAITING_FOR_CORPUS,
+    DISABLED,
     DRAFT,
     FAILED,
 }
@@ -100,6 +101,17 @@ data class AgentImportSession(
     val preview: AgentImportPreview,
 )
 
+data class AgentPackageImportSession(
+    val id: String,
+    val sourceName: String,
+    val stagedFile: File,
+    val parsedPackage: ParsedAgentPackage,
+    val publisherFingerprint: String,
+    val packageSha256: String,
+    val packageBytes: Long,
+    val preview: AgentImportPreview,
+)
+
 enum class AgentInstallOutcome {
     INSTALLED,
     ALREADY_INSTALLED,
@@ -116,6 +128,37 @@ data class AgentEvidence(
     val location: String,
     val text: String,
     val score: Int,
+    val chunkKey: String = chunkId,
+)
+
+enum class AgentCorpusRemovalOutcome {
+    REMOVED,
+    REQUIRED,
+    REFERENCED,
+    NOT_INSTALLED,
+}
+
+data class AgentCorpusRemovalResult(
+    val outcome: AgentCorpusRemovalOutcome,
+)
+
+data class AgentVersionCoverage(
+    val agentId: String,
+    val version: Int,
+    val requiredCorpusCount: Int,
+    val installedRequiredCorpusCount: Int,
+    val installedCorpusCount: Int,
+)
+
+enum class AgentVersionRemovalOutcome {
+    REMOVED,
+    REFERENCED,
+    ACTIVE,
+    NOT_FOUND,
+}
+
+data class AgentVersionRemovalResult(
+    val outcome: AgentVersionRemovalOutcome,
 )
 
 data class AgentRuntimeContext(

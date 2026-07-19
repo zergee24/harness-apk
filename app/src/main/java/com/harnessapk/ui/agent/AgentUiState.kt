@@ -9,6 +9,7 @@ internal fun canStartAgent(agent: Agent): Boolean = agent.status == AgentStatus.
 internal fun agentStatusLabel(status: AgentStatus): String = when (status) {
     AgentStatus.READY -> "可用"
     AgentStatus.WAITING_FOR_CORPUS -> "缺少资料"
+    AgentStatus.DISABLED -> "已停用"
     AgentStatus.DRAFT -> "草稿"
     AgentStatus.FAILED -> "不可用"
 }

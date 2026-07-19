@@ -130,6 +130,7 @@ import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.chat.defaultReasoningEffort
 import com.harnessapk.chat.identityLockedForPendingSend
 import com.harnessapk.chat.supportsReasoningEffort
+import com.harnessapk.agent.AgentVersionCoverage
 import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.provider.ProviderProfile
@@ -263,6 +264,7 @@ fun ChatScreen(
     var identityMessageStateKnown by remember(conversationId) { mutableStateOf(false) }
     var persistedUserMessage by remember(conversationId) { mutableStateOf(false) }
     var showIdentityDetails by remember { mutableStateOf(false) }
+    var fixedVersionCoverage by remember(conversationId) { mutableStateOf<AgentVersionCoverage?>(null) }
     var showSessionConfig by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
     var deliverables by remember { mutableStateOf<List<MarkdownDeliverable>>(emptyList()) }
@@ -1362,8 +1364,8 @@ fun ChatScreen(
     if (showIdentityDetails) {
         ConversationIdentityDetailsDialog(
             version = conversation?.agentVersion,
-            installedCorpusCount = agents.firstOrNull { it.id == conversation?.agentId }?.installedCorpusCount,
-            requiredCorpusCount = agents.firstOrNull { it.id == conversation?.agentId }?.requiredCorpusCount,
+            installedCorpusCount = fixedVersionCoverage?.installedRequiredCorpusCount,
+            requiredCorpusCount = fixedVersionCoverage?.requiredCorpusCount,
             publisherFingerprint = agents.firstOrNull { it.id == conversation?.agentId }?.publisherFingerprint,
             onDismiss = { showIdentityDetails = false },
         )
@@ -1442,7 +1444,21 @@ fun ChatScreen(
                 ConversationIdentityPicker(
                     state = identityState,
                     onSelectAgentId = {},
-                    onShowDetails = { showIdentityDetails = true },
+                    onShowDetails = {
+                        val agentId = conversation?.agentId
+                        val version = conversation?.agentVersion
+                        if (agentId == null || version == null) {
+                            fixedVersionCoverage = null
+                            showIdentityDetails = true
+                        } else {
+                            scope.launch {
+                                fixedVersionCoverage = runCatching {
+                                    container.agentRepository.versionCoverage(agentId, version)
+                                }.getOrNull()
+                                showIdentityDetails = true
+                            }
+                        }
+                    },
                 )
             }
         }

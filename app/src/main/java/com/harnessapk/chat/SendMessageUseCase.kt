@@ -30,6 +30,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import java.io.IOException
 import java.util.UUID
 import kotlin.time.TimeMark
@@ -422,13 +424,16 @@ internal fun appendAgentSourcesPart(
         .map { evidence -> "${evidence.sourceTitle} · ${evidence.location}" }
         .distinct()
     if (sources.isEmpty()) return snapshot
+    val chunkKeys = evidence.map(AgentEvidence::chunkKey).filter(String::isNotBlank).distinct().sorted()
     return snapshot.copy(
         parts = snapshot.parts + UiMessagePartDraft(
             index = snapshot.parts.size,
             type = UiMessagePartType.AGENT_SOURCES,
             content = sources.mapIndexed { index, source -> "资料 ${index + 1} · $source" }
                 .joinToString(separator = "\n"),
-            metadata = emptyMap(),
+            metadata = mapOf(
+                "chunkKeys" to JsonArray(chunkKeys.map(::JsonPrimitive)).toString(),
+            ),
             stable = true,
         ),
     )
