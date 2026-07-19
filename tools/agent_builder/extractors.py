@@ -1,5 +1,6 @@
 import hashlib
 import html
+import codecs
 import re
 import zipfile
 from html.parser import HTMLParser
@@ -12,6 +13,8 @@ from .models import BuildError, ExtractedDocument, ExtractedSection
 
 
 SUPPORTED_SUFFIXES = {".txt", ".md", ".markdown", ".epub", ".pdf"}
+V2_TEXT_READ_BYTES = 64 * 1024
+V2_MAX_SECTION_CHARS = 16 * 1024
 
 
 class _TextHtmlParser(HTMLParser):
@@ -53,6 +56,114 @@ def extract_document(path: Path) -> ExtractedDocument:
         source_hash=_sha256_file(path),
         sections=sections,
     )
+
+
+def iter_v2_plain_text_sections(
+    path: Path,
+    read_chars: int = V2_TEXT_READ_BYTES,
+    max_section_chars: int = V2_MAX_SECTION_CHARS,
+):
+    """Yield TXT/Markdown sections using only a bounded decode and section window."""
+    source = Path(path)
+    if read_chars < 1 or max_section_chars < 128:
+        raise BuildError("V2 文本窗口必须为正数")
+    encoding = _v2_detect_text_encoding(source, read_chars)
+    yield from _iter_v2_sections_from_decoded_lines(
+        _iter_decoded_lines(source, encoding, read_chars, max_section_chars),
+        max_section_chars,
+    )
+
+
+def _v2_detect_text_encoding(path: Path, buffer_size: int) -> str:
+    for encoding in ("utf-8-sig", "gb18030"):
+        decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+        try:
+            with path.open("rb") as stream:
+                while block := stream.read(buffer_size):
+                    decoder.decode(block)
+                decoder.decode(b"", final=True)
+            return encoding
+        except UnicodeDecodeError:
+            continue
+    raise BuildError(f"文本编码无法识别：{path.name}")
+
+
+def _iter_decoded_lines(path: Path, encoding: str, buffer_size: int, max_line_chars: int):
+    decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+    pending = ""
+    with path.open("rb") as stream:
+        while block := stream.read(buffer_size):
+            pending += decoder.decode(block)
+            while pending:
+                newline = re.search(r"\r\n|[\r\n]", pending)
+                if newline:
+                    yield pending[: newline.start()]
+                    pending = pending[newline.end() :]
+                    continue
+                if len(pending) >= max_line_chars:
+                    yield pending[:max_line_chars]
+                    pending = pending[max_line_chars:]
+                    continue
+                break
+        pending += decoder.decode(b"", final=True)
+    while pending:
+        newline = re.search(r"\r\n|[\r\n]", pending)
+        if newline:
+            yield pending[: newline.start()]
+            pending = pending[newline.end() :]
+        else:
+            yield pending[:max_line_chars]
+            pending = pending[max_line_chars:]
+
+
+def _iter_v2_sections_from_decoded_lines(lines, max_section_chars: int):
+    headings: list[str] = []
+    location = "正文"
+    buffer = ""
+
+    def normalized(value: str) -> str:
+        return _normalize_text(value)
+
+    def flush():
+        nonlocal buffer
+        value = normalized(buffer)
+        buffer = ""
+        if value:
+            return ExtractedSection(location, value)
+        return None
+
+    def append(value: str):
+        nonlocal buffer
+        pending = value
+        while pending:
+            available = max_section_chars - len(buffer)
+            if available <= 0:
+                emitted = flush()
+                if emitted is not None:
+                    yield emitted
+                available = max_section_chars
+            buffer += pending[:available]
+            pending = pending[available:]
+            if pending:
+                emitted = flush()
+                if emitted is not None:
+                    yield emitted
+
+    for line in lines:
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if heading:
+            emitted = flush()
+            if emitted is not None:
+                yield emitted
+            level = len(heading.group(1))
+            title = heading.group(2).strip()
+            headings[:] = headings[: level - 1]
+            headings.append(title)
+            location = " / ".join(headings)
+        yield from append(line + "\n")
+    emitted = flush()
+    if emitted is not None:
+        yield emitted
 
 
 def _extract_plain_text(path: Path) -> list[ExtractedSection]:

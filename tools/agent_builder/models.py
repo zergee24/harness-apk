@@ -11,6 +11,7 @@ class BuildError(RuntimeError):
 class ExtractedSection:
     location: str
     text: str
+    conflict_key: str = ""
 
 
 @dataclass(frozen=True)

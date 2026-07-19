@@ -1,20 +1,24 @@
 import base64
+import errno
 import hashlib
 import json
+import os
 import re
 import shutil
 import stat
 import tempfile
 import zipfile
 from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_private_key
 
-from .extractors import extract_document
-from .models import BuildError, BuildReport, PackResult
+from .corpus_pipeline import build_corpus_index_streaming
+from .extractors import extract_document, iter_v2_plain_text_sections
+from .models import BuildError, BuildReport, ExtractedDocument, PackResult
 from .schema_v2 import (
     AgentAssetPaths,
     Authorship,
@@ -35,6 +39,14 @@ SOURCE_HASH_BUFFER_SIZE = 1024 * 1024
 V2_STORED_NAME_MAX_BYTES = 200
 V2_SOURCE_HASH_PREFIX_LENGTH = 16
 V2_FILE_NAME_HASH_PREFIX_LENGTH = 16
+
+
+@dataclass(frozen=True)
+class _V2SourceSnapshot:
+    original_path: Path
+    snapshot_path: Path
+    source_hash: str
+    raw_size_bytes: int
 
 
 def prepare_workspace(
@@ -165,24 +177,64 @@ def prepare_workspace_v2(
     workspace = Path(output_dir).expanduser().resolve()
     if workspace.exists() and any(workspace.iterdir()):
         raise BuildError(f"输出目录必须为空：{workspace}")
-    documents = sorted(
-        (extract_document(path) for path in input_paths),
-        key=lambda document: (document.source_hash, document.source_path.name),
-    )
     catalog = _load_source_catalog(source_catalog_path) if source_catalog_path else None
-    sources = _build_source_records(documents, catalog)
-
-    manifest = WorkspaceV2(
-        agent_id=agent_id,
-        name=name,
-        version=version,
-        assets=AgentAssetPaths(),
-        sources=tuple(sources),
-    )
     workspace.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{workspace.name}.staging-", dir=workspace.parent))
     try:
-        _write_workspace_v2(staging, manifest, documents)
+        snapshots = _snapshot_v2_inputs(input_paths, staging / ".incoming")
+        documents = sorted(
+            (
+                ExtractedDocument(
+                    title=snapshot.original_path.stem,
+                    source_path=snapshot.original_path,
+                    source_hash=snapshot.source_hash,
+                    sections=[],
+                )
+                for snapshot in snapshots
+            ),
+            key=lambda document: (document.source_hash, document.source_path.name),
+        )
+        snapshot_by_key = {
+            (snapshot.source_hash, snapshot.original_path.name): snapshot
+            for snapshot in snapshots
+        }
+        sources = _build_source_records(
+            documents,
+            catalog,
+            raw_size_bytes={
+                key: snapshot.raw_size_bytes for key, snapshot in snapshot_by_key.items()
+            },
+        )
+        source_dir = staging / "sources"
+        source_dir.mkdir()
+        for source in sources:
+            snapshot = snapshot_by_key[(source.source_hash, source.file_name)]
+            snapshot.snapshot_path.replace(source_dir / source.stored_name)
+        shutil.rmtree(staging / ".incoming", ignore_errors=True)
+
+        indexed_sources: list[SourceRecord] = []
+        for source in sources:
+            extracted_chars = sum(
+                len(section.text)
+                for section in _iter_v2_source_sections(source_dir / source.stored_name)
+            )
+            if not extracted_chars:
+                raise BuildError(f"没有可提取文本：{source.file_name}")
+            indexed_sources.append(replace(source, extracted_chars=extracted_chars))
+        sources = indexed_sources
+        manifest = WorkspaceV2(
+            agent_id=agent_id,
+            name=name,
+            version=version,
+            assets=AgentAssetPaths(),
+            sources=tuple(sources),
+        )
+        _write_workspace_v2(staging, manifest, documents, copy_sources=False)
+        build_corpus_index_streaming(
+            staging,
+            sources,
+            lambda source: _iter_v2_source_sections(source_dir / source.stored_name),
+        )
         if workspace.exists():
             workspace.rmdir()
         staging.replace(workspace)
@@ -277,9 +329,99 @@ def _load_source_catalog(path: Path) -> dict[str, dict[str, str]]:
     return by_file_name
 
 
+def _snapshot_v2_inputs(inputs: list[Path], incoming_dir: Path) -> list[_V2SourceSnapshot]:
+    incoming_dir.mkdir()
+    snapshots: list[_V2SourceSnapshot] = []
+    for index, raw_path in enumerate(inputs):
+        source_path = Path(raw_path).expanduser()
+        suffix = source_path.suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown", ".epub", ".pdf"}:
+            raise BuildError(f"不支持的输入格式：{source_path.name}")
+        snapshot_path = incoming_dir / f"{index:08d}{suffix}"
+        source_hash, raw_size = _copy_v2_source(source_path, snapshot_path)
+        snapshots.append(
+            _V2SourceSnapshot(
+                original_path=source_path,
+                snapshot_path=snapshot_path,
+                source_hash=source_hash,
+                raw_size_bytes=raw_size,
+            )
+        )
+    return snapshots
+
+
+def _copy_v2_source(source_path: Path, destination: Path) -> tuple[str, int]:
+    """Copy one regular input through a no-follow descriptor and verify its identity."""
+    try:
+        expected = source_path.lstat()
+    except OSError as error:
+        raise BuildError(f"输入文件不存在：{source_path}") from error
+    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
+        raise BuildError(f"输入文件必须是普通文件：{source_path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source_path, flags)
+    except OSError as error:
+        raise BuildError(f"输入文件无法安全打开：{source_path}：{error}") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or not _same_file_identity(expected, before):
+            raise BuildError(f"输入来源在读取期间发生变化：{source_path}")
+        digest = hashlib.sha256()
+        raw_size = 0
+        with os.fdopen(descriptor, "rb", closefd=False) as source, destination.open("xb") as target:
+            while block := source.read(SOURCE_HASH_BUFFER_SIZE):
+                digest.update(block)
+                raw_size += len(block)
+                target.write(block)
+        after = os.fstat(descriptor)
+        if not _same_file_identity(before, after):
+            destination.unlink(missing_ok=True)
+            raise BuildError(f"输入来源在读取期间发生变化：{source_path}")
+    except OSError as error:
+        destination.unlink(missing_ok=True)
+        raise BuildError(f"输入文件无法读取：{source_path}：{error}") from error
+    finally:
+        os.close(descriptor)
+    verified_destination = destination.with_name(f"{destination.name}.verified")
+    try:
+        # The first copy is the no-follow descriptor snapshot of user input.
+        # This compatibility copy only reads that private staging snapshot.
+        shutil.copyfile(destination, verified_destination)
+        verified_destination.replace(destination)
+    except OSError:
+        destination.unlink(missing_ok=True)
+        verified_destination.unlink(missing_ok=True)
+        raise
+    return digest.hexdigest(), raw_size
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_size,
+        left.st_mtime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_size,
+        right.st_mtime_ns,
+    )
+
+
+def _iter_v2_source_sections(path: Path):
+    suffix = path.suffix.lower()
+    if suffix in {".txt", ".md", ".markdown"}:
+        yield from iter_v2_plain_text_sections(path)
+        return
+    yield from extract_document(path).sections
+
+
 def _build_source_records(
     documents: list[Any],
     catalog: dict[str, dict[str, str]] | None,
+    raw_size_bytes: dict[tuple[str, str], int] | None = None,
 ) -> list[SourceRecord]:
     input_file_names = {document.source_path.name for document in documents}
     if len(input_file_names) != len(documents):
@@ -306,7 +448,11 @@ def _build_source_records(
                 genre=SourceGenre(metadata["genre"]) if metadata else SourceGenre.UNKNOWN,
                 authorship=Authorship(metadata["authorship"]) if metadata else Authorship.UNKNOWN,
                 period=metadata["period"] if metadata else "unknown",
-                raw_size_bytes=document.source_path.stat().st_size,
+                raw_size_bytes=(
+                    raw_size_bytes[(document.source_hash, document.source_path.name)]
+                    if raw_size_bytes is not None
+                    else document.source_path.stat().st_size
+                ),
                 extracted_chars=sum(len(section.text) for section in document.sections),
             )
         )
@@ -336,13 +482,19 @@ def _default_source_title(document: Any) -> str:
     return title or f"资料-{document.source_hash[:16]}"
 
 
-def _write_workspace_v2(workspace: Path, manifest: WorkspaceV2, documents: list[Any]) -> None:
+def _write_workspace_v2(
+    workspace: Path,
+    manifest: WorkspaceV2,
+    documents: list[Any],
+    copy_sources: bool = True,
+) -> None:
     agent_dir = workspace / "agent"
     source_dir = workspace / "sources"
     agent_dir.mkdir()
-    source_dir.mkdir()
-    for document, source in zip(documents, manifest.sources, strict=True):
-        shutil.copyfile(document.source_path, source_dir / source.stored_name)
+    if copy_sources:
+        source_dir.mkdir()
+        for document, source in zip(documents, manifest.sources, strict=True):
+            shutil.copyfile(document.source_path, source_dir / source.stored_name)
     _write_json(workspace / "workspace.json", manifest.to_dict())
     _write_json(
         workspace / "source-catalog.json",
@@ -381,45 +533,55 @@ def _write_workspace_v2(workspace: Path, manifest: WorkspaceV2, documents: list[
 
 def _validate_v2_source_files(workspace: Path, sources: tuple[SourceRecord, ...], errors: list[str]) -> None:
     source_root = workspace / "sources"
-    if not source_root.is_dir() or source_root.is_symlink():
-        errors.append("来源目录缺失或不安全：sources")
+    try:
+        root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        root_descriptor = os.open(source_root, root_flags)
+        root_info = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root_info.st_mode):
+            raise OSError("sources 不是目录")
+    except OSError as error:
+        errors.append(f"来源目录缺失或不安全：sources：{error}")
         return
     try:
-        resolved_source_root = source_root.resolve(strict=True)
-    except OSError as error:
-        errors.append(f"来源目录无法读取：{error}")
-        return
-
-    for source in sources:
-        source_path = source_root / source.stored_name
-        try:
-            if not source_path.exists():
+        for source in sources:
+            try:
+                source_hash, raw_size_bytes = _sha256_and_size_at(root_descriptor, source.stored_name)
+            except FileNotFoundError:
                 errors.append(f"来源文件缺失：sources/{source.stored_name}")
                 continue
-            if source_path.is_symlink() or not source_path.is_file():
-                errors.append(f"来源文件必须是 sources 内的普通文件：{source.stored_name}")
+            except OSError as error:
+                if error.errno == errno.ELOOP:
+                    errors.append(f"来源文件必须是 sources 内的普通文件：{source.stored_name}")
+                else:
+                    errors.append(f"来源文件无法读取：{source.stored_name}：{error}")
                 continue
-            if not source_path.resolve(strict=True).is_relative_to(resolved_source_root):
-                errors.append(f"来源文件不在 sources 目录内：{source.stored_name}")
-                continue
-            source_hash, raw_size_bytes = _sha256_and_size(source_path)
-        except OSError as error:
-            errors.append(f"来源文件无法读取：{source.stored_name}：{error}")
-            continue
-        if raw_size_bytes != source.raw_size_bytes:
-            errors.append(f"来源文件字节数不匹配：{source.stored_name}")
-        if source_hash != source.source_hash:
-            errors.append(f"来源文件 SHA-256 不匹配：{source.stored_name}")
+            if raw_size_bytes != source.raw_size_bytes:
+                errors.append(f"来源文件字节数不匹配：{source.stored_name}")
+            if source_hash != source.source_hash:
+                errors.append(f"来源文件 SHA-256 不匹配：{source.stored_name}")
+    finally:
+        os.close(root_descriptor)
 
 
-def _sha256_and_size(path: Path) -> tuple[str, int]:
+def _sha256_and_size_at(root_descriptor: int, stored_name: str) -> tuple[str, int]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(stored_name, flags, dir_fd=root_descriptor)
     digest = hashlib.sha256()
     raw_size_bytes = 0
-    with path.open("rb") as source:
-        while chunk := source.read(SOURCE_HASH_BUFFER_SIZE):
-            digest.update(chunk)
-            raw_size_bytes += len(chunk)
-    return digest.hexdigest(), raw_size_bytes
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("来源文件必须是普通文件")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            while chunk := source.read(SOURCE_HASH_BUFFER_SIZE):
+                digest.update(chunk)
+                raw_size_bytes += len(chunk)
+        after = os.fstat(descriptor)
+        if not _same_file_identity(before, after):
+            raise OSError("来源文件在读取期间发生变化")
+        return digest.hexdigest(), raw_size_bytes
+    finally:
+        os.close(descriptor)
 
 
 def _validate_v2_asset_files(
