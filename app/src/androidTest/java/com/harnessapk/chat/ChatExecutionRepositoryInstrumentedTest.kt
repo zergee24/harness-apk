@@ -22,15 +22,18 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
 class ChatExecutionRepositoryInstrumentedTest {
@@ -102,13 +105,25 @@ class ChatExecutionRepositoryInstrumentedTest {
     fun enqueueWithOutcomeIdentifiesTheCallThatCreatedTheStableRequest() = runBlocking {
         val conversationId = chatRepository.createConversation()
         val request = request(conversationId).copy(requestId = "stable-outcome-request")
+        val barrierArrivals = AtomicInteger()
+        val readyToEnqueue = CyclicBarrier(2)
 
-        val first = repository.enqueueWithOutcome(request)
-        val second = repository.enqueueWithOutcome(request)
+        val outcomes = withTimeout(10_000L) {
+            coroutineScope {
+                List(2) {
+                    async(Dispatchers.IO) {
+                        barrierArrivals.incrementAndGet()
+                        readyToEnqueue.await(5L, TimeUnit.SECONDS)
+                        repository.enqueueWithOutcome(request)
+                    }
+                }.awaitAll()
+            }
+        }
 
-        assertTrue(first.insertedByThisCall)
-        assertFalse(second.insertedByThisCall)
-        assertEquals(first.entry, second.entry)
+        assertEquals(2, barrierArrivals.get())
+        assertEquals(listOf(false, true), outcomes.map { it.insertedByThisCall }.sorted())
+        assertEquals(1, outcomes.map { it.entry }.distinct().size)
+        assertEquals(1, database.chatExecutionEntryDao().listForConversation(conversationId).size)
         assertEquals(1, database.messageDao().countUserMessages(conversationId))
     }
 

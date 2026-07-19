@@ -40,6 +40,9 @@ import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
 class QueuedAttachmentStoreInstrumentedTest {
@@ -196,17 +199,30 @@ class QueuedAttachmentStoreInstrumentedTest {
             requestId = "attachment-concurrent-duplicate",
             attachments = listOf(sourceAttachment("concurrent.jpg")),
         )
-        val coordinator = coordinator()
+        val barrierArrivals = AtomicInteger()
+        val batchesPersisted = CyclicBarrier(2)
+        val attachmentStore = QueuedAttachmentStore(
+            context = context,
+            onBatchPersisted = {
+                barrierArrivals.incrementAndGet()
+                batchesPersisted.await(5L, TimeUnit.SECONDS)
+            },
+        )
+        val coordinator = coordinator(attachmentStore = attachmentStore)
 
         try {
-            val entries = coroutineScope {
-                List(2) { async(Dispatchers.IO) { coordinator.enqueue(request) } }.awaitAll()
+            val entries = withTimeout(10_000L) {
+                coroutineScope {
+                    List(2) { async(Dispatchers.IO) { coordinator.enqueue(request) } }.awaitAll()
+                }
             }
             val entry = requireNotNull(executionRepository.entry(request.requestId))
             val storedAttachments = database.messageAttachmentDao().listForMessage(entry.userMessageId)
             val storedFile = File(requireNotNull(Uri.parse(storedAttachments.single().uri).path))
 
+            assertEquals(2, barrierArrivals.get())
             assertEquals(1, entries.map { it.id }.distinct().size)
+            assertEquals(1, database.chatExecutionEntryDao().listForConversation(conversationId).size)
             assertEquals(1, database.messageDao().countUserMessages(conversationId))
             assertEquals(listOf(storedFile.canonicalFile), managedFiles())
         } finally {
@@ -364,10 +380,10 @@ class QueuedAttachmentStoreInstrumentedTest {
     @Test
     fun cleanupIsIdempotentForAStoredManagedFile() = runBlocking {
         val store = QueuedAttachmentStore(context)
-        val persisted = store.persistAll(listOf(sourceAttachment("idempotent.jpg")))
+        val batch = store.persistAll(listOf(sourceAttachment("idempotent.jpg")))
 
-        store.cleanup(persisted)
-        store.cleanup(persisted)
+        store.cleanup(batch)
+        store.cleanup(batch)
 
         assertTrue(managedDirectory.listFiles().orEmpty().isEmpty())
     }
@@ -381,63 +397,92 @@ class QueuedAttachmentStoreInstrumentedTest {
             writeText("nested")
         }
         val sourceLikeFile = File(managedDirectory, "source.jpg").apply { writeText("source") }
+        val malformedUuid = File(managedDirectory, "queued-not-a-uuid.jpg").apply { writeText("malformed") }
         val traversalTarget = File(managedDirectory, "traversal.jpg").apply { writeText("traversal") }
         val symlink = File(managedDirectory, "outside-link.jpg")
         Files.createSymbolicLink(symlink.toPath(), sourceOutside.toPath())
         val traversal = Uri.parse("file://${managedDirectory.absolutePath}/nested/../traversal.jpg")
 
         store.cleanup(
-            listOf(
-                PendingImageAttachment(Uri.parse("content://shared/never-delete"), "image/jpeg"),
-                PendingImageAttachment(managedDirectory.toUri(), "image/jpeg"),
-                PendingImageAttachment(nested.toUri(), "image/jpeg"),
-                PendingImageAttachment(sourceLikeFile.toUri(), "image/jpeg"),
-                PendingImageAttachment(sourceOutside.toUri(), "image/jpeg"),
-                PendingImageAttachment(traversal, "image/jpeg"),
-                PendingImageAttachment(symlink.toUri(), "image/jpeg"),
+            batchWithStoreOwner(
+                store = store,
+                attachments = listOf(
+                    PendingImageAttachment(Uri.parse("content://shared/never-delete"), "image/jpeg"),
+                    PendingImageAttachment(managedDirectory.toUri(), "image/jpeg"),
+                    PendingImageAttachment(nested.toUri(), "image/jpeg"),
+                    PendingImageAttachment(sourceLikeFile.toUri(), "image/jpeg"),
+                    PendingImageAttachment(malformedUuid.toUri(), "image/jpeg"),
+                    PendingImageAttachment(sourceOutside.toUri(), "image/jpeg"),
+                    PendingImageAttachment(traversal, "image/jpeg"),
+                    PendingImageAttachment(symlink.toUri(), "image/jpeg"),
+                ),
+                generatedPaths = listOf(
+                    File("/never-delete"),
+                    managedDirectory,
+                    nested,
+                    sourceLikeFile,
+                    malformedUuid,
+                    sourceOutside,
+                    File(requireNotNull(traversal.path)),
+                    symlink,
+                ),
             ),
         )
 
         assertTrue(managedDirectory.isDirectory)
         assertTrue(nested.isFile)
         assertTrue(sourceLikeFile.isFile)
+        assertTrue(malformedUuid.isFile)
         assertTrue(sourceOutside.isFile)
         assertTrue(traversalTarget.isFile)
         assertTrue(symlink.exists())
     }
 
     @Test
-    fun cleanupRejectsForgedPrefixAndNearUuidNames() = runBlocking {
+    fun cleanupRejectsForgedBatchEvenForAStrictUuidManagedName() = runBlocking {
         val store = QueuedAttachmentStore(context)
         managedDirectory.mkdirs()
+        val fullUuid = File(
+            managedDirectory,
+            "queued-${UUID.randomUUID()}.jpg",
+        ).apply { writeText("full uuid forged") }
         val forgedPrefix = File(managedDirectory, "queued-anything.jpg").apply { writeText("forged") }
         val nearUuid = File(
             managedDirectory,
             "queued-12345678-1234-1234-1234-123456789ab.jpg",
         ).apply { writeText("near uuid") }
+        val attachments = listOf(
+            PendingImageAttachment(fullUuid.toUri(), "image/jpeg"),
+            PendingImageAttachment(forgedPrefix.toUri(), "image/jpeg"),
+            PendingImageAttachment(nearUuid.toUri(), "image/jpeg"),
+        )
 
         store.cleanup(
-            listOf(
-                PendingImageAttachment(forgedPrefix.toUri(), "image/jpeg"),
-                PendingImageAttachment(nearUuid.toUri(), "image/jpeg"),
+            PersistedAttachmentBatch(
+                attachments = attachments,
+                ownerToken = Any(),
+                generatedPaths = attachments.map { attachment -> File(requireNotNull(attachment.uri.path)) },
             ),
         )
 
+        assertTrue(fullUuid.isFile)
         assertTrue(forgedPrefix.isFile)
         assertTrue(nearUuid.isFile)
     }
 
     @Test
-    fun cleanupRejectsSameDirectorySymlinkWithoutDeletingItsManagedTarget() = runBlocking {
+    fun cleanupRejectsSymlinkReplacingARealBatchPathAndKeepsItsTarget() = runBlocking {
         val store = QueuedAttachmentStore(context)
-        val target = store.persistAll(listOf(sourceAttachment("symlink-target.jpg"))).single()
-        val targetFile = File(requireNotNull(target.uri.path))
-        val symlink = File(managedDirectory, "queued-${UUID.randomUUID()}.jpg")
-        Files.createSymbolicLink(symlink.toPath(), targetFile.toPath())
+        val replacedBatch = store.persistAll(listOf(sourceAttachment("symlink-path.jpg")))
+        val targetBatch = store.persistAll(listOf(sourceAttachment("symlink-target.jpg")))
+        val replacedPath = File(requireNotNull(replacedBatch.attachments.single().uri.path))
+        val targetFile = File(requireNotNull(targetBatch.attachments.single().uri.path))
+        assertTrue(replacedPath.delete())
+        Files.createSymbolicLink(replacedPath.toPath(), targetFile.toPath())
 
-        store.cleanup(listOf(PendingImageAttachment(symlink.toUri(), "image/jpeg")))
+        store.cleanup(replacedBatch)
 
-        assertTrue(Files.isSymbolicLink(symlink.toPath()))
+        assertTrue(Files.isSymbolicLink(replacedPath.toPath()))
         assertTrue(targetFile.isFile)
     }
 
@@ -488,6 +533,20 @@ class QueuedAttachmentStoreInstrumentedTest {
         return PendingImageAttachment(source.toUri(), "image/jpeg")
     }
 
+    private fun batchWithStoreOwner(
+        store: QueuedAttachmentStore,
+        attachments: List<PendingImageAttachment>,
+        generatedPaths: List<File>,
+    ): PersistedAttachmentBatch {
+        val ownerTokenField = QueuedAttachmentStore::class.java.getDeclaredField("ownerToken")
+        ownerTokenField.isAccessible = true
+        return PersistedAttachmentBatch(
+            attachments = attachments,
+            ownerToken = requireNotNull(ownerTokenField.get(store)),
+            generatedPaths = generatedPaths,
+        )
+    }
+
     private fun request(
         conversationId: String,
         requestId: String,
@@ -508,6 +567,7 @@ class QueuedAttachmentStoreInstrumentedTest {
         onWorkScheduled: () -> Unit = {},
         exactAttachmentBatchReferenced: suspend (String, List<PendingImageAttachment>) -> Boolean =
             executionRepository::isAttachmentBatchReferenced,
+        attachmentStore: QueuedAttachmentStore = QueuedAttachmentStore(context),
     ) = ChatExecutionCoordinator(
         executionRepository = executionRepository,
         sendMessageUseCase = SendMessageUseCase(
@@ -519,7 +579,7 @@ class QueuedAttachmentStoreInstrumentedTest {
         ),
         providerRepository = providerRepository(),
         webSearchClient = JinaWebSearchClient(OkHttpClient()),
-        attachmentStore = QueuedAttachmentStore(context),
+        attachmentStore = attachmentStore,
         dispatchers = dispatchers(),
         onWorkScheduled = onWorkScheduled,
         exactAttachmentBatchReferenced = exactAttachmentBatchReferenced,

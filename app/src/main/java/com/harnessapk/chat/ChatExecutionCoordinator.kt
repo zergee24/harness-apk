@@ -49,11 +49,11 @@ class ChatExecutionCoordinator(
     val activeConversationIds: StateFlow<Set<String>> = _activeConversationIds.asStateFlow()
 
     suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = withContext(dispatchers.io) {
-        val persistedAttachments = attachmentStore.persistAll(request.attachments)
+        val attachmentBatch = attachmentStore.persistAll(request.attachments)
         try {
-            val outcome = executionRepository.enqueueWithOutcome(request.copy(attachments = persistedAttachments))
+            val outcome = executionRepository.enqueueWithOutcome(request.copy(attachments = attachmentBatch.attachments))
             if (!outcome.insertedByThisCall) {
-                cleanupAttachments(persistedAttachments)
+                cleanupAttachments(attachmentBatch)
             }
             withContext(NonCancellable) {
                 try {
@@ -66,22 +66,22 @@ class ChatExecutionCoordinator(
             }
             outcome.entry
         } catch (failure: Throwable) {
-            cleanupUnreferencedAttachments(request.requestId, persistedAttachments)
+            cleanupUnreferencedAttachments(request.requestId, attachmentBatch)
             throw failure
         }
     }
 
-    private suspend fun cleanupAttachments(attachments: List<PendingImageAttachment>) = withContext(NonCancellable) {
-        runCatching { attachmentStore.cleanup(attachments) }
+    private suspend fun cleanupAttachments(batch: PersistedAttachmentBatch) = withContext(NonCancellable) {
+        runCatching { attachmentStore.cleanup(batch) }
     }
 
     private suspend fun cleanupUnreferencedAttachments(
         requestId: String,
-        attachments: List<PendingImageAttachment>,
+        batch: PersistedAttachmentBatch,
     ) = withContext(NonCancellable) {
-        val referenced = runCatching { exactAttachmentBatchReferenced(requestId, attachments) }.getOrNull()
+        val referenced = runCatching { exactAttachmentBatchReferenced(requestId, batch.attachments) }.getOrNull()
         if (referenced == false) {
-            runCatching { attachmentStore.cleanup(attachments) }
+            runCatching { attachmentStore.cleanup(batch) }
         }
     }
 
