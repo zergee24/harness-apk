@@ -221,6 +221,30 @@ class AgentRetrievalTest {
     }
 
     @Test
+    fun discardDeleteFailureKeepsOwnedSessionRetryable() = runTest {
+        val fileOps = FailingAgentFileOps(failDelete = true)
+        val fixture = v2InstallFixture(fileOps = fileOps)
+        val session = fixture.repository.preparePackageImport("agent.hagent") {
+            "agent".byteInputStream()
+        }
+
+        val failure = runCatching {
+            fixture.repository.discardPackageImport(session)
+        }.exceptionOrNull()
+
+        assertTrue(failure is AgentBundleException)
+        assertTrue(session.stagedFile.isFile)
+
+        fileOps.failDelete = false
+        fixture.repository.discardPackageImport(session)
+
+        assertFalse(session.stagedFile.exists())
+        assertTrue(
+            runCatching { fixture.repository.discardPackageImport(session) }.exceptionOrNull() is AgentBundleException,
+        )
+    }
+
+    @Test
     fun consumedSessionInstallsOnlyFromPrivateSnapshotWhenOriginalPathIsReplaced() = runTest {
         val fileOps = StagedMutationAgentFileOps(StagedMutationMode.REPLACE_PATH)
         val fixture = v2InstallFixture(fileOps = fileOps)

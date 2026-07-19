@@ -277,10 +277,13 @@ class AgentRepository(
     }
 
     private fun discardOwnedSessionUnlocked(owned: OwnedPackageSession) {
-        if (!packageSessions.remove(owned.session.id, owned)) {
+        if (packageSessions[owned.session.id] !== owned) {
             throw AgentBundleException("导入会话已经失效或已使用")
         }
         deleteOrRecordOrphan(owned.session.stagedFile)
+        if (!packageSessions.remove(owned.session.id, owned)) {
+            throw AgentBundleException("导入会话已经失效或已使用")
+        }
     }
 
     private suspend fun installConsumedPackageUnlocked(
