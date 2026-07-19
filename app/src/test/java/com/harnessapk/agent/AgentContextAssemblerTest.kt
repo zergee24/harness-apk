@@ -212,6 +212,127 @@ class AgentContextAssemblerTest {
     }
 
     @Test
+    fun repositoryRetainsTwoMatchedRoutesForAssemblerWhenOneRouteFillsPhysicalTopK() = runTest {
+        val query = "请概括完整思想体系"
+
+        fun fixture(reverseInsertion: Boolean, includeSecondRoute: Boolean): AgentRepository {
+            val dao = FakeAgentDao().apply {
+                version = strictVersion("agent-route-diversity", 2)
+                versionCorpora = listOf(
+                    AgentVersionCorpusCrossRef("agent-route-diversity", 2, "core", "hash", true),
+                )
+                val nodes = buildList {
+                    add(hierarchyNode("route-a-root", "source-a", "hash", "root-a", null, query))
+                    repeat(49) { index ->
+                        val key = index.toString().padStart(3, '0')
+                        add(
+                            hierarchyNode(
+                                "route-a-node-$key",
+                                "source-a",
+                                "hash",
+                                "section-a-$key",
+                                "route-a-root",
+                                query,
+                            ),
+                        )
+                    }
+                    if (includeSecondRoute) {
+                        add(hierarchyNode("route-b-root", "source-b", "hash", "root-b", null, "思想体系"))
+                        add(
+                            hierarchyNode(
+                                "route-z-node-b",
+                                "source-b",
+                                "hash",
+                                "section-b",
+                                "route-b-root",
+                                "思想体系",
+                            ),
+                        )
+                    }
+                }
+                (if (reverseInsertion) nodes.reversed() else nodes).forEach { node ->
+                    hierarchyNodes[node.nodeKey] = node
+                    if (node.parentNodeKey != null) {
+                        hierarchySearchRows += com.harnessapk.storage.AgentHierarchyFtsEntity(node.nodeKey, node.title)
+                    }
+                }
+                val storedChunks = buildList {
+                    repeat(49) { index ->
+                        val key = index.toString().padStart(3, '0')
+                        add(
+                            AgentChunkEntity(
+                                chunkKey = "a-chunk-$key",
+                                sourceId = "source-a",
+                                sourceHash = "hash",
+                                chunkId = "a-chunk-$key",
+                                sourceTitle = "route-a",
+                                location = "section-a-$key",
+                                parentPath = "root-a/section-a-$key",
+                                text = query,
+                                keywordsText = query,
+                            ),
+                        )
+                    }
+                    if (includeSecondRoute) {
+                        add(
+                            AgentChunkEntity(
+                                chunkKey = "z-chunk-b",
+                                sourceId = "source-b",
+                                sourceHash = "hash",
+                                chunkId = "z-chunk-b",
+                                sourceTitle = "route-b",
+                                location = "section-b",
+                                parentPath = "root-b/section-b",
+                                text = "思想体系",
+                                keywordsText = "思想 体系",
+                            ),
+                        )
+                    }
+                }
+                (if (reverseInsertion) storedChunks.reversed() else storedChunks).forEach { chunk ->
+                    chunks[chunk.chunkKey] = chunk
+                }
+                searchResult = storedChunks.map(AgentChunkEntity::chunkKey)
+            }
+            return repositoryFor(dao)
+        }
+
+        val firstRepository = fixture(reverseInsertion = false, includeSecondRoute = true)
+        val firstRoutes = firstRepository.searchHierarchy("agent-route-diversity", 2, query, 24)
+        val firstCandidates = firstRepository.searchChunks("agent-route-diversity", 2, query, 24, firstRoutes)
+        val firstContext = AgentContextAssembler(firstRepository).assemble(
+            AgentContextRequest("agent-route-diversity", 2, query),
+        )!!
+        val secondRepository = fixture(reverseInsertion = true, includeSecondRoute = true)
+        val secondRoutes = secondRepository.searchHierarchy("agent-route-diversity", 2, query, 24)
+        val secondCandidates = secondRepository.searchChunks("agent-route-diversity", 2, query, 24, secondRoutes)
+        val secondContext = AgentContextAssembler(secondRepository).assemble(
+            AgentContextRequest("agent-route-diversity", 2, query),
+        )!!
+
+        assertEquals(setOf("source-a/root-a", "source-b/root-b"), firstRoutes.map { "${it.sourceId}/${it.topLevelId}" }.toSet())
+        assertTrue(firstCandidates.any { "source-a/root-a" in it.routeIds })
+        assertTrue(firstCandidates.any { "source-b/root-b" in it.routeIds })
+        assertEquals(setOf("source-a/root-a", "source-b/root-b"), firstContext.diagnostics.selectedRouteIds.toSet())
+        assertEquals(firstRoutes, secondRoutes)
+        assertEquals(firstCandidates, secondCandidates)
+        assertEquals(firstContext.diagnostics.selectedChunkKeys, secondContext.diagnostics.selectedChunkKeys)
+
+        val singleRouteRepository = fixture(reverseInsertion = true, includeSecondRoute = false)
+        val singleRouteCandidates = singleRouteRepository.searchChunks(
+            "agent-route-diversity",
+            2,
+            query,
+            24,
+            singleRouteRepository.searchHierarchy("agent-route-diversity", 2, query, 24),
+        )
+        assertEquals(
+            (0 until 24).map { index -> "a-chunk-${index.toString().padStart(3, '0')}" },
+            singleRouteCandidates.map(AgentRetrievalChunk::chunkKey),
+        )
+    }
+
+    @Test
     fun relationshipIntentUsesIdentityAndMemoryWithoutRetrieval() = runTest {
         val source = FakeContextSource(packageData())
         val context = AgentContextAssembler(source).assemble(

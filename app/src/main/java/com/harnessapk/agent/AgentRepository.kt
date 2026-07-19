@@ -1252,6 +1252,7 @@ class AgentRepository(
         if (corpusKeys.isEmpty() || ftsQuery.isBlank() || limit <= 0) return@withContext emptyList()
         val terms = agentQueryTerms(query)
         val topRoutes = mutableListOf<AgentHierarchyRoute>()
+        val routeRepresentatives = mutableListOf<AgentHierarchyRoute>()
         var afterNodeKey = ""
         while (true) {
             currentCoroutineContext().ensureActive()
@@ -1266,12 +1267,14 @@ class AgentRepository(
             val nodes = loadHierarchyClosure(nodeKeys)
             nodeKeys.mapNotNull(nodes::get).forEach { node ->
                 val root = resolveHierarchyRoot(node, nodes)
-                topRoutes += AgentHierarchyRoute(
+                val route = AgentHierarchyRoute(
                     nodeKey = node.nodeKey,
                     sourceId = node.sourceId,
                     topLevelId = root.nodeId,
                     physicalScore = scoreHierarchyNode(node, query, terms),
                 )
+                topRoutes += route
+                retainRouteRepresentative(routeRepresentatives, route, limit)
             }
             topRoutes.sortWith(repositoryRouteComparator())
             if (topRoutes.size > limit) topRoutes.subList(limit, topRoutes.size).clear()
@@ -1281,7 +1284,7 @@ class AgentRepository(
             check(nextKey != afterNodeKey) { "层级 FTS 分页游标未前进" }
             afterNodeKey = nextKey
         }
-        topRoutes.toList()
+        mergeRouteRepresentatives(routeRepresentatives, topRoutes, limit)
     }
 
     override suspend fun searchChunks(
@@ -1294,11 +1297,36 @@ class AgentRepository(
         val corpusKeys = versionCorpusKeys(agentId, version)
         val ftsQuery = buildAgentFtsQuery(query)
         if (corpusKeys.isEmpty() || limit <= 0) return@withContext emptyList()
-        val hierarchyKeys = hierarchyRoutes.map(AgentHierarchyRoute::nodeKey)
-        val routedKeys = if (hierarchyKeys.isEmpty()) {
-            emptyList()
-        } else {
-            dao.listChunkKeysForHierarchyNodes(corpusKeys, hierarchyKeys, limit)
+        val routeRepresentatives = selectRouteRepresentatives(hierarchyRoutes, limit)
+        val routeGroups = hierarchyRoutes.groupBy(AgentHierarchyRoute::repositoryRouteId)
+        val routedKeys = mutableListOf<String>()
+        val orderedRouteIds = buildList {
+            addAll(routeRepresentatives.map(AgentHierarchyRoute::repositoryRouteId))
+            addAll(
+                routeGroups.entries.sortedWith(
+                    Comparator { left, right ->
+                        repositoryRouteComparator().compare(
+                            left.value.minWith(repositoryRouteComparator()),
+                            right.value.minWith(repositoryRouteComparator()),
+                        )
+                    },
+                ).map(Map.Entry<String, List<AgentHierarchyRoute>>::key),
+            )
+        }.distinct()
+        orderedRouteIds.forEach { routeId ->
+            if (routedKeys.size >= limit) return@forEach
+            val routeNodes = routeGroups.getValue(routeId).map(AgentHierarchyRoute::nodeKey)
+            val remaining = limit - routedKeys.size
+            currentCoroutineContext().ensureActive()
+            val keys = dao.listChunkKeysForHierarchyNodes(
+                corpusKeys = corpusKeys,
+                nodeKeys = routeNodes,
+                limit = minOf(ROUTED_CHILDREN_PER_ROUTE, remaining),
+            )
+            currentCoroutineContext().ensureActive()
+            keys.forEach { key ->
+                if (routedKeys.size < limit && key !in routedKeys) routedKeys += key
+            }
         }
         val ftsChunks = if (ftsQuery.isBlank()) {
             emptyList()
@@ -1306,14 +1334,16 @@ class AgentRepository(
             scanTopChunkMatches(corpusKeys, ftsQuery, query, limit)
         }
         val routedChunks = dao.listChunks(routedKeys)
+        currentCoroutineContext().ensureActive()
         val chunks = (routedChunks + ftsChunks).associateBy(AgentChunkEntity::chunkKey).values
         val terms = agentQueryTerms(query)
-        chunks.map { chunk ->
+        val mappedChunks = chunks.map { chunk ->
+            val sourceId = chunk.sourceId.ifBlank { chunk.sourceHash }
             val parentIds = chunk.parentPath.split('/').filter(String::isNotBlank).toSet()
             AgentRetrievalChunk(
                 chunkKey = chunk.chunkKey,
                 chunkId = chunk.chunkId,
-                sourceId = chunk.sourceId.ifBlank { chunk.sourceHash },
+                sourceId = sourceId,
                 sourceTitle = chunk.sourceTitle,
                 period = chunk.period,
                 authorship = V2Authorship.entries.firstOrNull { it.wireName == chunk.authorship }
@@ -1323,16 +1353,16 @@ class AgentRepository(
                 duplicateGroup = chunk.duplicateGroup,
                 physicalScore = scoreChunk(chunk, query, terms),
                 routeIds = hierarchyRoutes.filter { route ->
-                    route.sourceId == chunk.sourceId &&
+                    route.sourceId == sourceId &&
                         (route.topLevelId in parentIds || route.nodeKey.substringAfter(':') in parentIds)
-                }.map { route -> "${route.sourceId}/${route.topLevelId}" }.toSet(),
+                }.map(AgentHierarchyRoute::repositoryRouteId).toSet(),
             )
-        }.sortedWith(
-            compareByDescending<AgentRetrievalChunk>(AgentRetrievalChunk::physicalScore)
-                .thenBy(AgentRetrievalChunk::sourceId)
-                .thenBy(AgentRetrievalChunk::period)
-                .thenBy(AgentRetrievalChunk::chunkKey),
-        ).take(limit)
+        }.filter { chunk -> chunk.physicalScore > 0 }
+        mergeRoutedAndFtsChunks(
+            chunks = mappedChunks,
+            representativeRouteIds = routeRepresentatives.map(AgentHierarchyRoute::repositoryRouteId),
+            limit = limit,
+        )
     }
 
     private suspend fun scanTopChunkMatches(
@@ -1720,11 +1750,14 @@ class AgentRepository(
         private const val DEFAULT_EVIDENCE_LIMIT = 8
         private const val CHUNK_BATCH_SIZE = 200
         private const val FTS_SCAN_PAGE_SIZE = 64
+        private const val ROUTED_CHILDREN_PER_ROUTE = 2
         private const val SOURCE_PAYLOAD_NAME = "payload"
         private const val TOMBSTONE_META_SUFFIX = ".meta"
         private const val TOMBSTONE_DATA_SUFFIX = ".data"
     }
 }
+
+private const val MAX_ROUTE_REPRESENTATIVES = 2
 
 private fun File.fileKeyOrNull(): Any? = runCatching {
     Files.readAttributes(toPath(), BasicFileAttributes::class.java).fileKey()
@@ -1784,6 +1817,81 @@ private fun repositoryRouteComparator(): Comparator<AgentHierarchyRoute> =
         .thenBy(AgentHierarchyRoute::sourceId)
         .thenBy(AgentHierarchyRoute::topLevelId)
         .thenBy(AgentHierarchyRoute::nodeKey)
+
+private val AgentHierarchyRoute.repositoryRouteId: String
+    get() = "$sourceId/$topLevelId"
+
+private fun retainRouteRepresentative(
+    representatives: MutableList<AgentHierarchyRoute>,
+    candidate: AgentHierarchyRoute,
+    limit: Int,
+) {
+    val capacity = minOf(MAX_ROUTE_REPRESENTATIVES, limit)
+    if (capacity <= 0) return
+    val comparator = repositoryRouteComparator()
+    val matchingIndex = representatives.indexOfFirst { route ->
+        route.repositoryRouteId == candidate.repositoryRouteId
+    }
+    if (matchingIndex >= 0) {
+        if (comparator.compare(candidate, representatives[matchingIndex]) < 0) {
+            representatives[matchingIndex] = candidate
+        }
+        return
+    }
+    if (representatives.size < capacity) {
+        representatives += candidate
+        return
+    }
+    val worstIndex = representatives.indexOf(representatives.maxWith(comparator))
+    if (comparator.compare(candidate, representatives[worstIndex]) < 0) {
+        representatives[worstIndex] = candidate
+    }
+}
+
+private fun selectRouteRepresentatives(
+    routes: List<AgentHierarchyRoute>,
+    limit: Int,
+): List<AgentHierarchyRoute> = buildList {
+    routes.forEach { route -> retainRouteRepresentative(this, route, limit) }
+    sortWith(repositoryRouteComparator())
+}
+
+private fun mergeRouteRepresentatives(
+    representatives: List<AgentHierarchyRoute>,
+    physicalTop: List<AgentHierarchyRoute>,
+    limit: Int,
+): List<AgentHierarchyRoute> = buildList {
+    if (limit <= 0) return@buildList
+    addAll(representatives.sortedWith(repositoryRouteComparator()).take(limit))
+    physicalTop.sortedWith(repositoryRouteComparator()).forEach { route ->
+        if (size < limit && none { selected -> selected.nodeKey == route.nodeKey }) add(route)
+    }
+}
+
+private fun mergeRoutedAndFtsChunks(
+    chunks: List<AgentRetrievalChunk>,
+    representativeRouteIds: List<String>,
+    limit: Int,
+): List<AgentRetrievalChunk> {
+    if (limit <= 0) return emptyList()
+    val sorted = chunks.distinctBy(AgentRetrievalChunk::chunkKey).sortedWith(repositoryChunkComparator())
+    val reserved = representativeRouteIds.distinct().mapNotNull { routeId ->
+        sorted.firstOrNull { routeId in it.routeIds }
+    }.distinctBy(AgentRetrievalChunk::chunkKey)
+    val preserved = if (reserved.size >= 2) reserved else emptyList()
+    return buildList {
+        addAll(preserved)
+        sorted.forEach { chunk ->
+            if (size < limit && none { selected -> selected.chunkKey == chunk.chunkKey }) add(chunk)
+        }
+    }
+}
+
+private fun repositoryChunkComparator(): Comparator<AgentRetrievalChunk> =
+    compareByDescending<AgentRetrievalChunk>(AgentRetrievalChunk::physicalScore)
+        .thenBy(AgentRetrievalChunk::sourceId)
+        .thenBy(AgentRetrievalChunk::period)
+        .thenBy(AgentRetrievalChunk::chunkKey)
 
 private fun AgentVersionEntity.toContextPackage(
     installedRequiredCorpusCount: Int,
