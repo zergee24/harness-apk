@@ -26,6 +26,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -94,6 +95,20 @@ class ChatExecutionRepositoryInstrumentedTest {
         assertEquals("stable-request-id", first.id)
         assertEquals(first, second)
         assertEquals(1, database.chatExecutionEntryDao().listForConversation(conversationId).size)
+        assertEquals(1, database.messageDao().countUserMessages(conversationId))
+    }
+
+    @Test
+    fun enqueueWithOutcomeIdentifiesTheCallThatCreatedTheStableRequest() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val request = request(conversationId).copy(requestId = "stable-outcome-request")
+
+        val first = repository.enqueueWithOutcome(request)
+        val second = repository.enqueueWithOutcome(request)
+
+        assertTrue(first.insertedByThisCall)
+        assertFalse(second.insertedByThisCall)
+        assertEquals(first.entry, second.entry)
         assertEquals(1, database.messageDao().countUserMessages(conversationId))
     }
 

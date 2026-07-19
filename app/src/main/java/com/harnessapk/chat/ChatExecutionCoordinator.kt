@@ -35,9 +35,9 @@ class ChatExecutionCoordinator(
     private val dispatchers: AppDispatchers,
     private val webSearchAllowed: suspend (conversationId: String) -> Boolean = { true },
     private val onWorkScheduled: () -> Unit = {},
-    private val exactRequestCommitted: suspend (requestId: String) -> Boolean = { requestId ->
-        executionRepository.entry(requestId) != null
-    },
+    private val exactAttachmentBatchReferenced:
+        suspend (requestId: String, attachments: List<PendingImageAttachment>) -> Boolean =
+        executionRepository::isAttachmentBatchReferenced,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
     private val runners = mutableMapOf<String, Job>()
@@ -51,29 +51,36 @@ class ChatExecutionCoordinator(
     suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = withContext(dispatchers.io) {
         val persistedAttachments = attachmentStore.persistAll(request.attachments)
         try {
-            val entry = executionRepository.enqueue(request.copy(attachments = persistedAttachments))
+            val outcome = executionRepository.enqueueWithOutcome(request.copy(attachments = persistedAttachments))
+            if (!outcome.insertedByThisCall) {
+                cleanupAttachments(persistedAttachments)
+            }
             withContext(NonCancellable) {
                 try {
-                    ensureRunner(entry.conversationId)
+                    ensureRunner(outcome.entry.conversationId)
                     onWorkScheduled()
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Throwable) {
                 }
             }
-            entry
+            outcome.entry
         } catch (failure: Throwable) {
-            cleanupUncommittedAttachments(request.requestId, persistedAttachments)
+            cleanupUnreferencedAttachments(request.requestId, persistedAttachments)
             throw failure
         }
     }
 
-    private suspend fun cleanupUncommittedAttachments(
+    private suspend fun cleanupAttachments(attachments: List<PendingImageAttachment>) = withContext(NonCancellable) {
+        runCatching { attachmentStore.cleanup(attachments) }
+    }
+
+    private suspend fun cleanupUnreferencedAttachments(
         requestId: String,
         attachments: List<PendingImageAttachment>,
     ) = withContext(NonCancellable) {
-        val committed = runCatching { exactRequestCommitted(requestId) }.getOrNull()
-        if (committed == false) {
+        val referenced = runCatching { exactAttachmentBatchReferenced(requestId, attachments) }.getOrNull()
+        if (referenced == false) {
             runCatching { attachmentStore.cleanup(attachments) }
         }
     }

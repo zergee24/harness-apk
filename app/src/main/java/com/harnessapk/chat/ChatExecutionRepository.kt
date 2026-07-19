@@ -21,6 +21,11 @@ data class EnqueueChatRequest(
     val requestContext: ChatExecutionRequestContext,
 )
 
+data class ChatExecutionEnqueueOutcome(
+    val entry: ChatExecutionEntry,
+    val insertedByThisCall: Boolean,
+)
+
 class ChatExecutionRepository(
     private val database: RoomDatabase,
     private val dao: ChatExecutionEntryDao,
@@ -31,8 +36,12 @@ class ChatExecutionRepository(
     fun observeForConversation(conversationId: String): Flow<List<ChatExecutionEntry>> =
         dao.observeForConversation(conversationId).map { rows -> rows.map(ChatExecutionEntryEntity::toDomain) }
 
-    suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = database.withTransaction {
-        dao.findById(request.requestId)?.toDomain()?.let { return@withTransaction it }
+    suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = enqueueWithOutcome(request).entry
+
+    suspend fun enqueueWithOutcome(request: EnqueueChatRequest): ChatExecutionEnqueueOutcome = database.withTransaction {
+        dao.findById(request.requestId)?.toDomain()?.let { existing ->
+            return@withTransaction ChatExecutionEnqueueOutcome(existing, insertedByThisCall = false)
+        }
         identityRepository.pinForFirstMessage(request.conversationId)
         val now = timeProvider.nowMillis()
         val userMessageId = chatRepository.insertUserMessage(
@@ -58,10 +67,20 @@ class ChatExecutionRepository(
             updatedAt = now,
         )
         dao.insert(entity)
-        entity.toDomain()
+        ChatExecutionEnqueueOutcome(entity.toDomain(), insertedByThisCall = true)
     }
 
     suspend fun entry(id: String): ChatExecutionEntry? = dao.findById(id)?.toDomain()
+
+    suspend fun isAttachmentBatchReferenced(
+        requestId: String,
+        attachments: List<PendingImageAttachment>,
+    ): Boolean = database.withTransaction {
+        if (attachments.isEmpty()) return@withTransaction false
+        val entry = dao.findById(requestId) ?: return@withTransaction false
+        val candidateUris = attachments.mapTo(hashSetOf()) { it.uri.toString() }
+        chatRepository.listAttachments(entry.userMessageId).any { it.uri in candidateUris }
+    }
 
     suspend fun nextQueued(conversationId: String): ChatExecutionEntry? =
         dao.listForConversation(conversationId)

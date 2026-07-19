@@ -1,6 +1,7 @@
 package com.harnessapk.chat
 
 import android.content.Context
+import android.database.sqlite.SQLiteConstraintException
 import android.net.Uri
 import androidx.core.net.toUri
 import androidx.room.Room
@@ -19,17 +20,26 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
+import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class QueuedAttachmentStoreInstrumentedTest {
@@ -93,32 +103,183 @@ class QueuedAttachmentStoreInstrumentedTest {
         )
         val coordinator = coordinator()
 
+        var enqueueFailure: SQLiteConstraintException? = null
         try {
             coordinator.enqueue(request)
-            fail("Expected Room enqueue to fail")
-        } catch (_: Throwable) {
+        } catch (error: SQLiteConstraintException) {
+            enqueueFailure = error
         } finally {
             coordinator.close()
         }
 
+        assertNotNull("Expected Room enqueue to fail", enqueueFailure)
+        assertTrue(enqueueFailure!!.message.orEmpty().contains("attachment queue failure"))
         assertTrue("Copied attachments must be reclaimed", managedDirectory.listFiles().orEmpty().isEmpty())
         assertTrue(executionRepository.entry(request.requestId) == null)
         assertTrue(database.messageDao().countUserMessages(conversationId) == 0)
     }
 
     @Test
-    fun persistAllDeletesEarlierCopiesAndTheFailedCopyArtifactsWhenTheSecondSourceCannotBeRead() = runBlocking {
-        val store = QueuedAttachmentStore(context)
+    fun persistAllRethrowsMidCopyFailureAndDeletesEarlierFinalAndCurrentTemporaryFiles() = runBlocking {
         val first = sourceAttachment("first.jpg")
-        val unreadableSecond = PendingImageAttachment(Uri.parse("content://missing/second.jpg"), "image/jpeg")
+        val second = sourceAttachment("second.jpg")
+        val originalFailure = IOException("second attachment interrupted")
+        var observedWrittenTemporary = false
+        val failingInput = object : InputStream() {
+            private var emittedPartialBytes = false
 
+            override fun read(): Int = error("Buffered read expected")
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                if (!emittedPartialBytes) {
+                    val partial = "partial second attachment".toByteArray()
+                    partial.copyInto(buffer, offset, endIndex = partial.size.coerceAtMost(length))
+                    emittedPartialBytes = true
+                    return partial.size.coerceAtMost(length)
+                }
+                observedWrittenTemporary = managedDirectory.listFiles().orEmpty().any { file ->
+                    file.name.endsWith(".tmp") && file.length() > 0L
+                }
+                throw originalFailure
+            }
+        }
+        val store = QueuedAttachmentStore(
+            context = context,
+            inputOpener = { uri ->
+                if (uri == second.uri) failingInput else context.contentResolver.openInputStream(uri)
+            },
+        )
+
+        var copyFailure: IOException? = null
         try {
-            store.persistAll(listOf(first, unreadableSecond))
-            fail("Expected second attachment copy to fail")
-        } catch (_: Throwable) {
+            store.persistAll(listOf(first, second))
+        } catch (error: IOException) {
+            copyFailure = error
         }
 
+        assertNotNull("Expected second attachment copy to fail", copyFailure)
+        assertSame(originalFailure, copyFailure)
+        assertTrue("Second copy must write its temporary file before failing", observedWrittenTemporary)
         assertTrue("Batch copy must leave no final or temporary files", managedDirectory.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun sequentialDuplicateRequestReclaimsOnlyTheSecondCopiedBatch() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val request = request(
+            conversationId = conversationId,
+            requestId = "attachment-sequential-duplicate",
+            attachments = listOf(sourceAttachment("sequential.jpg")),
+        )
+        val coordinator = coordinator()
+
+        try {
+            val first = coordinator.enqueue(request)
+            val second = coordinator.enqueue(request)
+            val storedAttachments = database.messageAttachmentDao().listForMessage(first.userMessageId)
+            val storedFile = File(requireNotNull(Uri.parse(storedAttachments.single().uri).path))
+
+            assertEquals(first.id, second.id)
+            assertEquals(first.userMessageId, second.userMessageId)
+            assertEquals(1, database.messageDao().countUserMessages(conversationId))
+            assertEquals(listOf(storedFile.canonicalFile), managedFiles())
+        } finally {
+            coordinator.close()
+        }
+    }
+
+    @Test
+    fun concurrentDuplicateRequestReclaimsTheBatchNotReferencedByTheUserMessage() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val request = request(
+            conversationId = conversationId,
+            requestId = "attachment-concurrent-duplicate",
+            attachments = listOf(sourceAttachment("concurrent.jpg")),
+        )
+        val coordinator = coordinator()
+
+        try {
+            val entries = coroutineScope {
+                List(2) { async(Dispatchers.IO) { coordinator.enqueue(request) } }.awaitAll()
+            }
+            val entry = requireNotNull(executionRepository.entry(request.requestId))
+            val storedAttachments = database.messageAttachmentDao().listForMessage(entry.userMessageId)
+            val storedFile = File(requireNotNull(Uri.parse(storedAttachments.single().uri).path))
+
+            assertEquals(1, entries.map { it.id }.distinct().size)
+            assertEquals(1, database.messageDao().countUserMessages(conversationId))
+            assertEquals(listOf(storedFile.canonicalFile), managedFiles())
+        } finally {
+            coordinator.close()
+        }
+    }
+
+    @Test
+    fun failedRequestReclaimsItsBatchWhenAnotherSameIdBatchCommitsBeforeTheLandingLookup() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val requestId = "attachment-failure-race"
+        val losingRequest = request(
+            conversationId = conversationId,
+            requestId = requestId,
+            attachments = listOf(sourceAttachment("race-loser.jpg")),
+            content = "loser",
+        )
+        val winningRequest = request(
+            conversationId = conversationId,
+            requestId = requestId,
+            attachments = listOf(sourceAttachment("race-winner.jpg")),
+            content = "winner",
+        )
+        database.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER fail_losing_attachment_request
+            BEFORE INSERT ON chat_execution_entries
+            WHEN NEW.id = '$requestId'
+                AND (SELECT content FROM messages WHERE id = NEW.userMessageId) = 'loser'
+            BEGIN
+                SELECT RAISE(ABORT, 'losing attachment failure');
+            END
+            """.trimIndent(),
+        )
+        val landingLookupStarted = CompletableDeferred<Unit>()
+        val winningRequestCommitted = CompletableDeferred<Unit>()
+        val losingCoordinator = coordinator(
+            exactAttachmentBatchReferenced = { exactRequestId, attachments ->
+                landingLookupStarted.complete(Unit)
+                winningRequestCommitted.await()
+                executionRepository.isAttachmentBatchReferenced(exactRequestId, attachments)
+            },
+        )
+        val winningCoordinator = coordinator()
+
+        try {
+            val losingEnqueue = async(Dispatchers.IO) {
+                try {
+                    losingCoordinator.enqueue(losingRequest)
+                    null
+                } catch (error: SQLiteConstraintException) {
+                    error
+                }
+            }
+            withTimeout(5_000L) { landingLookupStarted.await() }
+            val winningEntry = try {
+                winningCoordinator.enqueue(winningRequest)
+            } finally {
+                winningRequestCommitted.complete(Unit)
+            }
+            val losingFailure = losingEnqueue.await()
+            val storedAttachments = database.messageAttachmentDao().listForMessage(winningEntry.userMessageId)
+            val storedFile = File(requireNotNull(Uri.parse(storedAttachments.single().uri).path))
+
+            assertNotNull("Expected the losing Room enqueue to fail", losingFailure)
+            assertTrue(losingFailure!!.message.orEmpty().contains("losing attachment failure"))
+            assertEquals(1, database.messageDao().countUserMessages(conversationId))
+            assertEquals(listOf(storedFile.canonicalFile), managedFiles())
+        } finally {
+            winningRequestCommitted.complete(Unit)
+            losingCoordinator.close()
+            winningCoordinator.close()
+        }
     }
 
     @Test
@@ -246,6 +407,41 @@ class QueuedAttachmentStoreInstrumentedTest {
     }
 
     @Test
+    fun cleanupRejectsForgedPrefixAndNearUuidNames() = runBlocking {
+        val store = QueuedAttachmentStore(context)
+        managedDirectory.mkdirs()
+        val forgedPrefix = File(managedDirectory, "queued-anything.jpg").apply { writeText("forged") }
+        val nearUuid = File(
+            managedDirectory,
+            "queued-12345678-1234-1234-1234-123456789ab.jpg",
+        ).apply { writeText("near uuid") }
+
+        store.cleanup(
+            listOf(
+                PendingImageAttachment(forgedPrefix.toUri(), "image/jpeg"),
+                PendingImageAttachment(nearUuid.toUri(), "image/jpeg"),
+            ),
+        )
+
+        assertTrue(forgedPrefix.isFile)
+        assertTrue(nearUuid.isFile)
+    }
+
+    @Test
+    fun cleanupRejectsSameDirectorySymlinkWithoutDeletingItsManagedTarget() = runBlocking {
+        val store = QueuedAttachmentStore(context)
+        val target = store.persistAll(listOf(sourceAttachment("symlink-target.jpg"))).single()
+        val targetFile = File(requireNotNull(target.uri.path))
+        val symlink = File(managedDirectory, "queued-${UUID.randomUUID()}.jpg")
+        Files.createSymbolicLink(symlink.toPath(), targetFile.toPath())
+
+        store.cleanup(listOf(PendingImageAttachment(symlink.toUri(), "image/jpeg")))
+
+        assertTrue(Files.isSymbolicLink(symlink.toPath()))
+        assertTrue(targetFile.isFile)
+    }
+
+    @Test
     fun cleanupKeepsFilesWhenTheExactRequestLookupFails() = runBlocking {
         val conversationId = chatRepository.createConversation()
         val request = request(
@@ -264,19 +460,28 @@ class QueuedAttachmentStoreInstrumentedTest {
             """.trimIndent(),
         )
         val coordinator = coordinator(
-            exactRequestCommitted = { throw IllegalStateException("request lookup failed") },
+            exactAttachmentBatchReferenced = { _, _ -> throw IllegalStateException("request lookup failed") },
         )
 
+        var enqueueFailure: SQLiteConstraintException? = null
         try {
             coordinator.enqueue(request)
-            fail("Expected Room enqueue to fail")
-        } catch (_: Throwable) {
+        } catch (error: SQLiteConstraintException) {
+            enqueueFailure = error
         } finally {
             coordinator.close()
         }
 
+        assertNotNull("Expected Room enqueue to fail", enqueueFailure)
+        assertTrue(enqueueFailure!!.message.orEmpty().contains("unknown landing failure"))
         assertTrue("Unknown landing must preserve files", managedDirectory.listFiles().orEmpty().single().isFile)
     }
+
+    private fun managedFiles(): List<File> = managedDirectory.listFiles()
+        .orEmpty()
+        .filter(File::isFile)
+        .map(File::getCanonicalFile)
+        .sortedBy(File::getName)
 
     private fun sourceAttachment(name: String): PendingImageAttachment {
         val source = File(sourceDirectory, name).apply { writeText("$name bytes") }
@@ -287,10 +492,11 @@ class QueuedAttachmentStoreInstrumentedTest {
         conversationId: String,
         requestId: String,
         attachments: List<PendingImageAttachment>,
+        content: String = "attachment request",
     ) = EnqueueChatRequest(
         requestId = requestId,
         conversationId = conversationId,
-        content = "attachment request",
+        content = content,
         attachments = attachments,
         providerId = null,
         model = null,
@@ -300,7 +506,8 @@ class QueuedAttachmentStoreInstrumentedTest {
 
     private fun coordinator(
         onWorkScheduled: () -> Unit = {},
-        exactRequestCommitted: suspend (String) -> Boolean = { requestId -> executionRepository.entry(requestId) != null },
+        exactAttachmentBatchReferenced: suspend (String, List<PendingImageAttachment>) -> Boolean =
+            executionRepository::isAttachmentBatchReferenced,
     ) = ChatExecutionCoordinator(
         executionRepository = executionRepository,
         sendMessageUseCase = SendMessageUseCase(
@@ -315,7 +522,7 @@ class QueuedAttachmentStoreInstrumentedTest {
         attachmentStore = QueuedAttachmentStore(context),
         dispatchers = dispatchers(),
         onWorkScheduled = onWorkScheduled,
-        exactRequestCommitted = exactRequestCommitted,
+        exactAttachmentBatchReferenced = exactAttachmentBatchReferenced,
     )
 
     private fun dispatchers() = AppDispatchers(
