@@ -133,7 +133,7 @@ class QueuedAttachmentStore internal constructor(
             inputOpener(source.uri).use { input ->
                 requireNotNull(input) { "无法读取图片" }
                 managedDirectory.newByteChannel(
-                    Path.of(temporaryName),
+                    relativePath(temporaryName),
                     setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
                 ).use { channel ->
                     temporaryEntry = ownedRegularFile(managedDirectory, temporaryName)
@@ -142,12 +142,12 @@ class QueuedAttachmentStore internal constructor(
             }
             testHooks.beforeFinalCreate(temporaryName, finalName)
             managedDirectory.newByteChannel(
-                Path.of(finalName),
+                relativePath(finalName),
                 setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
             ).use { finalChannel ->
                 finalEntry = ownedRegularFile(managedDirectory, finalName)
                 managedDirectory.newByteChannel(
-                    Path.of(temporaryName),
+                    relativePath(temporaryName),
                     setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS),
                 ).use { temporaryChannel ->
                     testHooks.copyTemporaryToFinal(
@@ -178,7 +178,7 @@ class QueuedAttachmentStore internal constructor(
     private fun openCurrentManagedDirectory(parent: SecureDirectoryStream<Path>): SecureDirectoryStream<Path> {
         val child = try {
             requireSecureDirectory(
-                parent.newDirectoryStream(Path.of(MANAGED_DIRECTORY_NAME), LinkOption.NOFOLLOW_LINKS),
+                parent.newDirectoryStream(relativePath(MANAGED_DIRECTORY_NAME), LinkOption.NOFOLLOW_LINKS),
                 "当前平台不支持安全会话图片目录句柄",
             )
         } catch (error: NoSuchFileException) {
@@ -215,7 +215,7 @@ class QueuedAttachmentStore internal constructor(
 
     private fun ownedRegularFile(directory: SecureDirectoryStream<Path>, name: String): OwnedAttachmentEntry {
         val attributes = directory.getFileAttributeView(
-            Path.of(name),
+            relativePath(name),
             BasicFileAttributeView::class.java,
             LinkOption.NOFOLLOW_LINKS,
         ).readAttributes()
@@ -240,14 +240,14 @@ class QueuedAttachmentStore internal constructor(
         testHooks.beforeOwnedEntryMove(name)
         val quarantineName = availableQuarantineName(directory)
         try {
-            directory.move(Path.of(name), directory, Path.of(quarantineName))
+            directory.move(relativePath(name), directory, relativePath(quarantineName))
         } catch (_: NoSuchFileException) {
             return
         }
 
         if (currentRegularFileKey(directory, quarantineName) == expectedFileKey) {
             try {
-                directory.deleteFile(Path.of(quarantineName))
+                directory.deleteFile(relativePath(quarantineName))
             } catch (_: NoSuchFileException) {
             }
             return
@@ -257,7 +257,7 @@ class QueuedAttachmentStore internal constructor(
 
     private fun currentRegularFileKey(directory: SecureDirectoryStream<Path>, name: String): Any? = try {
         val attributes = directory.getFileAttributeView(
-            Path.of(name),
+            relativePath(name),
             BasicFileAttributeView::class.java,
             LinkOption.NOFOLLOW_LINKS,
         ).readAttributes()
@@ -276,7 +276,7 @@ class QueuedAttachmentStore internal constructor(
 
     private fun entryExists(directory: SecureDirectoryStream<Path>, name: String): Boolean = try {
         directory.getFileAttributeView(
-            Path.of(name),
+            relativePath(name),
             BasicFileAttributeView::class.java,
             LinkOption.NOFOLLOW_LINKS,
         ).readAttributes()
@@ -291,7 +291,7 @@ class QueuedAttachmentStore internal constructor(
         originalName: String,
     ) {
         if (entryExists(directory, originalName)) return
-        runCatching { directory.move(Path.of(quarantineName), directory, Path.of(originalName)) }
+        runCatching { directory.move(relativePath(quarantineName), directory, relativePath(originalName)) }
     }
 
     private inline fun <T> withTrustedParent(block: (SecureDirectoryStream<Path>) -> T): T {
@@ -320,7 +320,7 @@ class QueuedAttachmentStore internal constructor(
         return withOpenDirectoryNoFollow(absolutePath.toString(), "应用文件目录无效") { rootFd, rootIdentity ->
             ParcelFileDescriptor.dup(rootFd).use { pinnedRoot ->
                 val anchoredRootPath = "/proc/self/fd/${pinnedRoot.fd}"
-                val rootFileKey = Files.newDirectoryStream(Path.of(anchoredRootPath)).use { stream ->
+                val rootFileKey = Files.newDirectoryStream(File(anchoredRootPath).toPath()).use { stream ->
                     directoryFileKey(
                         requireSecureDirectory(stream, "当前平台不支持安全应用文件目录句柄"),
                     )
@@ -353,7 +353,7 @@ class QueuedAttachmentStore internal constructor(
         val descriptor = try {
             Os.open(
                 path,
-                OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+                OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
                 0,
             )
         } catch (error: ErrnoException) {
@@ -408,6 +408,8 @@ class QueuedAttachmentStore internal constructor(
         check(attributes.isDirectory && !attributes.isSymbolicLink) { "应用文件目录无效" }
         return requireNotNull(attributes.fileKey()) { "无法确认应用文件目录身份" }
     }
+
+    private fun relativePath(name: String): Path = File(name).toPath()
 
     private class BatchRecord(
         val ownerToken: Any,
