@@ -542,6 +542,25 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun keepsRelationshipCauseWhenPredicateStillPointsAtCurrentAgent() {
+        val quote = "你让我信任你"
+        val candidate = candidate(
+            AgentMemoryKind.RELATIONSHIP_EVENT,
+            "trust",
+            "用户信任当前人物",
+            "direct-cause",
+            quote,
+        )
+
+        val result = policy.evaluate(
+            input(user("direct-cause", quote)),
+            listOf(candidate),
+        )
+
+        assertEquals(listOf(candidate), result.accepted)
+    }
+
+    @Test
     fun rejectsWorkProductsContractsAndCommercialOutcomesOutsideProjects() {
         val facts = listOf(
             "我们一起完成了登录页改版",
