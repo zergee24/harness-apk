@@ -64,6 +64,33 @@ scripts/agent-builder.sh pack build/agent-v2-fixture \
 
 只有 `READY` 智能体可开始新对话；`WAITING_FOR_CORPUS`、`DISABLED` 和 `FAILED` 都会阻止入口。独立 `.hcorpus` 仅扩展当前版本覆盖，历史会话仍绑定原 version；`.hsource` 只用于阅读核验，不参与回答。人格运行时使用固定会话版本、可选项目上下文和本地资料证据，不启用联网补写，也不创建智能体所属项目。
 
+## 人物关系记忆
+
+关系记忆归属于人物身份，不归属于单个会话或项目，所以同一人物可在日常会话和项目会话之间自然承接称呼、稳定偏好、共同经历和关系变化。项目仍是独立上下文：项目目标、文件、决定和业务事实不会写入人物关系记忆，也不会跟随人物进入另一个项目。
+
+应用会在每 10 个成功问答回合以及离开会话时，在后台尝试从用户明确表达中提取关系记忆。提取失败不会阻断聊天，也不会显示逐轮确认。会话中的“人物资料 -> 关系记忆”是唯一管理入口，可查看精确来源、编辑、删除或清空当前人物的全部关系记忆；清空后，下一轮请求会重新读取空列表，不再注入旧内容。关系记忆、会话和导入资料均保存在本机。
+
+离线人格回归只评估可验证信号，不调用 Provider：
+
+```bash
+scripts/agent-builder.sh benchmark-score \
+  tools/agent_builder/tests/fixtures/persona-regression.jsonl \
+  --responses tools/agent_builder/tests/fixtures/persona-regression-passing-responses.jsonl \
+  --output build/benchmark/scorer-contract-report.json
+
+scripts/agent-builder.sh benchmark-blind prepare \
+  --v1 build/benchmark/v1-responses.jsonl \
+  --v2 build/benchmark/v2-responses.jsonl \
+  --output build/benchmark/blind
+scripts/agent-builder.sh benchmark-blind score \
+  --pairs build/benchmark/blind/pairs.jsonl \
+  --answer-key build/benchmark/blind/answer-key.json \
+  --choices build/benchmark/blind/choices.jsonl \
+  --output build/benchmark/report.json
+```
+
+仓库内的 passing fixture 只证明 scorer 和 CLI 契约，不代表真实人物质量。真实 V1/V2 验收必须使用相同 Provider、模型、温度和上下文，由看不到 answer key 的评审者完成 choices；`build/benchmark/` 中的真实回答、选择和私钥不得提交。
+
 ## Emulator QA
 
 ```bash

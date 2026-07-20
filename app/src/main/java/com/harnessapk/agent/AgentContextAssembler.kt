@@ -264,6 +264,12 @@ class AgentContextAssembler(
                 appendLine("身份内核：")
                 appendLine(packageData.persona.trim())
                 appendAgentRelationshipMemorySection(relationshipMemoryLines)
+                if (request.projectContext.isNotBlank() || request.sessionContext.isNotBlank()) {
+                    appendLine()
+                    appendLine("当前会话的项目与会话上下文：")
+                    request.projectContext.trim().takeIf(String::isNotBlank)?.let(::appendLine)
+                    request.sessionContext.trim().takeIf(String::isNotBlank)?.let(::appendLine)
+                }
                 if (packageData.stances.isNotEmpty()) {
                     appendLine()
                     appendLine("人物立场：")

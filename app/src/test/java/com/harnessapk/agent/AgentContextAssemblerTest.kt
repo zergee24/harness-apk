@@ -816,6 +816,97 @@ class AgentContextAssemblerTest {
     }
 
     @Test
+    fun finalRuntimeMatrixKeepsV1V2ProjectAndRelationshipBoundaries() = runTest {
+        data class MatrixCase(
+            val schemaVersion: Int,
+            val hasMemory: Boolean,
+            val hasProject: Boolean,
+        )
+
+        val cases = listOf(
+            MatrixCase(schemaVersion = 1, hasMemory = false, hasProject = false),
+            MatrixCase(schemaVersion = 1, hasMemory = true, hasProject = true),
+            MatrixCase(schemaVersion = 2, hasMemory = false, hasProject = false),
+            MatrixCase(schemaVersion = 2, hasMemory = true, hasProject = true),
+        )
+
+        cases.forEach { item ->
+            val memoryValue = "关系-${item.schemaVersion}"
+            val projectValue = "项目-${item.schemaVersion}"
+            val assembler = AgentContextAssembler(
+                source = FakeContextSource(packageData().copy(schemaVersion = item.schemaVersion)),
+                relationshipMemoryProvider = AgentRelationshipMemoryProvider {
+                    if (item.hasMemory) {
+                        listOf(memory("matrix-${item.schemaVersion}", AgentMemoryKind.SHARED_HISTORY, memoryValue))
+                    } else {
+                        emptyList()
+                    }
+                },
+            )
+
+            val context = assembler.assemble(
+                request(
+                    query = "继续",
+                    projectContext = if (item.hasProject) projectValue else "",
+                ),
+            )!!
+
+            assertEquals(item.hasMemory, context.systemPrompt.contains(memoryValue))
+            assertEquals(item.hasProject, context.systemPrompt.contains(projectValue))
+            assertEquals(item.hasMemory, context.systemPrompt.contains("我们之间："))
+        }
+    }
+
+    @Test
+    fun clearedMemoryAndDeletedProjectAreNotRetainedByNextAssembly() = runTest {
+        var memories = listOf(
+            memory("transition", AgentMemoryKind.USER_PREFERENCE, "只属于关系记忆"),
+        )
+        val assembler = AgentContextAssembler(
+            source = FakeContextSource(packageData()),
+            relationshipMemoryProvider = AgentRelationshipMemoryProvider { memories },
+        )
+
+        val beforeClear = assembler.assemble(
+            request("继续", projectContext = "已删除项目上下文"),
+        )!!
+        memories = emptyList()
+        val afterClearAndDelete = assembler.assemble(request("继续"))!!
+
+        assertTrue(beforeClear.systemPrompt.contains("只属于关系记忆"))
+        assertTrue(beforeClear.systemPrompt.contains("已删除项目上下文"))
+        assertFalse(afterClearAndDelete.systemPrompt.contains("只属于关系记忆"))
+        assertFalse(afterClearAndDelete.systemPrompt.contains("已删除项目上下文"))
+        assertFalse(afterClearAndDelete.systemPrompt.contains("我们之间："))
+    }
+
+    @Test
+    fun optionalCorpusDegradesButMissingRequiredCorpusStopsBeforeMemoryRead() = runTest {
+        val optional = AgentContextAssembler(
+            source = FakeContextSource(
+                packageData(missingOptionalCoverage = listOf("optional-z", "optional-a")),
+            ),
+        ).assemble(request("继续"))
+        var relationshipReads = 0
+        val missingRequired = AgentContextAssembler(
+            source = FakeContextSource(
+                packageData(
+                    requiredCorpusCount = 1,
+                    installedRequiredCorpusCount = 0,
+                ),
+            ),
+            relationshipMemoryProvider = AgentRelationshipMemoryProvider {
+                relationshipReads += 1
+                emptyList()
+            },
+        ).assemble(request("继续"))
+
+        assertEquals(listOf("optional-a", "optional-z"), optional?.diagnostics?.missingOptionalCoverage)
+        assertNull(missingRequired)
+        assertEquals(0, relationshipReads)
+    }
+
+    @Test
     fun relationshipMemoryIsReadFreshAndProviderFailureDegradesButCancellationPropagates() = runTest {
         var current = listOf(memory("first", AgentMemoryKind.USER_PREFERENCE, "默认用中文"))
         val assembler = AgentContextAssembler(

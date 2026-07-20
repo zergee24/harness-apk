@@ -216,6 +216,39 @@ class AgentMemoryExtractionUseCaseTest {
     }
 
     @Test
+    fun transientGenerationFailureDoesNotPoisonNextExtraction() = runTest {
+        var generationAttempts = 0
+        var mergeCalls = 0
+        val useCase = useCase(
+            source = source(),
+            generator = AgentMemoryCandidateGenerator {
+                generationAttempts += 1
+                if (generationAttempts == 1) {
+                    throw IOException("provider raw response secret")
+                }
+                listOf(candidate("user-1", "默认使用中文回答", "以后默认用中文回答"))
+            },
+            merger = AgentMemoryAcceptedBatchMerger { batch ->
+                mergeCalls += 1
+                assertEquals(1, batch.candidates.size)
+                AgentMemoryMergeResult(1, 0, 0, 0)
+            },
+        )
+
+        val failed = useCase.extract("conversation-1")
+        val retried = useCase.extract("conversation-1")
+
+        assertEquals(
+            AgentMemoryExtractionResult.Failed(AgentMemoryExtractionFailureCategory.NETWORK),
+            failed,
+        )
+        assertFalse(failed.toString().contains("secret"))
+        assertEquals(AgentMemoryExtractionResult.Succeeded(1, 0), retried)
+        assertEquals(2, generationAttempts)
+        assertEquals(1, mergeCalls)
+    }
+
+    @Test
     fun mergerCannotReportMoreWritesThanPolicyAccepted() = runTest {
         val accepted = candidate(
             messageId = "user-1",

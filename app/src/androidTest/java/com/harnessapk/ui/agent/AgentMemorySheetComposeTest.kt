@@ -153,16 +153,18 @@ class AgentMemorySheetComposeTest {
             }
         }
 
+        composeRule.onNodeWithTag("关系记忆列表").performScrollToIndex(3)
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             runCatching {
                 composeRule.onNodeWithText("来源不可用").fetchSemanticsNode()
                 true
             }.getOrDefault(false)
         }
+        composeRule.onNodeWithText("来源不可用").assertIsDisplayed()
+        composeRule.onNodeWithText("来源已删除").assertIsDisplayed()
+        composeRule.onNodeWithTag("关系记忆列表").performScrollToIndex(2)
         composeRule.onNodeWithText("查看来源").performClick()
-        composeRule.onNodeWithText("来源不可用").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("逐渐建立信任").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("来源已删除").performScrollTo().assertIsDisplayed()
 
         assertEquals(listOf("conversation-source" to "message-source"), opened)
         composeRule.onNodeWithText("人物资料").assertIsDisplayed()

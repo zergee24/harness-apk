@@ -59,8 +59,13 @@ internal fun unwrapSingleLineGluedTextFence(line: String): String? {
     var changed = false
     inlineGluedTextFencePatterns.forEach { pattern ->
         unwrapped = pattern.replace(unwrapped) { match ->
-            changed = true
-            match.groupValues[1]
+            val content = match.groupValues[1]
+            if (content.startsWithHanCharacter()) {
+                changed = true
+                content
+            } else {
+                match.value
+            }
         }
     }
     return unwrapped.takeIf { changed }
@@ -74,6 +79,6 @@ private const val MIN_FENCE_LENGTH = 3
 private const val TEXT_LANGUAGE_LENGTH = 4
 private val recoveredTextDivider = Regex("^\\s{0,3}([-*_])(?:\\s*\\1){2,}\\s*$")
 private val inlineGluedTextFencePatterns = listOf(
-    Regex("`{3,}text([\\p{IsHan}].*?)`{3,}", RegexOption.IGNORE_CASE),
-    Regex("~{3,}text([\\p{IsHan}].*?)~{3,}", RegexOption.IGNORE_CASE),
+    Regex("`{3,}text(.*?)`{3,}", RegexOption.IGNORE_CASE),
+    Regex("~{3,}text(.*?)~{3,}", RegexOption.IGNORE_CASE),
 )

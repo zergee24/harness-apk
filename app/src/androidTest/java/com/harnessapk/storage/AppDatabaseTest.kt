@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -634,7 +635,7 @@ class AppDatabaseTest {
         val sqlite = migrated.openHelper.writableDatabase
 
         assertEquals(16, sqlite.version)
-        assertEquals(3, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+        assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "默认使用中文",
             sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"),
@@ -672,7 +673,7 @@ class AppDatabaseTest {
             0,
             sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_list('agent_memories')"),
         )
-        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
+        sqlite.assertNoForeignKeyViolations()
 
         migrated.close()
         context.deleteDatabase(name)
@@ -871,7 +872,7 @@ class AppDatabaseTest {
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_hierarchy_nodes"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_memories"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_list('agent_memories')"))
-        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
+        sqlite.assertNoForeignKeyViolations()
 
         migrated.agentMemoryDao().insert(
             AgentMemoryEntity(
@@ -891,7 +892,7 @@ class AppDatabaseTest {
         sqlite.execSQL("DELETE FROM agents WHERE id = 'agent-v2'")
 
         assertEquals(1, migrated.agentMemoryDao().listForAgent("agent-v2").size)
-        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
+        sqlite.assertNoForeignKeyViolations()
         migrated.close()
         context.deleteDatabase(name)
         Unit
@@ -915,6 +916,86 @@ class AppDatabaseTest {
         val sqlite = db.openHelper.writableDatabase
 
         assertEquals(16, sqlite.version)
+        assertEquals(
+            1,
+            sqlite.scalarInt(
+                """
+                SELECT COUNT(*) FROM conversations
+                WHERE id = 'ordinary-daily' AND agentId IS NULL AND agentVersion IS NULL
+                    AND projectId IS NULL
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
+            1,
+            sqlite.scalarInt(
+                """
+                SELECT COUNT(*) FROM conversations
+                WHERE id = 'persona-daily' AND agentId = 'agent-1' AND agentVersion = 1
+                    AND projectId IS NULL
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
+            1,
+            sqlite.scalarInt(
+                """
+                SELECT COUNT(*) FROM conversations
+                WHERE id = 'ordinary-project' AND agentId IS NULL AND agentVersion IS NULL
+                    AND projectId = 'project-1'
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
+            1,
+            sqlite.scalarInt(
+                """
+                SELECT COUNT(*) FROM conversations
+                WHERE id = 'conversation-1' AND agentId = 'agent-1' AND agentVersion = 1
+                    AND projectId = 'project-1'
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+        assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
+        assertEquals(5, sqlite.scalarInt("SELECT COUNT(*) FROM message_parts"))
+        mapOf(
+            "message-1" to "保留消息",
+            "message-ordinary-daily" to "普通日常消息",
+            "message-persona-daily" to "人物日常消息",
+            "message-ordinary-project" to "普通项目消息",
+        ).forEach { (messageId, content) ->
+            assertEquals(
+                content,
+                sqlite.string("SELECT content FROM messages WHERE id = '$messageId'"),
+            )
+        }
+        mapOf(
+            "message-part-1" to "保留分片",
+            "part-ordinary-daily" to "普通日常分片",
+            "part-persona-daily" to "人物日常分片",
+            "part-ordinary-project" to "普通项目分片",
+        ).forEach { (partId, content) ->
+            assertEquals(
+                content,
+                sqlite.string("SELECT content FROM message_parts WHERE id = '$partId'"),
+            )
+        }
+        mapOf(
+            "conversation-1" to "notes/fixture.md",
+            "ordinary-project" to "notes/ordinary-project.md",
+        ).forEach { (conversationId, relativePath) ->
+            assertEquals(
+                relativePath,
+                sqlite.string(
+                    """
+                    SELECT relativePath FROM conversation_markdown_links
+                    WHERE conversationId = '$conversationId'
+                    """.trimIndent(),
+                ),
+            )
+        }
+        assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM conversation_markdown_links"))
         assertEquals(1, sqlite.scalarInt("SELECT requiredCorpusCount FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
         assertEquals(0, sqlite.scalarInt("SELECT agentPackageSizeBytes FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
         assertEquals("", sqlite.string("SELECT selectedProfileId FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
@@ -925,10 +1006,7 @@ class AppDatabaseTest {
         assertEquals("", sqlite.string("SELECT conflictKey FROM agent_chunks LIMIT 1"))
         assertEquals("[]", sqlite.string("SELECT sourceAliasesJson FROM agent_chunks LIMIT 1"))
         assertEquals("", sqlite.string("SELECT simHash FROM agent_chunks LIMIT 1"))
-        assertEquals("conversation-1", sqlite.string("SELECT id FROM conversations"))
-        assertEquals("message-part-1", sqlite.string("SELECT id FROM message_parts"))
         assertEquals(1, db.agentDao().countLegacyAgentSourceParts("agent-1", 1))
-        assertEquals("notes/fixture.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
         assertEquals("provider-1", sqlite.string("SELECT id FROM provider_profiles"))
         assertEquals("V1 persona", db.agentDao().findVersion("agent-1", 1)?.persona)
         assertEquals("", db.agentDao().findVersion("agent-1", 1)?.identityJson)
@@ -960,7 +1038,7 @@ class AppDatabaseTest {
                 ),
             )
         }
-        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
+        sqlite.assertNoForeignKeyViolations()
         db.close()
         context.deleteDatabase(name)
         Unit
@@ -1564,6 +1642,33 @@ class AppDatabaseTest {
         )
         db.execSQL(
             """
+            INSERT INTO conversations (
+                id, title, createdAt, updatedAt, defaultProviderId, defaultModel, isArchived,
+                projectId, promptOriginal, promptOptimized, promptFinal, agentId, agentVersion
+            ) VALUES ('ordinary-daily', '普通日常', 1, 2, NULL, NULL, 0,
+                NULL, '', '', '', NULL, NULL)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO conversations (
+                id, title, createdAt, updatedAt, defaultProviderId, defaultModel, isArchived,
+                projectId, promptOriginal, promptOptimized, promptFinal, agentId, agentVersion
+            ) VALUES ('persona-daily', '人物日常', 1, 2, 'provider-1', 'model-1', 0,
+                NULL, '', '', '', 'agent-1', 1)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO conversations (
+                id, title, createdAt, updatedAt, defaultProviderId, defaultModel, isArchived,
+                projectId, promptOriginal, promptOptimized, promptFinal, agentId, agentVersion
+            ) VALUES ('ordinary-project', '普通项目', 1, 2, NULL, NULL, 0,
+                'project-1', '', '', '', NULL, NULL)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
             INSERT INTO messages (
                 id, conversationId, role, content, status, providerId, model,
                 createdAt, updatedAt, errorCode, errorMessage
@@ -1571,6 +1676,21 @@ class AppDatabaseTest {
                 'provider-1', 'model-1', 2, 3, NULL, NULL)
             """.trimIndent(),
         )
+        listOf(
+            Triple("ordinary-daily", "普通日常消息", "USER"),
+            Triple("persona-daily", "人物日常消息", "USER"),
+            Triple("ordinary-project", "普通项目消息", "ASSISTANT"),
+        ).forEach { (conversationId, content, role) ->
+            db.execSQL(
+                """
+                INSERT INTO messages (
+                    id, conversationId, role, content, status, providerId, model,
+                    createdAt, updatedAt, errorCode, errorMessage
+                ) VALUES ('message-$conversationId', '$conversationId', '$role', '$content',
+                    'SUCCEEDED', NULL, NULL, 2, 3, NULL, NULL)
+                """.trimIndent(),
+            )
+        }
         db.execSQL(
             """
             INSERT INTO message_parts (
@@ -1578,6 +1698,21 @@ class AppDatabaseTest {
             ) VALUES ('message-part-1', 'message-1', 0, 'TEXT', '保留分片', '{}', 1, 2, 3)
             """.trimIndent(),
         )
+        listOf(
+            "ordinary-daily" to "普通日常分片",
+            "persona-daily" to "人物日常分片",
+            "ordinary-project" to "普通项目分片",
+        ).forEach { (conversationId, content) ->
+            db.execSQL(
+                """
+                INSERT INTO message_parts (
+                    id, messageId, partIndex, type, content, metadataJson, stable,
+                    createdAt, updatedAt
+                ) VALUES ('part-$conversationId', 'message-$conversationId', 0, 'TEXT',
+                    '$content', '{}', 1, 2, 3)
+                """.trimIndent(),
+            )
+        }
         db.execSQL(
             """
             INSERT INTO message_parts (
@@ -1600,6 +1735,13 @@ class AppDatabaseTest {
             INSERT INTO conversation_markdown_links (
                 conversationId, projectId, relativePath, linkedAt, updatedAt
             ) VALUES ('conversation-1', 'project-1', 'notes/fixture.md', 2, 3)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO conversation_markdown_links (
+                conversationId, projectId, relativePath, linkedAt, updatedAt
+            ) VALUES ('ordinary-project', 'project-1', 'notes/ordinary-project.md', 2, 3)
             """.trimIndent(),
         )
         db.execSQL(
@@ -1786,3 +1928,9 @@ private fun androidx.sqlite.db.SupportSQLiteDatabase.string(query: String): Stri
         check(cursor.moveToFirst())
         cursor.getString(0)
     }
+
+private fun androidx.sqlite.db.SupportSQLiteDatabase.assertNoForeignKeyViolations() {
+    query("PRAGMA foreign_key_check").use { cursor ->
+        assertFalse(cursor.moveToFirst())
+    }
+}
