@@ -265,6 +265,17 @@ class ChatRepository(
     suspend fun listMessages(conversationId: String): List<ChatMessage> =
         messageDao.listForConversation(conversationId).map { it.toDomain() }
 
+    suspend fun recentSuccessfulTextMessages(
+        conversationId: String,
+        limit: Int,
+    ): List<ChatMessage> {
+        require(limit in 1..128) { "最近消息数量上限无效" }
+        return messageDao.listRecentSuccessfulText(conversationId, limit).map { it.toDomain() }
+    }
+
+    suspend fun lastSuccessfulAssistant(conversationId: String): ChatMessage? =
+        messageDao.findLastSuccessfulAssistant(conversationId)?.toDomain()
+
     suspend fun message(id: String): ChatMessage? = messageDao.findById(id)?.toDomain()
 
     suspend fun deleteMessage(id: String) {
@@ -384,6 +395,7 @@ private fun ConversationEntity.toDomain(): Conversation = Conversation(
     promptFinal = promptFinal,
     agentId = agentId,
     agentVersion = agentVersion,
+    isArchived = isArchived,
 )
 
 private fun MessageEntity.toDomain(): ChatMessage = ChatMessage(

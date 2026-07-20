@@ -101,10 +101,27 @@ class FileProjectRepository(
 
     suspend fun readProjectContext(projectId: String): String {
         val project = projectDirectory(projectId)
-        val trackedContext = project.resolve("context.md")
-        if (trackedContext.isFile) return trackedContext.readText()
-        val localContext = localHarnessDirectory(project).resolve("context.md")
-        return localContext.takeIf { it.isFile }?.readText().orEmpty()
+        return projectContextFile(project)?.readText().orEmpty()
+    }
+
+    suspend fun readProjectContextBounded(projectId: String, maxChars: Int): String {
+        require(maxChars in 1..1_000_000) { "项目上下文读取上限无效" }
+        val project = projectDirectory(projectId)
+        val contextFile = projectContextFile(project) ?: return ""
+        val output = StringBuilder(minOf(maxChars, 8_192))
+        contextFile.bufferedReader().use { reader ->
+            val buffer = CharArray(minOf(maxChars + 1, 8_192))
+            while (output.length <= maxChars) {
+                val remaining = maxChars + 1 - output.length
+                val count = reader.read(buffer, 0, minOf(buffer.size, remaining))
+                if (count < 0) break
+                output.append(buffer, 0, count)
+            }
+        }
+        if (output.length > maxChars) {
+            throw ProjectWorkspaceException("项目上下文超过本地读取上限")
+        }
+        return output.toString()
     }
 
     suspend fun updateProjectContext(projectId: String, markdown: String) {
@@ -505,6 +522,12 @@ class FileProjectRepository(
     }
 
     private fun localHarnessDirectory(project: File): File = project.resolve(".harness")
+
+    private fun projectContextFile(project: File): File? {
+        val trackedContext = project.resolve("context.md")
+        if (trackedContext.isFile) return trackedContext
+        return localHarnessDirectory(project).resolve("context.md").takeIf { it.isFile }
+    }
 
     private fun defaultMarkdown(template: DeliverableTemplate, title: String): String = when (template) {
         DeliverableTemplate.REQUIREMENT -> "# $title\n\n## 背景\n\n## 目标\n\n## 范围\n\n## 验收标准\n\n"

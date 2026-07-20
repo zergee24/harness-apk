@@ -15,6 +15,7 @@ data class Conversation(
     val promptFinal: String,
     val agentId: String? = null,
     val agentVersion: Int? = null,
+    val isArchived: Boolean = false,
 )
 
 data class ChatMessage(

@@ -189,6 +189,9 @@ private class NewConversationFakeConversationDao : ConversationDao {
 private class NewConversationFakeMessageDao : MessageDao {
     override fun observeForConversation(conversationId: String): Flow<List<MessageEntity>> = MutableStateFlow(emptyList())
     override suspend fun listForConversation(conversationId: String): List<MessageEntity> = emptyList()
+    override suspend fun listRecentSuccessfulText(conversationId: String, limit: Int): List<MessageEntity> =
+        emptyList()
+    override suspend fun findLastSuccessfulAssistant(conversationId: String): MessageEntity? = null
     override suspend fun findById(id: String): MessageEntity? = null
     override suspend fun countUserMessages(conversationId: String): Int = 0
     override suspend fun insert(entity: MessageEntity) = Unit

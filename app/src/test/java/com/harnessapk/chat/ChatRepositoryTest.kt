@@ -514,6 +514,28 @@ private class FakeMessageDao : MessageDao {
     override suspend fun listForConversation(conversationId: String): List<MessageEntity> =
         rows.values.filter { it.conversationId == conversationId }.sortedBy { it.createdAt }
 
+    override suspend fun listRecentSuccessfulText(
+        conversationId: String,
+        limit: Int,
+    ): List<MessageEntity> = rows.values
+        .filter {
+            it.conversationId == conversationId &&
+                it.status == "SUCCEEDED" &&
+                it.role in setOf("USER", "ASSISTANT") &&
+                it.content.isNotBlank()
+        }
+        .sortedWith(compareByDescending<MessageEntity> { it.createdAt }.thenByDescending { it.id })
+        .take(limit)
+
+    override suspend fun findLastSuccessfulAssistant(conversationId: String): MessageEntity? =
+        rows.values
+            .filter {
+                it.conversationId == conversationId &&
+                    it.status == "SUCCEEDED" &&
+                    it.role == "ASSISTANT"
+            }
+            .maxWithOrNull(compareBy<MessageEntity> { it.createdAt }.thenBy { it.id })
+
     override suspend fun findById(id: String): MessageEntity? = rows[id]
 
     override suspend fun countUserMessages(conversationId: String): Int =

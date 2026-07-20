@@ -15,6 +15,31 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
     suspend fun listForConversation(conversationId: String): List<MessageEntity>
 
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversationId = :conversationId
+          AND status = 'SUCCEEDED'
+          AND role IN ('USER', 'ASSISTANT')
+          AND TRIM(content) != ''
+        ORDER BY createdAt DESC, id DESC
+        LIMIT :limit
+        """,
+    )
+    suspend fun listRecentSuccessfulText(conversationId: String, limit: Int): List<MessageEntity>
+
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversationId = :conversationId
+          AND status = 'SUCCEEDED'
+          AND role = 'ASSISTANT'
+        ORDER BY createdAt DESC, id DESC
+        LIMIT 1
+        """,
+    )
+    suspend fun findLastSuccessfulAssistant(conversationId: String): MessageEntity?
+
     @Query("SELECT * FROM messages WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): MessageEntity?
 

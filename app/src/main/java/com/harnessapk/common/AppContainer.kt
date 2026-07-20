@@ -10,6 +10,16 @@ import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agentmemory.AgentMemoryRepository
 import com.harnessapk.agentmemory.AgentMemoryTransactionRunner
+import com.harnessapk.agentmemory.AgentMemoryAcceptedBatchMerger
+import com.harnessapk.agentmemory.AgentMemoryCandidatePolicy
+import com.harnessapk.agentmemory.AgentMemoryExtractionUseCase
+import com.harnessapk.agentmemory.AgentMemoryPolicy
+import com.harnessapk.agentmemory.LlmAgentMemoryCandidateGenerator
+import com.harnessapk.agentmemory.MarkdownAgentMemoryProjectFactSource
+import com.harnessapk.agentmemory.MAX_AGENT_MEMORY_PROJECT_CONTEXT_CHARS
+import com.harnessapk.agentmemory.RepositoryAgentMemoryExtractionSource
+import com.harnessapk.agentmemory.RepositoryAgentMemoryGenerationProviderResolver
+import com.harnessapk.agentmemory.openAiAgentMemoryCompletionGateway
 import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.BuildConfig
 import com.harnessapk.chat.ChatImageStore
@@ -146,6 +156,22 @@ class AppContainer(
     val projectRepository = FileProjectRepository(
         rootDirectory = appContext.filesDir,
         timeProvider = SystemTimeProvider,
+    )
+    private val agentMemoryPolicy = AgentMemoryPolicy()
+    val agentMemoryExtractionUseCase = AgentMemoryExtractionUseCase(
+        source = RepositoryAgentMemoryExtractionSource(chatRepository),
+        projectFactSource = MarkdownAgentMemoryProjectFactSource { projectId ->
+            projectRepository.readProjectContextBounded(
+                projectId = projectId,
+                maxChars = MAX_AGENT_MEMORY_PROJECT_CONTEXT_CHARS,
+            )
+        },
+        generator = LlmAgentMemoryCandidateGenerator(
+            providerResolver = RepositoryAgentMemoryGenerationProviderResolver(providerRepository),
+            completionGateway = openAiAgentMemoryCompletionGateway(openAiClient),
+        ),
+        policy = AgentMemoryCandidatePolicy(agentMemoryPolicy::evaluate),
+        merger = AgentMemoryAcceptedBatchMerger(agentMemoryRepository::merge),
     )
     val deleteProjectUseCase = DeleteProjectUseCase(
         projectRepository = projectRepository,

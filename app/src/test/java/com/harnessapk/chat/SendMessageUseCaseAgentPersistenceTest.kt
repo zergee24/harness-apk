@@ -777,6 +777,22 @@ private class ExecuteMessageDao : MessageDao {
     private val rows = linkedMapOf<String, MessageEntity>()
     override fun observeForConversation(conversationId: String): Flow<List<MessageEntity>> = MutableStateFlow(rows.values.filter { it.conversationId == conversationId })
     override suspend fun listForConversation(conversationId: String) = rows.values.filter { it.conversationId == conversationId }
+    override suspend fun listRecentSuccessfulText(conversationId: String, limit: Int) = rows.values
+        .filter {
+            it.conversationId == conversationId &&
+                it.status == "SUCCEEDED" &&
+                it.role in setOf("USER", "ASSISTANT") &&
+                it.content.isNotBlank()
+        }
+        .sortedWith(compareByDescending<MessageEntity> { it.createdAt }.thenByDescending { it.id })
+        .take(limit)
+    override suspend fun findLastSuccessfulAssistant(conversationId: String) = rows.values
+        .filter {
+            it.conversationId == conversationId &&
+                it.status == "SUCCEEDED" &&
+                it.role == "ASSISTANT"
+        }
+        .maxWithOrNull(compareBy<MessageEntity> { it.createdAt }.thenBy { it.id })
     override suspend fun findById(id: String) = rows[id]
     override suspend fun countUserMessages(conversationId: String) = rows.values.count { it.conversationId == conversationId && it.role == "USER" }
     override suspend fun insert(entity: MessageEntity) { rows[entity.id] = entity }

@@ -55,6 +55,12 @@ data class AgentMemoryExtractionInput(
     val conversationSummary: String,
     val recentMessages: List<AgentMemoryMessageSnapshot>,
     val projectFacts: List<String>,
+    val generationTarget: AgentMemoryGenerationTarget? = null,
+)
+
+data class AgentMemoryGenerationTarget(
+    val providerId: String?,
+    val model: String?,
 )
 
 data class AgentMemoryMessageSnapshot(
@@ -70,6 +76,42 @@ enum class AgentMemoryPolicyStatus {
     COMPLETED,
     INVALID_INPUT,
     RESOURCE_LIMIT_EXCEEDED,
+}
+
+enum class AgentMemoryExtractionFailureCategory {
+    SNAPSHOT,
+    PROJECT_CONTEXT,
+    PROVIDER,
+    NETWORK,
+    OUTPUT_LIMIT,
+    INVALID_RESPONSE,
+    POLICY,
+    STORAGE,
+    UNKNOWN,
+}
+
+enum class AgentMemoryExtractionSkipReason {
+    CONVERSATION_MISSING,
+    ARCHIVED,
+    NO_AGENT,
+    NO_COMPLETED_ASSISTANT,
+    NO_USER_MESSAGES,
+    IDENTITY_CHANGED,
+}
+
+sealed interface AgentMemoryExtractionResult {
+    data class Succeeded(
+        val savedCount: Int,
+        val ignoredCount: Int,
+    ) : AgentMemoryExtractionResult
+
+    data class Skipped(
+        val reason: AgentMemoryExtractionSkipReason,
+    ) : AgentMemoryExtractionResult
+
+    data class Failed(
+        val category: AgentMemoryExtractionFailureCategory,
+    ) : AgentMemoryExtractionResult
 }
 
 class AgentMemoryPolicyResult internal constructor(
