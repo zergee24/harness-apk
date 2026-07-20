@@ -321,6 +321,37 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun rejectsNegativeAddressAndLongDistanceNegationReversal() {
+        val longNegative =
+            "以后不要在任何未经我明确确认和反复说明的情况下使用中文回答"
+        val result = policy.evaluate(
+            input(
+                user("address", "以后不要叫我小李"),
+                user("language", longNegative),
+            ),
+            listOf(
+                candidate(
+                    AgentMemoryKind.ADDRESS_PREFERENCE,
+                    "address",
+                    "以后称呼用户为小李",
+                    "address",
+                    "以后不要叫我小李",
+                ),
+                candidate(
+                    AgentMemoryKind.USER_PREFERENCE,
+                    "language",
+                    "默认使用中文回答",
+                    "language",
+                    longNegative,
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(2, result.rejectedCount)
+    }
+
+    @Test
     fun keepsNegativePreferenceAndTrustDirectionWhenContentAgrees() {
         val input = input(
             user("language", "以后不要用中文回答"),
@@ -363,6 +394,35 @@ class AgentMemoryPolicyTest {
         )
 
         assertTrue(result.accepted.isEmpty())
+    }
+
+    @Test
+    fun rejectsStructuredCandidatesThatAddPeoplePlacesOrNumbers() {
+        val result = policy.evaluate(
+            input(
+                user("language", "以后默认用中文回答"),
+                user("trust", "我更信任你"),
+            ),
+            listOf(
+                candidate(
+                    AgentMemoryKind.USER_PREFERENCE,
+                    "language",
+                    "以后让小李默认用中文回答",
+                    "language",
+                    "以后默认用中文回答",
+                ),
+                candidate(
+                    AgentMemoryKind.RELATIONSHIP_EVENT,
+                    "trust",
+                    "上海之行后用户信任我三倍",
+                    "trust",
+                    "我更信任你",
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(2, result.rejectedCount)
     }
 
     @Test
@@ -425,6 +485,25 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun rejectsRelationshipPredicateWhoseObjectIsAThirdParty() {
+        val quote = "我和你都信任小李"
+        val result = policy.evaluate(
+            input(user("third-party", quote)),
+            listOf(
+                candidate(
+                    AgentMemoryKind.RELATIONSHIP_EVENT,
+                    "trust",
+                    "用户信任我",
+                    "third-party",
+                    quote,
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+    }
+
+    @Test
     fun rejectsWorkProductsContractsAndCommercialOutcomesOutsideProjects() {
         val facts = listOf(
             "我们一起完成了登录页改版",
@@ -432,6 +511,7 @@ class AgentMemoryPolicyTest {
             "我们共同完成供应商模块迭代并提升 GMV",
             "我们一起实现了销售额翻倍",
             "我们一起交付了婚礼策划流程",
+            "我们一起加班写了季度汇报",
         )
         val result = policy.evaluate(
             input(*facts.mapIndexed { index, text -> user("work-$index", text) }.toTypedArray()),
@@ -448,6 +528,35 @@ class AgentMemoryPolicyTest {
 
         assertTrue(result.accepted.isEmpty())
         assertEquals(facts.size, result.rejectedCount)
+    }
+
+    @Test
+    fun longProjectFactTailStillBlocksMatchingCandidate() {
+        val noisyPrefix = buildString {
+            repeat(2_200) { index ->
+                append((0x4E00 + index).toChar())
+            }
+        }
+        val projectFact = noisyPrefix + "我们一起度过蓝色灯塔夜晚"
+        val reorderedTail = "蓝色灯塔夜晚由我们一起度过"
+        val result = policy.evaluate(
+            input(
+                user("tail", reorderedTail),
+                projectId = "project-1",
+                projectFacts = listOf(projectFact),
+            ),
+            listOf(
+                candidate(
+                    AgentMemoryKind.SHARED_HISTORY,
+                    "tail",
+                    reorderedTail,
+                    "tail",
+                    reorderedTail,
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
     }
 
     @Test
@@ -508,6 +617,7 @@ class AgentMemoryPolicyTest {
             valid.copy(sourceQuote = "x".repeat(MAX_AGENT_MEMORY_SOURCE_QUOTE_CHARS + 1)),
             valid.copy(confidence = Double.NaN),
             valid.copy(confidence = Double.POSITIVE_INFINITY),
+            valid.copy(content = " ".repeat(MAX_AGENT_MEMORY_CONTENT_CHARS + 1) + valid.content),
         )
         val original = candidates.toList()
 
@@ -516,6 +626,29 @@ class AgentMemoryPolicyTest {
         assertEquals(listOf(valid), result.accepted)
         assertEquals(candidates.size - 1, result.rejectedCount)
         assertEquals(original, candidates)
+    }
+
+    @Test
+    fun aggregateCandidateCharacterBudgetFailsClosed() {
+        val validInput = input(user("valid", "以后默认用中文回答"))
+        val candidate = candidate(
+            AgentMemoryKind.USER_PREFERENCE,
+            "language",
+            "默认使用中文回答",
+            "valid",
+            "以后默认用中文回答",
+        )
+        val oversized = List(MAX_AGENT_MEMORY_CANDIDATES_PER_MERGE) { index ->
+            candidate.copy(
+                dedupeKey = "key-$index",
+                content = candidate.content + " ".repeat(MAX_AGENT_MEMORY_CONTENT_CHARS - candidate.content.length),
+            )
+        }
+
+        val result = policy.evaluate(validInput, oversized)
+
+        assertEquals(AgentMemoryPolicyStatus.RESOURCE_LIMIT_EXCEEDED, result.status)
+        assertTrue(result.accepted.isEmpty())
     }
 
     @Test

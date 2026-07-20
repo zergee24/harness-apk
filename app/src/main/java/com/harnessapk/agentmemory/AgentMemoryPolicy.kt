@@ -12,6 +12,7 @@ internal const val MAX_AGENT_MEMORY_POLICY_PROJECT_FACT_CHARS = 4_000
 private const val MAX_AGENT_MEMORY_POLICY_SUMMARY_CHARS = 8_000
 private const val MAX_AGENT_MEMORY_POLICY_TOTAL_MESSAGE_CHARS = 128_000
 private const val MAX_AGENT_MEMORY_POLICY_TOTAL_PROJECT_FACT_CHARS = 64_000
+private const val MAX_AGENT_MEMORY_POLICY_TOTAL_CANDIDATE_CHARS = 96_000L
 private const val MAX_MEMORY_FINGERPRINT_TERMS = 2_048
 
 class AgentMemoryPolicy {
@@ -80,7 +81,13 @@ class AgentMemoryPolicy {
             input.recentMessages.sumOf { it.content.length } >
             MAX_AGENT_MEMORY_POLICY_TOTAL_MESSAGE_CHARS ||
             input.projectFacts.sumOf(String::length) >
-            MAX_AGENT_MEMORY_POLICY_TOTAL_PROJECT_FACT_CHARS
+            MAX_AGENT_MEMORY_POLICY_TOTAL_PROJECT_FACT_CHARS ||
+            candidates.sumOf { candidate ->
+                candidate.dedupeKey.length.toLong() +
+                    candidate.content.length +
+                    candidate.sourceMessageId.length +
+                    candidate.sourceQuote.length
+            } > MAX_AGENT_MEMORY_POLICY_TOTAL_CANDIDATE_CHARS
         return if (exceeded) {
             AgentMemoryPolicyResult(
                 status = AgentMemoryPolicyStatus.RESOURCE_LIMIT_EXCEEDED,
@@ -151,8 +158,8 @@ internal fun projectFactFingerprints(projectContext: List<String>): Set<String> 
 private fun isValidId(value: String): Boolean = isValidField(value, MAX_AGENT_MEMORY_ID_CHARS)
 
 private fun isValidField(value: String, maxChars: Int): Boolean {
-    val trimmed = value.trim()
-    return trimmed.isNotEmpty() && trimmed.length <= maxChars
+    if (value.length > maxChars) return false
+    return value.trim().isNotEmpty()
 }
 
 private fun normalizedEvidenceText(text: String): String = text
@@ -182,7 +189,8 @@ private fun isAllowedRelationshipFact(
         AgentMemoryKind.USER_PREFERENCE ->
             STABLE_PREFERENCE.containsMatchIn(sourceQuote) &&
                 preferenceValues(sourceQuote).isNotEmpty() &&
-                preferenceValues(candidate.content).isNotEmpty()
+                preferenceValues(candidate.content).isNotEmpty() &&
+                hasNoUnsupportedCriticalLiterals(candidate.content, sourceQuote)
         AgentMemoryKind.SHARED_HISTORY ->
             !AMBIGUOUS_BILATERAL.containsMatchIn(sourceQuote) &&
                 BILATERAL_SHARED_QUOTE.containsMatchIn(sourceQuote) &&
@@ -192,7 +200,8 @@ private fun isAllowedRelationshipFact(
             !AMBIGUOUS_BILATERAL.containsMatchIn(sourceQuote) &&
                 BILATERAL_RELATIONSHIP_QUOTE.containsMatchIn(sourceQuote) &&
                 RELATIONSHIP_EVENT.containsMatchIn(sourceQuote) &&
-                CURRENT_RELATION_CONTENT.containsMatchIn(candidate.content)
+                CURRENT_RELATION_CONTENT.containsMatchIn(candidate.content) &&
+                hasNoUnsupportedCriticalLiterals(candidate.content, sourceQuote)
     }
 }
 
@@ -238,66 +247,69 @@ private fun overlapsProjectFact(
     projectFingerprints: List<MemoryFingerprint>,
 ): Boolean {
     if (projectFingerprints.isEmpty()) return false
-    val candidate = memoryFingerprint("$content\n$sourceQuote")
+    val candidates = listOf(memoryFingerprint(content), memoryFingerprint(sourceQuote))
     return projectFingerprints.any { fact ->
-        if (candidate.normalized.isEmpty() || fact.normalized.isEmpty()) return@any false
-        if (
-            candidate.normalized.contains(fact.normalized) ||
-            fact.normalized.contains(candidate.normalized) ||
-            (
-                candidate.compactHan.length >= 4 &&
-                    fact.compactHan.length >= 4 &&
-                    (
-                        candidate.compactHan.contains(fact.compactHan) ||
-                            fact.compactHan.contains(candidate.compactHan)
-                        )
-                )
-        ) {
-            return@any true
+        fact.overflowed || candidates.any { candidate ->
+            candidate.overflowed || fingerprintsOverlap(candidate, fact)
         }
-        val intersection = candidate.terms.intersect(fact.terms)
-        if (intersection.any(::isStrongIdentifier)) return@any true
-        val intersectionSize = intersection.size
-        if (intersectionSize == 0) return@any false
-        val minimumSize = minOf(candidate.terms.size, fact.terms.size)
-        val unionSize = candidate.terms.size + fact.terms.size - intersectionSize
-        val containment = intersectionSize.toDouble() / minimumSize.coerceAtLeast(1)
-        val jaccard = intersectionSize.toDouble() / unionSize.coerceAtLeast(1)
-        containment >= 0.68 || jaccard >= 0.52
     }
+}
+
+private fun fingerprintsOverlap(
+    candidate: MemoryFingerprint,
+    fact: MemoryFingerprint,
+): Boolean {
+    if (candidate.normalized.isEmpty() || fact.normalized.isEmpty()) return false
+    if (
+        candidate.normalized.contains(fact.normalized) ||
+        fact.normalized.contains(candidate.normalized) ||
+        (
+            candidate.compactHan.length >= 4 &&
+                fact.compactHan.length >= 4 &&
+                (
+                    candidate.compactHan.contains(fact.compactHan) ||
+                        fact.compactHan.contains(candidate.compactHan)
+                    )
+            )
+    ) {
+        return true
+    }
+    val intersection = candidate.terms.intersect(fact.terms)
+    if (intersection.any(::isStrongIdentifier)) return true
+    val intersectionSize = intersection.size
+    if (intersectionSize == 0) return false
+    val minimumSize = minOf(candidate.terms.size, fact.terms.size)
+    val unionSize = candidate.terms.size + fact.terms.size - intersectionSize
+    val containment = intersectionSize.toDouble() / minimumSize.coerceAtLeast(1)
+    val jaccard = intersectionSize.toDouble() / unionSize.coerceAtLeast(1)
+    return containment >= 0.68 || jaccard >= 0.52
 }
 
 private data class MemoryFingerprint(
     val normalized: String,
     val compactHan: String,
     val terms: Set<String>,
+    val overflowed: Boolean,
 )
 
 private fun memoryFingerprint(text: String): MemoryFingerprint {
     val normalized = normalizedComparableText(text)
-    val terms = linkedSetOf<String>()
+    val terms = BoundedFingerprintTerms()
     val asciiComponents = ASCII_COMPONENT.findAll(normalized)
         .map(MatchResult::value)
         .toList()
     ASCII_TOKEN.findAll(normalized).forEach { match ->
-        if (terms.size >= MAX_MEMORY_FINGERPRINT_TERMS) return@forEach
         val token = match.value
-        terms += token
+        terms.add(token)
         token.split(ASCII_TOKEN_SEPARATOR)
             .filter { it.length >= 2 }
-            .forEach { part ->
-                if (terms.size < MAX_MEMORY_FINGERPRINT_TERMS) terms += part
-            }
+            .forEach(terms::add)
         val canonical = token.replace(ASCII_TOKEN_SEPARATOR, "")
-        if (canonical.length >= 2 && terms.size < MAX_MEMORY_FINGERPRINT_TERMS) {
-            terms += canonical
-        }
+        if (canonical.length >= 2) terms.add(canonical)
     }
     asciiComponents.zipWithNext().forEach { (left, right) ->
         val canonical = left + right
-        if (canonical.length >= 4 && terms.size < MAX_MEMORY_FINGERPRINT_TERMS) {
-            terms += canonical
-        }
+        if (canonical.length >= 4) terms.add(canonical)
     }
     HAN_RUN.findAll(normalized).forEach { match ->
         addHanNgrams(match.value, terms)
@@ -305,15 +317,29 @@ private fun memoryFingerprint(text: String): MemoryFingerprint {
     val compactHan = HAN_CHARACTER.findAll(normalized)
         .joinToString(separator = "") { it.value }
     addHanNgrams(compactHan, terms)
-    return MemoryFingerprint(normalized, compactHan, terms)
+    return MemoryFingerprint(normalized, compactHan, terms.values, terms.overflowed)
 }
 
-private fun addHanNgrams(run: String, destination: MutableSet<String>) {
+private class BoundedFingerprintTerms {
+    val values = linkedSetOf<String>()
+    var overflowed = false
+        private set
+
+    fun add(value: String) {
+        if (value in values) return
+        if (values.size >= MAX_MEMORY_FINGERPRINT_TERMS) {
+            overflowed = true
+            return
+        }
+        values += value
+    }
+}
+
+private fun addHanNgrams(run: String, destination: BoundedFingerprintTerms) {
     for (size in 2..3) {
         if (run.length < size) continue
         for (index in 0..run.length - size) {
-            if (destination.size >= MAX_MEMORY_FINGERPRINT_TERMS) return
-            destination += run.substring(index, index + size)
+            destination.add(run.substring(index, index + size))
         }
     }
 }
@@ -335,14 +361,30 @@ private val HAN_RUN = Regex("[\\u3400-\\u4dbf\\u4e00-\\u9fff]+")
 private val HAN_CHARACTER = Regex("[\\u3400-\\u4dbf\\u4e00-\\u9fff]")
 private val NON_COMPARABLE = Regex("[^a-z0-9._/@:#\\-\\u3400-\\u4dbf\\u4e00-\\u9fff]+")
 private val WHITESPACE = Regex("\\s+")
+private val SEMANTIC_CLAUSE_DELIMITERS = setOf('。', '！', '？', '!', '?', '；', ';', '，', ',', '\n')
+private val SEMANTIC_CONTRAST = Regex("(?:但是|但|而是|不过|却|改为|转为)")
+private val CRITICAL_LITERAL_PATTERNS = listOf(
+    Regex("(?:小|老)[\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,2}"),
+    Regex("[\\u3400-\\u4dbf\\u4e00-\\u9fff]{1,3}(?:先生|女士|老师|总)"),
+    Regex("[\\u3400-\\u4dbf\\u4e00-\\u9fff]{2,6}(?:省|市|县|区|镇|村|路|街|山|河|湖|机场|车站|之行)"),
+    Regex("(?:[0-9]+(?:\\.[0-9]+)?|[零〇一二三四五六七八九十百千万亿两]+)(?:倍|次|年|月|日|岁|个|%|％)"),
+    Regex("(?:[a-z]+[._/@:#-]?[0-9]+|[0-9]+[._/@:#-]?[a-z]+)"),
+)
 
-private fun addressValue(text: String): String? {
+private data class DirectedValue(
+    val value: String,
+    val direction: String,
+)
+
+private fun addressValue(text: String): DirectedValue? {
     val normalized = Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
-    val raw = ADDRESS_VALUE.find(normalized)?.groupValues?.getOrNull(1) ?: return null
+    val match = ADDRESS_VALUE.find(normalized) ?: return null
+    val raw = match.groupValues.getOrNull(1) ?: return null
     val withoutSuffix = ADDRESS_VALUE_SUFFIXES.fold(raw) { value, suffix ->
         value.removeSuffix(suffix)
     }
-    return normalizedComparableText(withoutSuffix).takeIf(String::isNotBlank)
+    val value = normalizedComparableText(withoutSuffix).takeIf(String::isNotBlank) ?: return null
+    return DirectedValue(value, semanticDirection(normalized, match.range))
 }
 
 private fun preferenceValues(text: String): Set<String> = buildSet {
@@ -362,10 +404,41 @@ private fun relationshipValues(text: String): Set<String> = buildSet {
 }
 
 private fun semanticDirection(text: String, range: IntRange): String {
-    val start = (range.first - 10).coerceAtLeast(0)
-    val end = (range.last + 4).coerceAtMost(text.lastIndex)
+    val start = semanticSegmentStart(text, range.first)
+    val end = range.last.coerceAtMost(text.lastIndex)
     val context = if (end >= start) text.substring(start, end + 1) else text
     return if (NEGATIVE_DIRECTION.containsMatchIn(context)) "negative" else "positive"
+}
+
+private fun semanticSegmentStart(text: String, before: Int): Int {
+    val punctuation = text
+        .take(before)
+        .indexOfLast { it in SEMANTIC_CLAUSE_DELIMITERS }
+        .let { if (it < 0) 0 else it + 1 }
+    val contrast = SEMANTIC_CONTRAST.findAll(text.substring(0, before))
+        .lastOrNull()
+        ?.range
+        ?.last
+        ?.plus(1)
+        ?: 0
+    return maxOf(punctuation, contrast)
+}
+
+private fun hasNoUnsupportedCriticalLiterals(content: String, sourceQuote: String): Boolean {
+    val contentLiterals = criticalLiterals(content)
+    if (contentLiterals.isEmpty()) return true
+    return criticalLiterals(sourceQuote).containsAll(contentLiterals)
+}
+
+private fun criticalLiterals(text: String): Set<String> {
+    val normalized = Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
+    return buildSet {
+        CRITICAL_LITERAL_PATTERNS.forEach { pattern ->
+            pattern.findAll(normalized).forEach { match ->
+                add(normalizedComparableText(match.value))
+            }
+        }
+    }
 }
 
 private val PROJECT_ARTIFACT_OR_BUSINESS = Regex(
@@ -402,6 +475,12 @@ private val PROJECT_ARTIFACT_OR_BUSINESS = Regex(
             (?:改版|迭代)(?:完成|计划|上线)? |
             (?:本月|季度|年度)?指标 |
             转化率 |
+            加班 |
+            (?:周|月|季度|年度)?(?:汇报|报告|周报|月报|季报|年报|述职|报表) |
+            会议纪要 |
+            工单 |
+            排期 |
+            里程碑 |
             (?:我们|一起|共同).{0,16}(?:完成|开发|实现|交付|上线|发布|改版|迭代|拿下|签下|达成) |
             我们决定 |
             决定(?:本周|本月|采用|上线|发布)
@@ -459,10 +538,13 @@ private val BILATERAL_SHARED_QUOTE = Regex(
         "(?:你|您)(?:陪|帮)我|between\\s+us|\\bwe\\b)",
 )
 private val BILATERAL_RELATIONSHIP_QUOTE = Regex(
-    "(?i)(?:我.{0,10}(?:你|您)(?!的?(?:哥哥|弟弟|姐姐|妹妹|父亲|母亲|爸爸|妈妈|朋友|同事|" +
-        "领导|老师|学生|团队|部门|公司))|(?:你|您).{0,10}我|我们(?:的)?关系|" +
-        "我把(?:你|您)当|\\bi\\b.{0,20}\\byou\\b|\\byou\\b.{0,20}\\bme\\b|" +
-        "\\bour\\s+relationship\\b)",
+    "(?i)(?:我.{0,6}(?:信任|相信|原谅|亲近|疏远)(?:你|您)|" +
+        "我.{0,6}(?:对|于)(?:你|您).{0,4}(?:失望|亲近|疏远)|" +
+        "我把(?:你|您)当(?:朋友|伙伴)|" +
+        "(?:你|您).{0,8}(?:让我|使我).{0,8}(?:信任|相信|失望|亲近)|" +
+        "我们(?:的|之间的)?(?:关系|边界|界限)|" +
+        "\\bi\\b.{0,12}\\b(?:trust|believe|forgive)\\b.{0,8}\\byou\\b|" +
+        "\\bour\\s+(?:relationship|boundary)\\b)",
 )
 private val CURRENT_RELATION_CONTENT = Regex(
     "(?i)(?:我们|咱们|用户.{0,12}(?:我|当前人物)|(?:我|当前人物).{0,12}用户|" +
