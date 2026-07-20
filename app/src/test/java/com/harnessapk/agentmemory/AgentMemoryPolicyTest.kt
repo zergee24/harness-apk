@@ -1,6 +1,5 @@
 package com.harnessapk.agentmemory
 
-import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import org.junit.Assert.assertEquals
@@ -263,6 +262,124 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun rejectsPartialOverlapThatFabricatesLanguageOrAddressValues() {
+        val input = input(
+            user("music", "我喜欢中文歌"),
+            user("address", "以后叫我小李"),
+        )
+        val candidates = listOf(
+            candidate(
+                AgentMemoryKind.USER_PREFERENCE,
+                "language",
+                "用户希望以后默认使用中文回答",
+                "music",
+                "我喜欢中文歌",
+            ),
+            candidate(
+                AgentMemoryKind.ADDRESS_PREFERENCE,
+                "address",
+                "以后称呼用户为老唐",
+                "address",
+                "以后叫我小李",
+            ),
+        )
+
+        val result = policy.evaluate(input, candidates)
+
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(candidates.size, result.rejectedCount)
+    }
+
+    @Test
+    fun rejectsThirdPartyRelationshipAndHistoryAsCurrentAgentMemories() {
+        val input = input(
+            user("friend", "小李是我最信任的朋友"),
+            user("history", "我和小李一起度过最难受的那个晚上"),
+        )
+        val candidates = listOf(
+            candidate(
+                AgentMemoryKind.RELATIONSHIP_EVENT,
+                "trust",
+                "用户更信任当前人物",
+                "friend",
+                "小李是我最信任的朋友",
+            ),
+            candidate(
+                AgentMemoryKind.SHARED_HISTORY,
+                "hard-night",
+                "我们一起度过用户最难受的那个晚上",
+                "history",
+                "我和小李一起度过最难受的那个晚上",
+            ),
+        )
+
+        val result = policy.evaluate(input, candidates)
+
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(candidates.size, result.rejectedCount)
+    }
+
+    @Test
+    fun rejectsWorkProductsContractsAndCommercialOutcomesOutsideProjects() {
+        val facts = listOf(
+            "我们一起完成了登录页改版",
+            "我们一起拿下了三百万合同",
+            "我们共同完成供应商模块迭代并提升 GMV",
+        )
+        val result = policy.evaluate(
+            input(*facts.mapIndexed { index, text -> user("work-$index", text) }.toTypedArray()),
+            facts.mapIndexed { index, text ->
+                candidate(
+                    AgentMemoryKind.SHARED_HISTORY,
+                    "work-$index",
+                    text,
+                    "work-$index",
+                    text,
+                )
+            },
+        )
+
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(facts.size, result.rejectedCount)
+    }
+
+    @Test
+    fun projectFingerprintResistsSplitChineseAndIdentifierSeparatorChanges() {
+        val chinese = "我们一起经历北、岸、灯、塔、计、划、发、布、新、版、本"
+        val ascii = "we went through Oriole 7421 together"
+        val result = policy.evaluate(
+            input(
+                user("chinese", chinese),
+                user("ascii", ascii),
+                projectId = "project-1",
+                projectFacts = listOf(
+                    "北岸灯塔计划发布新版本",
+                    "Oriole_7421 rollout target",
+                ),
+            ),
+            listOf(
+                candidate(
+                    AgentMemoryKind.SHARED_HISTORY,
+                    "chinese-project",
+                    chinese,
+                    "chinese",
+                    chinese,
+                ),
+                candidate(
+                    AgentMemoryKind.SHARED_HISTORY,
+                    "ascii-project",
+                    ascii,
+                    "ascii",
+                    ascii,
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(2, result.rejectedCount)
+    }
+
+    @Test
     fun dropsMalformedCandidatesIndividuallyWithoutMutatingInput() {
         val input = input(user("valid", "以后默认用中文回答"))
         val valid = candidate(
@@ -438,6 +555,35 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun dedupeKeyUsesNfkcAndCollapsedWhitespace() {
+        val input = input(user("user-1", "以后默认用中文回答"))
+        val first = candidate(
+            AgentMemoryKind.USER_PREFERENCE,
+            "language preference",
+            "默认使用中文回答",
+            "user-1",
+            "以后默认用中文回答",
+        )
+        val equivalent = first.copy(dedupeKey = "  ｌａｎｇｕａｇｅ　   ｐｒｅｆｅｒｅｎｃｅ  ")
+
+        val result = policy.evaluate(input, listOf(first, equivalent))
+
+        assertEquals(listOf(first), result.accepted)
+        assertEquals(1, result.rejectedCount)
+    }
+
+    @Test
+    fun messageSnapshotContainsOnlyPolicyFields() {
+        assertEquals(
+            setOf("id", "conversationId", "role", "status", "content", "order"),
+            AgentMemoryMessageSnapshot::class.java.declaredFields
+                .filterNot { it.isSynthetic || it.name.startsWith("$") }
+                .map { it.name }
+                .toSet(),
+        )
+    }
+
+    @Test
     fun chineseFingerprintsUseBoundedNgramsInsteadOfWholeRuns() {
         val terms = normalizedMemoryTerms("北岸灯塔计划 Oriole_7421")
 
@@ -449,7 +595,7 @@ class AgentMemoryPolicyTest {
     }
 
     private fun input(
-        vararg messages: ChatMessage,
+        vararg messages: AgentMemoryMessageSnapshot,
         projectId: String? = null,
         projectFacts: List<String> = emptyList(),
     ) = AgentMemoryExtractionInput(
@@ -494,16 +640,12 @@ class AgentMemoryPolicyTest {
         role: MessageRole,
         content: String,
         status: MessageStatus,
-    ) = ChatMessage(
+    ) = AgentMemoryMessageSnapshot(
         id = id,
         conversationId = "conversation-1",
         role = role,
         content = content,
         status = status,
-        providerId = null,
-        model = null,
-        errorMessage = null,
-        createdAt = id.hashCode().toLong(),
-        updatedAt = id.hashCode().toLong(),
+        order = id.hashCode().toLong(),
     )
 }

@@ -5,6 +5,7 @@ import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AgentMemoryDao
 import com.harnessapk.storage.AgentMemoryEntity
 import java.security.MessageDigest
+import java.text.Normalizer
 import java.util.Locale
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -154,7 +155,7 @@ internal fun agentMemoryId(
     dedupeKey: String,
 ): String {
     val normalizedAgentId = requiredField("agentId", agentId, MAX_AGENT_MEMORY_ID_CHARS)
-    val normalizedDedupeKey = normalizedDedupeKey(dedupeKey)
+    val normalizedDedupeKey = normalizedAgentMemoryDedupeKey(dedupeKey)
     val digest = MessageDigest.getInstance("SHA-256")
         .digest("$normalizedAgentId|${kind.name}|$normalizedDedupeKey".encodeToByteArray())
     return buildString(digest.size * 2) {
@@ -181,16 +182,21 @@ private fun AgentMemoryCandidate.normalized(): NormalizedCandidate {
     requiredField("sourceQuote", sourceQuote, MAX_AGENT_MEMORY_SOURCE_QUOTE_CHARS)
     return NormalizedCandidate(
         kind = kind,
-        dedupeKey = normalizedDedupeKey(dedupeKey),
+        dedupeKey = normalizedAgentMemoryDedupeKey(dedupeKey),
         content = requiredField("content", content, MAX_AGENT_MEMORY_CONTENT_CHARS),
         sourceMessageId = requiredField("sourceMessageId", sourceMessageId, MAX_AGENT_MEMORY_ID_CHARS),
         confidence = confidence,
     )
 }
 
-private fun normalizedDedupeKey(value: String): String =
-    requiredField("dedupeKey", value, MAX_AGENT_MEMORY_DEDUPE_KEY_CHARS)
+internal fun normalizedAgentMemoryDedupeKey(value: String): String {
+    val validated = requiredField("dedupeKey", value, MAX_AGENT_MEMORY_DEDUPE_KEY_CHARS)
+    val normalized = Normalizer.normalize(validated, Normalizer.Form.NFKC)
         .lowercase(Locale.ROOT)
+        .replace(DEDUPLICATION_WHITESPACE, " ")
+        .trim()
+    return requiredField("dedupeKey", normalized, MAX_AGENT_MEMORY_DEDUPE_KEY_CHARS)
+}
 
 private fun requiredField(name: String, value: String, maxChars: Int): String {
     val normalized = value.trim()
@@ -223,3 +229,4 @@ private fun AgentMemoryEntity.toDomain(): AgentMemory {
 }
 
 private const val HEX = "0123456789abcdef"
+private val DEDUPLICATION_WHITESPACE = Regex("\\s+")

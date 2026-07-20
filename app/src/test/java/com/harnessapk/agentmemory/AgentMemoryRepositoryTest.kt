@@ -27,8 +27,14 @@ class AgentMemoryRepositoryTest {
             val turkish = agentMemoryId("agent-1", AgentMemoryKind.USER_PREFERENCE, "  TITLE I  ")
             Locale.setDefault(Locale.US)
             val english = agentMemoryId("agent-1", AgentMemoryKind.USER_PREFERENCE, "title i")
+            val fullWidth = agentMemoryId(
+                "agent-1",
+                AgentMemoryKind.USER_PREFERENCE,
+                "　ｔｉｔｌｅ　   ｉ　",
+            )
 
             assertEquals(english, turkish)
+            assertEquals(english, fullWidth)
             assertEquals(64, english.length)
         } finally {
             Locale.setDefault(original)

@@ -1,6 +1,7 @@
 package com.harnessapk.agentmemory
 
-import com.harnessapk.chat.ChatMessage
+import com.harnessapk.chat.MessageRole
+import com.harnessapk.chat.MessageStatus
 
 internal const val MAX_AGENT_MEMORY_ID_CHARS = 256
 internal const val MAX_AGENT_MEMORY_DEDUPE_KEY_CHARS = 256
@@ -52,8 +53,17 @@ data class AgentMemoryExtractionInput(
     val conversationId: String,
     val projectId: String?,
     val conversationSummary: String,
-    val recentMessages: List<ChatMessage>,
+    val recentMessages: List<AgentMemoryMessageSnapshot>,
     val projectFacts: List<String>,
+)
+
+data class AgentMemoryMessageSnapshot(
+    val id: String,
+    val conversationId: String,
+    val role: MessageRole,
+    val status: MessageStatus,
+    val content: String,
+    val order: Long,
 )
 
 enum class AgentMemoryPolicyStatus {
