@@ -1,5 +1,7 @@
 package com.harnessapk.agentmemory
 
+import com.harnessapk.chat.ChatMessage
+
 internal const val MAX_AGENT_MEMORY_ID_CHARS = 256
 internal const val MAX_AGENT_MEMORY_DEDUPE_KEY_CHARS = 256
 internal const val MAX_AGENT_MEMORY_CONTENT_CHARS = 2_000
@@ -44,6 +46,28 @@ data class AgentMemoryMergeResult(
     val savedCount: Int
         get() = insertedCount + updatedCount
 }
+
+data class AgentMemoryExtractionInput(
+    val agentId: String,
+    val conversationId: String,
+    val projectId: String?,
+    val conversationSummary: String,
+    val recentMessages: List<ChatMessage>,
+    val projectFacts: List<String>,
+)
+
+enum class AgentMemoryPolicyStatus {
+    COMPLETED,
+    INVALID_INPUT,
+    RESOURCE_LIMIT_EXCEEDED,
+}
+
+data class AgentMemoryPolicyResult(
+    val status: AgentMemoryPolicyStatus,
+    val accepted: List<AgentMemoryCandidate>,
+    val rejectedCount: Int,
+    val reason: String,
+)
 
 class AgentMemoryValidationException(message: String) : IllegalArgumentException(message)
 
