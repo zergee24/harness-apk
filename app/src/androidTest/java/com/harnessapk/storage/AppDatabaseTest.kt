@@ -18,6 +18,10 @@ import com.harnessapk.agent.AgentEvidence
 import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agent.ParsedAgentBundle
+import com.harnessapk.agentmemory.AgentMemoryCandidate
+import com.harnessapk.agentmemory.AgentMemoryKind
+import com.harnessapk.agentmemory.AgentMemoryRepository
+import com.harnessapk.agentmemory.AgentMemoryTransactionRunner
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.chat.AgentSourcePartWriter
@@ -40,6 +44,49 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
+    @Test
+    fun agentMemoryRoomTransactionPreservesCompletedUserEdit() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        var now = 10L
+        val repository = AgentMemoryRepository(
+            dao = db.agentMemoryDao(),
+            transactionRunner = AgentMemoryTransactionRunner { block ->
+                db.withTransaction { block() }
+            },
+            timeProvider = TimeProvider { now },
+        )
+        fun candidate(content: String, messageId: String) = AgentMemoryCandidate(
+            kind = AgentMemoryKind.USER_PREFERENCE,
+            dedupeKey = "language",
+            content = content,
+            sourceMessageId = messageId,
+            sourceQuote = content,
+            confidence = 0.8,
+        )
+        repository.merge("agent-1", "conversation-1", listOf(candidate("默认英文", "message-1")))
+        val id = repository.list("agent-1").single().id
+        now = 20L
+        assertTrue(repository.edit(id, "默认中文"))
+        now = 30L
+
+        val result = repository.merge(
+            "agent-1",
+            "conversation-2",
+            listOf(candidate("自动改写", "message-2")),
+        )
+
+        val memory = repository.list("agent-1").single()
+        assertEquals(1, result.protectedCount)
+        assertEquals("默认中文", memory.content)
+        assertEquals("conversation-1", memory.sourceConversationId)
+        assertEquals("message-1", memory.sourceMessageId)
+        assertEquals(10L, memory.createdAt)
+        assertEquals(20L, memory.updatedAt)
+        assertTrue(memory.userEdited)
+        db.close()
+    }
+
     @Test
     fun storesOnePhysicalChunkForTwoCorporaAndFiltersFtsThroughCrossRefs() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -546,6 +593,232 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun migration15To16PreservesExistingDataAndCreatesIndependentAgentMemories() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-15-16-${System.nanoTime()}.db"
+        val version15 = Room.databaseBuilder(context, AppDatabase::class.java, name).build()
+        val agentDao = version15.agentDao()
+        val sourceHash = "a".repeat(64)
+        version15.conversationDao().insert(
+            conversation("daily-conversation", updatedAt = 20L, agentId = "agent-v2"),
+        )
+        version15.conversationDao().insert(
+            conversation(
+                id = "project-conversation",
+                updatedAt = 10L,
+                projectId = "project-1",
+                agentId = "agent-v2",
+            ),
+        )
+        version15.messageDao().insert(
+            MessageEntity(
+                id = "daily-message",
+                conversationId = "daily-conversation",
+                role = "USER",
+                content = "默认使用中文",
+                status = "SUCCEEDED",
+                providerId = "provider-1",
+                model = "model-1",
+                createdAt = 1L,
+                updatedAt = 1L,
+                errorCode = null,
+                errorMessage = null,
+            ),
+        )
+        version15.conversationMarkdownLinkDao().insert(
+            ConversationMarkdownLinkEntity(
+                conversationId = "project-conversation",
+                projectId = "project-1",
+                relativePath = "notes/project.md",
+                linkedAt = 2L,
+                updatedAt = 2L,
+            ),
+        )
+        agentDao.upsertAgent(
+            AgentEntity(
+                id = "agent-v2",
+                name = "测试人物",
+                summary = "",
+                activeVersion = 2,
+                publisherPublicKey = byteArrayOf(1),
+                publisherFingerprint = "publisher",
+                installSource = "LOCAL_FILE",
+                status = "READY",
+                requiredCorpusCount = 1,
+                installedCorpusCount = 1,
+                createdAt = 1L,
+                updatedAt = 2L,
+            ),
+        )
+        agentDao.insertVersion(
+            AgentVersionEntity(
+                agentId = "agent-v2",
+                version = 2,
+                schemaVersion = 2,
+                bundlePath = "/tmp/agent.hagent",
+                bundleSha256 = "b".repeat(64),
+                manifestJson = "{}",
+                persona = "第一人称",
+                worldviewJsonl = "",
+                installedAt = 2L,
+                state = "READY",
+                identityJson = "{}",
+                voiceJson = "{}",
+                installPlanJson = "{}",
+                requiredCorpusCount = 1,
+                agentPackageSizeBytes = 100L,
+                selectedProfileId = "balanced",
+            ),
+        )
+        agentDao.upsertVersionPackages(
+            listOf(
+                AgentVersionPackageEntity(
+                    agentId = "agent-v2",
+                    version = 2,
+                    packageId = "core",
+                    type = "corpus",
+                    fileName = "core.hcorpus",
+                    installClass = "required",
+                    packageSha256 = "c".repeat(64),
+                    packageSizeBytes = 50L,
+                    installed = true,
+                    filePath = "/tmp/core.hcorpus",
+                    installedAt = 2L,
+                ),
+            ),
+        )
+        agentDao.insertCorpus(AgentCorpusEntity("core", sourceHash, "核心资料", 2L, 50L))
+        agentDao.insertVersionCorpus(
+            AgentVersionCorpusCrossRef(
+                "agent-v2",
+                2,
+                "core",
+                sourceHash,
+                true,
+                "required",
+                "c".repeat(64),
+                50L,
+                2L,
+            ),
+        )
+        agentDao.insertSource(
+            AgentSourceFileEntity(
+                sourceId = "source-1",
+                sourceHash = sourceHash,
+                title = "来源",
+                fileName = "source.md",
+                storedName = "source.md",
+                format = "md",
+                genre = "conversation",
+                authorship = "direct",
+                period = "2026",
+                rawSizeBytes = 20L,
+                filePath = "/tmp/source.md",
+                packageSha256 = "d".repeat(64),
+                installedAt = 2L,
+            ),
+        )
+        agentDao.insertVersionSource(
+            AgentVersionSourceCrossRef("agent-v2", 2, "source-1", sourceHash),
+        )
+        agentDao.insertCorpusSourceRefs(
+            listOf(AgentCorpusSourceCrossRef("core", sourceHash, "source-1", sourceHash)),
+        )
+        agentDao.insertChunks(
+            listOf(
+                AgentChunkEntity(
+                    chunkKey = "source-1:chunk-1",
+                    sourceId = "source-1",
+                    sourceHash = sourceHash,
+                    chunkId = "chunk-1",
+                    sourceTitle = "来源",
+                    period = "2026",
+                    genre = "conversation",
+                    authorship = "direct",
+                    location = "第一段",
+                    text = "默认使用中文",
+                    keywordsText = "默认 中文",
+                ),
+            ),
+        )
+        agentDao.insertCorpusChunkRefs(
+            listOf(AgentCorpusChunkCrossRef("core", sourceHash, "source-1:chunk-1")),
+        )
+        agentDao.insertChunkSearchRows(
+            listOf(AgentChunkFtsEntity("source-1:chunk-1", "默认 中文")),
+        )
+        agentDao.insertHierarchyNodes(
+            listOf(
+                AgentHierarchyNodeEntity(
+                    nodeKey = "source-1:root",
+                    sourceId = "source-1",
+                    sourceHash = sourceHash,
+                    nodeId = "root",
+                    kind = "document",
+                    title = "来源",
+                    parentNodeKey = null,
+                    path = "来源",
+                    summary = "摘要",
+                ),
+            ),
+        )
+        agentDao.insertHierarchySearchRows(
+            listOf(AgentHierarchyFtsEntity("source-1:root", "来源 摘要")),
+        )
+        agentDao.insertCorpusHierarchyRefs(
+            listOf(AgentCorpusHierarchyCrossRef("core", sourceHash, "source-1:root")),
+        )
+
+        val rawVersion15 = version15.openHelper.writableDatabase
+        rawVersion15.execSQL("DROP INDEX IF EXISTS index_agent_memories_agentId_updatedAt")
+        rawVersion15.execSQL("DROP TABLE IF EXISTS agent_memories")
+        rawVersion15.version = 15
+        version15.close()
+
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(AppDatabase.MIGRATION_15_16)
+            .build()
+        val sqlite = migrated.openHelper.writableDatabase
+
+        assertEquals(16, sqlite.version)
+        assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+        assertEquals("默认使用中文", sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"))
+        assertEquals("notes/project.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
+        assertEquals("balanced", sqlite.string("SELECT selectedProfileId FROM agent_versions"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_version_packages"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_source_files"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_hierarchy_nodes"))
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_memories"))
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_list('agent_memories')"))
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
+
+        migrated.agentMemoryDao().insert(
+            AgentMemoryEntity(
+                id = "memory-1",
+                agentId = "agent-v2",
+                kind = "USER_PREFERENCE",
+                content = "默认使用中文",
+                sourceConversationId = "daily-conversation",
+                sourceMessageId = "daily-message",
+                confidence = 0.9,
+                userEdited = false,
+                createdAt = 3L,
+                updatedAt = 3L,
+            ),
+        )
+        sqlite.execSQL("DELETE FROM conversations WHERE id = 'daily-conversation'")
+        sqlite.execSQL("DELETE FROM agents WHERE id = 'agent-v2'")
+
+        assertEquals(1, migrated.agentMemoryDao().listForAgent("agent-v2").size)
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
+        migrated.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
     fun migratesRealVersion11FixtureAndPreservesV1DataAndSearch() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-11-12-${System.nanoTime()}.db"
@@ -557,17 +830,19 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_12_13,
                 AppDatabase.MIGRATION_13_14,
                 AppDatabase.MIGRATION_14_15,
+                AppDatabase.MIGRATION_15_16,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(15, sqlite.version)
+        assertEquals(16, sqlite.version)
         assertEquals(1, sqlite.scalarInt("SELECT requiredCorpusCount FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
         assertEquals(0, sqlite.scalarInt("SELECT agentPackageSizeBytes FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
         assertEquals("", sqlite.string("SELECT selectedProfileId FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_version_packages"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_sources"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_hierarchy"))
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_memories"))
         assertEquals("", sqlite.string("SELECT conflictKey FROM agent_chunks LIMIT 1"))
         assertEquals("[]", sqlite.string("SELECT sourceAliasesJson FROM agent_chunks LIMIT 1"))
         assertEquals("", sqlite.string("SELECT simHash FROM agent_chunks LIMIT 1"))
@@ -623,6 +898,7 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_12_13,
                 AppDatabase.MIGRATION_13_14,
                 AppDatabase.MIGRATION_14_15,
+                AppDatabase.MIGRATION_15_16,
             )
             .build()
         db.openHelper.writableDatabase
@@ -666,6 +942,7 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_12_13,
                     AppDatabase.MIGRATION_13_14,
                     AppDatabase.MIGRATION_14_15,
+                    AppDatabase.MIGRATION_15_16,
                 )
                 .build()
                 .openHelper

@@ -31,8 +31,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentCorpusHierarchyCrossRef::class,
         AgentSourceFileEntity::class,
         AgentVersionSourceCrossRef::class,
+        AgentMemoryEntity::class,
     ],
-    version = 15,
+    version = 16,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -46,6 +47,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun conversationMarkdownLinkDao(): ConversationMarkdownLinkDao
     abstract fun markdownChangeDraftDao(): MarkdownChangeDraftDao
     abstract fun agentDao(): AgentDao
+    abstract fun agentMemoryDao(): AgentMemoryDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -667,6 +669,34 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "ALTER TABLE agent_versions ADD COLUMN selectedProfileId TEXT NOT NULL DEFAULT ''",
+                )
+            }
+        }
+
+        val MIGRATION_15_16: Migration = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_memories (
+                        id TEXT NOT NULL,
+                        agentId TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        sourceConversationId TEXT NOT NULL,
+                        sourceMessageId TEXT NOT NULL,
+                        confidence REAL NOT NULL,
+                        userEdited INTEGER NOT NULL DEFAULT 0,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_agent_memories_agentId_updatedAt
+                    ON agent_memories(agentId, updatedAt)
+                    """.trimIndent(),
                 )
             }
         }

@@ -8,6 +8,8 @@ import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentContextAssembler
 import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.AgentTransactionRunner
+import com.harnessapk.agentmemory.AgentMemoryRepository
+import com.harnessapk.agentmemory.AgentMemoryTransactionRunner
 import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.BuildConfig
 import com.harnessapk.chat.ChatImageStore
@@ -75,6 +77,7 @@ class AppContainer(
         AppDatabase.MIGRATION_12_13,
         AppDatabase.MIGRATION_13_14,
         AppDatabase.MIGRATION_14_15,
+        AppDatabase.MIGRATION_15_16,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -115,6 +118,13 @@ class AppContainer(
         timeProvider = SystemTimeProvider,
         ioDispatcher = dispatchers.io,
         privateInstallAvailableBytes = { StatFs(appContext.filesDir.absolutePath).availableBytes },
+    )
+    val agentMemoryRepository = AgentMemoryRepository(
+        dao = database.agentMemoryDao(),
+        transactionRunner = AgentMemoryTransactionRunner { block ->
+            database.withTransaction { block() }
+        },
+        timeProvider = SystemTimeProvider,
     )
     val conversationIdentityRepository = ConversationIdentityRepository(
         conversationDao = database.conversationDao(),
