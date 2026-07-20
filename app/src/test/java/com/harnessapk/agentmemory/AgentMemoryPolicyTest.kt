@@ -291,6 +291,81 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun rejectsPreferenceAndRelationshipDirectionReversal() {
+        val input = input(
+            user("language", "以后不要用中文回答"),
+            user("trust", "我不再相信你"),
+        )
+        val result = policy.evaluate(
+            input,
+            listOf(
+                candidate(
+                    AgentMemoryKind.USER_PREFERENCE,
+                    "language",
+                    "默认使用中文回答",
+                    "language",
+                    "以后不要用中文回答",
+                ),
+                candidate(
+                    AgentMemoryKind.RELATIONSHIP_EVENT,
+                    "trust",
+                    "用户更信任我",
+                    "trust",
+                    "我不再相信你",
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(2, result.rejectedCount)
+    }
+
+    @Test
+    fun keepsNegativePreferenceAndTrustDirectionWhenContentAgrees() {
+        val input = input(
+            user("language", "以后不要用中文回答"),
+            user("trust", "我不再相信你"),
+        )
+        val negativeLanguage = candidate(
+            AgentMemoryKind.USER_PREFERENCE,
+            "language",
+            "以后避免使用中文回答",
+            "language",
+            "以后不要用中文回答",
+        )
+        val lostTrust = candidate(
+            AgentMemoryKind.RELATIONSHIP_EVENT,
+            "trust",
+            "用户不再信任我",
+            "trust",
+            "我不再相信你",
+        )
+
+        val result = policy.evaluate(input, listOf(negativeLanguage, lostTrust))
+
+        assertEquals(listOf(negativeLanguage, lostTrust), result.accepted)
+    }
+
+    @Test
+    fun rejectsSharedHistoryWhenCandidateReplacesAPlace() {
+        val input = input(user("trip", "我们一起去了北京旅行"))
+        val result = policy.evaluate(
+            input,
+            listOf(
+                candidate(
+                    AgentMemoryKind.SHARED_HISTORY,
+                    "trip",
+                    "我们一起去了上海旅行",
+                    "trip",
+                    "我们一起去了北京旅行",
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+    }
+
+    @Test
     fun rejectsThirdPartyRelationshipAndHistoryAsCurrentAgentMemories() {
         val input = input(
             user("friend", "小李是我最信任的朋友"),
@@ -320,11 +395,43 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun rejectsPossessiveThirdPartiesAndGroupWe() {
+        val input = input(
+            user("relative", "我对你哥哥很信任"),
+            user("department", "我们部门一起度过了那次危机"),
+        )
+        val result = policy.evaluate(
+            input,
+            listOf(
+                candidate(
+                    AgentMemoryKind.RELATIONSHIP_EVENT,
+                    "trust",
+                    "用户更信任我",
+                    "relative",
+                    "我对你哥哥很信任",
+                ),
+                candidate(
+                    AgentMemoryKind.SHARED_HISTORY,
+                    "crisis",
+                    "我们一起度过了那次危机",
+                    "department",
+                    "我们部门一起度过了那次危机",
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+        assertEquals(2, result.rejectedCount)
+    }
+
+    @Test
     fun rejectsWorkProductsContractsAndCommercialOutcomesOutsideProjects() {
         val facts = listOf(
             "我们一起完成了登录页改版",
             "我们一起拿下了三百万合同",
             "我们共同完成供应商模块迭代并提升 GMV",
+            "我们一起实现了销售额翻倍",
+            "我们一起交付了婚礼策划流程",
         )
         val result = policy.evaluate(
             input(*facts.mapIndexed { index, text -> user("work-$index", text) }.toTypedArray()),

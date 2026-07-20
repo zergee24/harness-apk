@@ -184,11 +184,13 @@ private fun isAllowedRelationshipFact(
                 preferenceValues(sourceQuote).isNotEmpty() &&
                 preferenceValues(candidate.content).isNotEmpty()
         AgentMemoryKind.SHARED_HISTORY ->
-            BILATERAL_QUOTE.containsMatchIn(sourceQuote) &&
+            !AMBIGUOUS_BILATERAL.containsMatchIn(sourceQuote) &&
+                BILATERAL_SHARED_QUOTE.containsMatchIn(sourceQuote) &&
                 SHARED_HISTORY_MARKER.containsMatchIn(sourceQuote) &&
                 CURRENT_RELATION_CONTENT.containsMatchIn(candidate.content)
         AgentMemoryKind.RELATIONSHIP_EVENT ->
-            BILATERAL_QUOTE.containsMatchIn(sourceQuote) &&
+            !AMBIGUOUS_BILATERAL.containsMatchIn(sourceQuote) &&
+                BILATERAL_RELATIONSHIP_QUOTE.containsMatchIn(sourceQuote) &&
                 RELATIONSHIP_EVENT.containsMatchIn(sourceQuote) &&
                 CURRENT_RELATION_CONTENT.containsMatchIn(candidate.content)
     }
@@ -217,23 +219,18 @@ private fun isSupportedBySource(
 }
 
 private fun hasStrongTextualSupport(content: String, sourceQuote: String): Boolean {
-    val contentFingerprint = memoryFingerprint(content)
-    val quoteFingerprint = memoryFingerprint(sourceQuote)
-    if (contentFingerprint.normalized.isEmpty() || quoteFingerprint.normalized.isEmpty()) return false
-    if (
-        contentFingerprint.normalized.contains(quoteFingerprint.normalized) ||
-        quoteFingerprint.normalized.contains(contentFingerprint.normalized)
-    ) {
-        return true
-    }
-    val contentTerms = contentFingerprint.terms - GENERIC_SUPPORT_TERMS
-    val quoteTerms = quoteFingerprint.terms - GENERIC_SUPPORT_TERMS
-    val intersectionSize = contentTerms.intersect(quoteTerms).size
-    if (intersectionSize < 2) return false
-    val contentCoverage = intersectionSize.toDouble() / contentTerms.size.coerceAtLeast(1)
-    val quoteCoverage = intersectionSize.toDouble() / quoteTerms.size.coerceAtLeast(1)
-    return contentCoverage >= 0.35 && quoteCoverage >= 0.25
+    val normalizedContent = canonicalSharedText(content)
+    val normalizedQuote = canonicalSharedText(sourceQuote)
+    return normalizedContent.isNotEmpty() &&
+        normalizedQuote.isNotEmpty() &&
+        normalizedQuote.contains(normalizedContent)
 }
+
+private fun canonicalSharedText(text: String): String = normalizedComparableText(text)
+    .replace("当前人物", "你")
+    .replace("本人物", "你")
+    .replace("用户", "我")
+    .replace("双方", "我们")
 
 private fun overlapsProjectFact(
     content: String,
@@ -350,14 +347,25 @@ private fun addressValue(text: String): String? {
 
 private fun preferenceValues(text: String): Set<String> = buildSet {
     PREFERENCE_VALUE_PATTERNS.forEach { (value, pattern) ->
-        if (pattern.containsMatchIn(text)) add(value)
+        pattern.findAll(text).forEach { match ->
+            add("$value:${semanticDirection(text, match.range)}")
+        }
     }
 }
 
 private fun relationshipValues(text: String): Set<String> = buildSet {
     RELATIONSHIP_VALUE_PATTERNS.forEach { (value, pattern) ->
-        if (pattern.containsMatchIn(text)) add(value)
+        pattern.findAll(text).forEach { match ->
+            add("$value:${semanticDirection(text, match.range)}")
+        }
     }
+}
+
+private fun semanticDirection(text: String, range: IntRange): String {
+    val start = (range.first - 10).coerceAtLeast(0)
+    val end = (range.last + 4).coerceAtMost(text.lastIndex)
+    val context = if (end >= start) text.substring(start, end + 1) else text
+    return if (NEGATIVE_DIRECTION.containsMatchIn(context)) "negative" else "positive"
 }
 
 private val PROJECT_ARTIFACT_OR_BUSINESS = Regex(
@@ -380,17 +388,21 @@ private val PROJECT_ARTIFACT_OR_BUSINESS = Regex(
             订单(?:号|金额|状态)? |
             合同(?:额|金额|编号|状态)? |
             营收 |
+            销售额 |
+            利润 |
+            回款 |
             \bgmv\b |
             商户 |
             供应商 |
+            (?:策划|执行|审批|交付|业务)?流程 |
+            (?:技术|产品|营销|运营|婚礼|活动)?方案 |
             产品(?:页面|模块|功能|版本)? |
             (?:登录|注册|支付|订单|详情|首页)页 |
             (?:页面|模块|功能|版本)(?:改版|迭代|开发|交付)? |
             (?:改版|迭代)(?:完成|计划|上线)? |
             (?:本月|季度|年度)?指标 |
             转化率 |
-            (?:我们|一起|共同).{0,12}(?:完成|开发|实现|交付|上线|发布|改版|迭代|拿下|签下|达成)
-                .{0,16}(?:页面|模块|功能|版本|产品|项目|需求|合同|订单|客户|商户|供应商|营收|gmv) |
+            (?:我们|一起|共同).{0,16}(?:完成|开发|实现|交付|上线|发布|改版|迭代|拿下|签下|达成) |
             我们决定 |
             决定(?:本周|本月|采用|上线|发布)
         )
@@ -437,10 +449,20 @@ private val PREFERENCE_VALUE_PATTERNS = linkedMapOf(
     "initiative:off" to Regex("(?i)(?:不要主动|别主动|未经允许不要|do\\s+not\\s+initiate)"),
     "voice:first-person" to Regex("(?i)(?:第一人称|first[ -]person)"),
 )
-private val BILATERAL_QUOTE = Regex(
-    "(?i)(?:我们|咱们|我.{0,10}(?:你|您)|(?:你|您).{0,10}我|(?:和|跟|与)(?:你|您)|" +
-        "(?:你|您)(?:陪|帮|让|对)我|我(?:对|把)(?:你|您)|\\bwe\\b|\\bi\\b.{0,20}\\byou\\b|" +
-        "\\byou\\b.{0,20}\\bme\\b|between\\s+us)",
+private val AMBIGUOUS_BILATERAL = Regex(
+    "(?i)(?:我们(?:的)?(?:部门|团队|公司|项目组|小组|班级|家庭|家人|同事)|" +
+        "(?:你|您)(?:的)?(?:哥哥|弟弟|姐姐|妹妹|父亲|母亲|爸爸|妈妈|丈夫|妻子|爱人|孩子|" +
+        "儿子|女儿|朋友|同事|领导|老师|学生|团队|部门|公司))",
+)
+private val BILATERAL_SHARED_QUOTE = Regex(
+    "(?i)(?:我们|咱们|我(?:和|跟|与)(?:你|您)|(?:你|您)(?:和|跟|与)我|" +
+        "(?:你|您)(?:陪|帮)我|between\\s+us|\\bwe\\b)",
+)
+private val BILATERAL_RELATIONSHIP_QUOTE = Regex(
+    "(?i)(?:我.{0,10}(?:你|您)(?!的?(?:哥哥|弟弟|姐姐|妹妹|父亲|母亲|爸爸|妈妈|朋友|同事|" +
+        "领导|老师|学生|团队|部门|公司))|(?:你|您).{0,10}我|我们(?:的)?关系|" +
+        "我把(?:你|您)当|\\bi\\b.{0,20}\\byou\\b|\\byou\\b.{0,20}\\bme\\b|" +
+        "\\bour\\s+relationship\\b)",
 )
 private val CURRENT_RELATION_CONTENT = Regex(
     "(?i)(?:我们|咱们|用户.{0,12}(?:我|当前人物)|(?:我|当前人物).{0,12}用户|" +
@@ -461,17 +483,6 @@ private val RELATIONSHIP_VALUE_PATTERNS = linkedMapOf(
     "disappointment" to Regex("(?i)(?:失望|disappoint)"),
     "forgiveness" to Regex("(?i)(?:原谅|forgiv)"),
 )
-private val GENERIC_SUPPORT_TERMS = setOf(
-    "用户",
-    "希望",
-    "以后",
-    "默认",
-    "使用",
-    "回答",
-    "回复",
-    "我们",
-    "一起",
-    "明确",
-    "表示",
-    "请用",
+private val NEGATIVE_DIRECTION = Regex(
+    "(?i)(?:不再|不要|不|没|无|避免|拒绝|停止|失去|降低|减少|别|请勿|never|not|do\\s+not|don't)",
 )
