@@ -7,6 +7,7 @@ import com.harnessapk.agent.AgentImportSession
 import com.harnessapk.agent.AgentPackageManifest
 import com.harnessapk.agent.ParsedAgentBundle
 import com.harnessapk.agent.AgentStatus
+import com.harnessapk.agent.AgentInsufficientStorageException
 import com.harnessapk.agent.V2Authorship
 import com.harnessapk.agent.V2InstallClass
 import com.harnessapk.agent.V2PackageType
@@ -22,6 +23,32 @@ import org.junit.Test
 import java.io.File
 
 class AgentUiStateTest {
+    @Test
+    fun finalStorageFailureRefreshesAvailableBytesAndReturnsActionableInlineError() = runTest {
+        var statFsReads = 0
+
+        val result = attemptAgentPackageInstall(
+            install = {
+                throw AgentInsufficientStorageException(
+                    requiredBytes = 300L,
+                    availableBytes = 275L,
+                )
+            },
+            refreshAvailableBytes = {
+                statFsReads += 1
+                250L
+            },
+        )
+
+        assertEquals(1, statFsReads)
+        assertTrue(result is AgentPackageInstallAttempt.Failure)
+        result as AgentPackageInstallAttempt.Failure
+        assertEquals(250L, result.availableBytes)
+        assertTrue(result.message.contains("需要 300 字节"))
+        assertTrue(result.message.contains("可用 250 字节"))
+        assertTrue(result.message.contains("释放空间后重试，或调整资料"))
+    }
+
     @Test
     fun readyAgentCanStartAndShowsCorpusCoverage() {
         val agent = agent(status = AgentStatus.READY, installed = 2, required = 2)

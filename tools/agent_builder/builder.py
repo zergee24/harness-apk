@@ -6,8 +6,10 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import zipfile
+import zlib
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -68,6 +70,10 @@ V2_AGENT_PAYLOAD_FILES = frozenset({
 V2_AGENT_ENTRY_MAX_BYTES = 16 * 1024 * 1024
 V2_AGENT_TOTAL_MAX_BYTES = 64 * 1024 * 1024
 WORKSPACE_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
+SOURCE_DESCRIPTOR_CACHE_SCHEMA_VERSION = 1
+SOURCE_PACKAGE_FORMAT_VERSION = "hsource-v2-deflate9-stream-v1"
+SOURCE_DESCRIPTOR_CACHE_DIRECTORY = ".agent-builder-cache"
+SOURCE_DESCRIPTOR_CACHE_FILE = "source-artifacts-v2.json"
 
 
 @dataclass(frozen=True)
@@ -869,6 +875,8 @@ def pack_workspace_v2(
 
     if profile_id not in {"lite", "balanced", "complete", "source"}:
         raise BuildError(f"未知 profile：{profile_id}")
+    if profile_id == "source" and not emit_sources:
+        raise BuildError("source profile 要求 emit_sources=true")
     workspace = Path(workspace).expanduser().resolve()
     manifest, validation = _validate_workspace_v2_for_pack(workspace)
     if not validation.publishable:
@@ -928,15 +936,55 @@ def pack_workspace_v2(
             for source in sorted(manifest.sources, key=lambda item: item.source_id):
                 package_id = f"source-{source.source_id}"
                 target = package_root / f"{package_id}.hsource"
-                _pack_source_v2(
+                cached_descriptor = _read_source_descriptor_cache_v2(
                     workspace,
                     manifest.agent_id,
                     manifest.version,
                     source,
-                    target,
                     private_key,
                 )
-                sha256, size_bytes = _hash_regular_file(target)
+                if emit_sources:
+                    _pack_source_v2(
+                        workspace,
+                        manifest.agent_id,
+                        manifest.version,
+                        source,
+                        target,
+                        private_key,
+                    )
+                    sha256, size_bytes = _hash_regular_file(target)
+                    if cached_descriptor is not None and cached_descriptor != (sha256, size_bytes):
+                        raise BuildError(f"原文包与签名 descriptor cache 不一致：{package_id}")
+                    source_paths[package_id] = target
+                    if cached_descriptor is None:
+                        _write_source_descriptor_cache_v2(
+                            workspace,
+                            manifest.agent_id,
+                            manifest.version,
+                            source,
+                            private_key,
+                            sha256,
+                            size_bytes,
+                        )
+                elif cached_descriptor is not None:
+                    sha256, size_bytes = cached_descriptor
+                else:
+                    sha256, size_bytes = _measure_source_v2(
+                        workspace,
+                        manifest.agent_id,
+                        manifest.version,
+                        source,
+                        private_key,
+                    )
+                    _write_source_descriptor_cache_v2(
+                        workspace,
+                        manifest.agent_id,
+                        manifest.version,
+                        source,
+                        private_key,
+                        sha256,
+                        size_bytes,
+                    )
                 artifact = CorpusShard.source(
                     package_id=package_id,
                     source_ids=(source.source_id,),
@@ -946,7 +994,6 @@ def pack_workspace_v2(
                     sha256=sha256,
                 )
                 source_artifacts.append(artifact)
-                source_paths[package_id] = target
 
             install_plan = choose_install_profiles([*corpus_artifacts, *source_artifacts])
             install_plan_bytes = _canonical_json_bytes(
@@ -991,6 +1038,7 @@ def pack_workspace_v2(
                 report_target,
                 {
                     "agentId": manifest.agent_id,
+                    "bundleIncludesSources": profile_id == "source",
                     "bundleSizeBytes": bundle_size,
                     "children": [
                         {
@@ -1021,9 +1069,6 @@ def pack_workspace_v2(
                 },
             )
 
-        if not emit_sources:
-            for path in source_paths.values():
-                path.unlink()
         final_names = sorted(path.name for path in package_root.iterdir())
         if output.exists():
             if not output.is_dir():
@@ -1326,14 +1371,54 @@ def _pack_source_v2(
     target: Path,
     private_key: Ed25519PrivateKey,
 ) -> None:
+    entries, expected_files = _source_package_entries_v2(
+        workspace,
+        agent_id,
+        version,
+        source,
+    )
+    _write_signed_package_v2_streaming(
+        target,
+        entries,
+        private_key,
+        expected_files=expected_files,
+    )
+
+
+def _measure_source_v2(
+    workspace: Path,
+    agent_id: str,
+    version: int,
+    source: SourceRecord,
+    private_key: Ed25519PrivateKey,
+) -> tuple[str, int]:
+    entries, expected_files = _source_package_entries_v2(
+        workspace,
+        agent_id,
+        version,
+        source,
+    )
+    return _measure_signed_package_v2(
+        entries,
+        private_key,
+        expected_files=expected_files,
+    )
+
+
+def _source_package_entries_v2(
+    workspace: Path,
+    agent_id: str,
+    version: int,
+    source: SourceRecord,
+) -> tuple[dict[str, bytes | Path], dict[str, tuple[str, int]]]:
     source_path = workspace / "sources" / source.stored_name
     actual_hash, actual_size = _hash_regular_file(source_path)
     if actual_hash != source.source_hash or actual_size != source.raw_size_bytes:
         raise BuildError(f"来源文件大小或哈希不匹配：{source.stored_name}")
-    _write_signed_package_v2(
-        target,
+    payload_path = f"files/{source.stored_name}"
+    return (
         {
-            f"files/{source.stored_name}": source_path,
+            payload_path: source_path,
             "manifest.json": _canonical_json_bytes(
                 {
                     "agentId": agent_id,
@@ -1349,14 +1434,185 @@ def _pack_source_v2(
                 }
             ),
         },
-        private_key,
-        expected_files={
-            f"files/{source.stored_name}": (
-                source.source_hash,
-                source.raw_size_bytes,
-            )
-        },
+        {payload_path: (source.source_hash, source.raw_size_bytes)},
     )
+
+
+def _read_source_descriptor_cache_v2(
+    workspace: Path,
+    agent_id: str,
+    version: int,
+    source: SourceRecord,
+    private_key: Ed25519PrivateKey,
+) -> tuple[str, int] | None:
+    # A cache hit still verifies the current source through a no-follow descriptor.
+    _source_package_entries_v2(workspace, agent_id, version, source)
+    document = _read_source_descriptor_cache_document_v2(workspace)
+    identity = _source_descriptor_identity_v2(agent_id, version, source, private_key)
+    cache_key = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+    entry = document.get("entries", {}).get(cache_key)
+    if not isinstance(entry, dict):
+        return None
+    payload = entry.get("payload")
+    signature = entry.get("signature")
+    if not isinstance(payload, dict) or not isinstance(signature, str):
+        return None
+    expected_identity = {key: payload.get(key) for key in identity}
+    package_hash = payload.get("packageSha256")
+    package_size = payload.get("packageSizeBytes")
+    if (
+        expected_identity != identity
+        or not isinstance(package_hash, str)
+        or len(package_hash) != 64
+        or any(character not in "0123456789abcdef" for character in package_hash)
+        or type(package_size) is not int
+        or package_size <= 0
+    ):
+        return None
+    try:
+        private_key.public_key().verify(
+            base64.b64decode(signature, validate=True),
+            _canonical_json_bytes(payload),
+        )
+    except (InvalidSignature, ValueError):
+        return None
+    return package_hash, package_size
+
+
+def _write_source_descriptor_cache_v2(
+    workspace: Path,
+    agent_id: str,
+    version: int,
+    source: SourceRecord,
+    private_key: Ed25519PrivateKey,
+    package_hash: str,
+    package_size: int,
+) -> None:
+    if (
+        len(package_hash) != 64
+        or any(character not in "0123456789abcdef" for character in package_hash)
+        or type(package_size) is not int
+        or package_size <= 0
+    ):
+        raise BuildError("原文包 descriptor 无效")
+    identity = _source_descriptor_identity_v2(agent_id, version, source, private_key)
+    cache_key = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+    payload = {
+        **identity,
+        "packageSha256": package_hash,
+        "packageSizeBytes": package_size,
+    }
+    document = _read_source_descriptor_cache_document_v2(workspace)
+    entries = document.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+    entries = dict(entries)
+    entries[cache_key] = {
+        "payload": payload,
+        "signature": base64.b64encode(
+            private_key.sign(_canonical_json_bytes(payload))
+        ).decode("ascii"),
+    }
+    cache_root = workspace / SOURCE_DESCRIPTOR_CACHE_DIRECTORY
+    _require_safe_cache_directory_v2(cache_root, create=True)
+    cache_path = cache_root / SOURCE_DESCRIPTOR_CACHE_FILE
+    if cache_path.exists() or cache_path.is_symlink():
+        info = cache_path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise BuildError("原文包 descriptor cache 路径不安全")
+    temporary = cache_root / f".{SOURCE_DESCRIPTOR_CACHE_FILE}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(
+                _canonical_json_bytes(
+                    {
+                        "entries": entries,
+                        "schemaVersion": SOURCE_DESCRIPTOR_CACHE_SCHEMA_VERSION,
+                    }
+                )
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, cache_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _source_descriptor_identity_v2(
+    agent_id: str,
+    version: int,
+    source: SourceRecord,
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    public_key = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return {
+        "agentId": agent_id,
+        "formatVersion": SOURCE_PACKAGE_FORMAT_VERSION,
+        "packageFileName": f"source-{source.source_id}.hsource",
+        "publisherFingerprint": hashlib.sha256(public_key).hexdigest(),
+        "pythonRuntime": (
+            f"{sys.implementation.name}-"
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        ),
+        "rawSizeBytes": source.raw_size_bytes,
+        "sourceHash": source.source_hash,
+        "sourceId": source.source_id,
+        "storedName": source.stored_name,
+        "version": version,
+        "zlibCompileVersion": zlib.ZLIB_VERSION,
+        "zlibRuntimeVersion": zlib.ZLIB_RUNTIME_VERSION,
+    }
+
+
+def _read_source_descriptor_cache_document_v2(workspace: Path) -> dict[str, Any]:
+    cache_root = workspace / SOURCE_DESCRIPTOR_CACHE_DIRECTORY
+    if not cache_root.exists() and not cache_root.is_symlink():
+        return {
+            "entries": {},
+            "schemaVersion": SOURCE_DESCRIPTOR_CACHE_SCHEMA_VERSION,
+        }
+    _require_safe_cache_directory_v2(cache_root, create=False)
+    cache_path = cache_root / SOURCE_DESCRIPTOR_CACHE_FILE
+    if not cache_path.exists() and not cache_path.is_symlink():
+        return {
+            "entries": {},
+            "schemaVersion": SOURCE_DESCRIPTOR_CACHE_SCHEMA_VERSION,
+        }
+    info = cache_path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise BuildError("原文包 descriptor cache 路径不安全")
+    if info.st_size > WORKSPACE_MANIFEST_MAX_BYTES:
+        raise BuildError("原文包 descriptor cache 过大")
+    try:
+        document = _read_small_json(cache_path)
+    except (BuildError, OSError, ValueError):
+        return {
+            "entries": {},
+            "schemaVersion": SOURCE_DESCRIPTOR_CACHE_SCHEMA_VERSION,
+        }
+    if (
+        document.get("schemaVersion") != SOURCE_DESCRIPTOR_CACHE_SCHEMA_VERSION
+        or not isinstance(document.get("entries"), dict)
+    ):
+        return {
+            "entries": {},
+            "schemaVersion": SOURCE_DESCRIPTOR_CACHE_SCHEMA_VERSION,
+        }
+    return document
+
+
+def _require_safe_cache_directory_v2(cache_root: Path, *, create: bool) -> None:
+    if create and not cache_root.exists() and not cache_root.is_symlink():
+        try:
+            cache_root.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+    try:
+        info = cache_root.lstat()
+    except OSError as error:
+        raise BuildError(f"原文包 descriptor cache 目录不可用：{error}") from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise BuildError("原文包 descriptor cache 目录不安全")
 
 
 def _pack_agent_v2(
@@ -1472,6 +1728,83 @@ def _write_signed_package_v2(
     *,
     expected_files: dict[str, tuple[str, int]] | None = None,
 ) -> Path:
+    package_files, expected_identities = _prepare_signed_package_v2(
+        files,
+        private_key,
+        expected_files,
+    )
+    try:
+        with zipfile.ZipFile(
+            target,
+            "x",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+            allowZip64=True,
+        ) as archive:
+            _write_prepared_package_v2(archive, package_files, expected_identities)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def _write_signed_package_v2_streaming(
+    target: Path,
+    files: dict[str, bytes | Path],
+    private_key: Ed25519PrivateKey,
+    *,
+    expected_files: dict[str, tuple[str, int]] | None = None,
+) -> Path:
+    package_files, expected_identities = _prepare_signed_package_v2(
+        files,
+        private_key,
+        expected_files,
+    )
+    try:
+        with target.open("xb") as raw_target:
+            writer = _NonSeekableWriter(raw_target)
+            with zipfile.ZipFile(
+                writer,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+                allowZip64=True,
+            ) as archive:
+                _write_prepared_package_v2(archive, package_files, expected_identities)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def _measure_signed_package_v2(
+    files: dict[str, bytes | Path],
+    private_key: Ed25519PrivateKey,
+    *,
+    expected_files: dict[str, tuple[str, int]] | None = None,
+) -> tuple[str, int]:
+    package_files, expected_identities = _prepare_signed_package_v2(
+        files,
+        private_key,
+        expected_files,
+    )
+    writer = _HashingCountingWriter()
+    with zipfile.ZipFile(
+        writer,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+        allowZip64=True,
+    ) as archive:
+        _write_prepared_package_v2(archive, package_files, expected_identities)
+    return writer.hexdigest(), writer.tell()
+
+
+def _prepare_signed_package_v2(
+    files: dict[str, bytes | Path],
+    private_key: Ed25519PrivateKey,
+    expected_files: dict[str, tuple[str, int]] | None,
+) -> tuple[dict[str, bytes | Path], dict[str, os.stat_result]]:
     normalized: dict[str, bytes | Path] = {}
     for raw_path, payload in files.items():
         path = _safe_package_path_v2(raw_path)
@@ -1512,28 +1845,65 @@ def _write_signed_package_v2(
         "checksums.json": checksums_bytes,
         "signature.json": signature_bytes,
     }
-    try:
-        with zipfile.ZipFile(
-            target,
-            "x",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
-            allowZip64=True,
-        ) as archive:
-            for path, payload in sorted(package_files.items()):
-                if isinstance(payload, bytes):
-                    _write_bytes_into_zip(archive, path, payload)
-                else:
-                    _stream_file_into_zip(
-                        archive,
-                        path,
-                        payload,
-                        expected_identities.get(path),
-                    )
-    except BaseException:
-        target.unlink(missing_ok=True)
-        raise
-    return target
+    return package_files, expected_identities
+
+
+def _write_prepared_package_v2(
+    archive: zipfile.ZipFile,
+    package_files: dict[str, bytes | Path],
+    expected_identities: dict[str, os.stat_result],
+) -> None:
+    for path, payload in sorted(package_files.items()):
+        if isinstance(payload, bytes):
+            _write_bytes_into_zip(archive, path, payload)
+        else:
+            _stream_file_into_zip(
+                archive,
+                path,
+                payload,
+                expected_identities.get(path),
+            )
+
+
+class _NonSeekableWriter:
+    def __init__(self, target: Any) -> None:
+        self._target = target
+        self._offset = 0
+
+    def write(self, payload: bytes) -> int:
+        written = self._target.write(payload)
+        if written is None:
+            written = len(payload)
+        if written != len(payload):
+            raise OSError("ZIP 输出发生短写")
+        self._offset += written
+        return written
+
+    def tell(self) -> int:
+        return self._offset
+
+    def flush(self) -> None:
+        self._target.flush()
+
+
+class _HashingCountingWriter:
+    def __init__(self) -> None:
+        self._digest = hashlib.sha256()
+        self._offset = 0
+
+    def write(self, payload: bytes) -> int:
+        self._digest.update(payload)
+        self._offset += len(payload)
+        return len(payload)
+
+    def tell(self) -> int:
+        return self._offset
+
+    def flush(self) -> None:
+        pass
+
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
 
 
 def _write_bytes_into_zip(

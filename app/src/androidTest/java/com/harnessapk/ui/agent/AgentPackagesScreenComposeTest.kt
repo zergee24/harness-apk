@@ -147,6 +147,51 @@ class AgentPackagesScreenComposeTest {
     }
 
     @Test
+    fun finalStorageRaceStaysInDialogAndCanRetryTheSameFlowWithLite() {
+        val availableBytes = mutableStateOf(350L)
+        val inlineError = mutableStateOf<String?>(null)
+        val installedProfiles = mutableListOf<String>()
+        composeRule.setContent {
+            HarnessApkTheme {
+                AgentV2InstallPreview(
+                    name = "研究者",
+                    version = 2,
+                    publisherFingerprint = "fingerprint",
+                    plan = plan(),
+                    availableBytes = availableBytes.value,
+                    sourceRecords = emptyList(),
+                    isInstalling = false,
+                    installErrorText = inlineError.value,
+                    onDismiss = {},
+                    onInstall = { profile ->
+                        if (installedProfiles.isEmpty()) {
+                            installedProfiles += profile
+                            availableBytes.value = 250L
+                            inlineError.value =
+                                "安装空间不足：需要 300 字节，可用 250 字节。释放空间后重试，或调整资料。"
+                        } else {
+                            installedProfiles += profile
+                            inlineError.value = null
+                        }
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("安装").performClick()
+        composeRule.onNodeWithText(
+            "安装空间不足：需要 300 字节，可用 250 字节。释放空间后重试，或调整资料。",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithText("推荐安装空间不足").assertIsDisplayed()
+        composeRule.onNodeWithText("调整资料").performClick()
+        composeRule.onNodeWithText("轻量").performClick()
+        composeRule.onNodeWithText("安装").assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(listOf("balanced", "lite"), installedProfiles)
+        }
+    }
+
+    @Test
     fun largeFontPreviewKeepsActionsVisibleAndProvidesScrollableBody() {
         val density = composeRule.activity.resources.displayMetrics.density
         InstrumentationRegistry.getInstrumentation().runOnMainSync {

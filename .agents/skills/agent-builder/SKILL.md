@@ -55,6 +55,8 @@ scripts/agent-builder.sh recommend <workspace> --key <publisher-key.pem>
 | 完整证据 | `complete` | 全部证据分片，不含原文 |
 | 包含原文 | `source` | 完整证据及 `.hsource`，原文只供阅读核验 |
 
+`source` 档位始终同时生成 bundle 与独立 `.hsource`；不得关闭 source 输出。若调用方把 `profile=source` 与 `emit_sources=false` 组合使用，构建必须 fail closed，且不得发布部分产物。
+
 7. 用户说“自动”“按建议”“默认”，或没有回答非阻塞 profile 选择时，直接执行：
 
 ```bash

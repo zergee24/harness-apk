@@ -48,10 +48,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 
-class AppContainer(context: Context) {
+class AppContainer(
+    context: Context,
+    applicationScopeOverride: CoroutineScope? = null,
+) {
     private val appContext = context.applicationContext
     val dispatchers = AppDispatchers()
-    private val chatSendRecoveryScope = CoroutineScope(SupervisorJob() + dispatchers.io)
+    val applicationScope = applicationScopeOverride
+        ?: CoroutineScope(SupervisorJob() + dispatchers.io)
     val database: AppDatabase = Room.databaseBuilder(
         appContext,
         AppDatabase::class.java,
@@ -198,7 +202,7 @@ class AppContainer(context: Context) {
         onWorkScheduled = { ChatExecutionService.start(appContext) },
     )
     val chatSendRecoveryManager = ChatSendRecoveryManager(
-        scope = chatSendRecoveryScope,
+        scope = applicationScope,
         store = chatSendRecoveryStore,
         controller = ChatSendController(
             enqueue = chatExecutionCoordinator::enqueue,

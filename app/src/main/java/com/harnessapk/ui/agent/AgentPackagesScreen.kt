@@ -95,6 +95,7 @@ fun AgentPackagesScreen(
         }.toMap()
     }
     var previewAvailableBytes by remember { mutableStateOf(Long.MAX_VALUE) }
+    var previewInstallError by remember { mutableStateOf<String?>(null) }
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
 
@@ -109,6 +110,7 @@ fun AgentPackagesScreen(
                 }
                 previewViewModel.replace(session)
                 previewAvailableBytes = privateInstallAvailableBytes(context.filesDir.absolutePath)
+                previewInstallError = null
             } catch (error: Throwable) {
                 errorText = error.message ?: "智能体包读取失败"
             }
@@ -205,13 +207,25 @@ fun AgentPackagesScreen(
                 }
                 isWorking = true
                 errorText = null
-                runCatching { container.agentRepository.installPackage(session, profileId) }
-                    .onSuccess { result ->
+                previewInstallError = null
+                when (
+                    val attempt = attemptAgentPackageInstall(
+                        install = { container.agentRepository.installPackage(session, profileId) },
+                        refreshAvailableBytes = {
+                            privateInstallAvailableBytes(context.filesDir.absolutePath)
+                        },
+                    )
+                ) {
+                    is AgentPackageInstallAttempt.Success -> {
                         previewViewModel.clearIfCurrent(session)
                         detailsRevision += 1
-                        expandedAgentId = result.agent.id
+                        expandedAgentId = attempt.result.agent.id
                     }
-                    .onFailure { error -> errorText = error.message ?: "智能体安装失败" }
+                    is AgentPackageInstallAttempt.Failure -> {
+                        previewInstallError = attempt.message
+                        attempt.availableBytes?.let { previewAvailableBytes = it }
+                    }
+                }
                 isWorking = false
             }
         }
@@ -224,6 +238,7 @@ fun AgentPackagesScreen(
                 availableBytes = previewAvailableBytes,
                 sourceRecords = parsed.corpora.flatMap(V2Corpus::sources),
                 isInstalling = isWorking,
+                installErrorText = previewInstallError,
                 onDismiss = dismiss,
                 onInstall = install,
             )
@@ -231,6 +246,7 @@ fun AgentPackagesScreen(
                 preview = session.preview,
                 sourceReadOnly = parsed is V2Source,
                 isInstalling = isWorking,
+                installErrorText = previewInstallError,
                 onDismiss = dismiss,
                 onInstall = { install(DEFAULT_INSTALLATION_PROFILE_ID) },
             )
@@ -299,6 +315,7 @@ private fun AgentImportDialog(
     preview: AgentImportPreview,
     sourceReadOnly: Boolean,
     isInstalling: Boolean,
+    installErrorText: String?,
     onDismiss: () -> Unit,
     onInstall: () -> Unit,
 ) {
@@ -322,6 +339,13 @@ private fun AgentImportDialog(
                     Text(
                         if (sourceReadOnly) sourceParticipationLabel() else "包含原始资料文件",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                installErrorText?.let { message ->
+                    Text(
+                        text = message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
                 if (isInstalling) {
@@ -351,6 +375,7 @@ internal fun AgentV2InstallPreview(
     availableBytes: Long,
     sourceRecords: List<V2SourceRecord>,
     isInstalling: Boolean,
+    installErrorText: String? = null,
     initialProfileId: String = DEFAULT_INSTALLATION_PROFILE_ID,
     onDismiss: () -> Unit,
     onInstall: (String) -> Unit,
@@ -402,6 +427,13 @@ internal fun AgentV2InstallPreview(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     is AgentInstallationDecision.InstallDirectly -> Unit
+                }
+                installErrorText?.let { message ->
+                    Text(
+                        text = message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
                 if (selectedProfileId == "source") {
                     Text(

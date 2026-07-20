@@ -1,6 +1,8 @@
 package com.harnessapk.ui.agent
 
 import com.harnessapk.agent.Agent
+import com.harnessapk.agent.AgentInstallResult
+import com.harnessapk.agent.AgentInsufficientStorageException
 import com.harnessapk.agent.AgentStatus
 import com.harnessapk.agent.InstallContractPackage
 import com.harnessapk.agent.InstallContractProfile
@@ -11,6 +13,7 @@ import com.harnessapk.agent.V2PackageType
 import com.harnessapk.agent.V2SourceGenre
 import com.harnessapk.agent.V2SourceRecord
 import com.harnessapk.agent.installPlanContractError
+import kotlinx.coroutines.CancellationException
 import java.util.Locale
 
 internal data class AgentInstallationPackage(
@@ -49,6 +52,37 @@ internal sealed interface AgentInstallationDecision {
         val profileId: String,
         val missingPackageIds: List<String>,
     ) : AgentInstallationDecision
+}
+
+internal sealed interface AgentPackageInstallAttempt {
+    data class Success(val result: AgentInstallResult) : AgentPackageInstallAttempt
+
+    data class Failure(
+        val message: String,
+        val availableBytes: Long? = null,
+    ) : AgentPackageInstallAttempt
+}
+
+internal suspend fun attemptAgentPackageInstall(
+    install: suspend () -> AgentInstallResult,
+    refreshAvailableBytes: () -> Long,
+): AgentPackageInstallAttempt = try {
+    AgentPackageInstallAttempt.Success(install())
+} catch (error: CancellationException) {
+    throw error
+} catch (error: AgentInsufficientStorageException) {
+    val refreshed = runCatching(refreshAvailableBytes).getOrDefault(error.availableBytes)
+    val available = refreshed.takeIf { it >= 0L } ?: error.availableBytes.takeIf { it >= 0L }
+    val message = if (error.requiredBytes >= 0L && available != null) {
+        "安装空间不足：需要 ${error.requiredBytes} 字节，可用 $available 字节。释放空间后重试，或调整资料。"
+    } else if (available != null) {
+        "安装空间在数据库写入期间耗尽，可用 $available 字节。释放空间后重试，或调整资料。"
+    } else {
+        "安装空间不足。释放空间后重试，或调整资料。"
+    }
+    AgentPackageInstallAttempt.Failure(message, available)
+} catch (error: Throwable) {
+    AgentPackageInstallAttempt.Failure(error.message ?: "智能体安装失败")
 }
 
 internal fun installationDecision(

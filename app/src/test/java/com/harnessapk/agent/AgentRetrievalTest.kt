@@ -152,6 +152,31 @@ class AgentRetrievalTest {
     }
 
     @Test
+    fun integrityFailureContainingEnospcIsNotNormalizedOrKeptRetryable() = runTest {
+        val integrityFailure = AgentBundleException(
+            "physical chunk immutable evidence 冲突：forged-enospc-key",
+        )
+        val fixture = v2InstallFixture(chunkSearchInsertFailure = integrityFailure)
+        val session = fixture.repository.preparePackageImport("balanced.hbundle") {
+            "bundle".byteInputStream()
+        }
+
+        val failure = runCatching {
+            fixture.repository.installPackage(session, "balanced")
+        }.exceptionOrNull()
+
+        assertEquals(AgentBundleException::class, failure?.let { it::class })
+        assertEquals(integrityFailure.message, failure?.message)
+        assertFalse(failure is AgentInsufficientStorageException)
+        fixture.dao.chunkSearchInsertFailure = null
+        val retry = runCatching {
+            fixture.repository.installPackage(session, "balanced")
+        }.exceptionOrNull()
+        assertTrue(retry is AgentBundleException)
+        assertTrue(fixture.dao.findAgent("agent-v2") == null)
+    }
+
+    @Test
     fun sameVersionConvenienceSupplementRecapturesSpaceAndCanRetryLowerRaceFailure() = runTest {
         var availableBytes = Long.MAX_VALUE
         var captures = 0

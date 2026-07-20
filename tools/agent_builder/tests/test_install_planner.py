@@ -800,6 +800,164 @@ class InstallPlannerTest(unittest.TestCase):
             plan = json.loads(archive.read("install-plan.json"))
         self.assertTrue(any(package["type"] == "hsource" for package in plan["packages"]))
 
+    def test_source_profile_rejects_emit_sources_false_before_publishing_anything(self):
+        output = self.root / "dist-source-without-sources"
+
+        with self.assertRaisesRegex(BuildError, "source.*emit_sources"):
+            pack_workspace_v2(
+                self.workspace,
+                output,
+                self.private_key_path,
+                profile_id="source",
+                emit_sources=False,
+            )
+
+        self.assertFalse(output.exists())
+
+        valid = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-source-explicit",
+            self.private_key_path,
+            profile_id="source",
+            emit_sources=True,
+        )
+        report = json.loads(valid.report_path.read_text("utf-8"))
+        with zipfile.ZipFile(valid.bundle_package) as archive:
+            bundled_sources = [
+                name for name in archive.namelist() if name.endswith(".hsource")
+            ]
+        self.assertTrue(report["bundleIncludesSources"])
+        self.assertTrue(report["sourcesEmitted"])
+        self.assertEqual(len(valid.source_packages), len(bundled_sources))
+
+    def test_balanced_profile_does_not_materialize_source_packages(self):
+        with mock.patch.object(
+            builder,
+            "_pack_source_v2",
+            side_effect=AssertionError("balanced 不得物化 hsource"),
+        ):
+            result = pack_workspace_v2(
+                self.workspace,
+                self.root / "dist-balanced-bounded",
+                self.private_key_path,
+                profile_id="balanced",
+                emit_sources=False,
+            )
+
+        self.assertTrue(result.bundle_package.is_file())
+        self.assertEqual([], result.source_packages)
+
+    def test_signed_source_descriptor_cache_avoids_repeat_measurement_and_matches_source_output(self):
+        first = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-balanced-first",
+            self.private_key_path,
+            profile_id="balanced",
+            emit_sources=False,
+        )
+
+        with mock.patch.object(
+            builder,
+            "_measure_source_v2",
+            side_effect=AssertionError("相同 source/key/format 应复用 descriptor cache"),
+        ):
+            second = pack_workspace_v2(
+                self.workspace,
+                self.root / "dist-balanced-second",
+                self.private_key_path,
+                profile_id="balanced",
+                emit_sources=False,
+            )
+
+        source = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-source-after-cache",
+            self.private_key_path,
+            profile_id="source",
+            emit_sources=True,
+        )
+        with zipfile.ZipFile(first.agent_package) as archive:
+            first_plan = json.loads(archive.read("install-plan.json"))
+        with zipfile.ZipFile(second.agent_package) as archive:
+            second_plan = json.loads(archive.read("install-plan.json"))
+        with zipfile.ZipFile(source.agent_package) as archive:
+            source_plan = json.loads(archive.read("install-plan.json"))
+
+        self.assertEqual(first_plan, second_plan)
+        self.assertEqual(first_plan, source_plan)
+        declared = {
+            row["fileName"]: row
+            for row in first_plan["packages"]
+            if row["type"] == "hsource"
+        }
+        self.assertEqual(set(declared), {path.name for path in source.source_packages})
+        for path in source.source_packages:
+            self.assertEqual(declared[path.name]["sha256"], self._sha256(path))
+            self.assertEqual(declared[path.name]["sizeBytes"], path.stat().st_size)
+
+        cache = json.loads(
+            (
+                self.workspace
+                / builder.SOURCE_DESCRIPTOR_CACHE_DIRECTORY
+                / builder.SOURCE_DESCRIPTOR_CACHE_FILE
+            ).read_text("utf-8")
+        )
+        payloads = [entry["payload"] for entry in cache["entries"].values()]
+        self.assertTrue(payloads)
+        for payload in payloads:
+            self.assertIn("pythonRuntime", payload)
+            self.assertIn("zlibCompileVersion", payload)
+            self.assertIn("zlibRuntimeVersion", payload)
+
+    def test_source_pack_fails_closed_before_publish_when_cached_descriptor_mismatches(self):
+        pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-cache-prime",
+            self.private_key_path,
+            profile_id="balanced",
+            emit_sources=False,
+        )
+        output = self.root / "dist-source-cache-mismatch"
+        original_pack = builder._pack_source_v2
+
+        def corrupt_after_pack(*args, **kwargs):
+            original_pack(*args, **kwargs)
+            target = args[4]
+            with target.open("ab") as stream:
+                stream.write(b"tampered")
+
+        with (
+            mock.patch.object(builder, "_pack_source_v2", side_effect=corrupt_after_pack),
+            self.assertRaisesRegex(BuildError, "descriptor cache 不一致"),
+        ):
+            pack_workspace_v2(
+                self.workspace,
+                output,
+                self.private_key_path,
+                profile_id="source",
+                emit_sources=True,
+            )
+
+        self.assertFalse(output.exists())
+
+    def test_streaming_source_package_uses_readable_zip_data_descriptors(self):
+        result = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-source-data-descriptor",
+            self.private_key_path,
+            profile_id="source",
+            emit_sources=True,
+        )
+
+        for package in result.source_packages:
+            with zipfile.ZipFile(package) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                payload = archive.read(f"files/{manifest['storedName']}")
+                payload_info = archive.getinfo(f"files/{manifest['storedName']}")
+            self.assertNotEqual(0, payload_info.flag_bits & 0x08)
+            self.assertEqual(manifest["rawSizeBytes"], len(payload))
+            self.assertEqual(manifest["sourceHash"], hashlib.sha256(payload).hexdigest())
+
     def test_emit_sources_false_still_rejects_symlink_source_metadata(self):
         outside = self.root / "outside.txt"
         outside.write_text("outside", encoding="utf-8")

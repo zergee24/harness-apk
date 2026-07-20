@@ -1,5 +1,8 @@
 package com.harnessapk.agent
 
+import android.database.sqlite.SQLiteFullException
+import android.system.ErrnoException
+import android.system.OsConstants
 import com.harnessapk.common.SystemTimeProvider
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AgentChunkEntity
@@ -38,8 +41,10 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.put
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.FileSystemException
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.Base64
@@ -2108,23 +2113,39 @@ class AgentRepository(
 
     private fun normalizeInstallFailure(error: Throwable): Throwable {
         if (error is CancellationException || error is AgentInsufficientStorageException) return error
+        generateSequence(error) { it.cause }
+            .filterIsInstance<CancellationException>()
+            .firstOrNull()
+            ?.let { return it }
         var current: Throwable? = error
         while (current != null) {
-            val name = current::class.java.name
-            val message = current.message.orEmpty().lowercase()
-            if (
-                name == "android.database.sqlite.SQLiteFullException" ||
-                message.contains("sqlite_full") ||
-                message.contains("database or disk is full") ||
-                message.contains("no space left on device") ||
-                message.contains("enospc")
-            ) {
+            val isTrustedStorageFailure = when (current) {
+                is SQLiteFullException -> true
+                is ErrnoException -> current.errno == OsConstants.ENOSPC
+                is FileSystemException -> current.hasSystemNoSpaceMessage()
+                is IOException -> current.hasSystemNoSpaceMessage()
+                else -> false
+            }
+            if (isTrustedStorageFailure) {
                 val available = runCatching(privateInstallAvailableBytes).getOrDefault(-1L)
                 return AgentInsufficientStorageException(-1L, available, error)
             }
             current = current.cause
         }
         return error
+    }
+
+    private fun IOException.hasSystemNoSpaceMessage(): Boolean {
+        val normalized = buildString {
+            append(message.orEmpty())
+            if (this@hasSystemNoSpaceMessage is FileSystemException) {
+                append(' ')
+                append(reason.orEmpty())
+            }
+        }.lowercase()
+        return normalized.contains("no space left on device") ||
+            normalized.contains("database or disk is full") ||
+            Regex("(^|[^a-z0-9_])enospc([^a-z0-9_]|$)").containsMatchIn(normalized)
     }
 
     private fun installWriteBytes(payloadBytes: Long): Long =

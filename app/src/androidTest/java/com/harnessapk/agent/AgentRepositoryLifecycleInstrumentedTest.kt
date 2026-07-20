@@ -1,8 +1,13 @@
 package com.harnessapk.agent
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteFullException
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import androidx.room.Room
+import androidx.room.RoomDatabase
 import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -10,6 +15,9 @@ import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AppDatabase
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -31,6 +39,125 @@ import java.util.zip.ZipOutputStream
 
 @RunWith(AndroidJUnit4::class)
 class AgentRepositoryLifecycleInstrumentedTest {
+    @Test
+    fun fileBackedRoomWalAndFtsPeakGrowthStaysWithinConservativeCorpusBudget() = runBlocking {
+        val fixture = FileBackedIntegrationFixture(chunkCount = 4_000)
+        val session = fixture.repository.preparePackageImport(fixture.bundle.name) {
+            fixture.bundle.inputStream()
+        }
+        val corpusBytes = (session.parsedPackage as V2Bundle).corpora.single().uncompressedSizeBytes
+        val budget = conservativeCorpusInstallWorkspaceBytes(corpusBytes)
+        val baseline = fixture.databaseFootprint()
+        var peak = baseline
+        val sampler = launch(Dispatchers.IO) {
+            while (isActive) {
+                peak = maxOf(peak, fixture.databaseFootprint())
+                delay(2L)
+            }
+        }
+
+        fixture.repository.installPackage(session, profileId = "source")
+        sampler.cancel()
+        sampler.join()
+        fixture.checkpointWal()
+        peak = maxOf(peak, fixture.databaseFootprint())
+        val allocatedGrowth = (peak.allocatedBytes - baseline.allocatedBytes).coerceAtLeast(0L)
+
+        assertTrue("allocated growth=$allocatedGrowth budget=$budget", allocatedGrowth <= budget)
+        assertEquals(4_000, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(4_000, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunk_fts"))
+        println(
+            "ROOM_FTS_BUDGET corpus=$corpusBytes budget=$budget " +
+                "peakLogical=${peak.logicalBytes} peakAllocated=${peak.allocatedBytes} " +
+                "allocatedGrowth=$allocatedGrowth",
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun fileBackedQuotaProducesRealSQLiteFullAndRoomInstallKeepsSessionRetryable() = runBlocking {
+        val fixture = FileBackedIntegrationFixture(chunkCount = 2_200)
+        val session = fixture.repository.preparePackageImport(fixture.bundle.name) {
+            fixture.bundle.inputStream()
+        }
+        val realSQLiteFull = fixture.createRealSQLiteFullFromFileBackedQuota()
+        fixture.failNextFtsWrite(realSQLiteFull)
+
+        val failure = runCatching {
+            fixture.repository.installPackage(session, profileId = "source")
+        }.exceptionOrNull()
+
+        assertTrue(
+            "failure chain=" + generateSequence(failure) { it.cause }
+                .joinToString(" -> ") { "${it::class.java.name}:${it.message}" },
+            failure is AgentInsufficientStorageException,
+        )
+        assertTrue(generateSequence(failure) { it.cause }.any { it is SQLiteFullException })
+        assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agents"))
+        assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertTrue(fixture.snapshotFiles().isNotEmpty())
+
+        assertEquals(AgentStatus.READY, fixture.repository.installPackage(session, "source").agent.status)
+        assertTrue(fixture.snapshotFiles().isEmpty())
+        fixture.close()
+    }
+
+    @Test
+    fun errnoNormalizationAcceptsOnlyEnospcAndKeepsThatSessionRetryable() = runBlocking {
+        val enospcFixture = FileBackedIntegrationFixture(chunkCount = 16)
+        val enospcSession = enospcFixture.repository.preparePackageImport(enospcFixture.bundle.name) {
+            enospcFixture.bundle.inputStream()
+        }
+        enospcFixture.failNextFtsWrite(ErrnoException("fts write", OsConstants.ENOSPC))
+
+        val enospcFailure = runCatching {
+            enospcFixture.repository.installPackage(enospcSession, profileId = "source")
+        }.exceptionOrNull()
+
+        assertTrue(enospcFailure is AgentInsufficientStorageException)
+        assertTrue(generateSequence(enospcFailure) { it.cause }.any { it is ErrnoException })
+        assertEquals(
+            AgentStatus.READY,
+            enospcFixture.repository.installPackage(enospcSession, profileId = "source").agent.status,
+        )
+        enospcFixture.close()
+
+        val eioFixture = FileBackedIntegrationFixture(chunkCount = 16)
+        val eioSession = eioFixture.repository.preparePackageImport(eioFixture.bundle.name) {
+            eioFixture.bundle.inputStream()
+        }
+        eioFixture.failNextFtsWrite(ErrnoException("fts write", OsConstants.EIO))
+
+        val eioFailure = runCatching {
+            eioFixture.repository.installPackage(eioSession, profileId = "source")
+        }.exceptionOrNull()
+        val eioChain = generateSequence(eioFailure) { it.cause }
+            .joinToString(" -> ") { error ->
+                buildString {
+                    append(error::class.java.name)
+                    append(':')
+                    append(error.message)
+                    if (error is ErrnoException) append("[errno=${error.errno}]")
+                }
+            }
+        println("EIO_FAILURE_CHAIN $eioChain")
+
+        assertFalse(eioChain, eioFailure is AgentInsufficientStorageException)
+        assertTrue(
+            eioChain,
+            generateSequence(eioFailure) { it.cause }
+                .filterIsInstance<ErrnoException>()
+                .any { it.errno == OsConstants.EIO },
+        )
+        assertTrue(
+            eioChain,
+            runCatching {
+                eioFixture.repository.installPackage(eioSession, profileId = "source")
+            }.exceptionOrNull() is AgentBundleException,
+        )
+        eioFixture.close()
+    }
+
     @Test
     fun realSignedBundleInstalls2200ChunksSourceAndReadyStateThroughRoomAndFilesystem() = runBlocking {
         val fixture = IntegrationFixture(chunkCount = 2_200)
@@ -221,6 +348,127 @@ private class IntegrationFixture(
         db.close()
         root.deleteRecursively()
     }
+}
+
+private data class DatabaseFootprint(
+    val logicalBytes: Long,
+    val allocatedBytes: Long,
+) : Comparable<DatabaseFootprint> {
+    override fun compareTo(other: DatabaseFootprint): Int =
+        allocatedBytes.compareTo(other.allocatedBytes)
+}
+
+private class FileBackedIntegrationFixture(
+    chunkCount: Int,
+    journalMode: RoomDatabase.JournalMode = RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING,
+) {
+    private val context = ApplicationProvider.getApplicationContext<Context>()
+    private val root = context.cacheDir.resolve("agent-file-backed-${UUID.randomUUID()}").apply { mkdirs() }
+    private val filesRoot = root.resolve("files")
+    private val cacheRoot = root.resolve("cache")
+    private val packageRoot = root.resolve("packages").apply { mkdirs() }
+    private val databaseName = "agent-file-backed-${UUID.randomUUID()}.db"
+    private val databasePath = context.getDatabasePath(databaseName)
+    private val ftsFailure = OneShotFtsFailureController()
+    val db: AppDatabase = Room.databaseBuilder(context, AppDatabase::class.java, databaseName)
+        .setJournalMode(journalMode)
+        .build()
+    private val sourceHash = "source".encodeToByteArray().sha256()
+    val bundle: File = RealV2Packages(packageRoot, sourceHash).bundle(chunkCount)
+    val repository = AgentRepository(
+        filesDir = filesRoot,
+        cacheDir = cacheRoot,
+        dao = ftsFailure.wrap(db.agentDao()),
+        conversationDao = db.conversationDao(),
+        reader = AgentBundleReader(temporaryDirectory = root.resolve("reader")),
+        transactionRunner = AgentTransactionRunner { block -> db.withTransaction { block() } },
+        timeProvider = TimeProvider { 100L },
+        ioDispatcher = Dispatchers.IO,
+    )
+
+    fun databaseFootprint(): DatabaseFootprint {
+        val files = listOf(
+            databasePath,
+            File(databasePath.absolutePath + "-wal"),
+            File(databasePath.absolutePath + "-shm"),
+            File(databasePath.absolutePath + "-journal"),
+        ).filter(File::isFile)
+        return DatabaseFootprint(
+            logicalBytes = files.sumOf(File::length),
+            allocatedBytes = files.sumOf { file ->
+                runCatching { Math.multiplyExact(Os.stat(file.absolutePath).st_blocks, 512L) }
+                    .getOrDefault(file.length())
+            },
+        )
+    }
+
+    fun checkpointWal() {
+        db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(TRUNCATE)").use { cursor ->
+            check(cursor.moveToFirst())
+        }
+    }
+
+    fun failNextFtsWrite(error: Throwable) {
+        ftsFailure.failure = error
+    }
+
+    fun createRealSQLiteFullFromFileBackedQuota(): SQLiteFullException {
+        val quotaPath = root.resolve("sqlite-full-quota.db")
+        val quota = SQLiteDatabase.openOrCreateDatabase(quotaPath, null)
+        return try {
+            quota.rawQuery("PRAGMA journal_mode=DELETE", null).use { cursor ->
+                check(cursor.moveToFirst())
+            }
+            quota.execSQL("CREATE TABLE payload(value BLOB NOT NULL)")
+            val currentPages = quota.rawQuery("PRAGMA page_count", null).use { cursor ->
+                check(cursor.moveToFirst())
+                cursor.getLong(0)
+            }
+            quota.rawQuery("PRAGMA max_page_count=$currentPages", null).use { cursor ->
+                check(cursor.moveToFirst())
+                check(cursor.getLong(0) == currentPages)
+            }
+            try {
+                quota.execSQL("INSERT INTO payload(value) VALUES(zeroblob(1048576))")
+                error("file-backed max_page_count did not raise SQLiteFullException")
+            } catch (error: SQLiteFullException) {
+                error
+            }
+        } finally {
+            quota.close()
+        }
+    }
+
+    fun snapshotFiles(): List<File> =
+        cacheRoot.resolve("agent-install-snapshots").listFiles().orEmpty().filter(File::isFile)
+
+    fun close() {
+        db.close()
+        context.deleteDatabase(databaseName)
+        root.deleteRecursively()
+    }
+}
+
+private class OneShotFtsFailureController {
+    var failure: Throwable? = null
+
+    fun wrap(delegate: com.harnessapk.storage.AgentDao): com.harnessapk.storage.AgentDao =
+        Proxy.newProxyInstance(
+            delegate::class.java.classLoader,
+            arrayOf(com.harnessapk.storage.AgentDao::class.java),
+        ) { _, method, arguments ->
+            if (method.name == "insertChunkSearchRows") {
+                failure?.let { injected ->
+                    failure = null
+                    throw injected
+                }
+            }
+            try {
+                method.invoke(delegate, *(arguments ?: emptyArray()))
+            } catch (error: InvocationTargetException) {
+                throw requireNotNull(error.cause)
+            }
+        } as com.harnessapk.storage.AgentDao
 }
 
 private class SQLiteFullController(private val failAfterCall: Int?) {
