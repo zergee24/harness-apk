@@ -53,6 +53,7 @@ class CorpusShard:
     source_hashes: tuple[str, ...] = ()
     periods: tuple[str, ...] = ()
     top_level_ids: tuple[str, ...] = ()
+    selection_top_id: str = ""
     chunk_ids: tuple[str, ...] = ()
     node_ids: tuple[str, ...] = ()
     coverage: frozenset[str] = frozenset()

@@ -208,6 +208,19 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
         core_hashes = tuple(
             self._source(source_id)["sourceHash"] for source_id in core_sources
         )
+        core_top_level_ids = tuple(
+            row["id"]
+            for row in connection.execute(
+                """
+                SELECT DISTINCT nodes.id
+                FROM nodes
+                JOIN chunk_nodes ON chunk_nodes.node_id = nodes.id
+                JOIN core_refs ON core_refs.chunk_id = chunk_nodes.chunk_id
+                WHERE nodes.parent_id IS NULL
+                ORDER BY nodes.id
+                """
+            )
+        )
         shards = [
             CorpusShard(
                 package_id="core-evidence",
@@ -216,6 +229,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                 install_class="required",
                 source_ids=core_sources,
                 source_hashes=core_hashes,
+                top_level_ids=core_top_level_ids,
                 chunk_ids=core_chunks,
                 node_ids=core_nodes,
                 coverage=self.coverage_for("core", ""),
@@ -233,6 +247,17 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
         for row in selectors:
             selector = self.selector(row["source_id"], row["period"], row["top_id"])
             shard_id = _shard_id(row["source_id"], row["period"], row["top_id"])
+            source_root_ids = tuple(
+                item["id"]
+                for item in connection.execute(
+                    """
+                    SELECT id FROM nodes
+                    WHERE source_id = ? AND parent_id IS NULL
+                    ORDER BY id
+                    """,
+                    (row["source_id"],),
+                )
+            )
             chunk_ids = tuple(
                 item["id"]
                 for item in connection.execute(
@@ -266,7 +291,8 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                     source_ids=(row["source_id"],),
                     source_hashes=(row["source_hash"],),
                     periods=(row["period"],),
-                    top_level_ids=(row["top_id"],),
+                    top_level_ids=source_root_ids,
+                    selection_top_id=row["top_id"],
                     chunk_ids=chunk_ids,
                     node_ids=node_ids,
                     coverage=self.coverage_for("selector", selector),
@@ -420,7 +446,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
             )
         return (
             "WHERE chunks.source_id = ? AND chunks.period = ? AND chunks.top_id = ?",
-            (shard.source_ids[0], shard.periods[0], shard.top_level_ids[0]),
+            (shard.source_ids[0], shard.periods[0], shard.selection_top_id),
         )
 
     def _create_schema(self) -> None:
@@ -701,7 +727,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
             SELECT 1 FROM chunks
             WHERE id = ? AND source_id = ? AND period = ? AND top_id = ?
             """,
-            (chunk_id, shard.source_ids[0], shard.periods[0], shard.top_level_ids[0]),
+            (chunk_id, shard.source_ids[0], shard.periods[0], shard.selection_top_id),
         ).fetchone() is not None
 
     def _source(self, source_id: str) -> dict[str, Any]:

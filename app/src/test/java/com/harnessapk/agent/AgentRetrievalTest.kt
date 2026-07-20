@@ -99,6 +99,51 @@ class AgentRetrievalTest {
     }
 
     @Test
+    fun v2InstallRecapturesPrivateFilesystemSpaceAndFailsBeforeFinalCopy() = runTest {
+        var availableBytes = 16L
+        var captures = 0
+        val fixture = v2InstallFixture(
+            privateInstallAvailableBytes = {
+                captures += 1
+                availableBytes
+            },
+        )
+        val blocked = fixture.repository.preparePackageImport("balanced.hbundle") {
+            "bundle".byteInputStream()
+        }
+
+        val failure = runCatching { fixture.repository.installPackage(blocked, "balanced") }.exceptionOrNull()
+
+        assertTrue(failure is AgentBundleException)
+        assertEquals(1, captures)
+        assertTrue(fixture.dao.findAgent("agent-v2") == null)
+        assertTrue(fixture.repositoryRoot.resolve("files").walkTopDown().none(File::isFile))
+
+        availableBytes = 17L
+        val installable = fixture.repository.preparePackageImport("balanced.hbundle") {
+            "bundle".byteInputStream()
+        }
+        assertEquals(AgentStatus.READY, fixture.repository.installPackage(installable, "balanced").agent.status)
+        assertEquals(2, captures)
+    }
+
+    @Test
+    fun balancedConvenienceBundleCanInstallLiteWithoutCopyingUnselectedSourcePackage() = runTest {
+        val fixture = v2InstallFixture()
+        val session = fixture.repository.preparePackageImport("balanced.hbundle") {
+            "bundle".byteInputStream()
+        }
+
+        val result = fixture.repository.installPackage(session, profileId = "lite")
+
+        assertEquals(AgentStatus.READY, result.agent.status)
+        assertFalse(fixture.dao.versionPackages.getValue("agent-v2:2:source-package").installed)
+        assertTrue(
+            fixture.repositoryRoot.resolve("files/agents/sources").walkTopDown().none(File::isFile),
+        )
+    }
+
+    @Test
     fun unifiedImportRejectsExternallyModifiedSessionWithoutInstallingAnything() = runTest {
         val fixture = v2InstallFixture()
         val session = fixture.repository.preparePackageImport("balanced.hbundle") {
@@ -327,6 +372,19 @@ class AgentRetrievalTest {
 
         assertEquals(AgentStatus.WAITING_FOR_CORPUS, result.agent.status)
         assertEquals(AgentStatus.WAITING_FOR_CORPUS.name, fixture.dao.version!!.state)
+    }
+
+    @Test
+    fun recommendedEvaluationAttributionDoesNotBlockReadyWhenEvidenceIsRequired() = runTest {
+        val fixture = v2InstallFixture(evaluationCorpusId = "corpus-recommended")
+        val session = fixture.repository.preparePackageImport("balanced.hbundle") {
+            "bundle".byteInputStream()
+        }
+
+        val result = fixture.repository.installPackage(session)
+
+        assertEquals(AgentStatus.READY, result.agent.status)
+        assertEquals(AgentStatus.READY.name, fixture.dao.version!!.state)
     }
 
     @Test
@@ -1904,12 +1962,14 @@ private data class V2InstallFixture(
 private fun v2InstallFixture(
     chunkCount: Int = 1,
     requiredEvidenceId: String = "chunk-0",
+    evaluationCorpusId: String = "corpus-core",
     standaloneCorpusTransform: (V2Corpus) -> V2Corpus = { it },
     existingCorpusTransform: (V2Corpus) -> V2Corpus = { it },
     failure: V2InstallFailure = V2InstallFailure.NONE,
     fileOps: AgentFileOps = DefaultAgentFileOps(),
     lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
     conversationDao: ConversationDao? = null,
+    privateInstallAvailableBytes: () -> Long = { Long.MAX_VALUE },
 ): V2InstallFixture {
     val root = Files.createTempDirectory("agent-v2-install-test").toFile().apply { deleteOnExit() }
     val packageFile = root.resolve("template.zip").apply { writeText("template") }
@@ -1934,7 +1994,12 @@ private fun v2InstallFixture(
     )
     val plan = V2InstallPlan(
         packages = listOf(installPackage, sourceInstallPackage),
-        profiles = listOf(V2InstallProfile("balanced", listOf("corpus-core", "source-package"), true)),
+        profiles = listOf(
+            V2InstallProfile("lite", listOf("corpus-core"), false),
+            V2InstallProfile("balanced", listOf("corpus-core", "source-package"), true),
+            V2InstallProfile("complete", listOf("corpus-core", "source-package"), false),
+            V2InstallProfile("source", listOf("corpus-core", "source-package"), false),
+        ),
         recommendedProfileId = "balanced",
         requiredCorpusIds = listOf("corpus-core"),
     )
@@ -1956,7 +2021,7 @@ private fun v2InstallFixture(
         examples = emptyList(),
         openers = V2Openers("", emptyList()),
         evaluations = listOf(
-            V2Evaluation("eval-1", "grounding", "依据？", "", listOf(requiredEvidenceId), "corpus-core"),
+            V2Evaluation("eval-1", "grounding", "依据？", "", listOf(requiredEvidenceId), evaluationCorpusId),
         ),
         installPlanJson = "{}",
         installPlan = plan,
@@ -2020,7 +2085,7 @@ private fun v2InstallFixture(
             "balanced",
             listOf("corpus-core", "source-package"),
         ),
-        profile = plan.profiles.single(),
+        profile = plan.profiles.first { it.id == "balanced" },
         agent = agent,
         corpora = listOf(corpus),
         sources = listOf(sourcePackage),
@@ -2083,6 +2148,7 @@ private fun v2InstallFixture(
             fileOps = fileOps,
             timeProvider = TimeProvider { 20L },
             ioDispatcher = Dispatchers.Unconfined,
+            privateInstallAvailableBytes = privateInstallAvailableBytes,
         ),
         dao = dao,
         repositoryRoot = root,

@@ -390,10 +390,6 @@ fun HarnessApkApp(
                             )
                         }
                     },
-                    onDone = {
-                        dispatchAgentPackageImport(AgentPackageImportEvent.Done)
-                        navController.popBackStack()
-                    },
                 )
             }
             composable(Routes.Updates) {

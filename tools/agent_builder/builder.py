@@ -1560,7 +1560,9 @@ def _stream_file_into_zip(
             expected_identity, before
         ):
             raise BuildError(f"文件在写入 ZIP 前发生变化：{source_path}")
-        with archive.open(_zip_info(path), "w", force_zip64=True) as target:
+        info = _zip_info(path)
+        info.file_size = before.st_size
+        with archive.open(info, "w") as target:
             with os.fdopen(os.dup(descriptor), "rb") as source:
                 while block := source.read(SOURCE_HASH_BUFFER_SIZE):
                     target.write(block)

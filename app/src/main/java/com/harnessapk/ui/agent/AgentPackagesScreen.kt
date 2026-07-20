@@ -1,6 +1,7 @@
 package com.harnessapk.ui.agent
 
 import android.net.Uri
+import android.os.StatFs
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +24,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,11 +44,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentBundleException
-import com.harnessapk.agent.AgentImportSession
-import com.harnessapk.agent.AgentStatus
+import com.harnessapk.agent.AgentImportPreview
+import com.harnessapk.agent.AgentPackageImportSession
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
+import com.harnessapk.agent.V1Bundle
+import com.harnessapk.agent.V2Agent
+import com.harnessapk.agent.V2Bundle
+import com.harnessapk.agent.V2Corpus
+import com.harnessapk.agent.V2InstallClass
+import com.harnessapk.agent.V2Source
+import com.harnessapk.agent.V2SourceRecord
 import com.harnessapk.common.AppContainer
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @Composable
 fun AgentPackagesScreen(
@@ -54,16 +68,20 @@ fun AgentPackagesScreen(
     externalImportUri: Uri?,
     onExternalImportConsumed: () -> Unit,
     onStartConversation: (Agent, String?) -> Unit,
-    onDone: () -> Unit,
 ) {
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val previewViewModel = remember {
-        AgentImportPreviewViewModel(container.agentRepository::discardImport)
+        AgentImportPreviewViewModel<AgentPackageImportSession>(
+            discardImport = container.agentRepository::discardPackageImport,
+            stagedFile = AgentPackageImportSession::stagedFile,
+        )
     }
     val importSession by previewViewModel.session.collectAsState()
-    var installedAgent by remember { mutableStateOf<Agent?>(null) }
+    var expandedAgentId by remember { mutableStateOf<String?>(null) }
+    var installedDetails by remember { mutableStateOf<Map<String, AgentPackageDetailUiState>>(emptyMap()) }
+    var previewAvailableBytes by remember { mutableStateOf(Long.MAX_VALUE) }
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
 
@@ -72,11 +90,12 @@ fun AgentPackagesScreen(
             isWorking = true
             errorText = null
             try {
-                val session = container.agentRepository.prepareImport(uri.lastPathSegment ?: "智能体包") {
+                val session = container.agentRepository.preparePackageImport(uri.lastPathSegment ?: "智能体包") {
                     context.contentResolver.openInputStream(uri)
                         ?: throw AgentBundleException("无法读取所选文件")
                 }
                 previewViewModel.replace(session)
+                previewAvailableBytes = privateInstallAvailableBytes(context.filesDir.absolutePath)
             } catch (error: Throwable) {
                 errorText = error.message ?: "智能体包读取失败"
             }
@@ -140,7 +159,15 @@ fun AgentPackagesScreen(
                     }
                 }
                 items(agents, key = Agent::id) { agent ->
-                    AgentPackageRow(agent)
+                    AgentPackageRow(
+                        agent = agent,
+                        detail = installedDetails[agent.id],
+                        expanded = expandedAgentId == agent.id,
+                        onToggleDetail = {
+                            expandedAgentId = if (expandedAgentId == agent.id) null else agent.id
+                        },
+                        onStartConversation = { onStartConversation(agent, sourceProjectId) },
+                    )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
             }
@@ -151,37 +178,52 @@ fun AgentPackagesScreen(
     }
 
     importSession?.let { session ->
-        AgentImportDialog(
-            session = session,
-            isInstalling = isWorking,
-            onDismiss = {
-                scope.launch {
-                    runCatching { previewViewModel.discardIfCurrent(session) }
+        val dismiss = {
+            scope.launch { runCatching { previewViewModel.discardIfCurrent(session) } }
+            Unit
+        }
+        val install: (String) -> Unit = { profileId ->
+            scope.launch {
+                val availableBytes = privateInstallAvailableBytes(context.filesDir.absolutePath)
+                previewAvailableBytes = availableBytes
+                val plan = (session.parsedPackage as? V2Bundle)?.toInstallationPlan()
+                if (plan != null && installationDecision(plan, availableBytes, profileId) !is AgentInstallationDecision.InstallDirectly) {
+                    return@launch
                 }
-            },
-            onInstall = {
-                scope.launch {
-                    isWorking = true
-                    errorText = null
-                    runCatching { container.agentRepository.install(session) }
-                        .onSuccess { result ->
-                            previewViewModel.clearIfCurrent(session)
-                            installedAgent = result.agent
-                        }
-                        .onFailure { error -> errorText = error.message ?: "智能体安装失败" }
-                    isWorking = false
-                }
-            },
-        )
-    }
-
-    installedAgent?.let { agent ->
-        AgentInstallSuccessDialog(
-            agent = agent,
-            sourceProjectId = sourceProjectId,
-            onStartConversation = onStartConversation,
-            onDone = onDone,
-        )
+                isWorking = true
+                errorText = null
+                runCatching { container.agentRepository.installPackage(session, profileId) }
+                    .onSuccess { result ->
+                        previewViewModel.clearIfCurrent(session)
+                        installedDetails = installedDetails + (
+                            result.agent.id to installedDetail(session, profileId, installedDetails[result.agent.id])
+                            )
+                        expandedAgentId = result.agent.id
+                    }
+                    .onFailure { error -> errorText = error.message ?: "智能体安装失败" }
+                isWorking = false
+            }
+        }
+        when (val parsed = session.parsedPackage) {
+            is V2Bundle -> AgentV2InstallPreview(
+                name = parsed.agent.manifest.name,
+                version = parsed.agent.manifest.version,
+                publisherFingerprint = parsed.publisherFingerprint,
+                plan = parsed.toInstallationPlan(),
+                availableBytes = previewAvailableBytes,
+                sourceRecords = parsed.corpora.flatMap(V2Corpus::sources),
+                isInstalling = isWorking,
+                onDismiss = dismiss,
+                onInstall = install,
+            )
+            else -> AgentImportDialog(
+                preview = session.preview,
+                sourceReadOnly = parsed is V2Source,
+                isInstalling = isWorking,
+                onDismiss = dismiss,
+                onInstall = { install(DEFAULT_INSTALLATION_PROFILE_ID) },
+            )
+        }
     }
 }
 
@@ -214,7 +256,13 @@ internal fun AgentPackagesEmptyState(
 }
 
 @Composable
-private fun AgentPackageRow(agent: Agent) {
+internal fun AgentPackageRow(
+    agent: Agent,
+    detail: AgentPackageDetailUiState?,
+    expanded: Boolean,
+    onToggleDetail: () -> Unit,
+    onStartConversation: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -228,17 +276,21 @@ private fun AgentPackageRow(agent: Agent) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        TextButton(onClick = onToggleDetail) { Text(if (expanded) "收起详情" else "查看详情") }
+        if (expanded) {
+            AgentPackageDetail(agent, detail, onStartConversation)
+        }
     }
 }
 
 @Composable
 private fun AgentImportDialog(
-    session: AgentImportSession,
+    preview: AgentImportPreview,
+    sourceReadOnly: Boolean,
     isInstalling: Boolean,
     onDismiss: () -> Unit,
     onInstall: () -> Unit,
 ) {
-    val preview = session.preview
     AlertDialog(
         onDismissRequest = { if (!isInstalling) onDismiss() },
         title = { Text("安装智能体") },
@@ -250,7 +302,10 @@ private fun AgentImportDialog(
                 Text("大小：${formatAgentPackageSize(preview.compressedSizeBytes)}")
                 Text("发布者指纹：${preview.publisherFingerprint}", style = MaterialTheme.typography.bodySmall)
                 if (preview.includesOriginalSources) {
-                    Text("包含原始资料文件", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (sourceReadOnly) sourceParticipationLabel() else "包含原始资料文件",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 if (isInstalling) {
                     AgentInstallProgress()
@@ -271,6 +326,124 @@ private fun AgentImportDialog(
 }
 
 @Composable
+internal fun AgentV2InstallPreview(
+    name: String,
+    version: Int,
+    publisherFingerprint: String,
+    plan: AgentInstallationPlan,
+    availableBytes: Long,
+    sourceRecords: List<V2SourceRecord>,
+    isInstalling: Boolean,
+    initialProfileId: String = DEFAULT_INSTALLATION_PROFILE_ID,
+    onDismiss: () -> Unit,
+    onInstall: (String) -> Unit,
+) {
+    var selectedProfileId by remember(plan, initialProfileId) { mutableStateOf(initialProfileId) }
+    var showAdjustment by remember(plan) { mutableStateOf(false) }
+    val decision = installationDecision(plan, availableBytes, selectedProfileId)
+    val installEnabled = !isInstalling && decision is AgentInstallationDecision.InstallDirectly
+    val exactBytes = exactInstallationBytes(plan, selectedProfileId)
+
+    AlertDialog(
+        onDismissRequest = { if (!isInstalling) onDismiss() },
+        title = { Text("推荐安装") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text("基于资料模拟 · v$version", style = MaterialTheme.typography.bodySmall)
+                Text("人物身份 · 必装")
+                Text("核心证据 · 覆盖核心立场与评测")
+                Text("推荐资料 · 补充谈话、时期和体裁")
+                Text(
+                    "准确安装大小：${exactBytes?.let(::formatAgentPackageSize) ?: "不可用"}",
+                    fontWeight = FontWeight.SemiBold,
+                )
+                when (decision) {
+                    is AgentInstallationDecision.ShowAdjustment -> Text(
+                        decision.reason,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    is AgentInstallationDecision.BlockMissingRequired -> Text(
+                        if (decision.missingPackageIds.isEmpty()) {
+                            "安装计划无效，已阻止安装"
+                        } else {
+                            "必装资料不可用：${decision.missingPackageIds.joinToString()}"
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    is AgentInstallationDecision.InstallDirectly -> Unit
+                }
+                if (selectedProfileId == "source") {
+                    Text(
+                        sourceParticipationLabel(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (shouldShowWrittenPersonaWarning(sourceRecords)) {
+                    Text(
+                        "书面人格，对话还原度有限",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Text(
+                    "发布者指纹：$publisherFingerprint",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (showAdjustment) {
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        INSTALLATION_PROFILE_ORDER.forEachIndexed { index, profileId ->
+                            SegmentedButton(
+                                selected = selectedProfileId == profileId,
+                                onClick = { selectedProfileId = profileId },
+                                shape = SegmentedButtonDefaults.itemShape(index, INSTALLATION_PROFILE_ORDER.size),
+                                modifier = Modifier.weight(1f),
+                                label = {
+                                    Text(
+                                        text = INSTALLATION_PROFILE_LABELS.getValue(profileId),
+                                        maxLines = 2,
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                },
+                            )
+                        }
+                    }
+                }
+                if (isInstalling) AgentInstallProgress()
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = installEnabled,
+                onClick = { onInstall(selectedProfileId) },
+            ) {
+                Text(if (isInstalling) "正在安装" else "安装")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                enabled = !isInstalling,
+                onClick = {
+                    if (showAdjustment) showAdjustment = false else onDismiss()
+                },
+            ) {
+                Text(if (showAdjustment) "收起" else "取消")
+            }
+            TextButton(
+                enabled = !isInstalling,
+                onClick = { showAdjustment = true },
+            ) {
+                Text("调整资料")
+            }
+        },
+    )
+}
+
+@Composable
 internal fun AgentInstallProgress() {
     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
     Text(
@@ -281,36 +454,160 @@ internal fun AgentInstallProgress() {
 }
 
 @Composable
-internal fun AgentInstallSuccessDialog(
+private fun AgentPackageDetail(
     agent: Agent,
-    sourceProjectId: String?,
-    onStartConversation: (Agent, String?) -> Unit,
-    onDone: () -> Unit,
+    detail: AgentPackageDetailUiState?,
+    onStartConversation: () -> Unit,
 ) {
-    val canStartConversation = agent.status == AgentStatus.READY
-    AlertDialog(
-        onDismissRequest = {},
-        title = { Text("智能体已安装") },
-        text = {
+    val bodyColor = MaterialTheme.colorScheme.onSurfaceVariant
+    Text("schema/version：${detail?.schemaVersion ?: "-"} / ${agent.activeVersion}", style = MaterialTheme.typography.bodySmall)
+    Text("发布者指纹：${agent.publisherFingerprint}", style = MaterialTheme.typography.bodySmall, color = bodyColor)
+    Text("运行状态：${agent.status.name}", style = MaterialTheme.typography.bodySmall)
+    detail?.let { state ->
+        Text("必装：${state.required.installed}/${state.required.planned}", style = MaterialTheme.typography.bodySmall)
+        Text("推荐：${state.recommended.installed}/${state.recommended.planned}", style = MaterialTheme.typography.bodySmall)
+        Text("可选：${state.optional.installed}/${state.optional.planned}", style = MaterialTheme.typography.bodySmall)
+        Text("原文：${state.source.installed}/${state.source.planned}", style = MaterialTheme.typography.bodySmall)
+        Text("安装档位：${INSTALLATION_PROFILE_LABELS[state.selectedProfileId] ?: state.selectedProfileId}", style = MaterialTheme.typography.bodySmall)
+        Text("准确安装大小：${formatAgentPackageSize(state.exactInstalledBytes)}", style = MaterialTheme.typography.bodySmall)
+        state.lastEvidenceExpansionAt?.let { timestamp ->
+            Text("最近资料扩展：${formatExpansionTime(timestamp)}", style = MaterialTheme.typography.bodySmall)
+        }
+        if (state.missingRequiredPackageIds.isNotEmpty()) {
             Text(
-                if (canStartConversation) {
-                    "${agent.name} 已可用于新对话。"
-                } else {
-                    "仍缺少资料，补齐后可开始对话。"
-                },
+                "缺少必装资料：${state.missingRequiredPackageIds.joinToString()}",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
             )
-        },
-        confirmButton = {
-            if (canStartConversation) {
-                TextButton(onClick = { onStartConversation(agent, sourceProjectId) }) {
-                    Text("开始对话")
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDone) {
-                Text("完成")
-            }
-        },
+        }
+    }
+    TextButton(enabled = canStartAgent(agent), onClick = onStartConversation) {
+        Text("开始对话")
+    }
+}
+
+private val INSTALLATION_PROFILE_LABELS = mapOf(
+    "lite" to "轻量",
+    "balanced" to "推荐",
+    "complete" to "完整证据",
+    "source" to "包含原文",
+)
+
+internal data class AgentPackageCount(val installed: Int, val planned: Int)
+
+internal data class AgentPackageDetailUiState(
+    val schemaVersion: Int,
+    val selectedProfileId: String,
+    val exactInstalledBytes: Long,
+    val required: AgentPackageCount,
+    val recommended: AgentPackageCount,
+    val optional: AgentPackageCount,
+    val source: AgentPackageCount,
+    val lastEvidenceExpansionAt: Long?,
+    val missingRequiredPackageIds: List<String>,
+)
+
+private fun V2Bundle.toInstallationPlan(): AgentInstallationPlan = AgentInstallationPlan(
+    agentPackageId = manifest.agent.fileName,
+    agentSizeBytes = manifest.agent.sizeBytes,
+    packages = agent.installPlan.packages.map { declaration ->
+        AgentInstallationPackage(
+            id = declaration.id,
+            type = declaration.type,
+            installClass = declaration.installClass,
+            sizeBytes = declaration.sizeBytes,
+        )
+    },
+    profiles = agent.installPlan.profiles.map { profile ->
+        AgentInstallationProfile(profile.id, profile.packageIds)
+    },
+    requiredPackageIds = agent.installPlan.requiredCorpusIds,
+)
+
+private fun installedDetail(
+    session: AgentPackageImportSession,
+    profileId: String,
+    previous: AgentPackageDetailUiState?,
+): AgentPackageDetailUiState = when (val parsed = session.parsedPackage) {
+    is V2Bundle -> {
+        val plan = parsed.toInstallationPlan()
+        val selectedIds = plan.profiles.first { it.id == profileId }.packageIds.toSet()
+        fun count(installClass: V2InstallClass) = AgentPackageCount(
+            installed = plan.packages.count { it.installClass == installClass && it.id in selectedIds },
+            planned = plan.packages.count { it.installClass == installClass },
+        )
+        AgentPackageDetailUiState(
+            schemaVersion = 2,
+            selectedProfileId = profileId,
+            exactInstalledBytes = requireNotNull(exactInstallationBytes(plan, profileId)),
+            required = count(V2InstallClass.REQUIRED),
+            recommended = count(V2InstallClass.RECOMMENDED),
+            optional = count(V2InstallClass.OPTIONAL),
+            source = count(V2InstallClass.SOURCE),
+            lastEvidenceExpansionAt = null,
+            missingRequiredPackageIds = plan.requiredPackageIds.filterNot(selectedIds::contains),
+        )
+    }
+    is V2Corpus -> previous.withAddedPackage(parsed.manifest.installClass, parsed.compressedSizeBytes)
+    is V2Source -> previous.withAddedPackage(V2InstallClass.SOURCE, parsed.compressedSizeBytes)
+    is V2Agent -> {
+        fun planned(installClass: V2InstallClass) = parsed.installPlan.packages.count { it.installClass == installClass }
+        AgentPackageDetailUiState(
+            schemaVersion = 2,
+            selectedProfileId = profileId,
+            exactInstalledBytes = parsed.compressedSizeBytes,
+            required = AgentPackageCount(0, planned(V2InstallClass.REQUIRED)),
+            recommended = AgentPackageCount(0, planned(V2InstallClass.RECOMMENDED)),
+            optional = AgentPackageCount(0, planned(V2InstallClass.OPTIONAL)),
+            source = AgentPackageCount(0, planned(V2InstallClass.SOURCE)),
+            lastEvidenceExpansionAt = null,
+            missingRequiredPackageIds = parsed.installPlan.requiredCorpusIds.sorted(),
+        )
+    }
+    is V1Bundle -> AgentPackageDetailUiState(
+        schemaVersion = 1,
+        selectedProfileId = "v1",
+        exactInstalledBytes = parsed.compressedSizeBytes,
+        required = AgentPackageCount(parsed.bundle.corpora.size, parsed.bundle.agent.requiredCorpora.size),
+        recommended = AgentPackageCount(0, 0),
+        optional = AgentPackageCount(0, 0),
+        source = AgentPackageCount(0, 0),
+        lastEvidenceExpansionAt = null,
+        missingRequiredPackageIds = parsed.bundle.agent.requiredCorpora
+            .filterNot(parsed.bundle.corpora.map { it.id }.toSet()::contains),
     )
 }
+
+private fun AgentPackageDetailUiState?.withAddedPackage(
+    installClass: V2InstallClass,
+    packageBytes: Long,
+): AgentPackageDetailUiState {
+    val base = this ?: AgentPackageDetailUiState(
+        schemaVersion = 2,
+        selectedProfileId = "standalone",
+        exactInstalledBytes = 0L,
+        required = AgentPackageCount(0, 0),
+        recommended = AgentPackageCount(0, 0),
+        optional = AgentPackageCount(0, 0),
+        source = AgentPackageCount(0, 0),
+        lastEvidenceExpansionAt = null,
+        missingRequiredPackageIds = emptyList(),
+    )
+    fun AgentPackageCount.increment() = copy(installed = (installed + 1).coerceAtMost(planned.coerceAtLeast(installed + 1)))
+    return base.copy(
+        exactInstalledBytes = Math.addExact(base.exactInstalledBytes, packageBytes),
+        required = if (installClass == V2InstallClass.REQUIRED) base.required.increment() else base.required,
+        recommended = if (installClass == V2InstallClass.RECOMMENDED) base.recommended.increment() else base.recommended,
+        optional = if (installClass == V2InstallClass.OPTIONAL) base.optional.increment() else base.optional,
+        source = if (installClass == V2InstallClass.SOURCE) base.source.increment() else base.source,
+        lastEvidenceExpansionAt = System.currentTimeMillis(),
+        missingRequiredPackageIds = if (installClass == V2InstallClass.REQUIRED) emptyList() else base.missingRequiredPackageIds,
+    )
+}
+
+private fun privateInstallAvailableBytes(path: String): Long =
+    runCatching { StatFs(path).availableBytes }.getOrDefault(-1L)
+
+private fun formatExpansionTime(timestamp: Long): String = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+    .withZone(ZoneId.systemDefault())
+    .format(Instant.ofEpochMilli(timestamp))

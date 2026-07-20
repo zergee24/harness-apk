@@ -7,6 +7,11 @@ import com.harnessapk.agent.AgentImportSession
 import com.harnessapk.agent.AgentPackageManifest
 import com.harnessapk.agent.ParsedAgentBundle
 import com.harnessapk.agent.AgentStatus
+import com.harnessapk.agent.V2Authorship
+import com.harnessapk.agent.V2InstallClass
+import com.harnessapk.agent.V2PackageType
+import com.harnessapk.agent.V2SourceGenre
+import com.harnessapk.agent.V2SourceRecord
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
@@ -35,6 +40,134 @@ class AgentUiStateTest {
     }
 
     @Test
+    fun onlyReadyAgentCanStart() {
+        AgentStatus.entries.forEach { status ->
+            assertEquals(status == AgentStatus.READY, canStartAgent(agent(status, 1, 1)))
+        }
+    }
+
+    @Test
+    fun balancedInstallsDirectlyWhenExactSignedBytesFit() {
+        val decision = installationDecision(plan(), availableBytes = 350L, requestedProfileId = null)
+
+        assertEquals(AgentInstallationDecision.InstallDirectly("balanced"), decision)
+    }
+
+    @Test
+    fun lowSpaceSuggestsLiteWithoutChangingBalancedSelection() {
+        val decision = installationDecision(plan(), availableBytes = 250L, requestedProfileId = null)
+
+        assertEquals(
+            AgentInstallationDecision.ShowAdjustment(
+                selectedProfileId = "balanced",
+                suggestedProfileId = "lite",
+                reason = "推荐安装空间不足",
+            ),
+            decision,
+        )
+    }
+
+    @Test
+    fun explicitCompleteAndSourceSelectionsInstallDirectlyWhenTheyFit() {
+        assertEquals(
+            AgentInstallationDecision.InstallDirectly("complete"),
+            installationDecision(plan(), availableBytes = 450L, requestedProfileId = "complete"),
+        )
+        assertEquals(
+            AgentInstallationDecision.InstallDirectly("source"),
+            installationDecision(plan(), availableBytes = 550L, requestedProfileId = "source"),
+        )
+    }
+
+    @Test
+    fun explicitSelectionIsPreservedAndLargestRunnableLowerProfileIsSuggested() {
+        assertEquals(
+            AgentInstallationDecision.ShowAdjustment(
+                selectedProfileId = "source",
+                suggestedProfileId = "complete",
+                reason = "所选资料空间不足",
+            ),
+            installationDecision(plan(), availableBytes = 450L, requestedProfileId = "source"),
+        )
+    }
+
+    @Test
+    fun requiredShortageAndOverflowFailClosed() {
+        assertEquals(
+            AgentInstallationDecision.BlockMissingRequired(listOf("core")),
+            installationDecision(plan(), availableBytes = 199L, requestedProfileId = "lite"),
+        )
+        assertTrue(
+            installationDecision(
+                plan(agentSizeBytes = Long.MAX_VALUE, coreSizeBytes = 1L),
+                availableBytes = Long.MAX_VALUE,
+                requestedProfileId = null,
+            ) is AgentInstallationDecision.BlockMissingRequired,
+        )
+        assertTrue(
+            installationDecision(plan(agentSizeBytes = 0L), Long.MAX_VALUE, null) is
+                AgentInstallationDecision.BlockMissingRequired,
+        )
+        assertTrue(
+            installationDecision(plan(coreSizeBytes = -1L), Long.MAX_VALUE, null) is
+                AgentInstallationDecision.BlockMissingRequired,
+        )
+    }
+
+    @Test
+    fun unknownDuplicateAndMissingRequiredIdsFailClosed() {
+        val duplicatePackage = plan().copy(
+            packages = plan().packages + plan().packages.first(),
+        )
+        val duplicateProfilePackage = plan().copy(
+            profiles = plan().profiles.map { profile ->
+                if (profile.id == "lite") profile.copy(packageIds = listOf("core", "core")) else profile
+            },
+        )
+        val unknownProfilePackage = plan().copy(
+            profiles = plan().profiles.map { profile ->
+                if (profile.id == "balanced") profile.copy(packageIds = profile.packageIds + "unknown") else profile
+            },
+        )
+        val missingRequired = plan().copy(
+            profiles = plan().profiles.map { profile ->
+                if (profile.id == "lite") profile.copy(packageIds = emptyList()) else profile
+            },
+        )
+
+        listOf(duplicatePackage, duplicateProfilePackage, unknownProfilePackage, missingRequired).forEach { malformed ->
+            assertTrue(
+                installationDecision(malformed, Long.MAX_VALUE, null) is
+                    AgentInstallationDecision.BlockMissingRequired,
+            )
+        }
+        assertTrue(
+            installationDecision(plan(), Long.MAX_VALUE, "unknown") is
+                AgentInstallationDecision.BlockMissingRequired,
+        )
+    }
+
+    @Test
+    fun sourceLabelIsReadOnlyAndWrittenPersonaWarningUsesExactMetadataIntersection() {
+        assertEquals("仅阅读核验，不参与回答", sourceParticipationLabel())
+        assertTrue(
+            shouldShowWrittenPersonaWarning(
+                listOf(source("essay", V2SourceGenre.ESSAY, V2Authorship.DIRECT)),
+            ),
+        )
+        assertTrue(
+            shouldShowWrittenPersonaWarning(
+                listOf(source("speech-secondary", V2SourceGenre.SPEECH, V2Authorship.SECONDARY)),
+            ),
+        )
+        assertFalse(
+            shouldShowWrittenPersonaWarning(
+                listOf(source("interview-direct", V2SourceGenre.INTERVIEW, V2Authorship.EDITED_DIRECT)),
+            ),
+        )
+    }
+
+    @Test
     fun formatsPackageSizeWithoutExcessPrecision() {
         assertEquals("900 B", formatAgentPackageSize(900))
         assertEquals("1.5 MB", formatAgentPackageSize(1_572_864))
@@ -43,10 +176,13 @@ class AgentUiStateTest {
     @Test
     fun replacingPreviewDiscardsNewSessionWhenPreviousDiscardFails() = runTest {
         val discarded = mutableListOf<String>()
-        val viewModel = AgentImportPreviewViewModel { session ->
-            discarded += session.id
-            if (session.id == "previous") throw AgentBundleException("previous expired")
-        }
+        val viewModel = AgentImportPreviewViewModel<AgentImportSession>(
+            discardImport = { session ->
+                discarded += session.id
+                if (session.id == "previous") throw AgentBundleException("previous expired")
+            },
+            stagedFile = AgentImportSession::stagedFile,
+        )
         val previous = session("previous")
         val replacement = session("replacement")
         viewModel.replace(previous)
@@ -62,13 +198,16 @@ class AgentUiStateTest {
         val allowFirstDiscard = CompletableDeferred<Unit>()
         var previousDiscardCalls = 0
         val discarded = mutableListOf<String>()
-        val viewModel = AgentImportPreviewViewModel { session ->
-            discarded += session.id
-            if (session.id == "previous" && ++previousDiscardCalls == 1) {
-                firstDiscardStarted.complete(Unit)
-                allowFirstDiscard.await()
-            }
-        }
+        val viewModel = AgentImportPreviewViewModel<AgentImportSession>(
+            discardImport = { session ->
+                discarded += session.id
+                if (session.id == "previous" && ++previousDiscardCalls == 1) {
+                    firstDiscardStarted.complete(Unit)
+                    allowFirstDiscard.await()
+                }
+            },
+            stagedFile = AgentImportSession::stagedFile,
+        )
         val previous = session("previous")
         val first = session("first")
         val second = session("second")
@@ -86,9 +225,10 @@ class AgentUiStateTest {
 
     @Test
     fun failedNewSessionCleanupDoesNotLeaveItsStagingFileOrReplaceValidPreview() = runTest {
-        val viewModel = AgentImportPreviewViewModel { session ->
-            throw AgentBundleException("cannot discard ${session.id}")
-        }
+        val viewModel = AgentImportPreviewViewModel<AgentImportSession>(
+            discardImport = { session -> throw AgentBundleException("cannot discard ${session.id}") },
+            stagedFile = AgentImportSession::stagedFile,
+        )
         val previous = session("previous")
         val replacement = session("replacement", createStagedFile = true)
         viewModel.replace(previous)
@@ -133,4 +273,43 @@ class AgentUiStateTest {
             preview = AgentImportPreview(id, id, 1, "", "publisher", emptyList(), 0L, false),
         )
     }
+
+    private fun plan(
+        agentSizeBytes: Long = 100L,
+        coreSizeBytes: Long = 100L,
+    ): AgentInstallationPlan = AgentInstallationPlan(
+        agentPackageId = "fixture.hagent",
+        agentSizeBytes = agentSizeBytes,
+        packages = listOf(
+            AgentInstallationPackage("core", V2PackageType.CORPUS, V2InstallClass.REQUIRED, coreSizeBytes),
+            AgentInstallationPackage("recommended", V2PackageType.CORPUS, V2InstallClass.RECOMMENDED, 100L),
+            AgentInstallationPackage("optional", V2PackageType.CORPUS, V2InstallClass.OPTIONAL, 100L),
+            AgentInstallationPackage("source", V2PackageType.SOURCE, V2InstallClass.SOURCE, 100L),
+        ),
+        profiles = listOf(
+            AgentInstallationProfile("lite", listOf("core")),
+            AgentInstallationProfile("balanced", listOf("core", "recommended")),
+            AgentInstallationProfile("complete", listOf("core", "recommended", "optional")),
+            AgentInstallationProfile("source", listOf("core", "recommended", "optional", "source")),
+        ),
+        requiredPackageIds = listOf("core"),
+    )
+
+    private fun source(
+        id: String,
+        genre: V2SourceGenre,
+        authorship: V2Authorship,
+    ): V2SourceRecord = V2SourceRecord(
+        sourceId = id,
+        title = id,
+        fileName = "$id.md",
+        storedName = "$id.md",
+        sourceHash = "a".repeat(64),
+        format = "md",
+        genre = genre,
+        authorship = authorship,
+        period = "1926",
+        rawSizeBytes = 1L,
+        extractedChars = 1L,
+    )
 }

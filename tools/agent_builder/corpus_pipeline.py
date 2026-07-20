@@ -497,7 +497,11 @@ def _insert_physical_chunk(
 def _merge_streaming_chunk(
     connection: sqlite3.Connection, primary: ContextualChunk, duplicate: ContextualChunk
 ) -> None:
-    aliases = tuple(sorted(set((*primary.source_aliases, *duplicate.source_aliases))))
+    aliases = tuple(sorted({
+        *primary.source_aliases,
+        duplicate.source_id,
+        *duplicate.source_aliases,
+    } - {primary.source_id}))
     merged = replace(primary, source_aliases=aliases)
     connection.execute(
         "UPDATE physical_chunks SET aliases = ?, payload = ? WHERE id = ?",
@@ -818,7 +822,7 @@ def _contextual_chunk(
             safe_near,
             semantic_guard,
         ),
-        source_aliases=(source.source_id,),
+        source_aliases=(),
         normalized_hash=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
         safe_near_hash=hashlib.sha256(safe_near.encode("utf-8")).hexdigest(),
         semantic_guard_hash=hashlib.sha256(semantic_guard.encode("utf-8")).hexdigest(),
@@ -909,7 +913,11 @@ def _is_safe_near_duplicate(left: ContextualChunk, right: ContextualChunk) -> bo
 def _merge_chunk(
     physical: list[ContextualChunk], primary: ContextualChunk, duplicate: ContextualChunk
 ) -> list[ContextualChunk]:
-    aliases = tuple(sorted(set((*primary.source_aliases, *duplicate.source_aliases))))
+    aliases = tuple(sorted({
+        *primary.source_aliases,
+        duplicate.source_id,
+        *duplicate.source_aliases,
+    } - {primary.source_id}))
     merged = replace(primary, source_aliases=aliases)
     return [merged if item.id == primary.id else item for item in physical]
 

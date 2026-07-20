@@ -1,6 +1,7 @@
 package com.harnessapk.common
 
 import android.content.Context
+import android.os.StatFs
 import androidx.room.Room
 import androidx.room.withTransaction
 import com.harnessapk.agent.AgentRepository
@@ -108,6 +109,7 @@ class AppContainer(context: Context) {
         },
         timeProvider = SystemTimeProvider,
         ioDispatcher = dispatchers.io,
+        privateInstallAvailableBytes = { StatFs(appContext.filesDir.absolutePath).availableBytes },
     )
     val conversationIdentityRepository = ConversationIdentityRepository(
         conversationDao = database.conversationDao(),

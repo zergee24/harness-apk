@@ -61,6 +61,7 @@ class AgentRepository(
     private val fileOps: AgentFileOps = DefaultAgentFileOps(),
     private val timeProvider: TimeProvider = SystemTimeProvider,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val privateInstallAvailableBytes: () -> Long = { Long.MAX_VALUE },
 ) : AgentContextDataSource {
     private val packageSessions = ConcurrentHashMap<String, OwnedPackageSession>()
     private val storageJson = Json { encodeDefaults = true }
@@ -359,10 +360,43 @@ class AgentRepository(
         stagedFile: File,
         profileId: String,
     ): AgentInstallResult {
-        if (bundle.profile.id != profileId) {
-            throw AgentBundleException("bundle profile 与安装选择不一致：$profileId")
+        val profile = bundle.agent.installPlan.profiles.singleOrNull { it.id == profileId }
+            ?: throw AgentBundleException("install plan 不包含所选 profile：$profileId")
+        val selectedIds = profile.packageIds.toSet()
+        if (selectedIds.size != profile.packageIds.size) {
+            throw AgentBundleException("所选 profile 包含重复 package ID")
         }
-        return installV2AgentContent(bundle.agent, bundle.corpora, bundle.sources, stagedFile, "bundle.hbundle")
+        val bundledIds = bundle.manifest.selectedPackageIds.toSet()
+        if (!bundledIds.containsAll(selectedIds)) {
+            throw AgentBundleException("当前 convenience bundle 不包含所选 profile 的全部子包")
+        }
+        val missingRequired = bundle.agent.installPlan.requiredCorpusIds.filterNot(selectedIds::contains)
+        if (missingRequired.isNotEmpty()) {
+            throw AgentBundleException("所选 profile 缺少 required package：${missingRequired.joinToString()}")
+        }
+        val declarations = bundle.agent.installPlan.packages.associateBy(V2InstallPackage::id)
+        if (declarations.size != bundle.agent.installPlan.packages.size || selectedIds.any { it !in declarations }) {
+            throw AgentBundleException("install plan package 声明无效")
+        }
+        val exactInstallBytes = exactSignedInstallBytes(
+            agentBytes = bundle.manifest.agent.sizeBytes,
+            packageBytes = profile.packageIds.map { declarations.getValue(it).sizeBytes },
+        )
+        val corpora = bundle.corpora.filter { it.manifest.id in selectedIds }
+        val sources = bundle.sources.filter { it.manifest.id in selectedIds }
+        if (corpora.map { it.manifest.id }.toSet() != selectedIds.filter { declarations.getValue(it).type == V2PackageType.CORPUS }.toSet() ||
+            sources.map { it.manifest.id }.toSet() != selectedIds.filter { declarations.getValue(it).type == V2PackageType.SOURCE }.toSet()
+        ) {
+            throw AgentBundleException("convenience bundle 子包与所选 profile 不一致")
+        }
+        return installV2AgentContent(
+            bundle.agent,
+            corpora,
+            sources,
+            stagedFile,
+            "bundle.hbundle",
+            exactInstallBytes,
+        )
     }
 
     private suspend fun installV2Agent(agent: V2Agent, stagedFile: File): AgentInstallResult =
@@ -374,6 +408,7 @@ class AgentRepository(
         sources: List<V2Source>,
         stagedFile: File,
         installedName: String,
+        requiredInstallBytes: Long? = null,
     ): AgentInstallResult {
         val existingAgent = dao.findAgent(agent.manifest.id)
         if (existingAgent != null && existingAgent.publisherFingerprint != agent.publisherFingerprint) {
@@ -390,6 +425,9 @@ class AgentRepository(
         val finalPackage = if (existingVersion == null) File(versionDirectory, installedName) else null
         if (finalPackage != null) {
             fileOps.createDirectories(versionDirectory)
+            requiredInstallBytes?.let { exactBytes ->
+                requirePrivateInstallSpace(maxOf(exactBytes, stagedFile.length()))
+            }
             fileOps.moveAtomically(stagedFile, finalPackage)
         }
         val readablePackage = finalPackage ?: stagedFile
@@ -609,6 +647,7 @@ class AgentRepository(
         val finalPackage = File(packageDirectory, "${corpus.packageSha256}.hcorpus")
         val createdFile = !finalPackage.exists()
         val installCorpus = if (createdFile) {
+            requirePrivateInstallSpace(corpus.compressedSizeBytes)
             fileOps.moveAtomically(stagedFile, finalPackage)
             corpus.copy(file = finalPackage)
         } else {
@@ -672,7 +711,6 @@ class AgentRepository(
                     installedAgent,
                     now,
                     evidenceIds = version.storedRequiredEvidenceIds(),
-                    evaluationCorpusIds = version.storedEvaluationCorpusIds(),
                 )
             }
             return AgentInstallResult(AgentInstallOutcome.INSTALLED, requireNotNull(updated).toDomain())
@@ -724,6 +762,7 @@ class AgentRepository(
         val finalSource = File(sourceDirectory, SOURCE_PAYLOAD_NAME)
         val createdFile = !finalSource.exists()
         if (createdFile) {
+            requirePrivateInstallSpace(source.compressedSizeBytes)
             val part = File(sourceDirectory, ".$SOURCE_PAYLOAD_NAME.${UUID.randomUUID()}.part")
             try {
                 fileOps.write(part) { output ->
@@ -945,7 +984,6 @@ class AgentRepository(
         agent: V2Agent,
         now: Long,
         evidenceIds: Set<String> = agent.requiredEvidenceIds(),
-        evaluationCorpusIds: Set<String> = agent.evaluations.map(V2Evaluation::corpusId).toSet(),
     ): AgentEntity {
         val corpora = dao.listVersionCorpora(agent.manifest.id, agent.manifest.version)
         val installedRequired = corpora.count { it.required }
@@ -955,8 +993,7 @@ class AgentRepository(
         val evidencePresent = evidenceIds.all { evidenceId ->
             dao.countRequiredEvidenceChunk(agent.manifest.id, agent.manifest.version, evidenceId) > 0
         }
-        val evaluationsUseRequired = evaluationCorpusIds.all { it in agent.manifest.requiredCorpora }
-        val status = if (requiredPackagesPresent && evidencePresent && evaluationsUseRequired) {
+        val status = if (requiredPackagesPresent && evidencePresent) {
             AgentStatus.READY
         } else {
             AgentStatus.WAITING_FOR_CORPUS
@@ -977,10 +1014,6 @@ class AgentRepository(
 
     private fun AgentVersionEntity.storedRequiredEvidenceIds(): Set<String> = runCatching {
         storageJson.decodeFromString<List<String>>(requiredEvidenceJson).toSet()
-    }.getOrElse { emptySet() }
-
-    private fun AgentVersionEntity.storedEvaluationCorpusIds(): Set<String> = runCatching {
-        storageJson.decodeFromString<List<String>>(evaluationCorpusIdsJson).toSet()
     }.getOrElse { emptySet() }
 
     private fun validateOwnedSessionForConsumption(owned: OwnedPackageSession) {
@@ -1745,6 +1778,25 @@ class AgentRepository(
     }
 
     private fun tombstoneDirectory(): File = File(filesDir, "agents/.tombstones")
+
+    private fun requirePrivateInstallSpace(requiredBytes: Long) {
+        val availableBytes = privateInstallAvailableBytes()
+        if (availableBytes < 0L || availableBytes < requiredBytes) {
+            throw AgentBundleException("私有安装空间不足：需要 $requiredBytes 字节，可用 $availableBytes 字节")
+        }
+    }
+
+    private fun exactSignedInstallBytes(agentBytes: Long, packageBytes: List<Long>): Long {
+        if (agentBytes <= 0L || packageBytes.any { it <= 0L }) {
+            throw AgentBundleException("install plan 包含零或负数字节")
+        }
+        return packageBytes.fold(agentBytes) { total, bytes ->
+            if (total > Long.MAX_VALUE - bytes) {
+                throw AgentBundleException("install plan 安装字节溢出")
+            }
+            total + bytes
+        }
+    }
 
     companion object {
         private const val DEFAULT_EVIDENCE_LIMIT = 8

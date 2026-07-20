@@ -19,6 +19,8 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
 ```
 
+Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
+
 本地打包：
 
 ```bash
@@ -37,9 +39,29 @@ scripts/agent-builder.sh validate build/my-agent
 scripts/agent-builder.sh pack build/my-agent --output build/agent-dist
 ```
 
+V2 Android 验收 fixture 只在 `build/` 中生成。以下三步必须复用同一个测试 key：
+
+```bash
+scripts/agent-builder.sh -m tools.agent_builder.tests.fixture_v2 \
+  --source app/src/test/resources/agent/source.md \
+  --workspace build/agent-v2-fixture \
+  --dist build/agent-v2-dist --reset
+scripts/agent-builder.sh validate build/agent-v2-fixture
+scripts/agent-builder.sh recommend build/agent-v2-fixture \
+  --key build/agent-v2-fixture/test-key.pem
+scripts/agent-builder.sh pack build/agent-v2-fixture \
+  --output build/agent-v2-dist \
+  --key build/agent-v2-fixture/test-key.pem \
+  --profile balanced
+```
+
+生成的 key、workspace、`.hagent`、`.hcorpus`、`.hsource` 和 `.hbundle` 都是临时测试产物，不进入 Git。
+
 ## Android 智能体导入
 
-人物身份在新会话输入区选择，发送第一条消息后固定。“设置 -> 智能体包”当前用于导入和安装：选择桌面生成的 `.hbundle` 后，核对名称、版本、资料与发布者指纹再安装。安装成功弹窗可选择“开始对话”进入统一会话，不会自动创建项目；已安装包行暂不提供更新、停用或直接开始对话操作。人格运行时使用当前会话、可选项目上下文和本地资料证据；不启用联网补写。项目不是智能体容器，无项目的人格会话同样合法。
+人物身份在新会话输入区选择，发送第一条消息后固定。“设置 -> 智能体包”用于导入和安装：V2 `.hbundle` 默认展示一张紧凑预览并直接安装推荐的 `balanced` 档；只有空间不足或用户主动调整时，才展示 `轻量 / 推荐 / 完整证据 / 包含原文` 四档选择。安装完成后直接回到包列表并展开状态详情，不再显示二次成功确认。
+
+只有 `READY` 智能体可开始新对话；`WAITING_FOR_CORPUS`、`DISABLED` 和 `FAILED` 都会阻止入口。独立 `.hcorpus` 仅扩展当前版本覆盖，历史会话仍绑定原 version；`.hsource` 只用于阅读核验，不参与回答。人格运行时使用固定会话版本、可选项目上下文和本地资料证据，不启用联网补写，也不创建智能体所属项目。
 
 ## Emulator QA
 

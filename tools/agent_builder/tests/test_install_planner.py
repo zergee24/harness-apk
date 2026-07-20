@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -54,6 +55,10 @@ class InstallPlannerTest(unittest.TestCase):
         self.assertEqual(("chunk-core", "chunk-dialogue", "chunk-secondary"), core.chunk_ids)
         self.assertEqual(("source-dialogue", "source-direct", "source-secondary"), core.source_ids)
         self.assertEqual(
+            ("node-dialogue-root", "node-direct-root", "node-secondary-root"),
+            core.top_level_ids,
+        )
+        self.assertEqual(
             (
                 "node-dialogue-root",
                 "node-dialogue-top",
@@ -65,6 +70,30 @@ class InstallPlannerTest(unittest.TestCase):
             core.node_ids,
         )
         self.assertFalse({"chunk-background"} & set(core.chunk_ids))
+
+    def test_streamed_small_package_entry_uses_android_compatible_local_header(self):
+        payload = self.root / "payload.bin"
+        payload.write_bytes(b"signed child package")
+        package = self.root / "streamed.hbundle"
+
+        builder._write_signed_package_v2(
+            package,
+            {"packages/child.hcorpus": payload},
+            Ed25519PrivateKey.generate(),
+        )
+
+        with zipfile.ZipFile(package) as archive, package.open("rb") as stream:
+            entry = archive.getinfo("packages/child.hcorpus")
+            stream.seek(entry.header_offset)
+            header = stream.read(30)
+            compressed_size, uncompressed_size, name_length, extra_length = struct.unpack_from(
+                "<IIHH", header, 18
+            )
+            stream.seek(name_length, os.SEEK_CUR)
+            extra = stream.read(extra_length)
+        self.assertNotEqual(0xFFFFFFFF, compressed_size)
+        self.assertNotEqual(0xFFFFFFFF, uncompressed_size)
+        self.assertNotIn(b"\x01\x00", extra)
 
     def test_core_source_metadata_includes_deduplicated_source_aliases(self):
         alias_payload = b"alias source\n"
@@ -115,13 +144,37 @@ class InstallPlannerTest(unittest.TestCase):
         self.assertEqual(4, len(non_core))
         self.assertEqual(
             {
-                ("source-direct", "1926", "node-direct-top", ("chunk-core",)),
-                ("source-direct", "1926", "node-direct-background", ("chunk-background",)),
-                ("source-dialogue", "1930", "node-dialogue-top", ("chunk-dialogue",)),
-                ("source-secondary", "1926", "node-secondary-top", ("chunk-secondary",)),
+                ("source-direct", "1926", "node-direct-root", "node-direct-top", ("chunk-core",)),
+                (
+                    "source-direct",
+                    "1926",
+                    "node-direct-root",
+                    "node-direct-background",
+                    ("chunk-background",),
+                ),
+                (
+                    "source-dialogue",
+                    "1930",
+                    "node-dialogue-root",
+                    "node-dialogue-top",
+                    ("chunk-dialogue",),
+                ),
+                (
+                    "source-secondary",
+                    "1926",
+                    "node-secondary-root",
+                    "node-secondary-top",
+                    ("chunk-secondary",),
+                ),
             },
             {
-                (shard.source_ids[0], shard.periods[0], shard.top_level_ids[0], shard.chunk_ids)
+                (
+                    shard.source_ids[0],
+                    shard.periods[0],
+                    shard.top_level_ids[0],
+                    shard.selection_top_id,
+                    shard.chunk_ids,
+                )
                 for shard in non_core
             },
         )
@@ -253,7 +306,13 @@ class InstallPlannerTest(unittest.TestCase):
         core = next(path for path in result.corpus_packages if path.name == "core-evidence.hcorpus")
         with zipfile.ZipFile(core) as archive:
             source_ids = {row["sourceId"] for row in json.loads(archive.read("sources.json"))}
+            packaged_chunks = [
+                json.loads(line)
+                for line in archive.read("chunks.jsonl").decode("utf-8").splitlines()
+            ]
         self.assertIn("source-alias", source_ids)
+        core_chunk = next(row for row in packaged_chunks if row["id"] == "chunk-core")
+        self.assertEqual(["source-alias"], core_chunk["sourceAliases"])
 
     def test_bundle_rejects_selected_paths_with_wrong_package_id_sequence(self):
         result = pack_workspace_v2(self.workspace, self.root / "dist-sequence", self.private_key_path)

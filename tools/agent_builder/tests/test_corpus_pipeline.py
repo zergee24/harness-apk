@@ -39,7 +39,7 @@ class CorpusPipelineTest(unittest.TestCase):
         )
 
         self.assertEqual(1, len(result.chunks))
-        self.assertEqual(("a", "b"), result.chunks[0].source_aliases)
+        self.assertEqual(("b",), result.chunks[0].source_aliases)
         self.assertEqual(1, result.stats.exact_duplicate_count)
         self.assertEqual(1, len(result.duplicates))
 
@@ -55,7 +55,7 @@ class CorpusPipelineTest(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(("a",), result.chunks[0].source_aliases)
+        self.assertEqual((), result.chunks[0].source_aliases)
 
     def test_explicit_safe_wording_variant_merges_as_near_and_remains_auditable(self):
         first = "调查以后再下结论。"
@@ -374,7 +374,7 @@ class CorpusPipelineTest(unittest.TestCase):
         chunks = (root / "corpora" / "index" / "chunks.jsonl").read_text("utf-8").splitlines()
         self.assertEqual(1, len(chunks))
         self.assertEqual(1, stats.near_duplicate_count)
-        self.assertEqual(["a", "b"], json.loads(chunks[0])["sourceAliases"])
+        self.assertEqual(["b"], json.loads(chunks[0])["sourceAliases"])
 
     def test_simhash_remains_deterministic_but_does_not_authorize_a_merge(self):
         self.assertEqual(
@@ -525,7 +525,7 @@ class CorpusPipelineTest(unittest.TestCase):
             )
         duplicate = json.loads((first_root / "corpora" / "index" / "duplicates.jsonl").read_text("utf-8"))
         self.assertEqual("exact", duplicate["matchType"])
-        self.assertEqual(("a", "b"), first.chunks[0].source_aliases)
+        self.assertEqual(("b",), first.chunks[0].source_aliases)
 
     def test_short_chinese_empty_and_non_chinese_sections_are_safe(self):
         result = build_corpus_index(
