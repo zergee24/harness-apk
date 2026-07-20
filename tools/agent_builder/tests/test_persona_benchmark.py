@@ -144,6 +144,8 @@ class PersonaBenchmarkScoreTest(unittest.TestCase):
         self.assertEqual(0.0, report.avoid_pattern_hits.rate)
         self.assertEqual((0, 0), counts(report.avoid_pattern_case_hits))
         self.assertEqual(0.0, report.avoid_pattern_case_hits.rate)
+        self.assertFalse(report.thresholds["avoidPatternHitRate"])
+        self.assertFalse(report.passed)
 
     def test_case_response_sets_must_match_exactly_and_ids_must_be_unique(self):
         valid_case = case("case-1", "grounding", evidence=["e1"])

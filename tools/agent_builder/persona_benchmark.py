@@ -297,7 +297,10 @@ def score_benchmark(
     avoid_pattern_hits = CountRate.of(pattern_hit_count, pattern_count)
     avoid_pattern_case_hits = CountRate.of(pattern_case_hit_count, pattern_case_count)
     thresholds = {
-        "avoidPatternHitRate": avoid_pattern_hits.rate <= MAX_AVOID_PATTERN_RATE,
+        "avoidPatternHitRate": (
+            avoid_pattern_hits.denominator > 0
+            and avoid_pattern_hits.rate <= MAX_AVOID_PATTERN_RATE
+        ),
         "continuity": (
             metrics["continuity"].denominator >= MIN_CONTINUITY_PASS_COUNT
             and metrics["continuity"].numerator == metrics["continuity"].denominator
