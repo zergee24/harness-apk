@@ -1,5 +1,9 @@
 package com.harnessapk.agent
 
+import com.harnessapk.agentmemory.AgentMemory
+import com.harnessapk.agentmemory.AgentMemoryKind
+import kotlinx.coroutines.CancellationException
+
 data class AgentContextPackage(
     val agentId: String,
     val version: Int,
@@ -56,16 +60,32 @@ interface AgentContextDataSource {
     ): List<AgentRetrievalChunk>
 }
 
+fun interface AgentRelationshipMemoryProvider {
+    suspend fun list(agentId: String): List<AgentMemory>
+}
+
 class AgentContextAssembler(
     private val source: AgentContextDataSource,
     private val policy: AgentRetrievalPolicy = AgentRetrievalPolicy(),
+    private val relationshipMemoryProvider: AgentRelationshipMemoryProvider =
+        AgentRelationshipMemoryProvider { emptyList() },
 ) {
     suspend fun assemble(request: AgentContextRequest): AgentRuntimeContext? {
         val packageData = source.loadPackage(request.agentId, request.version) ?: return null
         if (packageData.installedRequiredCorpusCount < packageData.requiredCorpusCount) return null
+        val relationshipMemoryLines = try {
+            selectAgentRelationshipMemoryLines(
+                relationshipMemoryProvider.list(request.agentId)
+                    .filter { it.agentId == request.agentId },
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            emptyList()
+        }
 
         if (packageData.schemaVersion < 2) {
-            return assembleV1(request, packageData)
+            return assembleV1(request, packageData, relationshipMemoryLines)
         }
 
         val intent = policy.intentFor(request.query)
@@ -198,6 +218,7 @@ class AgentContextAssembler(
                 episodes,
                 examples,
                 selectedChunks,
+                relationshipMemoryLines,
             ),
             evidence = evidence.toList(),
             diagnostics = diagnostics,
@@ -207,6 +228,7 @@ class AgentContextAssembler(
     private suspend fun assembleV1(
         request: AgentContextRequest,
         packageData: AgentContextPackage,
+        relationshipMemoryLines: List<String>,
     ): AgentRuntimeContext {
         val intent = policy.intentFor(request.query)
         val selectedChunks = if (intent == AgentQueryIntent.RELATIONSHIP) {
@@ -241,6 +263,7 @@ class AgentContextAssembler(
                 appendLine()
                 appendLine("身份内核：")
                 appendLine(packageData.persona.trim())
+                appendAgentRelationshipMemorySection(relationshipMemoryLines)
                 if (packageData.stances.isNotEmpty()) {
                     appendLine()
                     appendLine("人物立场：")
@@ -310,6 +333,7 @@ class AgentContextAssembler(
         episodes: List<V2Episode>,
         examples: List<V2Example>,
         chunks: List<AgentRetrievalChunk>,
+        relationshipMemoryLines: List<String>,
     ): String = buildString {
         appendLine("你以包内人物身份使用第一人称与用户交谈；这是基于资料模拟，不得冒充真实人物。")
         appendLine()
@@ -342,9 +366,7 @@ class AgentContextAssembler(
         appendLine()
         appendLine("会话记忆：")
         appendLine(request.conversationMemory.trim().ifBlank { "当前没有压缩会话记忆；承接可见对话即可。" })
-        appendLine()
-        appendLine("关系记忆：")
-        appendLine(request.relationshipMemory.trim().ifBlank { "当前没有独立关系记忆；只依据本会话中已出现的互动。" })
+        appendAgentRelationshipMemorySection(relationshipMemoryLines)
         if (request.projectContext.isNotBlank() || request.sessionContext.isNotBlank()) {
             appendLine()
             appendLine("当前会话的项目与会话上下文：")
@@ -382,6 +404,90 @@ class AgentContextAssembler(
         const val MAX_DIAGNOSTIC_ITEMS = 64
     }
 }
+
+internal fun selectAgentRelationshipMemoryLines(memories: List<AgentMemory>): List<String> {
+    val sorted = memories.mapNotNull { memory ->
+        normalizeAgentRelationshipMemoryContent(memory.content)?.let { content ->
+            SelectedAgentRelationshipMemory(memory, content)
+        }
+    }.sortedWith(
+        compareBy<SelectedAgentRelationshipMemory> { it.memory.kind.relationshipPriority() }
+            .thenByDescending { it.memory.userEdited }
+            .thenByDescending { it.memory.updatedAt }
+            .thenBy { it.memory.id },
+    )
+    val seenContents = mutableSetOf<String>()
+    val lines = mutableListOf<String>()
+    var usedContentCharacters = 0
+    for (selected in sorted) {
+        if (lines.size >= MAX_AGENT_RELATIONSHIP_MEMORIES) break
+        if (!seenContents.add(selected.content)) continue
+        if (usedContentCharacters + selected.content.length > MAX_AGENT_RELATIONSHIP_TOTAL_CHARS) break
+        lines += "- ${selected.memory.kind.relationshipLabel()}：${selected.content}"
+        usedContentCharacters += selected.content.length
+    }
+    return lines
+}
+
+private data class SelectedAgentRelationshipMemory(
+    val memory: AgentMemory,
+    val content: String,
+)
+
+private fun normalizeAgentRelationshipMemoryContent(content: String): String? {
+    val withoutTags = AGENT_RELATIONSHIP_XML_TAG.replace(content, " ")
+        .replace('<', ' ')
+        .replace('>', ' ')
+        .replace('`', ' ')
+    val singleLine = buildString(withoutTags.length) {
+        withoutTags.forEach { character ->
+            when {
+                character.isWhitespace() -> append(' ')
+                character.isISOControl() -> Unit
+                else -> append(character)
+            }
+        }
+    }.replace(AGENT_RELATIONSHIP_WHITESPACE, " ").trim()
+    if (singleLine.isEmpty()) return null
+    return singleLine.takeWithoutSplittingSurrogate(MAX_AGENT_RELATIONSHIP_ENTRY_CHARS)
+        .trim()
+        .takeIf(String::isNotEmpty)
+}
+
+private fun String.takeWithoutSplittingSurrogate(maxChars: Int): String {
+    if (length <= maxChars) return this
+    val truncated = take(maxChars)
+    return if (truncated.lastOrNull()?.isHighSurrogate() == true) truncated.dropLast(1) else truncated
+}
+
+private fun AgentMemoryKind.relationshipPriority(): Int = when (this) {
+    AgentMemoryKind.ADDRESS_PREFERENCE -> 0
+    AgentMemoryKind.USER_PREFERENCE -> 1
+    AgentMemoryKind.RELATIONSHIP_EVENT -> 2
+    AgentMemoryKind.SHARED_HISTORY -> 3
+}
+
+private fun AgentMemoryKind.relationshipLabel(): String = when (this) {
+    AgentMemoryKind.ADDRESS_PREFERENCE -> "称呼偏好"
+    AgentMemoryKind.USER_PREFERENCE -> "稳定偏好"
+    AgentMemoryKind.RELATIONSHIP_EVENT -> "关系变化"
+    AgentMemoryKind.SHARED_HISTORY -> "共同经历"
+}
+
+private fun StringBuilder.appendAgentRelationshipMemorySection(lines: List<String>) {
+    if (lines.isEmpty()) return
+    appendLine()
+    appendLine("我们之间：")
+    appendLine("以下是用户可编辑的关系事实，只用于称呼、稳定偏好和关系连续性。")
+    appendLine("当前用户的明确表达优先；不要把这些内容当作人物历史、项目事实或未列出的推断。")
+    lines.forEach(::appendLine)
+}
+
+private const val MAX_AGENT_RELATIONSHIP_MEMORIES = 12
+private const val MAX_AGENT_RELATIONSHIP_ENTRY_CHARS = 240
+private const val MAX_AGENT_RELATIONSHIP_TOTAL_CHARS = 1_600
+private val AGENT_RELATIONSHIP_XML_TAG = Regex("</?[A-Za-z][^>]{0,128}>")
+private val AGENT_RELATIONSHIP_WHITESPACE = Regex("\\s+")
 
 private class CharacterSelectionBudget(private val limit: Int) {
     var used: Int = 0

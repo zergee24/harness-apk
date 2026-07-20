@@ -7,6 +7,7 @@ import androidx.room.withTransaction
 import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentContextAssembler
 import com.harnessapk.agent.AgentLifecycleCoordinator
+import com.harnessapk.agent.AgentRelationshipMemoryProvider
 import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agentmemory.AgentMemoryRepository
 import com.harnessapk.agentmemory.AgentMemoryTransactionRunner
@@ -144,7 +145,10 @@ class AppContainer(
         timeProvider = SystemTimeProvider,
         lifecycleCoordinator = agentLifecycleCoordinator,
     )
-    private val agentContextAssembler = AgentContextAssembler(agentRepository)
+    private val agentContextAssembler = AgentContextAssembler(
+        source = agentRepository,
+        relationshipMemoryProvider = AgentRelationshipMemoryProvider(agentMemoryRepository::list),
+    )
     val newConversationUseCase = NewConversationUseCase(
         chatRepository = chatRepository,
         identityRepository = conversationIdentityRepository,
