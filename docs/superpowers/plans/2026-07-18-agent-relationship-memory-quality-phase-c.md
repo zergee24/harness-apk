@@ -4,7 +4,7 @@
 
 **Goal:** 为同一人物身份提供跨日常会话和项目会话的本地关系连续性、完整用户控制和可重复的人格质量评测，同时严格阻止项目事实进入人物关系记忆。
 
-**Architecture:** Room 13 新增按 `agentId` 作用域的离散关系记忆，纯策略层先验证类别、来源和项目事实边界，再由仓库以稳定 dedupe key 合并；LLM 只生成候选，不直接写数据库。应用级 `AgentMemoryCoordinator` 在每 10 个完成回合和离开会话时异步尝试提取，失败不影响回复；阶段 B 的 `AgentContextAssembler` 通过只读 provider 注入关系记忆。桌面 benchmark 把证据、立场、时间、语言套话和 V1/V2 盲测做成可重复报告。
+**Architecture:** Room 16 新增按 `agentId` 作用域的离散关系记忆，纯策略层先验证类别、来源和项目事实边界，再由仓库以稳定 dedupe key 合并；LLM 只生成候选，不直接写数据库。应用级 `AgentMemoryCoordinator` 在每 10 个完成回合和离开会话时异步尝试提取，失败不影响回复；阶段 B 的 `AgentContextAssembler` 通过只读 provider 注入关系记忆。桌面 benchmark 把证据、立场、时间、语言套话和 V1/V2 盲测做成可重复报告。
 
 **Tech Stack:** Kotlin、Room 2.8.4、Kotlin Coroutines、Kotlin Serialization、现有 OpenAI-compatible client、Jetpack Compose、Python 3.12、JSONL、JUnit 4。
 
@@ -16,10 +16,11 @@
 - 会话摘要继续按 `conversationId` 保存，不复制到人物关系记忆表。
 - 项目事实只能通过项目 Markdown 和项目上下文跨会话共享。
 - 所有记忆均为可审计的离散事实，必须保留来源会话和来源消息，不保存隐藏推理。
+- 用户手工编辑后的记忆不得被后续自动提取覆盖；编辑只改变内容、置信度和 `userEdited`，保留原始来源审计字段。
 - 自动提取失败不得阻断回复、弹重试或改变当前回答。
 - 不增加每轮“是否记住”确认；用户可查看、编辑、删除单条和清空当前人物记忆。
 - 关系记忆只保存在本机 Room，不进入项目 Git、`.hbundle` 或远端服务。
-- 本阶段把 Room 从 12 升级到 13；`MIGRATION_12_13` 只新增人物关系记忆。
+- 本阶段把 Room 从 15 升级到 16；`MIGRATION_15_16` 只新增人物关系记忆，不重写既有迁移。
 - V1/V2 包、固定会话版本、项目/Markdown 弱关联和普通会话必须保持兼容。
 - 人格质量必须用固定回归集和报告证明，不能只凭提示词主观判断。
 
@@ -34,7 +35,7 @@
 - Create: `app/src/main/java/com/harnessapk/storage/AgentMemoryDao.kt`：按 agent 查询、upsert、编辑、删除和清空。
 - Create: `app/src/main/java/com/harnessapk/agentmemory/AgentMemoryRepository.kt`：稳定 ID、去重、冲突更新和来源审计。
 - Create: `app/src/main/java/com/harnessapk/agentmemory/AgentMemoryPolicy.kt`：允许类别、项目事实指纹和本地防线。
-- Modify: `app/src/main/java/com/harnessapk/storage/AppDatabase.kt`：version 13、DAO 和 `MIGRATION_12_13`。
+- Modify: `app/src/main/java/com/harnessapk/storage/AppDatabase.kt`：version 16、DAO 和 `MIGRATION_15_16`。
 - Modify: `app/src/main/java/com/harnessapk/common/AppContainer.kt`：注册 migration 和仓库。
 
 ### 自动提取与运行时
@@ -71,7 +72,7 @@
 
 ---
 
-### Task 1: Room 12 -> 13 人物关系记忆与审计来源
+### Task 1: Room 15 -> 16 人物关系记忆与审计来源
 
 **Files:**
 - Create: `app/src/main/java/com/harnessapk/agentmemory/AgentMemoryModels.kt`
@@ -125,7 +126,7 @@ fun clearOnlyDeletesCurrentAgentMemories() = runTest {
 }
 ```
 
-Instrumentation migration test 创建 version 12 数据库，写入会话、消息、Markdown link、V2 agent/chunk，再应用 `MIGRATION_12_13`，断言旧表逐项未变且 `agent_memories` 为空。
+Instrumentation migration test 创建 version 15 数据库，写入会话、消息、Markdown link、V2 agent/chunk，再应用 `MIGRATION_15_16`，断言旧表逐项未变且 `agent_memories` 为空。
 
 - [ ] **Step 2: 运行测试确认 RED**
 
@@ -155,6 +156,7 @@ data class AgentMemoryEntity(
     val sourceConversationId: String,
     val sourceMessageId: String,
     val confidence: Double,
+    val userEdited: Boolean,
     val createdAt: Long,
     val updatedAt: Long,
 )
@@ -163,10 +165,10 @@ data class AgentMemoryEntity(
 ```kotlin
 @Dao
 interface AgentMemoryDao {
-    @Query("SELECT * FROM agent_memories WHERE agentId = :agentId ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM agent_memories WHERE agentId = :agentId ORDER BY updatedAt DESC, id ASC")
     fun observeForAgent(agentId: String): Flow<List<AgentMemoryEntity>>
 
-    @Query("SELECT * FROM agent_memories WHERE agentId = :agentId ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM agent_memories WHERE agentId = :agentId ORDER BY updatedAt DESC, id ASC")
     suspend fun listForAgent(agentId: String): List<AgentMemoryEntity>
 
     @Query("SELECT * FROM agent_memories WHERE id = :id LIMIT 1")
@@ -178,7 +180,7 @@ interface AgentMemoryDao {
 }
 ```
 
-`MIGRATION_12_13` 只执行 `CREATE TABLE agent_memories` 和复合索引，不 ALTER 任何既有表。
+`MIGRATION_15_16` 只执行 `CREATE TABLE agent_memories` 和复合索引，不 ALTER 任何既有表。
 
 - [ ] **Step 4: 实现稳定 dedupe key 和编辑约束**
 
@@ -188,6 +190,7 @@ data class AgentMemoryCandidate(
     val dedupeKey: String,
     val content: String,
     val sourceMessageId: String,
+    val sourceQuote: String,
     val confidence: Double,
 )
 
@@ -199,7 +202,9 @@ internal fun agentMemoryId(agentId: String, kind: AgentMemoryKind, dedupeKey: St
 }
 ```
 
-`merge` 对同一稳定 ID 执行 upsert，保留首次 `createdAt`，更新 content、来源、confidence 和 `updatedAt`；`edit` trim 后拒绝空内容，并把 confidence 设为 `1.0`，来源字段保持不变。
+`merge` 对同一稳定 ID 执行事务内 insert-or-update，保留首次 `createdAt`；仅当现有记录
+`userEdited == false` 时更新 content、来源、confidence 和 `updatedAt`。`edit` trim 后拒绝空内容，
+把 confidence 设为 `1.0`、`userEdited` 设为 `true`，来源字段保持不变。
 
 - [ ] **Step 5: 运行仓库和迁移测试**
 
@@ -326,7 +331,10 @@ internal fun overlapsProjectFact(candidate: String, projectFacts: List<String>):
 }
 ```
 
-`filter` 先检查 kind、content、confidence `[0.0,1.0]` 和 source message 是否属于输入消息，再应用三类 pattern 和项目事实相似度，最后按 `(kind,dedupeKey)` 保留最高 confidence。
+`filter` 先检查 kind、content、confidence `[0.0,1.0]`，再要求 `sourceMessageId` 指向输入中
+`SUCCEEDED` 的 USER 消息，且 trim 后的 `sourceQuote` 是该消息正文的精确非空子串。随后应用三类
+pattern 和项目事实相似度，最后按 `(kind,dedupeKey)` 保留最高 confidence。不得以 assistant
+消息、会话摘要或模型自行生成的内容作为事实来源。
 
 - [ ] **Step 5: 运行策略测试确认 GREEN**
 
@@ -401,7 +409,8 @@ fun interface AgentMemoryCandidateGenerator {
 只提取用户与当前人物以后如何相处仍有价值的离散事实。
 允许：称呼偏好、稳定偏好、共同经历、关系变化。
 禁止：项目目标、文件、任务、决定、业务事实、当前临时话题、模型推理。
-只输出 JSON 数组；每项字段为 kind、dedupeKey、content、sourceMessageId、confidence。
+只输出 JSON 数组；每项字段为 kind、dedupeKey、content、sourceMessageId、sourceQuote、confidence。
+sourceQuote 必须逐字摘自对应的成功 USER 消息。
 没有合格内容时输出 []。
 ```
 
@@ -832,7 +841,7 @@ git commit -m "功能：建立人格质量基准与盲测"
 
 **Interfaces:**
 - Consumes: Tasks 1-7 与阶段 A/B 全部产物。
-- Produces: Room 11 -> 12 -> 13 连续迁移证据、APK 和人格 benchmark 报告。
+- Produces: Room 11 -> 12 -> 13 -> 14 -> 15 -> 16 连续迁移证据、APK 和人格 benchmark 报告。
 
 - [ ] **Step 1: 增加连续迁移 instrumentation test**
 
@@ -848,7 +857,7 @@ ConversationMarkdownLink
 V1 agent/version/corpus/chunk
 ```
 
-依次应用 `MIGRATION_11_12`、`MIGRATION_12_13`，再由 Room 13 打开并逐项断言值不变。
+依次应用 `MIGRATION_11_12`、`MIGRATION_12_13`、`MIGRATION_13_14`、`MIGRATION_14_15`、`MIGRATION_15_16`，再由 Room 16 打开并逐项断言值不变。
 
 - [ ] **Step 2: 增加运行时降级矩阵**
 
@@ -920,6 +929,6 @@ git commit -m "验证：完成人格关系与质量闭环"
 
 - Spec coverage: `agent_memories` 字段、按 agent 召回、自动沉淀时机、稳定四类内容、项目事实过滤、失败隔离、查看/编辑/删除/清空、Context Assembler 注入和本地隐私边界均有对应任务。
 - No hidden project memory: LLM prompt 是第一道边界，本地 pattern + project fingerprint 是第二道边界；只有通过纯策略的 candidate 才能进入 repository。
-- Database sequencing: `MIGRATION_12_13` 只创建关系记忆表；最终 instrumentation 从 11 连续经过 12 和 13，保护会话、Markdown 和 V1/V2 索引。
+- Database sequencing: `MIGRATION_15_16` 只创建关系记忆表；最终 instrumentation 从 11 连续经过 12、13、14、15 和 16，保护会话、Markdown 和 V1/V2 索引。
 - Type consistency: `AgentMemoryKind`、`AgentMemoryCandidate.dedupeKey`、稳定 ID 和 UI section 使用同一枚举；assembler 只读取 domain memory，不直接访问 DAO。
 - Quality proof: 固定回归集覆盖 grounding、stance、voice、temporal、continuity，盲测隐藏 V1/V2 映射并执行 70%/5%/30 题门槛。
