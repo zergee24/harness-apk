@@ -22,7 +22,10 @@ import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agent.ParsedAgentBundle
 import com.harnessapk.agentmemory.AgentMemoryCandidate
+import com.harnessapk.agentmemory.AgentMemoryExtractionInput
 import com.harnessapk.agentmemory.AgentMemoryKind
+import com.harnessapk.agentmemory.AgentMemoryMessageSnapshot
+import com.harnessapk.agentmemory.AgentMemoryPolicy
 import com.harnessapk.agentmemory.AgentMemoryRepository
 import com.harnessapk.agentmemory.AgentMemoryTransactionRunner
 import com.harnessapk.common.TimeProvider
@@ -59,24 +62,48 @@ class AppDatabaseTest {
             },
             timeProvider = TimeProvider { now },
         )
-        fun candidate(content: String, messageId: String) = AgentMemoryCandidate(
-            kind = AgentMemoryKind.USER_PREFERENCE,
-            dedupeKey = "language",
-            content = content,
-            sourceMessageId = messageId,
-            sourceQuote = content,
-            confidence = 0.8,
-        )
-        repository.merge("agent-1", "conversation-1", listOf(candidate("默认英文", "message-1")))
+        fun candidate(content: String, messageId: String): AgentMemoryCandidate {
+            val verifiedContent = "$content；以后默认用中文回答"
+            return AgentMemoryCandidate(
+                kind = AgentMemoryKind.USER_PREFERENCE,
+                dedupeKey = "language",
+                content = verifiedContent,
+                sourceMessageId = messageId,
+                sourceQuote = verifiedContent,
+                confidence = 0.8,
+            )
+        }
+        fun acceptedBatch(
+            conversationId: String,
+            candidates: List<AgentMemoryCandidate>,
+        ): AgentMemoryPolicy.AcceptedBatch {
+            val input = AgentMemoryExtractionInput(
+                agentId = "agent-1",
+                conversationId = conversationId,
+                projectId = null,
+                conversationSummary = "",
+                recentMessages = candidates.mapIndexed { index, candidate ->
+                    AgentMemoryMessageSnapshot(
+                        id = candidate.sourceMessageId,
+                        conversationId = conversationId,
+                        role = MessageRole.USER,
+                        status = MessageStatus.SUCCEEDED,
+                        content = candidate.sourceQuote,
+                        order = index.toLong(),
+                    )
+                },
+                projectFacts = emptyList(),
+            )
+            return checkNotNull(AgentMemoryPolicy().evaluate(input, candidates).acceptedBatch)
+        }
+        repository.merge(acceptedBatch("conversation-1", listOf(candidate("默认英文", "message-1"))))
         val id = repository.list("agent-1").single().id
         now = 20L
         assertTrue(repository.edit(id, "默认中文"))
         now = 30L
 
         val result = repository.merge(
-            "agent-1",
-            "conversation-2",
-            listOf(candidate("自动改写", "message-2")),
+            acceptedBatch("conversation-2", listOf(candidate("自动改写", "message-2"))),
         )
 
         val memory = repository.list("agent-1").single()

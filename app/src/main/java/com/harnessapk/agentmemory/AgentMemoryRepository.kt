@@ -30,10 +30,11 @@ class AgentMemoryRepository(
     }
 
     suspend fun merge(
-        agentId: String,
-        conversationId: String,
-        candidates: List<AgentMemoryCandidate>,
+        batch: AgentMemoryPolicy.AcceptedBatch,
     ): AgentMemoryMergeResult {
+        val agentId = batch.agentId
+        val conversationId = batch.conversationId
+        val candidates = batch.candidates
         val normalizedAgentId = requiredField("agentId", agentId, MAX_AGENT_MEMORY_ID_CHARS)
         val normalizedConversationId = requiredField(
             "sourceConversationId",

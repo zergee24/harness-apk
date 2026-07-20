@@ -16,6 +16,26 @@ private const val MAX_AGENT_MEMORY_POLICY_TOTAL_CANDIDATE_CHARS = 96_000L
 private const val MAX_MEMORY_FINGERPRINT_TERMS = 2_048
 
 class AgentMemoryPolicy {
+    class AcceptedBatch private constructor(
+        internal val agentId: String,
+        internal val conversationId: String,
+        internal val candidates: List<AgentMemoryCandidate>,
+    ) {
+        companion object {
+            internal fun issue(
+                authority: Any,
+                agentId: String,
+                conversationId: String,
+                candidates: List<AgentMemoryCandidate>,
+            ): AcceptedBatch {
+                check(authority === AGENT_MEMORY_POLICY_AUTHORITY) {
+                    "关系记忆写入批次只能由策略签发"
+                }
+                return AcceptedBatch(agentId, conversationId, candidates.toList())
+            }
+        }
+    }
+
     fun filter(
         input: AgentMemoryExtractionInput,
         candidates: List<AgentMemoryCandidate>,
@@ -60,11 +80,18 @@ class AgentMemoryPolicy {
             }
         }
 
+        val accepted = winners.values.toList()
         return AgentMemoryPolicyResult(
             status = AgentMemoryPolicyStatus.COMPLETED,
-            accepted = winners.values.toList(),
+            accepted = accepted,
             rejectedCount = candidates.size - winners.size,
             reason = "",
+            acceptedBatch = AcceptedBatch.issue(
+                authority = AGENT_MEMORY_POLICY_AUTHORITY,
+                agentId = input.agentId.trim(),
+                conversationId = input.conversationId.trim(),
+                candidates = accepted,
+            ),
         )
     }
 
@@ -94,6 +121,7 @@ class AgentMemoryPolicy {
                 accepted = emptyList(),
                 rejectedCount = candidates.size,
                 reason = "关系记忆策略输入超过本地资源上限",
+                acceptedBatch = null,
             )
         } else {
             null
@@ -126,6 +154,7 @@ class AgentMemoryPolicy {
         accepted = emptyList(),
         rejectedCount = rejectedCount,
         reason = reason,
+        acceptedBatch = null,
     )
 
     private fun validatedCandidateKey(candidate: AgentMemoryCandidate): String? {
@@ -144,6 +173,8 @@ class AgentMemoryPolicy {
         }.getOrNull()
     }
 }
+
+private val AGENT_MEMORY_POLICY_AUTHORITY = Any()
 
 internal fun normalizedMemoryTerms(text: String): Set<String> = memoryFingerprint(text).terms
 
@@ -209,21 +240,27 @@ private fun isSupportedBySource(
     candidate: AgentMemoryCandidate,
     sourceQuote: String,
 ): Boolean = when (candidate.kind) {
-    AgentMemoryKind.ADDRESS_PREFERENCE -> {
-        val contentValue = addressValue(candidate.content)
-        val quoteValue = addressValue(sourceQuote)
-        contentValue != null && contentValue == quoteValue
-    }
-    AgentMemoryKind.USER_PREFERENCE -> {
-        val contentValues = preferenceValues(candidate.content)
-        val quoteValues = preferenceValues(sourceQuote)
-        contentValues.isNotEmpty() && quoteValues.containsAll(contentValues)
-    }
-    AgentMemoryKind.RELATIONSHIP_EVENT -> {
-        val contentValues = relationshipValues(candidate.content)
-        val quoteValues = relationshipValues(sourceQuote)
-        contentValues.isNotEmpty() && quoteValues.containsAll(contentValues)
-    }
+        AgentMemoryKind.ADDRESS_PREFERENCE -> {
+            val contentValue = addressValue(candidate.content)
+            val quoteValue = addressValue(sourceQuote)
+            contentValue != null &&
+                contentValue == quoteValue &&
+                hasStructuredTextSupport(candidate.content, sourceQuote, candidate.kind)
+        }
+        AgentMemoryKind.USER_PREFERENCE -> {
+            val contentValues = preferenceValues(candidate.content)
+            val quoteValues = preferenceValues(sourceQuote)
+            contentValues.isNotEmpty() &&
+                quoteValues.containsAll(contentValues) &&
+                hasStructuredTextSupport(candidate.content, sourceQuote, candidate.kind)
+        }
+        AgentMemoryKind.RELATIONSHIP_EVENT -> {
+            val contentValues = relationshipValues(candidate.content)
+            val quoteValues = relationshipValues(sourceQuote)
+            contentValues.isNotEmpty() &&
+                quoteValues.containsAll(contentValues) &&
+                hasStructuredTextSupport(candidate.content, sourceQuote, candidate.kind)
+        }
     AgentMemoryKind.SHARED_HISTORY -> hasStrongTextualSupport(candidate.content, sourceQuote)
 }
 
@@ -430,6 +467,32 @@ private fun hasNoUnsupportedCriticalLiterals(content: String, sourceQuote: Strin
     return criticalLiterals(sourceQuote).containsAll(contentLiterals)
 }
 
+private fun hasStructuredTextSupport(
+    content: String,
+    sourceQuote: String,
+    kind: AgentMemoryKind,
+): Boolean {
+    val contentResidual = structuredResidual(content, kind)
+    if (contentResidual.isEmpty()) return true
+    return structuredResidual(sourceQuote, kind).contains(contentResidual)
+}
+
+private fun structuredResidual(text: String, kind: AgentMemoryKind): String {
+    var residual = Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
+    val semanticPatterns = when (kind) {
+        AgentMemoryKind.ADDRESS_PREFERENCE -> listOf(ADDRESS_VALUE, ADDRESS_PREFERENCE)
+        AgentMemoryKind.USER_PREFERENCE -> PREFERENCE_VALUE_PATTERNS.values
+        AgentMemoryKind.RELATIONSHIP_EVENT -> RELATIONSHIP_VALUE_PATTERNS.values
+        AgentMemoryKind.SHARED_HISTORY -> emptyList()
+    }
+    semanticPatterns.forEach { pattern ->
+        residual = pattern.replace(residual, " ")
+    }
+    residual = STRUCTURED_ENGLISH_BOILERPLATE.replace(residual, " ")
+    residual = STRUCTURED_HAN_BOILERPLATE.replace(residual, " ")
+    return normalizedComparableText(residual).replace(" ", "")
+}
+
 private fun criticalLiterals(text: String): Set<String> {
     val normalized = Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
     return buildSet {
@@ -449,7 +512,7 @@ private val PROJECT_ARTIFACT_OR_BUSINESS = Regex(
             (?:^|\s)[/\\](?:[a-z0-9_.-]+[/\\])+[a-z0-9_.-]* |
             \bcommit\s+[0-9a-f]{7,40}\b |
             \b(?:git|branch|pull\s*request|release|deploy|deployment|endpoint|api|kpi|crm)\b |
-            项目(?:目标|任务|事实|需求|计划|进度|目录|文件|上下文) |
+            项目(?:目标|任务|事实|需求|计划|进度|目录|文件|上下文)? |
             (?:代码|文件)(?:目录|路径|变更) |
             需求(?:项|文档|排期)? |
             任务(?:是|为|清单|进度)? |
@@ -463,6 +526,16 @@ private val PROJECT_ARTIFACT_OR_BUSINESS = Regex(
             营收 |
             销售额 |
             利润 |
+            预算 |
+            成本 |
+            报价 |
+            付款 |
+            费用 |
+            账款 |
+            发票 |
+            毛利 |
+            收入 |
+            支出 |
             回款 |
             \bgmv\b |
             商户 |
@@ -541,7 +614,6 @@ private val BILATERAL_RELATIONSHIP_QUOTE = Regex(
     "(?i)(?:我.{0,6}(?:信任|相信|原谅|亲近|疏远)(?:你|您)|" +
         "我.{0,6}(?:对|于)(?:你|您).{0,4}(?:失望|亲近|疏远)|" +
         "我把(?:你|您)当(?:朋友|伙伴)|" +
-        "(?:你|您).{0,8}(?:让我|使我).{0,8}(?:信任|相信|失望|亲近)|" +
         "我们(?:的|之间的)?(?:关系|边界|界限)|" +
         "\\bi\\b.{0,12}\\b(?:trust|believe|forgive)\\b.{0,8}\\byou\\b|" +
         "\\bour\\s+(?:relationship|boundary)\\b)",
@@ -567,4 +639,15 @@ private val RELATIONSHIP_VALUE_PATTERNS = linkedMapOf(
 )
 private val NEGATIVE_DIRECTION = Regex(
     "(?i)(?:不再|不要|不|没|无|避免|拒绝|停止|失去|降低|减少|别|请勿|never|not|do\\s+not|don't)",
+)
+private val STRUCTURED_HAN_BOILERPLATE = Regex(
+    "(?:当前人物|本人物|这次之后|从此以后|用户|我们|咱们|以后|今后|默认|一直|通常|" +
+        "希望|偏好|喜欢|需要|务必|明确|表示|要求|回答|回复|交流|沟通|表达|使用|" +
+        "开始|仍然|不再|不要|避免|请勿|并且|而且|同时|另外|以及|称呼|关系|事件|" +
+        "请|别|更|用|说|讲|叫|喊|称|我|你|您|了|会|为|与|和|跟|对|让|使)",
+)
+private val STRUCTURED_ENGLISH_BOILERPLATE = Regex(
+    "(?i)\\b(?:current\\s+agent|user|we|i|you|always|default|usually|prefer|prefers|" +
+        "want|wants|please|reply|answer|speak|use|clearly|stated|states|more|now|" +
+        "relationship|event|and|also)\\b",
 )

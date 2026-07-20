@@ -72,11 +72,12 @@ enum class AgentMemoryPolicyStatus {
     RESOURCE_LIMIT_EXCEEDED,
 }
 
-data class AgentMemoryPolicyResult(
+class AgentMemoryPolicyResult internal constructor(
     val status: AgentMemoryPolicyStatus,
     val accepted: List<AgentMemoryCandidate>,
     val rejectedCount: Int,
     val reason: String,
+    internal val acceptedBatch: AgentMemoryPolicy.AcceptedBatch?,
 )
 
 class AgentMemoryValidationException(message: String) : IllegalArgumentException(message)

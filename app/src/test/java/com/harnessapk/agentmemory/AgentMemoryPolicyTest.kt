@@ -426,6 +426,25 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun rejectsPreferenceCandidateThatAppendsAnUnsupportedRule() {
+        val quote = "以后默认用中文回答"
+        val result = policy.evaluate(
+            input(user("language", quote)),
+            listOf(
+                candidate(
+                    AgentMemoryKind.USER_PREFERENCE,
+                    "language",
+                    "默认使用中文回答，并且用户要求每次回复先自我介绍",
+                    "language",
+                    quote,
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+    }
+
+    @Test
     fun rejectsThirdPartyRelationshipAndHistoryAsCurrentAgentMemories() {
         val input = input(
             user("friend", "小李是我最信任的朋友"),
@@ -504,6 +523,25 @@ class AgentMemoryPolicyTest {
     }
 
     @Test
+    fun rejectsRelationshipCauseThatPointsTrustAtAThirdParty() {
+        val quote = "你让我信任小李"
+        val result = policy.evaluate(
+            input(user("third-party-cause", quote)),
+            listOf(
+                candidate(
+                    AgentMemoryKind.RELATIONSHIP_EVENT,
+                    "trust",
+                    "用户信任当前人物",
+                    "third-party-cause",
+                    quote,
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
+    }
+
+    @Test
     fun rejectsWorkProductsContractsAndCommercialOutcomesOutsideProjects() {
         val facts = listOf(
             "我们一起完成了登录页改版",
@@ -528,6 +566,25 @@ class AgentMemoryPolicyTest {
 
         assertTrue(result.accepted.isEmpty())
         assertEquals(facts.size, result.rejectedCount)
+    }
+
+    @Test
+    fun rejectsProjectBudgetFactsWithoutProjectContext() {
+        val quote = "我们一起经历这个项目预算五十万元的变更"
+        val result = policy.evaluate(
+            input(user("budget", quote), projectId = null, projectFacts = emptyList()),
+            listOf(
+                candidate(
+                    AgentMemoryKind.SHARED_HISTORY,
+                    "project-budget",
+                    quote,
+                    "budget",
+                    quote,
+                ),
+            ),
+        )
+
+        assertTrue(result.accepted.isEmpty())
     }
 
     @Test

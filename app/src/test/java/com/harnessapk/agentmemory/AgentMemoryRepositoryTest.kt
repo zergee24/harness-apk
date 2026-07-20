@@ -1,5 +1,7 @@
 package com.harnessapk.agentmemory
 
+import com.harnessapk.chat.MessageRole
+import com.harnessapk.chat.MessageStatus
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AgentMemoryDao
 import com.harnessapk.storage.AgentMemoryEntity
@@ -44,14 +46,14 @@ class AgentMemoryRepositoryTest {
     @Test
     fun mergeUsesStableKeyAndKeepsLatestSourceForConflict() = runTest {
         val fixture = fixture()
-        fixture.repository.merge(
+        fixture.merge(
             agentId = "agent-1",
             conversationId = "conversation-1",
             candidates = listOf(candidate("address", "称呼我为 Tony", "message-1", confidence = 0.7)),
         )
         fixture.now.set(20L)
 
-        val result = fixture.repository.merge(
+        val result = fixture.merge(
             agentId = "agent-1",
             conversationId = "conversation-2",
             candidates = listOf(candidate(" ADDRESS ", "称呼我为老唐", "message-2", confidence = 0.9)),
@@ -60,7 +62,7 @@ class AgentMemoryRepositoryTest {
         val memory = fixture.repository.list("agent-1").single()
         assertEquals(0, result.insertedCount)
         assertEquals(1, result.updatedCount)
-        assertEquals("称呼我为老唐", memory.content)
+        assertEquals(verifiedUserPreferenceContent("称呼我为老唐"), memory.content)
         assertEquals("conversation-2", memory.sourceConversationId)
         assertEquals("message-2", memory.sourceMessageId)
         assertEquals(0.9, memory.confidence, 0.0)
@@ -70,10 +72,10 @@ class AgentMemoryRepositoryTest {
     }
 
     @Test
-    fun batchDuplicateUsesHighestConfidenceAndKeepsFirstOnTie() = runTest {
+    fun policyBatchUsesHighestConfidenceAndKeepsFirstOnTie() = runTest {
         val fixture = fixture()
 
-        val result = fixture.repository.merge(
+        val result = fixture.merge(
             agentId = "agent-1",
             conversationId = "conversation-1",
             candidates = listOf(
@@ -84,16 +86,16 @@ class AgentMemoryRepositoryTest {
         )
 
         assertEquals(1, result.insertedCount)
-        assertEquals(2, result.duplicateCount)
+        assertEquals(0, result.duplicateCount)
         val memory = fixture.repository.list("agent-1").single()
-        assertEquals("高置信先到", memory.content)
+        assertEquals(verifiedUserPreferenceContent("高置信先到"), memory.content)
         assertEquals("message-2", memory.sourceMessageId)
     }
 
     @Test
     fun userEditKeepsSourceAndCannotBeOverwrittenByAutomaticMerge() = runTest {
         val fixture = fixture()
-        fixture.repository.merge(
+        fixture.merge(
             "agent-1",
             "conversation-1",
             listOf(candidate("language", "默认英文", "message-1")),
@@ -103,7 +105,7 @@ class AgentMemoryRepositoryTest {
 
         assertTrue(fixture.repository.edit(beforeEdit.id, "  默认使用中文  "))
         fixture.now.set(30L)
-        val merge = fixture.repository.merge(
+        val merge = fixture.merge(
             "agent-1",
             "conversation-2",
             listOf(candidate("language", "自动改成日语", "message-2", confidence = 1.0)),
@@ -129,7 +131,7 @@ class AgentMemoryRepositoryTest {
 
         invalidContents.forEach { invalidContent ->
             val fixture = fixture()
-            fixture.repository.merge(
+            fixture.merge(
                 "agent-1",
                 "conversation-1",
                 listOf(candidate("language", "默认英文", "message-1")),
@@ -149,7 +151,7 @@ class AgentMemoryRepositoryTest {
     @Test
     fun deleteAndClearRemainScopedToTheRequestedMemoryOrAgent() = runTest {
         val fixture = fixture()
-        fixture.repository.merge(
+        fixture.merge(
             "agent-1",
             "conversation-1",
             listOf(
@@ -157,7 +159,7 @@ class AgentMemoryRepositoryTest {
                 candidate("address", "称呼老唐", "message-2", AgentMemoryKind.ADDRESS_PREFERENCE),
             ),
         )
-        fixture.repository.merge(
+        fixture.merge(
             "agent-2",
             "conversation-2",
             listOf(candidate("language", "默认中文", "message-3")),
@@ -172,10 +174,10 @@ class AgentMemoryRepositoryTest {
     }
 
     @Test
-    fun invalidCandidateBatchFailsBeforeWritingAnything() = runTest {
+    fun rejectedRawCandidatesCannotReachRepositoryWrites() = runTest {
         val invalidCandidates = listOf(
             candidate("blank-key", "内容", "message").copy(dedupeKey = " "),
-            candidate("blank-content", " ", "message"),
+            candidate("blank-content", "内容", "message").copy(content = " "),
             candidate("blank-message", "内容", " "),
             candidate("long-message", "内容", "x".repeat(MAX_AGENT_MEMORY_ID_CHARS + 1)),
             candidate("blank-quote", "内容", "message").copy(sourceQuote = " "),
@@ -196,62 +198,79 @@ class AgentMemoryRepositoryTest {
 
         invalidCandidates.forEach { invalid ->
             val fixture = fixture()
-            val failure = runCatching {
-                fixture.repository.merge(
-                    agentId = "agent-1",
-                    conversationId = "conversation-1",
-                    candidates = listOf(candidate("valid", "有效", "message-valid"), invalid),
-                )
-            }.exceptionOrNull()
+            val policyResult = fixture.policyResult(
+                agentId = "agent-1",
+                conversationId = "conversation-1",
+                candidates = listOf(invalid),
+            )
+            policyResult.acceptedBatch?.let { fixture.repository.merge(it) }
 
-            assertTrue(failure is AgentMemoryValidationException)
             assertTrue(fixture.repository.list("agent-1").isEmpty())
         }
     }
 
     @Test
-    fun scopeFieldsAndCandidateLimitFailBeforeWritingAnything() = runTest {
+    fun writeCapabilityRejectsForgedAuthorityAndCannotCarryProjectFacts() = runTest {
         val fixture = fixture()
-        val failures = listOf(
-            runCatching {
-                fixture.repository.merge(" ", "conversation", listOf(candidate("key", "内容", "message")))
-            }.exceptionOrNull(),
-            runCatching {
-                fixture.repository.merge("agent", " ", listOf(candidate("key", "内容", "message")))
-            }.exceptionOrNull(),
-            runCatching {
-                fixture.repository.merge(
-                    "x".repeat(MAX_AGENT_MEMORY_ID_CHARS + 1),
-                    "conversation",
-                    listOf(candidate("key", "内容", "message")),
-                )
-            }.exceptionOrNull(),
-            runCatching {
-                fixture.repository.merge(
-                    "agent",
-                    "x".repeat(MAX_AGENT_MEMORY_ID_CHARS + 1),
-                    listOf(candidate("key", "内容", "message")),
-                )
-            }.exceptionOrNull(),
-            runCatching {
-                fixture.repository.merge(
-                    "agent",
-                    "conversation",
-                    List(MAX_AGENT_MEMORY_CANDIDATES_PER_MERGE + 1) { index ->
-                        candidate("key-$index", "内容", "message-$index")
-                    },
-                )
-            }.exceptionOrNull(),
+        val projectCandidate = candidate(
+            dedupeKey = "budget",
+            content = "项目预算五十万元",
+            messageId = "message-budget",
+        )
+        val policyResult = fixture.policyResult(
+            agentId = "agent-1",
+            conversationId = "conversation-1",
+            candidates = listOf(projectCandidate),
         )
 
-        assertTrue(failures.all { it is AgentMemoryValidationException })
+        fixture.repository.merge(checkNotNull(policyResult.acceptedBatch))
+        val forged = runCatching {
+            AgentMemoryPolicy.AcceptedBatch.issue(
+                authority = Any(),
+                agentId = "agent-1",
+                conversationId = "conversation-1",
+                candidates = listOf(projectCandidate),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(policyResult.accepted.isEmpty())
+        assertTrue(fixture.repository.list("agent-1").isEmpty())
+        assertTrue(forged is IllegalStateException)
+    }
+
+    @Test
+    fun invalidScopeAndCandidateLimitDoNotReceiveWriteCapability() = runTest {
+        val fixture = fixture()
+        val rejected = listOf(
+            fixture.policyResult(" ", "conversation", listOf(candidate("key", "内容", "message"))),
+            fixture.policyResult("agent", " ", listOf(candidate("key", "内容", "message"))),
+            fixture.policyResult(
+                "x".repeat(MAX_AGENT_MEMORY_ID_CHARS + 1),
+                "conversation",
+                listOf(candidate("key", "内容", "message")),
+            ),
+            fixture.policyResult(
+                "agent",
+                "x".repeat(MAX_AGENT_MEMORY_ID_CHARS + 1),
+                listOf(candidate("key", "内容", "message")),
+            ),
+            fixture.policyResult(
+                "agent",
+                "conversation",
+                List(MAX_AGENT_MEMORY_CANDIDATES_PER_MERGE + 1) { index ->
+                    candidate("key-$index", "内容", "message-$index")
+                },
+            ),
+        )
+
+        assertTrue(rejected.all { it.acceptedBatch == null })
         assertTrue(fixture.repository.list("agent").isEmpty())
     }
 
     @Test
     fun equalTimestampsUseStableIdOrderAndMissingMutationsDoNotCreateRows() = runTest {
         val fixture = fixture()
-        fixture.repository.merge(
+        fixture.merge(
             "agent-1",
             "conversation-1",
             listOf(
@@ -272,7 +291,7 @@ class AgentMemoryRepositoryTest {
     @Test
     fun concurrentAutomaticMergesCannotOverwriteACompletedUserEdit() = runTest {
         val fixture = fixture()
-        fixture.repository.merge(
+        fixture.merge(
             "agent-1",
             "conversation-1",
             listOf(candidate("language", "默认英文", "message-1")),
@@ -285,7 +304,7 @@ class AgentMemoryRepositoryTest {
                 repeat(32) { index ->
                     add(
                         async {
-                            fixture.repository.merge(
+                            fixture.merge(
                                 "agent-1",
                                 "conversation-$index",
                                 listOf(candidate("language", "自动内容 $index", "message-$index")),
@@ -349,7 +368,7 @@ class AgentMemoryRepositoryTest {
         )
 
         val failure = runCatching {
-            fixture.repository.merge(
+            fixture.merge(
                 "agent-1",
                 "conversation-1",
                 listOf(candidate("language", "agent-1 新内容", "message-1")),
@@ -388,14 +407,30 @@ class AgentMemoryRepositoryTest {
         messageId: String,
         kind: AgentMemoryKind = AgentMemoryKind.USER_PREFERENCE,
         confidence: Double = 0.8,
-    ) = AgentMemoryCandidate(
-        kind = kind,
-        dedupeKey = dedupeKey,
-        content = content,
-        sourceMessageId = messageId,
-        sourceQuote = content,
-        confidence = confidence,
-    )
+    ): AgentMemoryCandidate {
+        val (verifiedContent, sourceQuote) = when (kind) {
+            AgentMemoryKind.USER_PREFERENCE -> {
+                val value = verifiedUserPreferenceContent(content)
+                value to value
+            }
+            AgentMemoryKind.ADDRESS_PREFERENCE ->
+                "以后称呼用户为$content" to "以后叫我$content"
+            AgentMemoryKind.SHARED_HISTORY -> {
+                val value = "我们一起经历了$content"
+                value to value
+            }
+            AgentMemoryKind.RELATIONSHIP_EVENT ->
+                "用户更信任我，$content" to "我更信任你，$content"
+        }
+        return AgentMemoryCandidate(
+            kind = kind,
+            dedupeKey = dedupeKey,
+            content = verifiedContent,
+            sourceMessageId = messageId,
+            sourceQuote = sourceQuote,
+            confidence = confidence,
+        )
+    }
 }
 
 private data class Fixture(
@@ -403,6 +438,48 @@ private data class Fixture(
     val now: AtomicLong,
     val repository: AgentMemoryRepository,
 )
+
+private suspend fun Fixture.merge(
+    agentId: String,
+    conversationId: String,
+    candidates: List<AgentMemoryCandidate>,
+): AgentMemoryMergeResult {
+    val policyResult = policyResult(agentId, conversationId, candidates)
+    check(policyResult.status == AgentMemoryPolicyStatus.COMPLETED)
+    check(policyResult.accepted.isNotEmpty() || candidates.isEmpty())
+    return repository.merge(checkNotNull(policyResult.acceptedBatch))
+}
+
+private fun Fixture.policyResult(
+    agentId: String,
+    conversationId: String,
+    candidates: List<AgentMemoryCandidate>,
+): AgentMemoryPolicyResult {
+    val messages = candidates.mapIndexed { index, candidate ->
+        AgentMemoryMessageSnapshot(
+            id = candidate.sourceMessageId,
+            conversationId = conversationId,
+            role = MessageRole.USER,
+            status = MessageStatus.SUCCEEDED,
+            content = candidate.sourceQuote,
+            order = index.toLong(),
+        )
+    }
+    return AgentMemoryPolicy().evaluate(
+        AgentMemoryExtractionInput(
+            agentId = agentId,
+            conversationId = conversationId,
+            projectId = null,
+            conversationSummary = "",
+            recentMessages = messages,
+            projectFacts = emptyList(),
+        ),
+        candidates,
+    )
+}
+
+private fun verifiedUserPreferenceContent(content: String): String =
+    "$content；以后默认用中文回答"
 
 private class FakeAgentMemoryDao : AgentMemoryDao {
     private val rows = MutableStateFlow<Map<String, AgentMemoryEntity>>(emptyMap())
