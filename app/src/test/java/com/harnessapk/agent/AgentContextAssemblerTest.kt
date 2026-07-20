@@ -833,6 +833,8 @@ class AgentContextAssemblerTest {
         cases.forEach { item ->
             val memoryValue = "关系-${item.schemaVersion}"
             val projectValue = "项目-${item.schemaVersion}"
+            val sessionValue = "会话-${item.schemaVersion}"
+            val conversationMemoryValue = "摘要-${item.schemaVersion}"
             val assembler = AgentContextAssembler(
                 source = FakeContextSource(packageData().copy(schemaVersion = item.schemaVersion)),
                 relationshipMemoryProvider = AgentRelationshipMemoryProvider {
@@ -848,12 +850,17 @@ class AgentContextAssemblerTest {
                 request(
                     query = "继续",
                     projectContext = if (item.hasProject) projectValue else "",
+                ).copy(
+                    conversationMemory = conversationMemoryValue,
+                    sessionContext = sessionValue,
                 ),
             )!!
 
-            assertEquals(item.hasMemory, context.systemPrompt.contains(memoryValue))
-            assertEquals(item.hasProject, context.systemPrompt.contains(projectValue))
-            assertEquals(item.hasMemory, context.systemPrompt.contains("我们之间："))
+            assertEquals(if (item.hasMemory) 1 else 0, context.systemPrompt.occurrencesOf(memoryValue))
+            assertEquals(if (item.hasProject) 1 else 0, context.systemPrompt.occurrencesOf(projectValue))
+            assertEquals(if (item.hasMemory) 1 else 0, context.systemPrompt.occurrencesOf("我们之间："))
+            assertEquals(1, context.systemPrompt.occurrencesOf(sessionValue))
+            assertEquals(1, context.systemPrompt.occurrencesOf(conversationMemoryValue))
         }
     }
 
@@ -1078,6 +1085,9 @@ class AgentContextAssemblerTest {
         query = query,
         projectContext = projectContext,
     )
+
+    private fun String.occurrencesOf(value: String): Int =
+        windowed(value.length).count(value::equals)
 
     private fun packageData(
         persona: String = "人格内核",

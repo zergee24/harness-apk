@@ -263,6 +263,9 @@ class AgentContextAssembler(
                 appendLine()
                 appendLine("身份内核：")
                 appendLine(packageData.persona.trim())
+                appendLine()
+                appendLine("会话记忆：")
+                appendLine(request.conversationMemory.trim().ifBlank { "当前没有压缩会话记忆；承接可见对话即可。" })
                 appendAgentRelationshipMemorySection(relationshipMemoryLines)
                 if (request.projectContext.isNotBlank() || request.sessionContext.isNotBlank()) {
                     appendLine()

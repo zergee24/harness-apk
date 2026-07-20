@@ -217,25 +217,53 @@ class AgentMemoryExtractionUseCaseTest {
 
     @Test
     fun transientGenerationFailureDoesNotPoisonNextExtraction() = runTest {
+        val source = source()
         var generationAttempts = 0
+        var projectFactReads = 0
+        var projectFacts = listOf("旧项目事实")
         var mergeCalls = 0
+        val generatedInputs = mutableListOf<AgentMemoryExtractionInput>()
+        val policyInputs = mutableListOf<AgentMemoryExtractionInput>()
+        var mergedBatch: AgentMemoryPolicy.AcceptedBatch? = null
         val useCase = useCase(
-            source = source(),
-            generator = AgentMemoryCandidateGenerator {
+            source = source,
+            projectFacts = AgentMemoryProjectFactSource {
+                projectFactReads += 1
+                projectFacts
+            },
+            generator = AgentMemoryCandidateGenerator { input ->
+                generatedInputs += input
                 generationAttempts += 1
                 if (generationAttempts == 1) {
                     throw IOException("provider raw response secret")
                 }
-                listOf(candidate("user-1", "默认使用中文回答", "以后默认用中文回答"))
+                listOf(candidate("user-2", "默认使用简体中文回答", "以后默认使用简体中文回答"))
+            },
+            policy = AgentMemoryCandidatePolicy { input, candidates ->
+                policyInputs += input
+                AgentMemoryPolicy().evaluate(input, candidates)
             },
             merger = AgentMemoryAcceptedBatchMerger { batch ->
                 mergeCalls += 1
+                mergedBatch = batch
                 assertEquals(1, batch.candidates.size)
                 AgentMemoryMergeResult(1, 0, 0, 0)
             },
         )
 
         val failed = useCase.extract("conversation-1")
+        source.messages = listOf(
+            userMessage("user-2", "以后默认使用简体中文回答", 4L),
+            assistantMessage("assistant-new", "provider-new", "model-new", 5L),
+        )
+        source.assistant = assistantMessage("assistant-new", "provider-new", "model-new", 5L)
+        source.memory = source.memory?.copy(
+            summary = "新摘要",
+            coveredThroughMessageId = "user-2",
+            coveredThroughCreatedAt = 4L,
+            updatedAt = 5L,
+        )
+        projectFacts = listOf("新项目事实")
         val retried = useCase.extract("conversation-1")
 
         assertEquals(
@@ -245,7 +273,22 @@ class AgentMemoryExtractionUseCaseTest {
         assertFalse(failed.toString().contains("secret"))
         assertEquals(AgentMemoryExtractionResult.Succeeded(1, 0), retried)
         assertEquals(2, generationAttempts)
+        assertEquals(2, projectFactReads)
         assertEquals(1, mergeCalls)
+        assertEquals(3, source.conversationCalls)
+        assertEquals(2, source.messageCalls)
+        assertEquals(2, source.assistantCalls)
+        assertEquals(2, source.memoryCalls)
+        assertEquals("摘要", generatedInputs.first().conversationSummary)
+        assertEquals("provider-last", generatedInputs.first().generationTarget?.providerId)
+        assertEquals("新摘要", generatedInputs.last().conversationSummary)
+        assertEquals("provider-new", generatedInputs.last().generationTarget?.providerId)
+        assertEquals("model-new", generatedInputs.last().generationTarget?.model)
+        assertEquals(listOf("新项目事实"), generatedInputs.last().projectFacts)
+        assertEquals(listOf("user-2", "assistant-new"), generatedInputs.last().recentMessages.map { it.id })
+        assertEquals(listOf(generatedInputs.last()), policyInputs)
+        assertEquals("user-2", mergedBatch?.candidates?.single()?.sourceMessageId)
+        assertEquals("默认使用简体中文回答", mergedBatch?.candidates?.single()?.content)
     }
 
     @Test
@@ -394,8 +437,13 @@ private class FakeExtractionSource(
     var memory: ConversationMemory?,
 ) : AgentMemoryExtractionSource {
     var conversationFailure: Throwable? = null
+    var conversationCalls: Int = 0
+    var messageCalls: Int = 0
+    var assistantCalls: Int = 0
+    var memoryCalls: Int = 0
 
     override suspend fun conversation(conversationId: String): Conversation? {
+        conversationCalls += 1
         conversationFailure?.let { throw it }
         return conversation
     }
@@ -403,9 +451,18 @@ private class FakeExtractionSource(
     override suspend fun recentSuccessfulMessages(
         conversationId: String,
         limit: Int,
-    ): List<ChatMessage> = messages
+    ): List<ChatMessage> {
+        messageCalls += 1
+        return messages
+    }
 
-    override suspend fun lastSuccessfulAssistant(conversationId: String): ChatMessage? = assistant
+    override suspend fun lastSuccessfulAssistant(conversationId: String): ChatMessage? {
+        assistantCalls += 1
+        return assistant
+    }
 
-    override suspend fun memory(conversationId: String): ConversationMemory? = memory
+    override suspend fun memory(conversationId: String): ConversationMemory? {
+        memoryCalls += 1
+        return memory
+    }
 }

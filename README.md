@@ -70,6 +70,8 @@ scripts/agent-builder.sh pack build/agent-v2-fixture \
 
 应用会在每 10 个成功问答回合以及离开会话时，在后台尝试从用户明确表达中提取关系记忆。提取失败不会阻断聊天，也不会显示逐轮确认。会话中的“人物资料 -> 关系记忆”是唯一管理入口，可查看精确来源、编辑、删除或清空当前人物的全部关系记忆；清空后，下一轮请求会重新读取空列表，不再注入旧内容。关系记忆、会话和导入资料均保存在本机。
 
+### 离线 Fixture 回归
+
 离线人格回归只评估可验证信号，不调用 Provider：
 
 ```bash
@@ -89,7 +91,22 @@ scripts/agent-builder.sh benchmark-blind score \
   --output build/benchmark/report.json
 ```
 
-仓库内的 passing fixture 只证明 scorer 和 CLI 契约，不代表真实人物质量。真实 V1/V2 验收必须使用相同 Provider、模型、温度和上下文，由看不到 answer key 的评审者完成 choices；`build/benchmark/` 中的真实回答、选择和私钥不得提交。
+仓库内的 passing fixture 只证明 scorer 和 CLI 契约，不代表真实人物质量。
+
+### 真实 Provider 关系记忆冒烟
+
+前置条件是本机 Debug App 已配置可用 Provider/模型，并安装一个 `READY` 人物包。只使用无敏感信息的测试表达，Provider key、请求响应和真实会话不得写入仓库。
+
+1. 新建该人物的日常会话，明确表达称呼、稳定偏好或共同经历；完成 10 个成功问答回合，或离开会话触发后台提取。
+2. 从“人物资料 -> 关系记忆”确认新记忆、精确来源和人物归属。
+3. 分别新建同一人物的日常会话和项目会话，确认称呼或关系可承接，同时项目目标、文件和决定不会进入另一会话的关系记忆。
+4. 清空该人物的关系记忆并发送下一轮，确认旧内容不再注入。
+
+当前仓库环境没有可用的真实 Provider 配置，因此这项冒烟验收为 blocked，不能由 fixture 结果替代。
+
+### 真实 V1/V2 盲测
+
+真实 V1/V2 验收必须使用相同 Provider、模型、温度和上下文生成 `build/benchmark/v1-responses.jsonl` 与 `v2-responses.jsonl`，再由看不到 answer key 的评审者完成 choices。真实回答、选择和私钥只放在默认不提交的 `build/benchmark/`；当前缺少可比真实 responses 和人工 choices，因此不报告真实胜率。
 
 ## Emulator QA
 

@@ -1,9 +1,13 @@
 package com.harnessapk.ui.agent
 
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -13,6 +17,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import com.harnessapk.agentmemory.AgentMemory
 import com.harnessapk.agentmemory.AgentMemoryKind
 import com.harnessapk.ui.theme.HarnessApkTheme
@@ -143,6 +148,9 @@ class AgentMemorySheetComposeTest {
             CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = 2f)) {
                 HarnessApkTheme {
                     sheet(
+                        modifier = Modifier
+                            .size(width = 360.dp, height = 520.dp)
+                            .clipToBounds(),
                         memories = memories,
                         sourceAvailable = { it.id == "available" },
                         onOpenSource = { memory ->
@@ -153,6 +161,7 @@ class AgentMemorySheetComposeTest {
             }
         }
 
+        composeRule.onNodeWithText("来源已删除").assertIsNotDisplayed()
         composeRule.onNodeWithTag("关系记忆列表").performScrollToIndex(3)
         composeRule.waitUntil(timeoutMillis = 5_000L) {
             runCatching {
@@ -230,6 +239,7 @@ class AgentMemorySheetComposeTest {
 
     @androidx.compose.runtime.Composable
     private fun sheet(
+        modifier: Modifier = Modifier,
         memories: List<AgentMemory>,
         sourceAvailable: suspend (AgentMemory) -> Boolean = { true },
         onOpenSource: (AgentMemory) -> Unit = {},
@@ -239,6 +249,7 @@ class AgentMemorySheetComposeTest {
     ) {
         AgentMemorySheet(
             agentId = "agent-a",
+            modifier = modifier,
             version = 7,
             installedCorpusCount = 2,
             requiredCorpusCount = 3,

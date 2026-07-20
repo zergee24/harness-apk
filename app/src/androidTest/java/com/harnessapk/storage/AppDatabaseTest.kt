@@ -637,14 +637,19 @@ class AppDatabaseTest {
         assertEquals(16, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
-            "默认使用中文",
-            sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"),
-        )
-        assertEquals(
-            "notes/project.md",
+            "daily-conversation|USER|默认使用中文",
             sqlite.string(
                 """
-                SELECT relativePath
+                SELECT conversationId || '|' || role || '|' || content
+                FROM messages WHERE id = 'daily-message'
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
+            "project-1|notes/project.md",
+            sqlite.string(
+                """
+                SELECT projectId || '|' || relativePath
                 FROM conversation_markdown_links
                 WHERE conversationId = 'project-conversation'
                 """.trimIndent(),
@@ -663,11 +668,43 @@ class AppDatabaseTest {
             ),
         )
         assertEquals(
+            "required|1",
+            sqlite.string(
+                """
+                SELECT installClass || '|' || installed
+                FROM agent_version_packages
+                WHERE agentId = 'agent-v2' AND version = 2 AND packageId = 'core'
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
+            "1|required",
+            sqlite.string(
+                """
+                SELECT required || '|' || installClass
+                FROM agent_version_corpora
+                WHERE agentId = 'agent-v2' AND version = 2 AND corpusId = 'core'
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
             1,
             sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks WHERE sourceId = 'source-v2'"),
         )
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_source_files"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_hierarchy_nodes"))
+        val v2SourceHash = sqlite.string(
+            "SELECT sourceHash FROM agent_corpora WHERE corpusId = 'core'",
+        )
+        val v2CorpusKeys = listOf("core:$v2SourceHash")
+        assertEquals(
+            listOf("source-v2:chunk-1"),
+            migrated.agentDao().searchChunkKeys(v2CorpusKeys, "默认", "", 8),
+        )
+        assertEquals(
+            listOf("source-v2:root"),
+            migrated.agentDao().searchHierarchyNodeKeysForCorpora(v2CorpusKeys, "摘要", "", 8),
+        )
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_memories"))
         assertEquals(
             0,
@@ -960,36 +997,55 @@ class AppDatabaseTest {
         assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
         assertEquals(5, sqlite.scalarInt("SELECT COUNT(*) FROM message_parts"))
         mapOf(
-            "message-1" to "保留消息",
-            "message-ordinary-daily" to "普通日常消息",
-            "message-persona-daily" to "人物日常消息",
-            "message-ordinary-project" to "普通项目消息",
-        ).forEach { (messageId, content) ->
+            "message-1" to "conversation-1|ASSISTANT|保留消息",
+            "message-ordinary-daily" to "ordinary-daily|USER|普通日常消息",
+            "message-persona-daily" to "persona-daily|USER|人物日常消息",
+            "message-ordinary-project" to "ordinary-project|ASSISTANT|普通项目消息",
+        ).forEach { (messageId, expected) ->
             assertEquals(
-                content,
-                sqlite.string("SELECT content FROM messages WHERE id = '$messageId'"),
-            )
-        }
-        mapOf(
-            "message-part-1" to "保留分片",
-            "part-ordinary-daily" to "普通日常分片",
-            "part-persona-daily" to "人物日常分片",
-            "part-ordinary-project" to "普通项目分片",
-        ).forEach { (partId, content) ->
-            assertEquals(
-                content,
-                sqlite.string("SELECT content FROM message_parts WHERE id = '$partId'"),
-            )
-        }
-        mapOf(
-            "conversation-1" to "notes/fixture.md",
-            "ordinary-project" to "notes/ordinary-project.md",
-        ).forEach { (conversationId, relativePath) ->
-            assertEquals(
-                relativePath,
+                expected,
                 sqlite.string(
                     """
-                    SELECT relativePath FROM conversation_markdown_links
+                    SELECT conversationId || '|' || role || '|' || content
+                    FROM messages WHERE id = '$messageId'
+                    """.trimIndent(),
+                ),
+            )
+        }
+        mapOf(
+            "message-part-1" to "message-1|0|TEXT|保留分片",
+            "part-ordinary-daily" to "message-ordinary-daily|0|TEXT|普通日常分片",
+            "part-persona-daily" to "message-persona-daily|0|TEXT|人物日常分片",
+            "part-ordinary-project" to "message-ordinary-project|0|TEXT|普通项目分片",
+        ).forEach { (partId, expected) ->
+            assertEquals(
+                expected,
+                sqlite.string(
+                    """
+                    SELECT messageId || '|' || partIndex || '|' || type || '|' || content
+                    FROM message_parts WHERE id = '$partId'
+                    """.trimIndent(),
+                ),
+            )
+        }
+        assertEquals(
+            "message-1|1|AGENT_SOURCES",
+            sqlite.string(
+                """
+                SELECT messageId || '|' || partIndex || '|' || type
+                FROM message_parts WHERE id = 'message-part-legacy-source'
+                """.trimIndent(),
+            ),
+        )
+        mapOf(
+            "conversation-1" to "project-1|notes/fixture.md",
+            "ordinary-project" to "project-1|notes/ordinary-project.md",
+        ).forEach { (conversationId, expected) ->
+            assertEquals(
+                expected,
+                sqlite.string(
+                    """
+                    SELECT projectId || '|' || relativePath FROM conversation_markdown_links
                     WHERE conversationId = '$conversationId'
                     """.trimIndent(),
                 ),
@@ -1003,6 +1059,24 @@ class AppDatabaseTest {
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_sources"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_hierarchy"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_memories"))
+        assertEquals(
+            "1|required",
+            sqlite.string(
+                """
+                SELECT required || '|' || installClass FROM agent_version_corpora
+                WHERE agentId = 'agent-1' AND version = 1 AND corpusId = 'corpus-core'
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
+            "0|optional",
+            sqlite.string(
+                """
+                SELECT required || '|' || installClass FROM agent_version_corpora
+                WHERE agentId = 'agent-1' AND version = 1 AND corpusId = 'corpus-full'
+                """.trimIndent(),
+            ),
+        )
         assertEquals("", sqlite.string("SELECT conflictKey FROM agent_chunks LIMIT 1"))
         assertEquals("[]", sqlite.string("SELECT sourceAliasesJson FROM agent_chunks LIMIT 1"))
         assertEquals("", sqlite.string("SELECT simHash FROM agent_chunks LIMIT 1"))

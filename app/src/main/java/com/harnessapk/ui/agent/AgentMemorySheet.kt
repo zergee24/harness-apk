@@ -53,6 +53,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun AgentMemorySheet(
     agentId: String,
+    modifier: Modifier = Modifier,
     version: Int?,
     installedCorpusCount: Int?,
     requiredCorpusCount: Int?,
@@ -113,6 +114,7 @@ fun AgentMemorySheet(
     }
 
     ModalBottomSheet(
+        modifier = modifier,
         onDismissRequest = onDismiss,
         sheetState = sheetState,
     ) {
