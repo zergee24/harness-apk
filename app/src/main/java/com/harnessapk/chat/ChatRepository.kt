@@ -276,6 +276,9 @@ class ChatRepository(
     suspend fun lastSuccessfulAssistant(conversationId: String): ChatMessage? =
         messageDao.findLastSuccessfulAssistant(conversationId)?.toDomain()
 
+    suspend fun completedAssistantTextCount(conversationId: String): Int =
+        messageDao.countSuccessfulAssistantText(conversationId)
+
     suspend fun message(id: String): ChatMessage? = messageDao.findById(id)?.toDomain()
 
     suspend fun deleteMessage(id: String) {

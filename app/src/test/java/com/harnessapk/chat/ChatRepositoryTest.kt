@@ -372,6 +372,33 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun completedAssistantTextCountUsesPersistedSuccessfulNonBlankReplies() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 58L })
+        val conversationId = repository.createConversation()
+        repository.insertAssistantPending(conversationId, "provider", "model").also {
+            repository.appendAssistantText(it, "成功回复")
+            repository.markAssistantSucceeded(it)
+        }
+        repository.insertAssistantPending(conversationId, "provider", "model").also {
+            repository.markAssistantSucceeded(it)
+        }
+        repository.insertAssistantPending(conversationId, "provider", "model").also {
+            repository.appendAssistantText(it, "失败回复")
+            repository.markAssistantFailed(it, "失败")
+        }
+        repository.insertAssistantPending(conversationId, "provider", "model").also {
+            repository.appendAssistantText(it, "仍在生成")
+        }
+        val otherConversationId = repository.createConversation()
+        repository.insertAssistantPending(otherConversationId, "provider", "model").also {
+            repository.appendAssistantText(it, "其他会话")
+            repository.markAssistantSucceeded(it)
+        }
+
+        assertEquals(1, repository.completedAssistantTextCount(conversationId))
+    }
+
+    @Test
     fun manualContextCompressionSavesMemoryAndInsertsSystemEvent() = runTest {
         val conversationDao = FakeConversationDao()
         var now = 60L
@@ -535,6 +562,14 @@ private class FakeMessageDao : MessageDao {
                     it.role == "ASSISTANT"
             }
             .maxWithOrNull(compareBy<MessageEntity> { it.createdAt }.thenBy { it.id })
+
+    override suspend fun countSuccessfulAssistantText(conversationId: String): Int =
+        rows.values.count {
+            it.conversationId == conversationId &&
+                it.status == "SUCCEEDED" &&
+                it.role == "ASSISTANT" &&
+                it.content.isNotBlank()
+        }
 
     override suspend fun findById(id: String): MessageEntity? = rows[id]
 

@@ -12,6 +12,7 @@ import com.harnessapk.agentmemory.AgentMemoryRepository
 import com.harnessapk.agentmemory.AgentMemoryTransactionRunner
 import com.harnessapk.agentmemory.AgentMemoryAcceptedBatchMerger
 import com.harnessapk.agentmemory.AgentMemoryCandidatePolicy
+import com.harnessapk.agentmemory.AgentMemoryCoordinator
 import com.harnessapk.agentmemory.AgentMemoryExtractionUseCase
 import com.harnessapk.agentmemory.AgentMemoryPolicy
 import com.harnessapk.agentmemory.LlmAgentMemoryCandidateGenerator
@@ -173,6 +174,11 @@ class AppContainer(
         policy = AgentMemoryCandidatePolicy(agentMemoryPolicy::evaluate),
         merger = AgentMemoryAcceptedBatchMerger(agentMemoryRepository::merge),
     )
+    val agentMemoryCoordinator = AgentMemoryCoordinator(
+        scope = applicationScope,
+        completedRoundCount = chatRepository::completedAssistantTextCount,
+        extract = agentMemoryExtractionUseCase::extract,
+    )
     val deleteProjectUseCase = DeleteProjectUseCase(
         projectRepository = projectRepository,
         database = database,
@@ -236,6 +242,7 @@ class AppContainer(
             webSearchAllowedForAgentConversation(chatRepository.conversation(conversationId)?.agentId)
         },
         onWorkScheduled = { ChatExecutionService.start(appContext) },
+        onReplyCompleted = agentMemoryCoordinator::onReplyCompleted,
     )
     val chatSendRecoveryManager = ChatSendRecoveryManager(
         scope = applicationScope,

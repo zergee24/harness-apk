@@ -35,6 +35,7 @@ class ChatExecutionCoordinator(
     private val dispatchers: AppDispatchers,
     private val webSearchAllowed: suspend (conversationId: String) -> Boolean = { true },
     private val onWorkScheduled: () -> Unit = {},
+    private val onReplyCompleted: (conversationId: String) -> Unit = {},
     private val exactAttachmentBatchReferenced:
         suspend (requestId: String, attachments: List<PendingImageAttachment>) -> Boolean =
         executionRepository::isAttachmentBatchReferenced,
@@ -161,6 +162,11 @@ class ChatExecutionCoordinator(
                         assistantMessageId = result.assistantMessageId,
                         errorMessage = result.errorMessage,
                     )
+                    notifyAgentMemoryAfterTerminalPersistence(
+                        conversationId = next.conversationId,
+                        status = result.status,
+                        onReplyCompleted = onReplyCompleted,
+                    )
                 } catch (cancelled: CancellationException) {
                     val entry = executionRepository.entry(next.id)
                     if (entry?.status == ChatExecutionStatus.RUNNING) {
@@ -232,3 +238,15 @@ internal fun <T> shouldRemoveRunner(registered: T?, finished: T?): Boolean =
     registered != null && registered === finished
 
 internal fun shouldRecoverRunningExecution(hasActiveRunner: Boolean): Boolean = !hasActiveRunner
+
+internal fun notifyAgentMemoryAfterTerminalPersistence(
+    conversationId: String,
+    status: ChatExecutionStatus,
+    onReplyCompleted: (String) -> Unit,
+) {
+    if (status != ChatExecutionStatus.SUCCEEDED) return
+    try {
+        onReplyCompleted(conversationId)
+    } catch (_: Exception) {
+    }
+}

@@ -793,6 +793,12 @@ private class ExecuteMessageDao : MessageDao {
                 it.role == "ASSISTANT"
         }
         .maxWithOrNull(compareBy<MessageEntity> { it.createdAt }.thenBy { it.id })
+    override suspend fun countSuccessfulAssistantText(conversationId: String) = rows.values.count {
+        it.conversationId == conversationId &&
+            it.status == "SUCCEEDED" &&
+            it.role == "ASSISTANT" &&
+            it.content.isNotBlank()
+    }
     override suspend fun findById(id: String) = rows[id]
     override suspend fun countUserMessages(conversationId: String) = rows.values.count { it.conversationId == conversationId && it.role == "USER" }
     override suspend fun insert(entity: MessageEntity) { rows[entity.id] = entity }

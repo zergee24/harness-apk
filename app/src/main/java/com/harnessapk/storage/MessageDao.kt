@@ -40,6 +40,17 @@ interface MessageDao {
     )
     suspend fun findLastSuccessfulAssistant(conversationId: String): MessageEntity?
 
+    @Query(
+        """
+        SELECT COUNT(*) FROM messages
+        WHERE conversationId = :conversationId
+          AND status = 'SUCCEEDED'
+          AND role = 'ASSISTANT'
+          AND TRIM(content) != ''
+        """,
+    )
+    suspend fun countSuccessfulAssistantText(conversationId: String): Int
+
     @Query("SELECT * FROM messages WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): MessageEntity?
 

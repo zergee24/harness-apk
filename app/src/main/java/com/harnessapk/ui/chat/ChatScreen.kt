@@ -85,6 +85,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -312,6 +313,10 @@ fun ChatScreen(
     val sendRequestState by container.chatSendRecoveryStore
         .observe(conversationId)
         .collectAsState(initial = container.chatSendRecoveryStore.current(conversationId))
+    AgentMemoryConversationLeaveEffect(
+        conversationId = conversationId,
+        onConversationLeft = container.agentMemoryCoordinator::onConversationLeft,
+    )
     LaunchedEffect(
         sendRequestState?.requestId,
         sendRequestState?.phase,
@@ -1684,6 +1689,19 @@ fun ChatScreen(
                     sendFileChangeNow()
                 },
             )
+        }
+    }
+}
+
+@Composable
+internal fun AgentMemoryConversationLeaveEffect(
+    conversationId: String,
+    onConversationLeft: (String) -> Unit,
+) {
+    val currentOnConversationLeft by rememberUpdatedState(onConversationLeft)
+    DisposableEffect(conversationId) {
+        onDispose {
+            currentOnConversationLeft(conversationId)
         }
     }
 }

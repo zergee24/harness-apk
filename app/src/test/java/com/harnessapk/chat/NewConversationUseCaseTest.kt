@@ -192,6 +192,7 @@ private class NewConversationFakeMessageDao : MessageDao {
     override suspend fun listRecentSuccessfulText(conversationId: String, limit: Int): List<MessageEntity> =
         emptyList()
     override suspend fun findLastSuccessfulAssistant(conversationId: String): MessageEntity? = null
+    override suspend fun countSuccessfulAssistantText(conversationId: String): Int = 0
     override suspend fun findById(id: String): MessageEntity? = null
     override suspend fun countUserMessages(conversationId: String): Int = 0
     override suspend fun insert(entity: MessageEntity) = Unit
