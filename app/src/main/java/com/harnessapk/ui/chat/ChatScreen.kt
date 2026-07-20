@@ -133,6 +133,7 @@ import com.harnessapk.chat.defaultReasoningEffort
 import com.harnessapk.chat.identityLockedForPendingSend
 import com.harnessapk.chat.supportsReasoningEffort
 import com.harnessapk.agent.AgentVersionCoverage
+import com.harnessapk.agentmemory.AgentMemory
 import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.provider.ProviderProfile
@@ -164,6 +165,10 @@ import com.harnessapk.storage.DefaultModelPreference
 import com.harnessapk.storage.ProviderCapabilityCatalogSnapshot
 import com.harnessapk.ui.components.InlineStatusMessage
 import com.harnessapk.ui.components.StatusTone
+import com.harnessapk.ui.agent.AgentMemorySheet
+import com.harnessapk.ui.agent.canOperateAgentMemory
+import com.harnessapk.ui.agent.resolveAgentMemorySourceTarget
+import com.harnessapk.ui.agent.AgentMemorySourceTarget
 import com.harnessapk.ui.markdown.MarkdownMessage
 import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.ui.theme.HarnessSpacing
@@ -223,6 +228,8 @@ fun ChatScreen(
     onSessionConfigRequestConsumed: () -> Unit = {},
     onOpenProjectFiles: (projectId: String, selectedPath: String?) -> Unit = { _, _ -> },
     onOpenProjectGit: (projectId: String) -> Unit = {},
+    initialSourceMessageId: String? = null,
+    onOpenConversationMessage: (conversationId: String, messageId: String) -> Unit = { _, _ -> },
     contentPadding: PaddingValues,
 ) {
     val persistedMessages by remember(conversationId) {
@@ -300,6 +307,20 @@ fun ChatScreen(
     var initialProjectApplied by remember { mutableStateOf(false) }
     var autoFocusInputRequested by remember(conversationId) { mutableStateOf(false) }
     var streamingAutoScrollEnabled by remember(conversationId) { mutableStateOf(true) }
+    var pendingSourceMessageId by remember(conversationId, initialSourceMessageId) {
+        mutableStateOf(initialSourceMessageId)
+    }
+    var sourceLocationConsumed by remember(conversationId, initialSourceMessageId) {
+        mutableStateOf(false)
+    }
+    var sourceLocationStatus by remember(conversationId, initialSourceMessageId) {
+        mutableStateOf<String?>(null)
+    }
+    val currentAgentId = conversation?.agentId
+    val relationshipMemories by remember(currentAgentId) {
+        currentAgentId?.let(container.agentMemoryRepository::observe)
+            ?: flowOf(emptyList<AgentMemory>())
+    }.collectAsState(initial = emptyList())
     val identityController = remember(conversationId) {
         ConversationIdentityController(
             scope = scope,
@@ -547,6 +568,10 @@ fun ChatScreen(
     }
     LaunchedEffect(autoScrollKey(messages)) {
         val currentKey = autoScrollKey(messages)
+        if (!pendingSourceMessageId.isNullOrBlank() && !sourceLocationConsumed) {
+            previousAutoScrollKey = currentKey
+            return@LaunchedEffect
+        }
         val scrollMode = chatAutoScrollMode(
             previous = previousAutoScrollKey,
             current = currentKey,
@@ -572,6 +597,33 @@ fun ChatScreen(
                 }
             }
             ChatAutoScrollMode.NONE -> Unit
+        }
+    }
+
+    LaunchedEffect(
+        conversationId,
+        pendingSourceMessageId,
+        messageState,
+        sourceLocationConsumed,
+    ) {
+        val sourceMessageId = pendingSourceMessageId
+        if (
+            !shouldConsumeSourceMessageLocation(
+                sourceMessageId = sourceMessageId,
+                messagesLoaded = messageState is PersistedMessagesState.Loaded,
+                consumed = sourceLocationConsumed,
+            )
+        ) {
+            return@LaunchedEffect
+        }
+        sourceLocationConsumed = true
+        val index = sourceMessageIndex(messages, sourceMessageId.orEmpty())
+        if (index == null) {
+            sourceLocationStatus = "来源消息不可用"
+        } else {
+            sourceLocationStatus = null
+            streamingAutoScrollEnabled = false
+            listState.scrollToItem(index)
         }
     }
 
@@ -1393,13 +1445,70 @@ fun ChatScreen(
     }
 
     if (showIdentityDetails) {
-        ConversationIdentityDetailsDialog(
-            version = conversation?.agentVersion,
-            installedCorpusCount = fixedVersionCoverage?.installedRequiredCorpusCount,
-            requiredCorpusCount = fixedVersionCoverage?.requiredCorpusCount,
-            publisherFingerprint = agents.firstOrNull { it.id == conversation?.agentId }?.publisherFingerprint,
-            onDismiss = { showIdentityDetails = false },
-        )
+        currentAgentId?.let { agentId ->
+            AgentMemorySheet(
+                agentId = agentId,
+                version = conversation?.agentVersion,
+                installedCorpusCount = fixedVersionCoverage?.installedRequiredCorpusCount,
+                requiredCorpusCount = fixedVersionCoverage?.requiredCorpusCount,
+                publisherFingerprint = agents.firstOrNull { it.id == agentId }?.publisherFingerprint,
+                memories = relationshipMemories,
+                sourceAvailable = { memory ->
+                    if (!canOperateAgentMemory(agentId, memory)) {
+                        false
+                    } else {
+                        val sourceConversation =
+                            container.chatRepository.conversation(memory.sourceConversationId)
+                        val sourceMessage = container.chatRepository.message(memory.sourceMessageId)
+                        sourceConversation?.agentId == agentId &&
+                            sourceMessage?.conversationId == memory.sourceConversationId
+                    }
+                },
+                onOpenSource = { memory ->
+                    when (
+                        resolveAgentMemorySourceTarget(
+                            currentConversationId = conversationId,
+                            memory = memory,
+                            sourceAvailable = canOperateAgentMemory(agentId, memory),
+                        )
+                    ) {
+                        is AgentMemorySourceTarget.CurrentConversation -> {
+                            pendingSourceMessageId = memory.sourceMessageId
+                            sourceLocationConsumed = false
+                            sourceLocationStatus = null
+                        }
+                        is AgentMemorySourceTarget.OtherConversation -> {
+                            onOpenConversationMessage(
+                                memory.sourceConversationId,
+                                memory.sourceMessageId,
+                            )
+                        }
+                        AgentMemorySourceTarget.Unavailable -> {
+                            sourceLocationStatus = "来源消息不可用"
+                        }
+                    }
+                },
+                onEdit = { memory, content ->
+                    conversation?.agentId == agentId &&
+                        canOperateAgentMemory(agentId, memory) &&
+                        container.agentMemoryRepository.edit(memory.id, content)
+                },
+                onDelete = { memory ->
+                    conversation?.agentId == agentId &&
+                        canOperateAgentMemory(agentId, memory) &&
+                        container.agentMemoryRepository.delete(memory.id)
+                },
+                onClear = {
+                    if (conversation?.agentId != agentId) {
+                        false
+                    } else {
+                        val clearedCount = container.agentMemoryRepository.clear(agentId)
+                        clearedCount > 0 || container.agentMemoryRepository.list(agentId).isEmpty()
+                    }
+                },
+                onDismiss = { showIdentityDetails = false },
+            )
+        }
     }
 
     if (showSessionConfig) {
@@ -1495,6 +1604,7 @@ fun ChatScreen(
         }
         errorText?.let { ResponsiveChatContentRail { InlineError(it) } }
         sessionStatus?.let { ResponsiveChatContentRail { InlineStatus(it) } }
+        sourceLocationStatus?.let { ResponsiveChatContentRail { InlineStatus(it) } }
 
         BoxWithConstraints(
             modifier = Modifier
@@ -3421,32 +3531,6 @@ private fun MessageSelectionCopyDialog(
             TextButton(onClick = onDismiss) {
                 Text("关闭")
             }
-        },
-    )
-}
-
-@Composable
-private fun ConversationIdentityDetailsDialog(
-    version: Int?,
-    installedCorpusCount: Int?,
-    requiredCorpusCount: Int?,
-    publisherFingerprint: String?,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("人物资料") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("固定版本：v${version ?: "未知"}")
-                Text(
-                    "资料覆盖：${installedCorpusCount ?: "未知"}/${requiredCorpusCount ?: "未知"}",
-                )
-                Text("发布者指纹：${publisherFingerprint ?: "未知"}")
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
 }

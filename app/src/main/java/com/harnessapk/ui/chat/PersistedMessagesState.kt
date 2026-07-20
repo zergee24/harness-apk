@@ -17,3 +17,14 @@ internal fun PersistedMessagesState.messagesOrEmpty(): List<ChatMessage> = when 
 
 internal fun PersistedMessagesState.isLoadedEmpty(): Boolean =
     this is PersistedMessagesState.Loaded && messages.isEmpty()
+
+internal fun shouldConsumeSourceMessageLocation(
+    sourceMessageId: String?,
+    messagesLoaded: Boolean,
+    consumed: Boolean,
+): Boolean = !sourceMessageId.isNullOrBlank() && messagesLoaded && !consumed
+
+internal fun sourceMessageIndex(
+    messages: List<ChatMessage>,
+    sourceMessageId: String,
+): Int? = messages.indexOfFirst { it.id == sourceMessageId }.takeIf { it >= 0 }

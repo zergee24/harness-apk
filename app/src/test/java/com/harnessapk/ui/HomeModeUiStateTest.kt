@@ -47,12 +47,27 @@ class HomeModeUiStateTest {
     }
 
     @Test
-    fun chatRouteCarriesFocusInputOnlyWhenRequested() {
-        assertEquals("", chatRouteQuery(projectId = null, focusInput = false, encode = { it }))
-        assertEquals("?focusInput=true", chatRouteQuery(projectId = null, focusInput = true, encode = { it }))
+    fun chatRouteKeepsOldQueriesAndOptionallyCarriesSourceMessage() {
+        assertEquals(
+            "",
+            chatRouteQuery(projectId = null, focusInput = false, sourceMessageId = null, encode = { it }),
+        )
+        assertEquals(
+            "?focusInput=true",
+            chatRouteQuery(projectId = null, focusInput = true, sourceMessageId = null, encode = { it }),
+        )
         assertEquals(
             "?projectId=p1&focusInput=true",
-            chatRouteQuery(projectId = "p1", focusInput = true, encode = { it }),
+            chatRouteQuery(projectId = "p1", focusInput = true, sourceMessageId = null, encode = { it }),
+        )
+        assertEquals(
+            "?sourceMessageId=message%201",
+            chatRouteQuery(
+                projectId = null,
+                focusInput = false,
+                sourceMessageId = "message 1",
+                encode = { it.replace(" ", "%20") },
+            ),
         )
     }
 }

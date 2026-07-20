@@ -961,6 +961,38 @@ class ChatUiStateTest {
         assertEquals("M", markdownFileChangeOperationLabel(items[1]))
     }
 
+    @Test
+    fun sourceMessageLocationWaitsForLoadedMessagesAndConsumesOnce() {
+        val messages = listOf(
+            userMessage(id = "first"),
+            userMessage(id = "source"),
+        )
+
+        assertFalse(
+            shouldConsumeSourceMessageLocation(
+                sourceMessageId = "source",
+                messagesLoaded = false,
+                consumed = false,
+            ),
+        )
+        assertTrue(
+            shouldConsumeSourceMessageLocation(
+                sourceMessageId = "source",
+                messagesLoaded = true,
+                consumed = false,
+            ),
+        )
+        assertFalse(
+            shouldConsumeSourceMessageLocation(
+                sourceMessageId = "source",
+                messagesLoaded = true,
+                consumed = true,
+            ),
+        )
+        assertEquals(1, sourceMessageIndex(messages, "source"))
+        assertEquals(null, sourceMessageIndex(messages, "missing"))
+    }
+
     private fun userMessage(
         id: String = "user",
         content: String = "hello",

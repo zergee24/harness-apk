@@ -77,27 +77,38 @@ object Routes {
     const val Skills = "skills"
     const val AgentPackages = "agent-packages"
     const val Updates = "updates"
-    const val ChatPattern = "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}"
+    const val ChatPattern =
+        "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}"
 
     fun chat(
         conversationId: String,
         projectId: String? = null,
         focusInput: Boolean = false,
+        sourceMessageId: String? = null,
     ): String = buildString {
         append("chat/")
         append(Uri.encode(conversationId))
-        append(chatRouteQuery(projectId = projectId, focusInput = focusInput, encode = Uri::encode))
+        append(
+            chatRouteQuery(
+                projectId = projectId,
+                focusInput = focusInput,
+                sourceMessageId = sourceMessageId,
+                encode = Uri::encode,
+            ),
+        )
     }
 }
 
 internal fun chatRouteQuery(
     projectId: String?,
     focusInput: Boolean,
+    sourceMessageId: String? = null,
     encode: (String) -> String,
 ): String {
     val query = listOfNotNull(
         projectId?.let { "projectId=${encode(it)}" },
         if (focusInput) "focusInput=true" else null,
+        sourceMessageId?.let { "sourceMessageId=${encode(it)}" },
     )
     return if (query.isEmpty()) "" else "?${query.joinToString("&")}"
 }
@@ -320,6 +331,11 @@ fun HarnessApkApp(
                         type = NavType.BoolType
                         defaultValue = false
                     },
+                    navArgument("sourceMessageId") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
                 ),
             ) { entry ->
                 ChatScreen(
@@ -334,6 +350,17 @@ fun HarnessApkApp(
                     },
                     onOpenProjectGit = { projectId ->
                         openWorkbench(projectId, ProjectWorkbenchDestination.GIT)
+                    },
+                    initialSourceMessageId = entry.arguments?.getString("sourceMessageId"),
+                    onOpenConversationMessage = { sourceConversationId, sourceMessageId ->
+                        navController.navigate(
+                            Routes.chat(
+                                conversationId = sourceConversationId,
+                                sourceMessageId = sourceMessageId,
+                            ),
+                        ) {
+                            launchSingleTop = true
+                        }
                     },
                     contentPadding = padding,
                 )
