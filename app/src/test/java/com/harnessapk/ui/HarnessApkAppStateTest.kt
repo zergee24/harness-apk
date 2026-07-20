@@ -52,6 +52,22 @@ class HarnessApkAppStateTest {
     }
 
     @Test
+    fun homeConversationRequestUsesSuggestedIdentityWithoutProject() {
+        assertEquals(
+            NewConversationRequest(),
+            homeConversationRequest(),
+        )
+    }
+
+    @Test
+    fun projectConversationRequestUsesProjectTitleAndProjectId() {
+        assertEquals(
+            NewConversationRequest(title = "移动端 Harness · 项目会话", projectId = "project-1"),
+            projectConversationRequest(projectId = "project-1", projectName = "移动端 Harness"),
+        )
+    }
+
+    @Test
     fun sharedModeSwitcherUsesConsistentThemeShapes() {
         val source = File("src/main/java/com/harnessapk/ui/components/WarmComponents.kt").readText()
         val segmentedSource = source.substringAfter("fun WarmSegmentedControl").substringBefore("@Composable\nfun ActionableEmptyState")
@@ -59,6 +75,33 @@ class HarnessApkAppStateTest {
         assertTrue(segmentedSource.contains("shape = MaterialTheme.shapes.large"))
         assertTrue(segmentedSource.contains("shape = MaterialTheme.shapes.medium"))
         assertFalse(segmentedSource.contains("RoundedCornerShape(999.dp)"))
+    }
+
+    @Test
+    fun homeModeSwitcherUsesCompactSingleLineSegments() {
+        val appSource = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
+        val componentSource = File("src/main/java/com/harnessapk/ui/components/WarmComponents.kt").readText()
+        val modeSwitcherSource = appSource.substringAfter("private fun ModeSwitcher").substringBefore("@Composable\nprivate fun HomeTopBarActions")
+        val segmentedSource = componentSource.substringAfter("fun WarmSegmentedControl").substringBefore("@Composable\nfun ActionableEmptyState")
+
+        assertTrue(modeSwitcherSource.contains("modifier = modifier"))
+        assertTrue(segmentedSource.contains("modifier.height(48.dp)"))
+        assertTrue(segmentedSource.contains(".weight(1f)"))
+        assertTrue(segmentedSource.contains("style = MaterialTheme.typography.labelMedium"))
+        assertTrue(segmentedSource.contains("maxLines = 1"))
+        assertTrue(segmentedSource.contains("softWrap = false"))
+    }
+
+    @Test
+    fun homeModeSwitcherUsesDedicatedTopBarSpace() {
+        val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
+        val topBarSource = source.substringAfter("topBar = {").substringBefore("},\n    ) { padding")
+
+        assertTrue(topBarSource.contains("if (isHomeRoute)"))
+        assertTrue(topBarSource.contains("HomeTopBar("))
+        assertTrue(source.contains("private fun HomeTopBar("))
+        assertTrue(source.contains(".weight(1f, fill = false)"))
+        assertTrue(source.contains("widthIn(max = 216.dp)"))
     }
 
     private fun conversation(id: String, title: String): Conversation = Conversation(

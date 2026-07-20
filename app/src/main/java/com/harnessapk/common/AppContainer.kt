@@ -1,19 +1,49 @@
 package com.harnessapk.common
 
 import android.content.Context
+import android.os.StatFs
 import androidx.room.Room
+import androidx.room.withTransaction
+import com.harnessapk.agent.AgentRepository
+import com.harnessapk.agent.AgentContextAssembler
+import com.harnessapk.agent.AgentLifecycleCoordinator
+import com.harnessapk.agent.AgentRelationshipMemoryProvider
+import com.harnessapk.agent.AgentTransactionRunner
+import com.harnessapk.agentmemory.AgentMemoryRepository
+import com.harnessapk.agentmemory.AgentMemoryTransactionRunner
+import com.harnessapk.agentmemory.AgentMemoryAcceptedBatchMerger
+import com.harnessapk.agentmemory.AgentMemoryCandidatePolicy
+import com.harnessapk.agentmemory.AgentMemoryCoordinator
+import com.harnessapk.agentmemory.AgentMemoryExtractionUseCase
+import com.harnessapk.agentmemory.AgentMemoryPolicy
+import com.harnessapk.agentmemory.LlmAgentMemoryCandidateGenerator
+import com.harnessapk.agentmemory.MarkdownAgentMemoryProjectFactSource
+import com.harnessapk.agentmemory.MAX_AGENT_MEMORY_PROJECT_CONTEXT_CHARS
+import com.harnessapk.agentmemory.RepositoryAgentMemoryExtractionSource
+import com.harnessapk.agentmemory.RepositoryAgentMemoryGenerationProviderResolver
+import com.harnessapk.agentmemory.openAiAgentMemoryCompletionGateway
+import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.BuildConfig
+import com.harnessapk.chat.ChatImageStore
+import com.harnessapk.chat.AgentSourcePartWriter
 import com.harnessapk.chat.ChatRepository
 import com.harnessapk.chat.ChatExecutionCoordinator
 import com.harnessapk.chat.ChatExecutionRepository
+import com.harnessapk.chat.ChatSendController
+import com.harnessapk.chat.ChatSendRecoveryManager
+import com.harnessapk.chat.ChatSendRecoveryStore
 import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.chat.ManualContextCompressionUseCase
+import com.harnessapk.chat.NewConversationUseCase
 import com.harnessapk.chat.QueuedAttachmentStore
 import com.harnessapk.chat.SendMessageUseCase
+import com.harnessapk.chat.assembleAgentContextForConversation
+import com.harnessapk.chat.webSearchAllowedForAgentConversation
 import com.harnessapk.git.GitCredentialStore
 import com.harnessapk.git.JGitEngine
 import com.harnessapk.network.OpenAiCompatibleClient
 import com.harnessapk.project.FileProjectRepository
+import com.harnessapk.project.DeleteProjectUseCase
 import com.harnessapk.project.ProjectWorkspaceGatewayAdapter
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderCapabilityCatalogClient
@@ -27,12 +57,19 @@ import com.harnessapk.updater.ApkInstaller
 import com.harnessapk.updater.UpdateRepository
 import com.harnessapk.updater.UpdateDownloadCoordinator
 import com.harnessapk.websearch.JinaWebSearchClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 
-class AppContainer(context: Context) {
+class AppContainer(
+    context: Context,
+    applicationScopeOverride: CoroutineScope? = null,
+) {
     private val appContext = context.applicationContext
     val dispatchers = AppDispatchers()
+    val applicationScope = applicationScopeOverride
+        ?: CoroutineScope(SupervisorJob() + dispatchers.io)
     val database: AppDatabase = Room.databaseBuilder(
         appContext,
         AppDatabase::class.java,
@@ -47,6 +84,12 @@ class AppContainer(context: Context) {
         AppDatabase.MIGRATION_7_8,
         AppDatabase.MIGRATION_8_9,
         AppDatabase.MIGRATION_9_10,
+        AppDatabase.MIGRATION_10_11,
+        AppDatabase.MIGRATION_11_12,
+        AppDatabase.MIGRATION_12_13,
+        AppDatabase.MIGRATION_13_14,
+        AppDatabase.MIGRATION_14_15,
+        AppDatabase.MIGRATION_15_16,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -74,12 +117,75 @@ class AppContainer(context: Context) {
         memoryDao = database.conversationMemoryDao(),
         timeProvider = SystemTimeProvider,
     )
+    private val agentLifecycleCoordinator = AgentLifecycleCoordinator()
+    val agentRepository = AgentRepository(
+        filesDir = appContext.filesDir,
+        cacheDir = appContext.cacheDir,
+        dao = database.agentDao(),
+        conversationDao = database.conversationDao(),
+        lifecycleCoordinator = agentLifecycleCoordinator,
+        transactionRunner = AgentTransactionRunner { block ->
+            database.withTransaction { block() }
+        },
+        timeProvider = SystemTimeProvider,
+        ioDispatcher = dispatchers.io,
+        privateInstallAvailableBytes = { StatFs(appContext.filesDir.absolutePath).availableBytes },
+    )
+    val agentMemoryRepository = AgentMemoryRepository(
+        dao = database.agentMemoryDao(),
+        transactionRunner = AgentMemoryTransactionRunner { block ->
+            database.withTransaction { block() }
+        },
+        timeProvider = SystemTimeProvider,
+    )
+    val conversationIdentityRepository = ConversationIdentityRepository(
+        conversationDao = database.conversationDao(),
+        messageDao = database.messageDao(),
+        agentDao = database.agentDao(),
+        timeProvider = SystemTimeProvider,
+        lifecycleCoordinator = agentLifecycleCoordinator,
+    )
+    private val agentContextAssembler = AgentContextAssembler(
+        source = agentRepository,
+        relationshipMemoryProvider = AgentRelationshipMemoryProvider(agentMemoryRepository::list),
+    )
+    val newConversationUseCase = NewConversationUseCase(
+        chatRepository = chatRepository,
+        identityRepository = conversationIdentityRepository,
+        lifecycleCoordinator = agentLifecycleCoordinator,
+    )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
+    val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
     val queuedAttachmentStore = QueuedAttachmentStore(appContext)
     val projectRepository = FileProjectRepository(
         rootDirectory = appContext.filesDir,
         timeProvider = SystemTimeProvider,
+    )
+    private val agentMemoryPolicy = AgentMemoryPolicy()
+    val agentMemoryExtractionUseCase = AgentMemoryExtractionUseCase(
+        source = RepositoryAgentMemoryExtractionSource(chatRepository),
+        projectFactSource = MarkdownAgentMemoryProjectFactSource { projectId ->
+            projectRepository.readProjectContextBounded(
+                projectId = projectId,
+                maxChars = MAX_AGENT_MEMORY_PROJECT_CONTEXT_CHARS,
+            )
+        },
+        generator = LlmAgentMemoryCandidateGenerator(
+            providerResolver = RepositoryAgentMemoryGenerationProviderResolver(providerRepository),
+            completionGateway = openAiAgentMemoryCompletionGateway(openAiClient),
+        ),
+        policy = AgentMemoryCandidatePolicy(agentMemoryPolicy::evaluate),
+        merger = AgentMemoryAcceptedBatchMerger(agentMemoryRepository::merge),
+    )
+    val agentMemoryCoordinator = AgentMemoryCoordinator(
+        scope = applicationScope,
+        completedRoundCount = chatRepository::completedAssistantTextCount,
+        extract = agentMemoryExtractionUseCase::extract,
+    )
+    val deleteProjectUseCase = DeleteProjectUseCase(
+        projectRepository = projectRepository,
+        database = database,
     )
     val projectWorkspaceGateway = ProjectWorkspaceGatewayAdapter(projectRepository)
     val promptOptimizerUseCase = PromptOptimizerUseCase(
@@ -101,13 +207,34 @@ class AppContainer(context: Context) {
             settingsStore.providerCapabilityCatalogSnapshot.first().rawJson
                 ?.let { rawJson -> runCatching { parseProviderCapabilityCatalogJson(rawJson, json) }.getOrNull() }
         },
+        agentContextProvider = { conversationId, request ->
+            val conversation = chatRepository.conversation(conversationId)
+            val agentId = conversation?.agentId
+            val agentVersion = conversation?.agentVersion
+            assembleAgentContextForConversation(
+                agentId = agentId,
+                agentVersion = agentVersion,
+                request = request,
+                assembler = agentContextAssembler::assemble,
+            )
+        },
+        agentSourcePartWriter = AgentSourcePartWriter(
+            dao = database.agentDao(),
+            chatRepository = chatRepository,
+            transactionRunner = AgentTransactionRunner { block -> database.withTransaction { block() } },
+            lifecycleCoordinator = agentLifecycleCoordinator,
+        ),
+        lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val chatExecutionRepository = ChatExecutionRepository(
         database = database,
         dao = database.chatExecutionEntryDao(),
         chatRepository = chatRepository,
+        identityRepository = conversationIdentityRepository,
         timeProvider = SystemTimeProvider,
+        lifecycleCoordinator = agentLifecycleCoordinator,
     )
+    val chatSendRecoveryStore = ChatSendRecoveryStore()
     val chatExecutionCoordinator = ChatExecutionCoordinator(
         executionRepository = chatExecutionRepository,
         sendMessageUseCase = sendMessageUseCase,
@@ -115,7 +242,19 @@ class AppContainer(context: Context) {
         webSearchClient = webSearchClient,
         attachmentStore = queuedAttachmentStore,
         dispatchers = dispatchers,
+        webSearchAllowed = { conversationId ->
+            webSearchAllowedForAgentConversation(chatRepository.conversation(conversationId)?.agentId)
+        },
         onWorkScheduled = { ChatExecutionService.start(appContext) },
+        onReplyCompleted = agentMemoryCoordinator::onReplyCompleted,
+    )
+    val chatSendRecoveryManager = ChatSendRecoveryManager(
+        scope = applicationScope,
+        store = chatSendRecoveryStore,
+        controller = ChatSendController(
+            enqueue = chatExecutionCoordinator::enqueue,
+            requestExists = { requestId -> chatExecutionRepository.entry(requestId) != null },
+        ),
     )
     val markdownNotebookRepository = MarkdownNotebookRepository(
         chatRepository = chatRepository,

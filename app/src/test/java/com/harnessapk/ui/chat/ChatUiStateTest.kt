@@ -31,6 +31,64 @@ import org.junit.Test
 
 class ChatUiStateTest {
     @Test
+    fun persistedMessagesStateOnlyTreatsLoadedEmptyHistoryAsEmptyChat() {
+        val message = ChatMessage(
+            id = "historical-message",
+            conversationId = "conversation",
+            role = MessageRole.ASSISTANT,
+            content = "历史回复",
+            status = MessageStatus.SUCCEEDED,
+            providerId = null,
+            model = null,
+            errorMessage = null,
+        )
+
+        assertFalse(PersistedMessagesState.Loading.isLoadedEmpty())
+        assertEquals(emptyList<ChatMessage>(), PersistedMessagesState.Loading.messagesOrEmpty())
+        assertTrue(PersistedMessagesState.Loaded(emptyList()).isLoadedEmpty())
+        assertFalse(PersistedMessagesState.Loaded(listOf(message)).isLoadedEmpty())
+    }
+
+    @Test
+    fun cameraActionRequestsPermissionOnlyWhenNotGranted() {
+        assertEquals(ChatImageSourceAction.REQUEST_CAMERA_PERMISSION, cameraAction(permissionGranted = false))
+        assertEquals(ChatImageSourceAction.LAUNCH_CAMERA, cameraAction(permissionGranted = true))
+    }
+
+    @Test
+    fun cancelledCameraKeepsTypedDraftAndClearsPreviousError() {
+        val result = cameraCancelledFeedback(
+            currentText = "待发送文字",
+            currentErrorText = "未获得相机权限，可从相册选择图片",
+        )
+
+        assertEquals("待发送文字", result.text)
+        assertNull(result.errorText)
+    }
+
+    @Test
+    fun pendingCameraUriStateRestoresAcrossRecreationAndClearsAfterResult() {
+        val captured = PendingCameraUriState().start("content://com.harnessapk.fileprovider/chat-images/camera.jpg")
+        val restored = PendingCameraUriState(captured.savedUri)
+
+        assertEquals("content://com.harnessapk.fileprovider/chat-images/camera.jpg", restored.savedUri)
+        assertNull(restored.clear().savedUri)
+    }
+
+    @Test
+    fun imagePartSourceUsesImageContentBeforeFallbackLabel() {
+        val part = UiMessagePartDraft(
+            index = 1,
+            type = UiMessagePartType.IMAGE,
+            content = "https://example.com/reply.png",
+            metadata = mapOf("mimeType" to "image/png"),
+            stable = true,
+        )
+
+        assertEquals("https://example.com/reply.png", imagePartSource(part))
+    }
+
+    @Test
     fun assistantMessagesAreUnframedWhileUserMessagesStayWarm() {
         assertEquals(ChatBubblePresentation.UNFRAMED, chatBubblePresentation(MessageRole.ASSISTANT))
         assertEquals(ChatBubblePresentation.WARM_USER, chatBubblePresentation(MessageRole.USER))
@@ -416,11 +474,11 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun chatInputUsesAttachmentAsTrailingActionBeforeComposing() {
+    fun chatInputKeepsAttachmentEntryAvailableWhileComposing() {
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = false))
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "   ", hasSelectedImage = false))
 
-        assertFalse(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
+        assertTrue(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
         assertFalse(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = true))
 
         assertEquals(ChatInputTrailingAction.ATTACHMENT, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false))
@@ -901,6 +959,38 @@ class ChatUiStateTest {
         assertEquals(2, hiddenMarkdownFileChangeItemCount(items))
         assertEquals("A", markdownFileChangeOperationLabel(items.first()))
         assertEquals("M", markdownFileChangeOperationLabel(items[1]))
+    }
+
+    @Test
+    fun sourceMessageLocationWaitsForLoadedMessagesAndConsumesOnce() {
+        val messages = listOf(
+            userMessage(id = "first"),
+            userMessage(id = "source"),
+        )
+
+        assertFalse(
+            shouldConsumeSourceMessageLocation(
+                sourceMessageId = "source",
+                messagesLoaded = false,
+                consumed = false,
+            ),
+        )
+        assertTrue(
+            shouldConsumeSourceMessageLocation(
+                sourceMessageId = "source",
+                messagesLoaded = true,
+                consumed = false,
+            ),
+        )
+        assertFalse(
+            shouldConsumeSourceMessageLocation(
+                sourceMessageId = "source",
+                messagesLoaded = true,
+                consumed = true,
+            ),
+        )
+        assertEquals(1, sourceMessageIndex(messages, "source"))
+        assertEquals(null, sourceMessageIndex(messages, "missing"))
     }
 
     private fun userMessage(

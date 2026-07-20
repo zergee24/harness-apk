@@ -7,6 +7,8 @@ app/build/
 local.properties
 *.apk
 *.aab
+__pycache__/
+*.py[cod]
 
 # Release artifacts are generated locally or by CI and uploaded to OSS.
 release/test/

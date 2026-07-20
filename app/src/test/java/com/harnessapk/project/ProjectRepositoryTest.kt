@@ -37,6 +37,22 @@ class ProjectRepositoryTest {
     }
 
     @Test
+    fun boundedProjectContextReadRejectsOversizedFilesWithoutReturningPartialFacts() = runTest {
+        val repository = FileProjectRepository(
+            rootDirectory = temporaryFolder.root,
+            timeProvider = TimeProvider { 100L },
+        )
+        val project = repository.createProject("有界上下文")
+        repository.updateProjectContext(project.id, "x".repeat(101))
+
+        val failure = runCatching {
+            repository.readProjectContextBounded(project.id, maxChars = 100)
+        }.exceptionOrNull()
+
+        assertTrue(failure is ProjectWorkspaceException)
+    }
+
+    @Test
     fun manageDeliverablesSearchAndSessionSummaries() = runTest {
         val repository = FileProjectRepository(
             rootDirectory = temporaryFolder.root,

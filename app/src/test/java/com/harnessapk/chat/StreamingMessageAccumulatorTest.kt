@@ -26,6 +26,135 @@ class StreamingMessageAccumulatorTest {
     }
 
     @Test
+    fun completeMarkdownImageProducesImagePartAndPreservesSurroundingText() {
+        val accumulator = StreamingMessageAccumulator()
+
+        accumulator.onEvent(
+            StreamEvent.TextDelta("图片如下：![日落](https://cdn.example.com/sunset.png)谢谢。"),
+            nowMillis = 0L,
+        )
+
+        val parts = accumulator.snapshot().parts
+        assertEquals(
+            listOf(UiMessagePartType.TEXT, UiMessagePartType.IMAGE, UiMessagePartType.TEXT),
+            parts.map { it.type },
+        )
+        assertEquals("图片如下：", parts[0].content)
+        assertEquals("https://cdn.example.com/sunset.png", parts[1].content)
+        assertEquals("谢谢。", parts[2].content)
+    }
+
+    @Test
+    fun partialMarkdownImageWaitsForClosingParenthesisBeforeCreatingImagePart() {
+        val accumulator = StreamingMessageAccumulator()
+
+        accumulator.onEvent(
+            StreamEvent.TextDelta("图片如下：![日落](https://cdn.example.com/sun"),
+            nowMillis = 0L,
+        )
+
+        assertEquals(
+            listOf(UiMessagePartType.TEXT),
+            accumulator.snapshot().parts.map { it.type },
+        )
+        assertEquals("图片如下：", accumulator.snapshot().parts.single().content)
+
+        accumulator.onEvent(StreamEvent.TextDelta("set.png)谢谢。"), nowMillis = 10L)
+
+        val parts = accumulator.snapshot().parts
+        assertEquals(
+            listOf(UiMessagePartType.TEXT, UiMessagePartType.IMAGE, UiMessagePartType.TEXT),
+            parts.map { it.type },
+        )
+        assertEquals("https://cdn.example.com/sunset.png", parts[1].content)
+        assertTrue(parts[1].stable)
+    }
+
+    @Test
+    fun usageEventDoesNotBreakIncompleteMarkdownImage() {
+        val accumulator = StreamingMessageAccumulator()
+
+        accumulator.onEvent(
+            StreamEvent.TextDelta("![日落](https://cdn.example.com/sunset"),
+            nowMillis = 0L,
+        )
+        accumulator.onEvent(
+            StreamEvent.Usage(inputTokens = 10, outputTokens = 5, totalTokens = 15),
+            nowMillis = 5L,
+        )
+        accumulator.onEvent(StreamEvent.TextDelta(".png)"), nowMillis = 10L)
+
+        val part = accumulator.snapshot().parts.single()
+        assertEquals(UiMessagePartType.IMAGE, part.type)
+        assertEquals("https://cdn.example.com/sunset.png", part.content)
+    }
+
+    @Test
+    fun normalMarkdownLinksAndBareUrlsRemainTextParts() {
+        val accumulator = StreamingMessageAccumulator()
+        val content = "普通[链接](https://example.com)和 https://cdn.example.com/photo.png 都是文本。"
+
+        accumulator.onEvent(StreamEvent.TextDelta(content), nowMillis = 0L)
+
+        assertEquals(listOf(UiMessagePartType.TEXT), accumulator.snapshot().parts.map { it.type })
+        assertEquals(content, accumulator.snapshot().parts.single().content)
+    }
+
+    @Test
+    fun explicitImageEventCreatesStableImagePartWithMetadata() {
+        val accumulator = StreamingMessageAccumulator()
+
+        accumulator.onEvent(
+            StreamEvent.ImageDelta(
+                source = "data:image/png;base64,aGVsbG8=",
+                mimeType = "image/png",
+                altText = "示例图",
+            ),
+            nowMillis = 0L,
+        )
+
+        val part = accumulator.snapshot().parts.single()
+        assertEquals(UiMessagePartType.IMAGE, part.type)
+        assertEquals("data:image/png;base64,aGVsbG8=", part.content)
+        assertEquals("image/png", part.metadata["mimeType"])
+        assertEquals("示例图", part.metadata["altText"])
+        assertTrue(part.stable)
+        assertEquals(MessageStatus.STREAMING, accumulator.snapshot().status)
+    }
+
+    @Test
+    fun explicitImageEventPreservesLocalUriSource() {
+        val accumulator = StreamingMessageAccumulator()
+
+        accumulator.onEvent(
+            StreamEvent.ImageDelta(
+                source = "content://com.harnessapk.fileprovider/chat_images/generated.png",
+                mimeType = "image/png",
+            ),
+            nowMillis = 0L,
+        )
+
+        val part = accumulator.snapshot().parts.single()
+        assertEquals(UiMessagePartType.IMAGE, part.type)
+        assertEquals("content://com.harnessapk.fileprovider/chat_images/generated.png", part.content)
+        assertEquals("image/png", part.metadata["mimeType"])
+    }
+
+    @Test
+    fun dataMarkdownImageInfersMimeType() {
+        val accumulator = StreamingMessageAccumulator()
+
+        accumulator.onEvent(
+            StreamEvent.TextDelta("![图](data:image/webp;base64,aGVsbG8=)"),
+            nowMillis = 0L,
+        )
+
+        val part = accumulator.snapshot().parts.single()
+        assertEquals(UiMessagePartType.IMAGE, part.type)
+        assertEquals("image/webp", part.metadata["mimeType"])
+    }
+
+    @Test
     fun textDeltasFlushByIntervalAfterFirstChunk() {
         val accumulator = StreamingMessageAccumulator(
             flushIntervalMillis = 300L,

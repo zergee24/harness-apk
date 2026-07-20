@@ -255,7 +255,7 @@ internal fun projectWorkbenchContentForProjectSelection(
 internal fun ProjectScreen(
     container: AppContainer,
     contentPadding: PaddingValues,
-    onCurrentProjectNameChange: (String?) -> Unit,
+    onCurrentProjectChange: (Project?) -> Unit,
     workbenchTarget: ProjectWorkbenchTarget? = null,
     onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
@@ -325,6 +325,7 @@ internal fun ProjectScreen(
         gitStatus = nextContent.gitStatus
         gitBranches = nextContent.gitBranches
         selectedProjectId = projectId
+        onCurrentProjectChange(projects.firstOrNull { it.id == projectId })
     }
 
     fun refreshProjects() {
@@ -335,7 +336,7 @@ internal fun ProjectScreen(
             if (selectedProjectId == null || projects.none { it.id == selectedProjectId }) {
                 selectProject(projects.firstOrNull()?.id)
             }
-            onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
+            onCurrentProjectChange(projects.firstOrNull { it.id == selectedProjectId })
         }
     }
 
@@ -463,7 +464,7 @@ internal fun ProjectScreen(
         scope.launch {
             runCatching {
                 withContext(container.dispatchers.io) {
-                    container.projectRepository.deleteProject(project.id)
+                    container.deleteProjectUseCase.delete(project.id)
                 }
             }.onSuccess {
                 if (selectedProjectId == project.id) {
@@ -492,7 +493,7 @@ internal fun ProjectScreen(
                     if (current.id == renamed.id) renamed else current
                 }
                 statusText = "已重命名项目：${renamed.name}"
-                onCurrentProjectNameChange(renamed.name)
+                onCurrentProjectChange(renamed)
             }.onFailure {
                 statusText = it.toUserMessage()
             }
@@ -686,7 +687,7 @@ internal fun ProjectScreen(
         }
         projectsLoaded = true
         if (selectedProjectId == null) selectProject(projects.firstOrNull()?.id)
-        onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
+        onCurrentProjectChange(projects.firstOrNull { it.id == selectedProjectId })
     }
 
     LaunchedEffect(workbenchTarget?.requestKey, projectsLoaded) {
@@ -721,7 +722,7 @@ internal fun ProjectScreen(
     }
 
     LaunchedEffect(selectedProjectId, searchQuery) {
-        onCurrentProjectNameChange(projects.firstOrNull { it.id == selectedProjectId }?.name)
+        onCurrentProjectChange(projects.firstOrNull { it.id == selectedProjectId })
         val projectId = selectedProjectId ?: return@LaunchedEffect
         val ordinaryRefresh = deliverableRefreshController.beginOrdinaryFilesRefresh(
             projectId = projectId,

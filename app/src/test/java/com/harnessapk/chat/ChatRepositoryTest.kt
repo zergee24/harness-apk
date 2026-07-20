@@ -123,6 +123,33 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun createConversationPinsAgentVersion() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 37L })
+
+        val conversationId = repository.createConversation(
+            title = "资料研究代理",
+            agentId = "agent-1",
+            agentVersion = 3,
+        )
+
+        val conversation = repository.conversation(conversationId)!!
+        assertEquals("agent-1", conversation.agentId)
+        assertEquals(3, conversation.agentVersion)
+    }
+
+    @Test
+    fun createConversationRejectsPartialAgentBinding() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 38L })
+
+        try {
+            repository.createConversation(agentId = "agent-1", agentVersion = null)
+            org.junit.Assert.fail("Expected incomplete agent binding to fail")
+        } catch (error: IllegalArgumentException) {
+            assertEquals("agentId 和 agentVersion 必须同时提供", error.message)
+        }
+    }
+
+    @Test
     fun markAssistantCancelledPersistsCancelledStatusWithoutError() = runTest {
         val repository = repository(FakeConversationDao(), TimeProvider { 40L })
         val conversationId = repository.createConversation()
@@ -345,6 +372,33 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun completedAssistantTextCountUsesPersistedSuccessfulNonBlankReplies() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 58L })
+        val conversationId = repository.createConversation()
+        repository.insertAssistantPending(conversationId, "provider", "model").also {
+            repository.appendAssistantText(it, "成功回复")
+            repository.markAssistantSucceeded(it)
+        }
+        repository.insertAssistantPending(conversationId, "provider", "model").also {
+            repository.markAssistantSucceeded(it)
+        }
+        repository.insertAssistantPending(conversationId, "provider", "model").also {
+            repository.appendAssistantText(it, "失败回复")
+            repository.markAssistantFailed(it, "失败")
+        }
+        repository.insertAssistantPending(conversationId, "provider", "model").also {
+            repository.appendAssistantText(it, "仍在生成")
+        }
+        val otherConversationId = repository.createConversation()
+        repository.insertAssistantPending(otherConversationId, "provider", "model").also {
+            repository.appendAssistantText(it, "其他会话")
+            repository.markAssistantSucceeded(it)
+        }
+
+        assertEquals(1, repository.completedAssistantTextCount(conversationId))
+    }
+
+    @Test
     fun manualContextCompressionSavesMemoryAndInsertsSystemEvent() = runTest {
         val conversationDao = FakeConversationDao()
         var now = 60L
@@ -429,6 +483,14 @@ private class FakeConversationDao : ConversationDao {
 
     override suspend fun findById(id: String): ConversationEntity? = rows[id]
 
+    override suspend fun findLatestActive(): ConversationEntity? =
+        rows.values.filter { !it.isArchived }
+            .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
+
+    override suspend fun findLatestActiveInProject(projectId: String): ConversationEntity? =
+        rows.values.filter { !it.isArchived && it.projectId == projectId }
+            .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
+
     override suspend fun insert(entity: ConversationEntity) {
         rows[entity.id] = entity
         refresh()
@@ -439,10 +501,31 @@ private class FakeConversationDao : ConversationDao {
         refresh()
     }
 
+    override suspend fun updateIdentityIfNoUserMessages(
+        id: String,
+        agentId: String?,
+        agentVersion: Int?,
+        updatedAt: Long,
+    ): Int {
+        val conversation = rows[id] ?: return 0
+        rows[id] = conversation.copy(agentId = agentId, agentVersion = agentVersion, updatedAt = updatedAt)
+        refresh()
+        return 1
+    }
+
+    override suspend fun clearProject(projectId: String) {
+        rows.replaceAll { _, conversation ->
+            if (conversation.projectId == projectId) conversation.copy(projectId = null) else conversation
+        }
+        refresh()
+    }
+
     override suspend fun archive(id: String, updatedAt: Long) {
         rows[id]?.let { rows[id] = it.copy(isArchived = true, updatedAt = updatedAt) }
         refresh()
     }
+    override suspend fun countByAgentVersion(agentId: String, version: Int) =
+        rows.values.count { it.agentId == agentId && it.agentVersion == version }
 
     private fun refresh() {
         flow.value = rows.values.filter { !it.isArchived }.sortedByDescending { it.updatedAt }
@@ -458,7 +541,40 @@ private class FakeMessageDao : MessageDao {
     override suspend fun listForConversation(conversationId: String): List<MessageEntity> =
         rows.values.filter { it.conversationId == conversationId }.sortedBy { it.createdAt }
 
+    override suspend fun listRecentSuccessfulText(
+        conversationId: String,
+        limit: Int,
+    ): List<MessageEntity> = rows.values
+        .filter {
+            it.conversationId == conversationId &&
+                it.status == "SUCCEEDED" &&
+                it.role in setOf("USER", "ASSISTANT") &&
+                it.content.isNotBlank()
+        }
+        .sortedWith(compareByDescending<MessageEntity> { it.createdAt }.thenByDescending { it.id })
+        .take(limit)
+
+    override suspend fun findLastSuccessfulAssistant(conversationId: String): MessageEntity? =
+        rows.values
+            .filter {
+                it.conversationId == conversationId &&
+                    it.status == "SUCCEEDED" &&
+                    it.role == "ASSISTANT"
+            }
+            .maxWithOrNull(compareBy<MessageEntity> { it.createdAt }.thenBy { it.id })
+
+    override suspend fun countSuccessfulAssistantText(conversationId: String): Int =
+        rows.values.count {
+            it.conversationId == conversationId &&
+                it.status == "SUCCEEDED" &&
+                it.role == "ASSISTANT" &&
+                it.content.isNotBlank()
+        }
+
     override suspend fun findById(id: String): MessageEntity? = rows[id]
+
+    override suspend fun countUserMessages(conversationId: String): Int =
+        rows.values.count { it.conversationId == conversationId && it.role == "USER" }
 
     override suspend fun insert(entity: MessageEntity) {
         rows[entity.id] = entity

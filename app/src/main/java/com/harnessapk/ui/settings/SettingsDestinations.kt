@@ -36,6 +36,11 @@ fun settingsDestinations(
         description = "技能和插件默认关闭，可按需启用。",
     ),
     SettingsDestination(
+        id = "agents",
+        title = "智能体包",
+        description = "安装、更新并查看人物身份与资料覆盖。",
+    ),
+    SettingsDestination(
         id = "updates",
         title = "检查更新",
         description = "查看新版本并安装 APK 更新。",

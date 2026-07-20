@@ -7,6 +7,16 @@ enum class MainMode(val label: String) {
     PROJECT("项目"),
 }
 
+enum class HomePrimaryAction {
+    CREATE_CONVERSATION,
+    NONE,
+}
+
+internal fun homePrimaryAction(mode: MainMode): HomePrimaryAction = when (mode) {
+    MainMode.SESSION -> HomePrimaryAction.CREATE_CONVERSATION
+    MainMode.PROJECT -> HomePrimaryAction.NONE
+}
+
 internal fun shouldShowUpdateBadge(result: UpdateCheckResult?): Boolean =
     result?.updateAvailable == true || result?.forceUpdate == true
 
@@ -16,7 +26,7 @@ internal fun topLevelTitle(
 ): String {
     val projectName = currentProjectName?.trim().orEmpty()
     return when {
-        mode == MainMode.SESSION -> mode.label
+        mode != MainMode.PROJECT -> mode.label
         projectName.isBlank() -> mode.label
         else -> "${mode.label} · $projectName"
     }

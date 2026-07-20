@@ -15,8 +15,47 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
     suspend fun listForConversation(conversationId: String): List<MessageEntity>
 
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversationId = :conversationId
+          AND status = 'SUCCEEDED'
+          AND role IN ('USER', 'ASSISTANT')
+          AND TRIM(content) != ''
+        ORDER BY createdAt DESC, id DESC
+        LIMIT :limit
+        """,
+    )
+    suspend fun listRecentSuccessfulText(conversationId: String, limit: Int): List<MessageEntity>
+
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversationId = :conversationId
+          AND status = 'SUCCEEDED'
+          AND role = 'ASSISTANT'
+        ORDER BY createdAt DESC, id DESC
+        LIMIT 1
+        """,
+    )
+    suspend fun findLastSuccessfulAssistant(conversationId: String): MessageEntity?
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM messages
+        WHERE conversationId = :conversationId
+          AND status = 'SUCCEEDED'
+          AND role = 'ASSISTANT'
+          AND TRIM(content) != ''
+        """,
+    )
+    suspend fun countSuccessfulAssistantText(conversationId: String): Int
+
     @Query("SELECT * FROM messages WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): MessageEntity?
+
+    @Query("SELECT COUNT(*) FROM messages WHERE conversationId = :conversationId AND role = 'USER'")
+    suspend fun countUserMessages(conversationId: String): Int
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(entity: MessageEntity)

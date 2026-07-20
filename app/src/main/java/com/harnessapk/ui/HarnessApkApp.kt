@@ -3,7 +3,16 @@ package com.harnessapk.ui
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -38,6 +47,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.harnessapk.HarnessApkApplication
 import com.harnessapk.chat.Conversation
+import com.harnessapk.ui.agent.AgentPackagesScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.components.WarmSegmentedControl
 import com.harnessapk.ui.conversation.ConversationListScreen
@@ -45,7 +55,6 @@ import com.harnessapk.ui.git.GitSettingsScreen
 import com.harnessapk.ui.project.ProjectWorkbenchDestination
 import com.harnessapk.ui.project.ProjectScreen
 import com.harnessapk.ui.project.ProjectWorkbenchTarget
-import com.harnessapk.ui.project.projectSessionTitle
 import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
 import com.harnessapk.ui.settings.SettingsScreen
@@ -66,28 +75,40 @@ object Routes {
     const val Voice = "voice"
     const val Git = "git"
     const val Skills = "skills"
+    const val AgentPackages = "agent-packages"
     const val Updates = "updates"
-    const val ChatPattern = "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}"
+    const val ChatPattern =
+        "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}"
 
     fun chat(
         conversationId: String,
         projectId: String? = null,
         focusInput: Boolean = false,
+        sourceMessageId: String? = null,
     ): String = buildString {
         append("chat/")
         append(Uri.encode(conversationId))
-        append(chatRouteQuery(projectId = projectId, focusInput = focusInput, encode = Uri::encode))
+        append(
+            chatRouteQuery(
+                projectId = projectId,
+                focusInput = focusInput,
+                sourceMessageId = sourceMessageId,
+                encode = Uri::encode,
+            ),
+        )
     }
 }
 
 internal fun chatRouteQuery(
     projectId: String?,
     focusInput: Boolean,
+    sourceMessageId: String? = null,
     encode: (String) -> String,
 ): String {
     val query = listOfNotNull(
         projectId?.let { "projectId=${encode(it)}" },
         if (focusInput) "focusInput=true" else null,
+        sourceMessageId?.let { "sourceMessageId=${encode(it)}" },
     )
     return if (query.isEmpty()) "" else "?${query.joinToString("&")}"
 }
@@ -106,13 +127,19 @@ internal fun projectWorkbenchTarget(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HarnessApkApp() {
+fun HarnessApkApp(
+    incomingAgentBundleUri: Uri? = null,
+    onIncomingAgentBundleUriConsumed: () -> Unit = {},
+) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val route = backStackEntry?.destination?.route
     val canGoBack = route != null && route != Routes.Conversations
     var mainMode by rememberSaveable { mutableStateOf(MainMode.SESSION) }
+    var currentProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
+    var agentImportSourceProjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    var consumedExternalAgentBundleUri by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
@@ -123,6 +150,25 @@ fun HarnessApkApp() {
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
 
+    fun dispatchAgentPackageImport(event: AgentPackageImportEvent) {
+        val transition = reduceAgentPackageImport(
+            state = AgentPackageImportState(
+                sourceProjectId = agentImportSourceProjectId,
+                consumedExternalBundleUri = consumedExternalAgentBundleUri,
+            ),
+            event = event,
+        )
+        agentImportSourceProjectId = transition.state.sourceProjectId
+        consumedExternalAgentBundleUri = transition.state.consumedExternalBundleUri
+        if (transition.navigateToPackages) navController.navigate(Routes.AgentPackages)
+    }
+
+    LaunchedEffect(route) {
+        dispatchAgentPackageImport(
+            AgentPackageImportEvent.RouteChanged(route == Routes.AgentPackages),
+        )
+    }
+
     LaunchedEffect(container) {
         val result = runCatching {
             withContext(container.dispatchers.io) {
@@ -132,7 +178,7 @@ fun HarnessApkApp() {
         updateCheckResult = result
         if (startupUpdateAction(result) == StartupUpdateAction.DOWNLOAD_APK) {
             result?.manifest?.let { manifest ->
-                runCatching { container.updateDownloadCoordinator.download(manifest) }
+                container.updateDownloadCoordinator.startDownload(manifest)
             }
         }
     }
@@ -144,16 +190,31 @@ fun HarnessApkApp() {
         Routes.Voice -> "语音能力"
         Routes.Git -> "Git / Gitee"
         Routes.Skills -> "技能 / 插件"
+        Routes.AgentPackages -> "智能体包"
         Routes.Updates -> "更新"
         Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
     }
     val scope = rememberCoroutineScope()
+    LaunchedEffect(incomingAgentBundleUri) {
+        val uri = incomingAgentBundleUri?.toString()
+        if (uri == null) {
+            dispatchAgentPackageImport(AgentPackageImportEvent.ExternalBundleConsumed)
+        } else {
+            dispatchAgentPackageImport(
+                AgentPackageImportEvent.ExternalBundleReceived(
+                    uri = uri,
+                    mainMode = mainMode,
+                    currentProjectId = currentProjectId,
+                ),
+            )
+        }
+    }
     val onCreateConversation: () -> Unit = {
         scope.launch {
             navController.navigate(
                 Routes.chat(
-                    conversationId = container.chatRepository.createConversation(),
+                    conversationId = container.newConversationUseCase.create(homeConversationRequest()),
                     focusInput = true,
                 ),
             )
@@ -176,39 +237,43 @@ fun HarnessApkApp() {
     }
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    if (isHomeRoute) {
-                        ModeSwitcher(
-                            mode = mainMode,
-                            onModeChange = { mainMode = it },
-                        )
-                    } else {
-                        Text(title)
-                    }
-                },
-                navigationIcon = {
-                    if (canGoBack) {
-                        IconButton(onClick = { navController.popBackStack() }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            if (isHomeRoute) {
+                HomeTopBar(
+                    mode = mainMode,
+                    onModeChange = { mainMode = it },
+                    primaryAction = homePrimaryAction(mainMode),
+                    showUpdateBadge = showUpdateBadge,
+                    onCreateConversation = onCreateConversation,
+                    onOpenSettings = { navController.navigate(Routes.Settings) },
+                )
+            } else {
+                TopAppBar(
+                    title = { Text(title) },
+                    navigationIcon = {
+                        if (canGoBack) {
+                            IconButton(
+                                onClick = {
+                                    if (route == Routes.AgentPackages) {
+                                        dispatchAgentPackageImport(
+                                            AgentPackageImportEvent.RouteChanged(isAgentPackagesRoute = false),
+                                        )
+                                    }
+                                    navController.popBackStack()
+                                },
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                            }
                         }
-                    }
-                },
-                actions = {
-                    if (isHomeRoute) {
-                        HomeTopBarActions(
-                            showCreate = mainMode == MainMode.SESSION,
-                            showUpdateBadge = showUpdateBadge,
-                            onCreate = onCreateConversation,
-                            onOpenSettings = { navController.navigate(Routes.Settings) },
-                        )
-                    } else if (route == Routes.ChatPattern) {
-                        IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
-                            Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
+                    },
+                    actions = {
+                        if (route == Routes.ChatPattern) {
+                            IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
+                                Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
+                            }
                         }
-                    }
-                },
-            )
+                    },
+                )
+            }
         },
     ) { padding ->
         NavHost(
@@ -216,28 +281,28 @@ fun HarnessApkApp() {
             startDestination = Routes.Conversations,
         ) {
             composable(Routes.Conversations) {
-                if (mainMode == MainMode.SESSION) {
-                    ConversationListScreen(
+                when (mainMode) {
+                    MainMode.SESSION -> ConversationListScreen(
                         container = container,
                         contentPadding = padding,
                         onOpenChat = { navController.navigate(Routes.chat(it)) },
                         onCreateConversation = onCreateConversation,
                     )
-                } else {
-                    ProjectScreen(
+                    MainMode.PROJECT -> ProjectScreen(
                         container = container,
                         contentPadding = padding,
-                        onCurrentProjectNameChange = { currentProjectName = it },
+                        onCurrentProjectChange = { project ->
+                            currentProjectId = project?.id
+                            currentProjectName = project?.name
+                        },
                         workbenchTarget = workbenchTarget,
                         onWorkbenchTargetConsumed = { requestKey ->
                             if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
                         },
                         onCreateSession = { project ->
                             scope.launch {
-                                val conversationId = container.chatRepository.createConversation(
-                                    title = projectSessionTitle(project.name, null),
-                                    projectId = project.id,
-                                )
+                                val request = projectConversationRequest(project.id, project.name)
+                                val conversationId = container.newConversationUseCase.create(request)
                                 navController.navigate(
                                     Routes.chat(
                                         conversationId = conversationId,
@@ -266,6 +331,11 @@ fun HarnessApkApp() {
                         type = NavType.BoolType
                         defaultValue = false
                     },
+                    navArgument("sourceMessageId") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
                 ),
             ) { entry ->
                 ChatScreen(
@@ -281,6 +351,17 @@ fun HarnessApkApp() {
                     onOpenProjectGit = { projectId ->
                         openWorkbench(projectId, ProjectWorkbenchDestination.GIT)
                     },
+                    initialSourceMessageId = entry.arguments?.getString("sourceMessageId"),
+                    onOpenConversationMessage = { sourceConversationId, sourceMessageId ->
+                        navController.navigate(
+                            Routes.chat(
+                                conversationId = sourceConversationId,
+                                sourceMessageId = sourceMessageId,
+                            ),
+                        ) {
+                            launchSingleTop = true
+                        }
+                    },
                     contentPadding = padding,
                 )
             }
@@ -295,6 +376,10 @@ fun HarnessApkApp() {
                     onOpenVoice = { navController.navigate(Routes.Voice) },
                     onOpenGit = { navController.navigate(Routes.Git) },
                     onOpenSkills = { navController.navigate(Routes.Skills) },
+                    onOpenAgentPackages = {
+                        dispatchAgentPackageImport(AgentPackageImportEvent.SettingsOpened)
+                        navController.navigate(Routes.AgentPackages)
+                    },
                     onOpenUpdates = { navController.navigate(Routes.Updates) },
                     showUpdateBadge = showUpdateBadge,
                 )
@@ -310,6 +395,29 @@ fun HarnessApkApp() {
             }
             composable(Routes.Skills) {
                 SkillsScreen(container = container, contentPadding = padding)
+            }
+            composable(Routes.AgentPackages) {
+                AgentPackagesScreen(
+                    container = container,
+                    contentPadding = padding,
+                    sourceProjectId = agentImportSourceProjectId,
+                    externalImportUri = incomingAgentBundleUri,
+                    onExternalImportConsumed = onIncomingAgentBundleUriConsumed,
+                    onStartConversation = { agent, sourceProjectId ->
+                        val request = installedAgentConversationRequest(agent, sourceProjectId)
+                        dispatchAgentPackageImport(AgentPackageImportEvent.StartConversation)
+                        scope.launch {
+                            val conversationId = container.newConversationUseCase.create(request)
+                            navController.navigate(
+                                Routes.chat(
+                                    conversationId = conversationId,
+                                    projectId = request.projectId,
+                                    focusInput = true,
+                                ),
+                            )
+                        }
+                    },
+                )
             }
             composable(Routes.Updates) {
                 UpdateSettingsScreen(
@@ -332,22 +440,58 @@ internal fun chatTopBarTitle(
     ?: "对话"
 
 @Composable
+private fun HomeTopBar(
+    mode: MainMode,
+    onModeChange: (MainMode) -> Unit,
+    primaryAction: HomePrimaryAction,
+    showUpdateBadge: Boolean,
+    onCreateConversation: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .height(64.dp)
+            .padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ModeSwitcher(
+            mode = mode,
+            onModeChange = onModeChange,
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .widthIn(max = 216.dp),
+        )
+        HomeTopBarActions(
+            primaryAction = primaryAction,
+            showUpdateBadge = showUpdateBadge,
+            onCreateConversation = onCreateConversation,
+            onOpenSettings = onOpenSettings,
+        )
+    }
+}
+
+@Composable
 private fun ModeSwitcher(
     mode: MainMode,
     onModeChange: (MainMode) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     WarmSegmentedControl(
         options = MainMode.entries.map { it.label },
         selectedIndex = MainMode.entries.indexOf(mode),
         onSelected = { index -> onModeChange(MainMode.entries[index]) },
+        modifier = modifier,
     )
 }
 
 @Composable
 private fun HomeTopBarActions(
-    showCreate: Boolean,
+    primaryAction: HomePrimaryAction,
     showUpdateBadge: Boolean,
-    onCreate: () -> Unit,
+    onCreateConversation: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     Box {
@@ -363,9 +507,12 @@ private fun HomeTopBarActions(
             )
         }
     }
-    if (showCreate) {
-        FilledIconButton(onClick = onCreate) {
-            Icon(Icons.Filled.Add, contentDescription = "新建对话")
+    if (primaryAction != HomePrimaryAction.NONE) {
+        FilledIconButton(onClick = onCreateConversation) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = "新建对话",
+            )
         }
     }
 }

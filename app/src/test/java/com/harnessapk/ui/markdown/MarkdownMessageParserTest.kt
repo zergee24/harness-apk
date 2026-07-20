@@ -50,6 +50,122 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun normalizesCommonModelListMarkersWithoutSpaces() {
+        val blocks = parseMarkdownBlocks(
+            """
+            -第一项
+              •子项
+            -[x]已完成
+
+            1、先做
+            2、再做
+            """.trimIndent(),
+        )
+
+        val bullet = blocks.filterIsInstance<MarkdownBlock.BulletList>().single()
+        assertEquals("第一项", bullet.items[0].text.plainText())
+        val nested = bullet.items[0].children.single() as MarkdownBlock.BulletList
+        assertEquals("子项", nested.items.single().text.plainText())
+        assertEquals(true, bullet.items[1].taskChecked)
+        assertEquals("已完成", bullet.items[1].text.plainText())
+
+        val ordered = blocks.filterIsInstance<MarkdownBlock.OrderedList>().single()
+        assertEquals(listOf("先做", "再做"), ordered.items.map { it.text.plainText() })
+    }
+
+    @Test
+    fun separatesNonOneOrderedListFromPrecedingModelParagraph() {
+        val blocks = parseMarkdownBlocks(
+            """
+            下面继续说明：
+            2、第二步
+            3、第三步
+            """.trimIndent(),
+        )
+
+        assertEquals("下面继续说明：", (blocks.first() as MarkdownBlock.Paragraph).text.plainText())
+        val ordered = blocks.last() as MarkdownBlock.OrderedList
+        assertEquals(2, ordered.startNumber)
+        assertEquals(listOf("第二步", "第三步"), ordered.items.map { it.text.plainText() })
+    }
+
+    @Test
+    fun preservesInlineEmphasisThatStartsAtTheBeginningOfLine() {
+        val blocks = parseMarkdownBlocks("*强调*、**粗体** 与 `代码` 也应保留。")
+
+        val paragraph = blocks.single() as MarkdownBlock.Paragraph
+        assertTrue(paragraph.text.first() is MarkdownInline.Emphasis)
+        assertTrue(paragraph.text.any { it is MarkdownInline.Strong })
+        assertTrue(paragraph.text.any { it is MarkdownInline.Code })
+    }
+
+    @Test
+    fun repairsGluedAgentListItemsAndLooseStrongClosings() {
+        val blocks = parseMarkdownBlocks(
+            "1. **先看具体情况，不拿现成公式硬套。 **我认为应结合实际。[资料 4]2. **既重视已有经验。 **外来的经验必须取舍。[资料 2]",
+        )
+
+        val list = blocks.single() as MarkdownBlock.OrderedList
+        assertEquals(2, list.items.size)
+        assertTrue(
+            list.items.joinToString { it.text.toString() },
+            list.items.all { item -> item.text.any { it is MarkdownInline.Strong } },
+        )
+        assertTrue(list.items.none { item -> item.text.plainText().contains("**") })
+    }
+
+    @Test
+    fun normalizesSupportedCompactListMarkersWithoutTouchingCodeBlocks() {
+        val bulletSamples = listOf(
+            Triple("-项目", "项目", null),
+            Triple("•项目", "项目", null),
+            Triple("-[ ]待办", "待办", false),
+        )
+        bulletSamples.forEach { (source, expectedText, checked) ->
+            val list = parseMarkdownBlocks(source).single() as MarkdownBlock.BulletList
+            assertEquals(expectedText, list.items.single().text.plainText())
+            assertEquals(checked, list.items.single().taskChecked)
+        }
+
+        listOf("1.第一步", "1)第一步", "1、第一步", "1）第一步").forEach { source ->
+            val list = parseMarkdownBlocks(source).single() as MarkdownBlock.OrderedList
+            assertEquals("第一步", list.items.single().text.plainText())
+        }
+
+        val code = parseMarkdownBlocks(
+            """
+            ```text
+            -第一项
+            1、第二项
+            ```
+            """.trimIndent(),
+        ).single() as MarkdownBlock.Code
+        assertEquals("-第一项\n1、第二项", code.literal)
+    }
+
+    @Test
+    fun incrementalParserKeepsNestedListTogetherWhileStreaming() {
+        val cache = IncrementalMarkdownBlockCache(
+            maxStableChunkChars = 64,
+            maxTailChars = 16,
+        )
+        val source = """
+            - ${"父项".repeat(24)}
+              - 子项一
+              - 子项二
+            - 末项
+        """.trimIndent()
+
+        val chunks = cache.chunksFor(source)
+
+        assertEquals(1, chunks.size)
+        assertEquals(false, chunks.single().stable)
+        val list = chunks.single().blocks.single() as MarkdownBlock.BulletList
+        val nested = list.items[0].children.single() as MarkdownBlock.BulletList
+        assertEquals(listOf("子项一", "子项二"), nested.items.map { it.text.plainText() })
+    }
+
+    @Test
     fun parsesCompactSingleLineFencedCodeFromModelOutput() {
         val blocks = parseMarkdownBlocks("安装后执行：```bashgit --version```然后继续。")
 

@@ -85,6 +85,26 @@ class SessionContextBuilderTest {
     }
 
     @Test
+    fun agentContextPrecedesProjectContextAndHistory() {
+        val requestMessages = buildSessionOutgoingMessages(
+            context = SessionRequestContext(
+                finalPrompt = "整理项目内容",
+                projectName = "Harness",
+                deliverableTitle = null,
+                projectContext = "项目上下文",
+                deliverableMarkdown = "",
+            ),
+            baseMessages = listOf(OutgoingChatMessage(role = "user", text = "为什么先调查")),
+            agentSystemContext = "严格资料上下文",
+        )
+
+        assertEquals("system", requestMessages.first().role)
+        assertTrue(requestMessages.first().text.startsWith("严格资料上下文"))
+        assertTrue(requestMessages.first().text.indexOf("严格资料上下文") < requestMessages.first().text.indexOf("会话提示词"))
+        assertEquals("为什么先调查", requestMessages.last().text)
+    }
+
+    @Test
     fun writeBackRequiresProjectAndAssistantMarkdownButNotExistingDeliverable() {
         assertTrue(canWriteBackMarkdown("project", "deliverable", "# 建议"))
         assertTrue(canWriteBackMarkdown("project", null, "# 新沉淀"))

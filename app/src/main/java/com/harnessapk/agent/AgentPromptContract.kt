@@ -1,0 +1,93 @@
+package com.harnessapk.agent
+
+import com.harnessapk.chat.StreamingMessageSnapshot
+import com.harnessapk.chat.UiMessagePartType
+import com.harnessapk.storage.AgentVersionEntity
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+
+internal fun buildAgentSystemPrompt(
+    version: AgentVersionEntity,
+    evidence: List<AgentEvidence>,
+): String = buildString {
+    appendLine("你以包内人物身份使用第一人称与用户交谈；这是基于资料模拟，不得冒充真实人物。")
+    appendLine("先直接回答用户，再说明结论成立的条件。默认使用自然段，内容确有并列关系时才使用列表。")
+    appendLine("历史事实、人物经历和核心立场必须由人物资料支持；不得用通用知识补写。")
+    appendLine("问候、承接前文和关系互动不要求原文证据，可自然回应。")
+    appendLine("今日事实只来自本轮、当前会话和已经提供的项目上下文。条件不足时先给方法判断，再只追问一个最关键的现实条件。")
+    appendLine("不要提资料库、chunk、资料编号、内部文件位置或惯例性的资料充分性声明。用户直接询问真实性时才明确说明是基于资料模拟。")
+    appendLine("不要机械套用“以下三点”“我的回答不是……而是……”等通用 AI 结构。")
+    appendLine()
+    appendLine("身份内核：")
+    appendLine(version.persona.trim())
+    renderWorldviewStatements(version.worldviewJsonl).takeIf(List<String>::isNotEmpty)?.let { statements ->
+        appendLine()
+        appendLine("人物立场：")
+        statements.forEach(::appendLine)
+    }
+    if (evidence.isNotEmpty()) {
+        appendLine()
+        appendLine("可用于本轮事实与立场判断的原始证据：")
+        evidence.forEach { item ->
+            appendLine(item.text.trim())
+            appendLine()
+        }
+    }
+}
+
+private val worldviewJson = Json { ignoreUnknownKeys = true }
+
+private fun renderWorldviewStatements(worldviewJsonl: String): List<String> = worldviewJsonl
+    .lineSequence()
+    .filter(String::isNotBlank)
+    .mapNotNull { line ->
+        runCatching { worldviewJson.parseToJsonElement(line) }
+            .getOrNull()
+            ?.let { it as? JsonObject }
+            ?.renderWorldviewStatement()
+    }
+    .toList()
+
+private fun JsonObject.renderWorldviewStatement(): String? {
+    val statement = nonBlankString("statement") ?: return null
+    val details = listOfNotNull(
+        nonBlankString("scope")?.let { "适用范围：$it" },
+        nonBlankString("period")?.let { "时间范围：$it" },
+        conditionsText()?.let { "条件：$it" },
+        nonBlankString("topic")?.let { "主题：$it" },
+    )
+    return if (details.isEmpty()) statement else "$statement（${details.joinToString("；")}）"
+}
+
+private fun JsonObject.nonBlankString(key: String): String? =
+    (this[key] as? JsonPrimitive)?.nonBlankString()
+
+private fun JsonObject.conditionsText(): String? = when (val conditions = this["conditions"]) {
+    is JsonPrimitive -> conditions.nonBlankString()
+    is JsonArray -> conditions
+        .map { value -> (value as? JsonPrimitive)?.nonBlankString() }
+        .takeIf { values -> values.isNotEmpty() && values.all { it != null } }
+        ?.joinToString("；") { requireNotNull(it) }
+    else -> null
+}
+
+private fun JsonPrimitive.nonBlankString(): String? = this
+    .takeIf(JsonPrimitive::isString)
+    ?.contentOrNull
+    ?.trim()
+    ?.takeIf(String::isNotBlank)
+
+internal fun sanitizeAgentCitationMarkers(
+    snapshot: StreamingMessageSnapshot,
+): StreamingMessageSnapshot = snapshot.copy(
+    parts = snapshot.parts.map { part ->
+        if (part.type == UiMessagePartType.TEXT) {
+            part.copy(content = part.content.replace(Regex("""\[资料\s*\d+\]"""), ""))
+        } else {
+            part
+        }
+    },
+)

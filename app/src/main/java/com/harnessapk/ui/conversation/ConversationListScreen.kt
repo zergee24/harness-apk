@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.Conversation
+import com.harnessapk.agent.Agent
 import com.harnessapk.common.AppContainer
 import com.harnessapk.session.WorkspaceProject
 import com.harnessapk.ui.components.ActionableEmptyState
@@ -54,6 +55,20 @@ import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.launch
 
+internal fun conversationIdentityLabel(conversation: Conversation, agents: Map<String, Agent>): String? =
+    conversation.agentId?.let { id ->
+        "${agents[id]?.name ?: "已安装人物"} · 基于资料模拟"
+    }
+
+internal fun conversationMetadataLabel(
+    conversation: Conversation,
+    projects: Map<String, WorkspaceProject>,
+    agents: Map<String, Agent>,
+): String? = listOfNotNull(
+    conversation.projectId?.let { projects[it]?.name ?: "未知项目" },
+    conversationIdentityLabel(conversation, agents),
+).joinToString(" · ").takeIf { it.isNotEmpty() }
+
 @Composable
 fun ConversationListScreen(
     container: AppContainer,
@@ -62,6 +77,7 @@ fun ConversationListScreen(
     onCreateConversation: () -> Unit,
 ) {
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
+    val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     var conversationToEdit by remember { mutableStateOf<Conversation?>(null) }
     var titleDraft by remember { mutableStateOf("") }
@@ -76,6 +92,7 @@ fun ConversationListScreen(
     }
 
     val projectsById = remember(projects) { projects.associateBy { it.id } }
+    val agentsById = remember(agents) { agents.associateBy { it.id } }
     val groupedState = remember(
         conversations,
         projects,
@@ -183,6 +200,7 @@ fun ConversationListScreen(
                             conversationItems(
                                 conversations = group.visibleConversations,
                                 projectsById = projectsById,
+                                agentsById = agentsById,
                                 onOpenChat = onOpenChat,
                                 onEdit = {
                                     conversationToEdit = it
@@ -198,6 +216,7 @@ fun ConversationListScreen(
                             conversationItems(
                                 conversations = section.conversations,
                                 projectsById = projectsById,
+                                agentsById = agentsById,
                                 onOpenChat = onOpenChat,
                                 onEdit = {
                                     conversationToEdit = it
@@ -214,6 +233,7 @@ fun ConversationListScreen(
                 conversationItems(
                     conversations = conversations,
                     projectsById = projectsById,
+                    agentsById = agentsById,
                     onOpenChat = onOpenChat,
                     onEdit = {
                         conversationToEdit = it
@@ -231,6 +251,7 @@ fun ConversationListScreen(
 private fun androidx.compose.foundation.lazy.LazyListScope.conversationItems(
     conversations: List<Conversation>,
     projectsById: Map<String, WorkspaceProject>,
+    agentsById: Map<String, Agent>,
     onOpenChat: (String) -> Unit,
     onEdit: (Conversation) -> Unit,
     onDelete: (Conversation) -> Unit,
@@ -238,7 +259,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.conversationItems(
     items(conversations, key = { it.id }) { conversation ->
         ConversationRow(
             conversation = conversation,
-            projectName = conversation.projectId?.let { projectsById[it]?.name ?: "未知项目" },
+            metadata = conversationMetadataLabel(conversation, projectsById, agentsById),
             onOpen = { onOpenChat(conversation.id) },
             onEdit = { onEdit(conversation) },
             onDelete = { onDelete(conversation) },
@@ -377,7 +398,7 @@ private fun ProjectSessionsToggleRow(
 @Composable
 private fun ConversationRow(
     conversation: Conversation,
-    projectName: String?,
+    metadata: String?,
     onOpen: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -387,7 +408,7 @@ private fun ConversationRow(
         ComfortListRow(
             title = conversation.title,
             supportingText = "更新于 ${conversation.updatedAt.toDisplayTime()}",
-            metadata = projectName,
+            metadata = metadata,
             onClick = onOpen,
             trailingContent = {
                 Box {

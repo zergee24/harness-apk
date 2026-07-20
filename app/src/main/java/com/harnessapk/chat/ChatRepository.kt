@@ -32,8 +32,14 @@ class ChatRepository(
     fun observeMessages(conversationId: String): Flow<List<ChatMessage>> =
         messageDao.observeForConversation(conversationId).map { rows -> rows.map { it.toDomain() } }
 
+    suspend fun hasUserMessage(conversationId: String): Boolean =
+        messageDao.countUserMessages(conversationId) > 0
+
     fun observeMessageParts(messageId: String): Flow<List<UiMessagePartDraft>> =
         messagePartDao.observeForMessage(messageId).map { rows -> rows.map { it.toPartDraft() } }
+
+    fun observeAttachments(messageId: String): Flow<List<ChatAttachment>> =
+        attachmentDao.observeForMessage(messageId).map { rows -> rows.map { it.toDomain() } }
 
     fun observeMemory(conversationId: String): Flow<ConversationMemory?> =
         memoryDao.observeForConversation(conversationId).map { it?.toDomain() }
@@ -41,7 +47,14 @@ class ChatRepository(
     suspend fun createConversation(
         title: String = DefaultConversationTitle,
         projectId: String? = null,
+        agentId: String? = null,
+        agentVersion: Int? = null,
     ): String {
+        val normalizedAgentId = agentId?.trim()?.ifBlank { null }
+        require((normalizedAgentId == null) == (agentVersion == null)) {
+            "agentId 和 agentVersion 必须同时提供"
+        }
+        require(agentVersion == null || agentVersion > 0) { "agentVersion 必须大于 0" }
         val now = timeProvider.nowMillis()
         val id = UUID.randomUUID().toString()
         conversationDao.insert(
@@ -57,6 +70,8 @@ class ChatRepository(
                 promptOriginal = "",
                 promptOptimized = "",
                 promptFinal = "",
+                agentId = normalizedAgentId,
+                agentVersion = agentVersion,
             ),
         )
         return id
@@ -250,6 +265,20 @@ class ChatRepository(
     suspend fun listMessages(conversationId: String): List<ChatMessage> =
         messageDao.listForConversation(conversationId).map { it.toDomain() }
 
+    suspend fun recentSuccessfulTextMessages(
+        conversationId: String,
+        limit: Int,
+    ): List<ChatMessage> {
+        require(limit in 1..128) { "最近消息数量上限无效" }
+        return messageDao.listRecentSuccessfulText(conversationId, limit).map { it.toDomain() }
+    }
+
+    suspend fun lastSuccessfulAssistant(conversationId: String): ChatMessage? =
+        messageDao.findLastSuccessfulAssistant(conversationId)?.toDomain()
+
+    suspend fun completedAssistantTextCount(conversationId: String): Int =
+        messageDao.countSuccessfulAssistantText(conversationId)
+
     suspend fun message(id: String): ChatMessage? = messageDao.findById(id)?.toDomain()
 
     suspend fun deleteMessage(id: String) {
@@ -367,6 +396,9 @@ private fun ConversationEntity.toDomain(): Conversation = Conversation(
     promptOriginal = promptOriginal,
     promptOptimized = promptOptimized,
     promptFinal = promptFinal,
+    agentId = agentId,
+    agentVersion = agentVersion,
+    isArchived = isArchived,
 )
 
 private fun MessageEntity.toDomain(): ChatMessage = ChatMessage(

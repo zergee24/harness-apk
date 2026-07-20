@@ -99,6 +99,26 @@ class ChatExecutionModelsTest {
         assertTrue(shouldRemoveRunner(original, original))
     }
 
+    @Test
+    fun persistedReplyCompletionNotifiesMemoryOnlyForSuccessAndIsolatesCallbackFailure() {
+        val notified = mutableListOf<String>()
+
+        ChatExecutionStatus.entries.forEach { status ->
+            notifyAgentMemoryAfterTerminalPersistence(
+                conversationId = "conversation-$status",
+                status = status,
+                onReplyCompleted = notified::add,
+            )
+        }
+        notifyAgentMemoryAfterTerminalPersistence(
+            conversationId = "callback-failure",
+            status = ChatExecutionStatus.SUCCEEDED,
+            onReplyCompleted = { throw IllegalStateException("memory callback failure") },
+        )
+
+        assertEquals(listOf("conversation-SUCCEEDED"), notified)
+    }
+
     private fun executionEntry(
         id: String = "entry",
         userMessageId: String = "user",

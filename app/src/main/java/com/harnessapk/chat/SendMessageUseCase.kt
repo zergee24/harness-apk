@@ -5,6 +5,11 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
+import com.harnessapk.agent.AgentEvidence
+import com.harnessapk.agent.AgentContextRequest
+import com.harnessapk.agent.AgentRuntimeContext
+import com.harnessapk.agent.AgentLifecycleCoordinator
+import com.harnessapk.agent.sanitizeAgentCitationMarkers
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.AppError
 import com.harnessapk.common.toUserMessage
@@ -21,8 +26,16 @@ import com.harnessapk.session.buildSessionOutgoingMessages
 import com.harnessapk.websearch.WebSearchContext
 import com.harnessapk.websearch.toVisibleSourcesMarkdown
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import java.io.IOException
 import java.util.UUID
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -37,9 +50,12 @@ class SendMessageUseCase(
     private val imageCompressionPolicy: ImageCompressionPolicy = ImageCompressionPolicy(),
     private val requestBuilder: ModelAwareRequestBuilder = ModelAwareRequestBuilder(),
     private val remoteCapabilityCatalog: suspend () -> ProviderCapabilityCatalog? = { null },
+    private val agentContextProvider: suspend (conversationId: String, request: AgentContextRequest) -> AgentRuntimeContext? = { _, _ -> null },
     private val outputTransformerPipelineFactory: () -> StreamEventTransformerPipeline = {
         StreamEventTransformerPipeline(listOf(ThinkTagStreamTransformer()))
     },
+    private val agentSourcePartWriter: AgentSourcePartWriter? = null,
+    private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
 ) {
     suspend fun send(
         conversationId: String,
@@ -87,6 +103,10 @@ class SendMessageUseCase(
         nativeWebSearchMode: NativeWebSearchMode? = null,
         onAssistantCreated: suspend (String) -> Unit = {},
     ): ChatExecutionResult = withContext(dispatchers.io) {
+        val conversation = requireNotNull(chatRepository.conversation(entry.conversationId)) {
+            "待执行的会话不存在"
+        }
+        val fixedAgentConversation = !conversation.agentId.isNullOrBlank() && conversation.agentVersion != null
         val currentUserMessage = requireNotNull(chatRepository.message(entry.userMessageId)) {
             "待执行的用户消息不存在"
         }
@@ -126,14 +146,17 @@ class SendMessageUseCase(
         var requestDiagnostics: ModelAwareRequestDiagnostics? = null
         var accumulator: StreamingMessageAccumulator? = null
         var streamClock: TimeMark? = null
+        var agentContext: AgentRuntimeContext? = null
+        var latestSnapshot: StreamingMessageSnapshot? = null
+        var streamCompleted = false
         val traceId = UUID.randomUUID().toString()
         val startedAtMillis = System.currentTimeMillis()
         var flushCount = 0
         var receivedChars = 0
 
         try {
-            val imageDataUrls = attachments.map { it.toDataUrl() }
             val existingMemory = chatRepository.memoryForConversation(entry.conversationId)
+            val imageDataUrls = attachments.map { it.toDataUrl() }
             val compressed = contextCompressor.prepare(
                 conversationId = entry.conversationId,
                 messages = executionHistoryWithCurrent(history, currentUserMessage),
@@ -152,6 +175,21 @@ class SendMessageUseCase(
                     )
                 }
             }
+            val memoryForAgent = compressed.memoryToSave ?: existingMemory
+            agentContext = agentContextProvider(
+                entry.conversationId,
+                agentContextRequestForSend(
+                    query = text,
+                    conversationMemory = memoryForAgent?.summary.orEmpty(),
+                    sessionContext = entry.requestContext.sessionContext,
+                ),
+            )
+            if (fixedAgentConversation && agentContext == null) throw AppError.AgentUnavailable()
+            val effectiveSearchContexts = effectiveAgentSearchContexts(
+                agentContext = agentContext,
+                webSearchContext = webSearchContext,
+                nativeWebSearchMode = nativeWebSearchMode,
+            )
             val nextAssistantId = chatRepository.insertAssistantPending(
                 entry.conversationId,
                 provider.profile.id,
@@ -159,43 +197,84 @@ class SendMessageUseCase(
             )
             onAssistantCreated(nextAssistantId)
             assistantId = nextAssistantId
-            val activeStreamClock = TimeSource.Monotonic.markNow()
-            val activeAccumulator = StreamingMessageAccumulator()
-            streamClock = activeStreamClock
-            accumulator = activeAccumulator
-            var latestSnapshot = StreamingMessageSnapshot(
+            latestSnapshot = StreamingMessageSnapshot(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
             )
-            val outputTransformerPipeline = outputTransformerPipelineFactory()
             val modelAwareRequest = requestBuilder.build(
                 provider = provider.profile,
                 apiKey = provider.apiKey,
                 capability = resolvedCapability,
-                messages = buildSessionOutgoingMessages(entry.requestContext.sessionContext, compressed.messages, webSearchContext),
+                messages = buildSessionOutgoingMessages(
+                    context = sessionContextOutsideAgentPrompt(entry.requestContext.sessionContext, agentContext),
+                    baseMessages = requestBaseMessages(compressed, agentContext),
+                    webSearchContext = effectiveSearchContexts.webSearchContext,
+                    agentSystemContext = agentContext?.systemPrompt,
+                ),
                 temperature = temperatureForModel(requestModel),
                 selectedReasoningEffort = entry.reasoningEffort,
-                webSearchRequested = nativeWebSearchMode != null,
+                webSearchRequested = effectiveSearchContexts.nativeWebSearchMode != null,
             )
             requestDiagnostics = modelAwareRequest.diagnostics
 
-            client.streamChatEvents(modelAwareRequest.request).collect { event ->
-                outputTransformerPipeline.transform(event).forEach { transformedEvent ->
-                    receivedChars += transformedEvent.visiblePayloadLength()
-                    activeAccumulator.onEvent(
-                        transformedEvent,
-                        activeStreamClock.elapsedNow().inWholeMilliseconds,
-                    )?.let { flush ->
-                        flushCount += 1
-                        latestSnapshot = flush.snapshot
-                        chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+            var retriesUsed = 0
+            while (true) {
+                streamCompleted = false
+                val activeStreamClock = TimeSource.Monotonic.markNow()
+                val activeAccumulator = StreamingMessageAccumulator()
+                streamClock = activeStreamClock
+                accumulator = activeAccumulator
+                val outputTransformerPipeline = outputTransformerPipelineFactory()
+                try {
+                    client.streamChatEvents(modelAwareRequest.request).collect { event ->
+                        outputTransformerPipeline.transform(event).forEach { transformedEvent ->
+                            receivedChars += transformedEvent.visiblePayloadLength()
+                            activeAccumulator.onEvent(
+                                transformedEvent,
+                                activeStreamClock.elapsedNow().inWholeMilliseconds,
+                            )?.let { flush ->
+                                flushCount += 1
+                                latestSnapshot = flush.snapshot
+                                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, flush.snapshot)
+                            }
+                        }
                     }
+                    streamCompleted = true
+                    break
+                } catch (error: Throwable) {
+                    if (!currentCoroutineContext().isActive ||
+                        !shouldRetryStreamAfterTransportFailure(error, retriesUsed)
+                    ) {
+                        throw error
+                    }
+                    retriesUsed += 1
+                    latestSnapshot = StreamingMessageSnapshot(
+                        status = MessageStatus.PENDING,
+                        parts = emptyList(),
+                    )
+                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
+                    delay(STREAM_TRANSPORT_RETRY_DELAY_MILLIS)
                 }
             }
-            webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
-                latestSnapshot = appendVisibleTextPart(latestSnapshot, it)
-                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, latestSnapshot)
+            effectiveSearchContexts.webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
+                latestSnapshot = appendVisibleTextPart(requireNotNull(latestSnapshot), it)
+                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
             }
+            if (agentContext != null) {
+                lifecycleCoordinator.serialized {
+                    val snapshot = requireNotNull(latestSnapshot)
+                    latestSnapshot = agentSourcePartWriter?.persist(
+                        nextAssistantId,
+                        snapshot,
+                        agentContext,
+                        onPrepared = { latestSnapshot = it },
+                    )
+                        ?: sanitizeAgentCitationMarkers(snapshot).also {
+                            chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, it)
+                        }
+                }
+            }
+            currentCoroutineContext().ensureActive()
             chatRepository.markAssistantSucceeded(nextAssistantId)
             ChatExecutionResult(
                 status = ChatExecutionStatus.SUCCEEDED,
@@ -203,16 +282,32 @@ class SendMessageUseCase(
                 errorMessage = null,
             )
         } catch (cancelled: CancellationException) {
-            assistantId?.let { id ->
-                val cancelledSnapshot = cancelStreamingSnapshot(
+            val cancelledSnapshot = if (streamCompleted) {
+                latestSnapshot?.toCancelledSnapshot()
+            } else {
+                cancelStreamingSnapshot(
                     accumulator = accumulator,
                     nowMillis = streamClock?.elapsedNow()?.inWholeMilliseconds ?: 0L,
                 )
-                if (cancelledSnapshot == null) {
-                    chatRepository.markAssistantCancelled(id)
-                } else {
-                    chatRepository.replaceMessagePartsFromSnapshot(id, cancelledSnapshot)
+            }
+            try {
+                withContext(NonCancellable) {
+                    assistantId?.let { id ->
+                        if (cancelledSnapshot == null) {
+                            chatRepository.markAssistantCancelled(id)
+                        } else {
+                            val sanitized = sanitizeAgentSnapshotIfNeeded(cancelledSnapshot, agentContext)
+                            if (agentContext != null && sanitized.hasAgentSources()) {
+                                agentSourcePartWriter?.persist(id, sanitized, agentContext)
+                                    ?: chatRepository.replaceMessagePartsFromSnapshot(id, sanitized)
+                            } else {
+                                chatRepository.replaceMessagePartsFromSnapshot(id, sanitized)
+                            }
+                        }
+                    }
                 }
+            } catch (_: Throwable) {
+                // Preserve the original cancellation even if best-effort cleanup fails.
             }
             throw cancelled
         } catch (error: Throwable) {
@@ -221,6 +316,22 @@ class SendMessageUseCase(
                 provider.profile.id,
                 requestModel,
             )
+            if (assistantId != null && agentContext != null) {
+                val failedSnapshot = if (streamCompleted) {
+                    latestSnapshot
+                } else {
+                    accumulator?.snapshot() ?: latestSnapshot
+                }
+                failedSnapshot?.let {
+                    val sanitized = sanitizeAgentCitationMarkers(it)
+                    if (sanitized.hasAgentSources()) {
+                        agentSourcePartWriter?.persist(failedAssistantId, sanitized, agentContext)
+                            ?: chatRepository.replaceMessagePartsFromSnapshot(failedAssistantId, sanitized)
+                    } else {
+                        chatRepository.replaceMessagePartsFromSnapshot(failedAssistantId, sanitized)
+                    }
+                }
+            }
             chatRepository.markAssistantFailed(
                 failedAssistantId,
                 buildChatErrorLog(
@@ -300,6 +411,82 @@ class SendMessageUseCase(
     }
 }
 
+internal data class EffectiveAgentSearchContexts(
+    val webSearchContext: WebSearchContext?,
+    val nativeWebSearchMode: NativeWebSearchMode?,
+)
+
+internal fun effectiveAgentSearchContexts(
+    agentContext: AgentRuntimeContext?,
+    webSearchContext: WebSearchContext?,
+    nativeWebSearchMode: NativeWebSearchMode?,
+): EffectiveAgentSearchContexts = if (agentContext == null) {
+    EffectiveAgentSearchContexts(webSearchContext, nativeWebSearchMode)
+} else {
+    EffectiveAgentSearchContexts(null, null)
+}
+
+internal fun webSearchAllowedForAgentConversation(agentId: String?): Boolean = agentId.isNullOrBlank()
+
+internal suspend fun assembleAgentContextForConversation(
+    agentId: String?,
+    agentVersion: Int?,
+    request: AgentContextRequest,
+    assembler: suspend (AgentContextRequest) -> AgentRuntimeContext?,
+): AgentRuntimeContext? {
+    if (agentId.isNullOrBlank() || agentVersion == null) return null
+    return assembler(request.copy(agentId = agentId, version = agentVersion))
+}
+
+internal fun agentContextRequestForSend(
+    query: String,
+    conversationMemory: String,
+    sessionContext: SessionRequestContext?,
+): AgentContextRequest = AgentContextRequest(
+    agentId = "",
+    version = 0,
+    query = query,
+    conversationMemory = conversationMemory,
+    projectContext = sessionContext?.projectContext.orEmpty(),
+    sessionContext = sessionContext?.toAgentSessionContext().orEmpty(),
+)
+
+internal fun sessionContextOutsideAgentPrompt(
+    sessionContext: SessionRequestContext?,
+    agentContext: AgentRuntimeContext?,
+): SessionRequestContext? = if (agentContext == null) sessionContext else null
+
+internal fun requestBaseMessages(
+    compression: ContextCompressionResult,
+    agentContext: AgentRuntimeContext?,
+): List<OutgoingChatMessage> {
+    if (agentContext == null) return compression.messages
+    val first = compression.messages.firstOrNull()
+    return if (
+        first?.role == "system" &&
+        first.text.startsWith("以下是本机保存的早期对话记忆。它由 App 自动压缩生成")
+    ) {
+        compression.messages.drop(1)
+    } else {
+        compression.messages
+    }
+}
+
+private fun SessionRequestContext.toAgentSessionContext(): String = buildString {
+    finalPrompt.trim().takeIf(String::isNotBlank)?.let { appendLine("会话目标：$it") }
+    projectName?.trim()?.takeIf(String::isNotBlank)?.let { appendLine("当前项目：$it") }
+    deliverableTitle?.trim()?.takeIf(String::isNotBlank)?.let { appendLine("当前 Markdown 沉淀：$it") }
+    deliverableMarkdown.trim().takeIf(String::isNotBlank)?.let {
+        appendLine("当前 Markdown 内容：")
+        appendLine(it)
+    }
+}.trim()
+
+internal fun sanitizeAgentSnapshotIfNeeded(
+    snapshot: StreamingMessageSnapshot,
+    agentContext: AgentRuntimeContext?,
+): StreamingMessageSnapshot = if (agentContext == null) snapshot else sanitizeAgentCitationMarkers(snapshot)
+
 internal fun appendVisibleTextPart(
     snapshot: StreamingMessageSnapshot,
     text: String,
@@ -316,11 +503,43 @@ internal fun appendVisibleTextPart(
     )
 }
 
+internal fun appendAgentSourcesPart(
+    snapshot: StreamingMessageSnapshot,
+    evidence: List<AgentEvidence>,
+): StreamingMessageSnapshot {
+    if (snapshot.legacyVisibleText().isBlank()) return snapshot
+    val sources = evidence
+        .map { evidence -> "${evidence.sourceTitle} · ${evidence.location}" }
+        .distinct()
+    if (sources.isEmpty()) return snapshot
+    val chunkKeys = evidence.map(AgentEvidence::chunkKey).filter(String::isNotBlank).distinct().sorted()
+    return snapshot.copy(
+        parts = snapshot.parts + UiMessagePartDraft(
+            index = snapshot.parts.size,
+            type = UiMessagePartType.AGENT_SOURCES,
+            content = sources.mapIndexed { index, source -> "资料 ${index + 1} · $source" }
+                .joinToString(separator = "\n"),
+            metadata = mapOf(
+                "chunkKeys" to JsonArray(chunkKeys.map(::JsonPrimitive)).toString(),
+            ),
+            stable = true,
+        ),
+    )
+}
+
+private fun StreamingMessageSnapshot.hasAgentSources(): Boolean =
+    parts.any { it.type == UiMessagePartType.AGENT_SOURCES }
+
 internal fun cancelStreamingSnapshot(
     accumulator: StreamingMessageAccumulator?,
     nowMillis: Long,
 ): StreamingMessageSnapshot? =
     accumulator?.cancel(nowMillis)?.snapshot
+
+private fun StreamingMessageSnapshot.toCancelledSnapshot(): StreamingMessageSnapshot = copy(
+    status = MessageStatus.CANCELLED,
+    parts = parts.map { part -> part.copy(stable = true) },
+)
 
 data class ChatRuntimeDiagnostics(
     val traceId: String,
@@ -378,6 +597,7 @@ private fun ModelAwareRequestDiagnostics?.toLogLinesOrEmpty(): List<String> =
 
 private fun StreamEvent.visiblePayloadLength(): Int = when (this) {
     is StreamEvent.TextDelta -> text.length
+    is StreamEvent.ImageDelta -> source.length
     is StreamEvent.ReasoningDelta -> text.length
     is StreamEvent.ToolCallDelta -> argumentsDelta.length
     is StreamEvent.ToolResult -> content.length
@@ -412,6 +632,13 @@ private fun String.asLlmFailureMessage(): String {
         "LLM 请求失败：$this"
     }
 }
+
+private const val MAX_STREAM_TRANSPORT_RETRIES = 1
+private const val STREAM_TRANSPORT_RETRY_DELAY_MILLIS = 1_000L
+
+internal fun shouldRetryStreamAfterTransportFailure(error: Throwable, retriesUsed: Int): Boolean =
+    retriesUsed < MAX_STREAM_TRANSPORT_RETRIES &&
+        generateSequence(error) { it.cause }.any { cause -> cause is IOException }
 
 private data class ImagePayload(
     val bytes: ByteArray,

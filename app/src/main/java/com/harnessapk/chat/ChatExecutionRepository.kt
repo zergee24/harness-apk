@@ -2,7 +2,10 @@ package com.harnessapk.chat
 
 import androidx.room.RoomDatabase
 import androidx.room.withTransaction
+import com.harnessapk.agent.ConversationIdentityRepository
+import com.harnessapk.agent.AgentLifecycleCoordinator
 import com.harnessapk.common.TimeProvider
+import com.harnessapk.common.toUserMessage
 import com.harnessapk.storage.ChatExecutionEntryDao
 import com.harnessapk.storage.ChatExecutionEntryEntity
 import kotlinx.coroutines.flow.Flow
@@ -10,6 +13,7 @@ import kotlinx.coroutines.flow.map
 import java.util.UUID
 
 data class EnqueueChatRequest(
+    val requestId: String = UUID.randomUUID().toString(),
     val conversationId: String,
     val content: String,
     val attachments: List<PendingImageAttachment>,
@@ -19,16 +23,31 @@ data class EnqueueChatRequest(
     val requestContext: ChatExecutionRequestContext,
 )
 
+data class ChatExecutionEnqueueOutcome(
+    val entry: ChatExecutionEntry,
+    val insertedByThisCall: Boolean,
+)
+
 class ChatExecutionRepository(
     private val database: RoomDatabase,
     private val dao: ChatExecutionEntryDao,
     private val chatRepository: ChatRepository,
+    private val identityRepository: ConversationIdentityRepository,
     private val timeProvider: TimeProvider,
+    private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
 ) {
     fun observeForConversation(conversationId: String): Flow<List<ChatExecutionEntry>> =
         dao.observeForConversation(conversationId).map { rows -> rows.map(ChatExecutionEntryEntity::toDomain) }
 
-    suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = database.withTransaction {
+    suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = enqueueWithOutcome(request).entry
+
+    suspend fun enqueueWithOutcome(request: EnqueueChatRequest): ChatExecutionEnqueueOutcome =
+        lifecycleCoordinator.serialized {
+            database.withTransaction {
+        dao.findById(request.requestId)?.toDomain()?.let { existing ->
+            return@withTransaction ChatExecutionEnqueueOutcome(existing, insertedByThisCall = false)
+        }
+        identityRepository.pinForFirstMessage(request.conversationId)
         val now = timeProvider.nowMillis()
         val userMessageId = chatRepository.insertUserMessage(
             conversationId = request.conversationId,
@@ -36,7 +55,7 @@ class ChatExecutionRepository(
             attachments = request.attachments,
         )
         val entity = ChatExecutionEntryEntity(
-            id = UUID.randomUUID().toString(),
+            id = request.requestId,
             conversationId = request.conversationId,
             userMessageId = userMessageId,
             assistantMessageId = null,
@@ -53,10 +72,21 @@ class ChatExecutionRepository(
             updatedAt = now,
         )
         dao.insert(entity)
-        entity.toDomain()
-    }
+        ChatExecutionEnqueueOutcome(entity.toDomain(), insertedByThisCall = true)
+            }
+        }
 
     suspend fun entry(id: String): ChatExecutionEntry? = dao.findById(id)?.toDomain()
+
+    suspend fun isAttachmentBatchReferenced(
+        requestId: String,
+        attachments: List<PendingImageAttachment>,
+    ): Boolean = database.withTransaction {
+        if (attachments.isEmpty()) return@withTransaction false
+        val entry = dao.findById(requestId) ?: return@withTransaction false
+        val candidateUris = attachments.mapTo(hashSetOf()) { it.uri.toString() }
+        chatRepository.listAttachments(entry.userMessageId).any { it.uri in candidateUris }
+    }
 
     suspend fun nextQueued(conversationId: String): ChatExecutionEntry? =
         dao.listForConversation(conversationId)
@@ -115,6 +145,27 @@ class ChatExecutionRepository(
                 errorMessage = errorMessage,
             )
         }
+    }
+
+    suspend fun markFailedAfterRunnerFailure(entryId: String, failure: Throwable): ChatExecutionEntry = database.withTransaction {
+        val entry = requireNotNull(dao.findById(entryId)) { "队列任务不存在" }
+        if (entry.status != ChatExecutionStatus.RUNNING.name) return@withTransaction entry.toDomain()
+
+        val errorMessage = failure.toUserMessage()
+        val assistantMessageId = entry.assistantMessageId ?: chatRepository.insertAssistantPending(
+            conversationId = entry.conversationId,
+            providerId = entry.providerId,
+            model = entry.model,
+        )
+        chatRepository.markAssistantFailed(assistantMessageId, errorMessage)
+        val updated = entry.copy(
+            status = ChatExecutionStatus.FAILED.name,
+            assistantMessageId = assistantMessageId,
+            errorMessage = errorMessage,
+            updatedAt = timeProvider.nowMillis(),
+        )
+        dao.update(updated)
+        updated.toDomain()
     }
 
     suspend fun recoverAfterProcessDeath(conversationId: String? = null) = database.withTransaction {

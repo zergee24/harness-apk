@@ -15,12 +15,54 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): ConversationEntity?
 
+    @Query(
+        """
+        SELECT * FROM conversations
+        WHERE isArchived = 0
+        ORDER BY updatedAt DESC, id DESC LIMIT 1
+        """,
+    )
+    suspend fun findLatestActive(): ConversationEntity?
+
+    @Query(
+        """
+        SELECT * FROM conversations
+        WHERE isArchived = 0 AND projectId = :projectId
+        ORDER BY updatedAt DESC, id DESC LIMIT 1
+        """,
+    )
+    suspend fun findLatestActiveInProject(projectId: String): ConversationEntity?
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(entity: ConversationEntity)
 
     @Update
     suspend fun update(entity: ConversationEntity)
 
+    @Query(
+        """
+        UPDATE conversations
+        SET agentId = :agentId, agentVersion = :agentVersion, updatedAt = :updatedAt
+        WHERE id = :id
+          AND NOT EXISTS (
+              SELECT 1 FROM messages
+              WHERE conversationId = :id AND role = 'USER'
+          )
+        """,
+    )
+    suspend fun updateIdentityIfNoUserMessages(
+        id: String,
+        agentId: String?,
+        agentVersion: Int?,
+        updatedAt: Long,
+    ): Int
+
+    @Query("UPDATE conversations SET projectId = NULL WHERE projectId = :projectId")
+    suspend fun clearProject(projectId: String)
+
     @Query("UPDATE conversations SET isArchived = 1, updatedAt = :updatedAt WHERE id = :id")
     suspend fun archive(id: String, updatedAt: Long)
+
+    @Query("SELECT COUNT(*) FROM conversations WHERE agentId = :agentId AND agentVersion = :version")
+    suspend fun countByAgentVersion(agentId: String, version: Int): Int
 }

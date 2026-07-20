@@ -1,10 +1,13 @@
 package com.harnessapk.updater
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -19,10 +22,17 @@ sealed interface UpdateDownloadState {
 class UpdateDownloadCoordinator(
     private val downloader: UpdateArtifactDownloader,
     private val ioDispatcher: CoroutineDispatcher,
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + ioDispatcher),
 ) {
     private val mutex = Mutex()
     private val mutableState = MutableStateFlow<UpdateDownloadState>(UpdateDownloadState.Idle)
     val state: StateFlow<UpdateDownloadState> = mutableState.asStateFlow()
+
+    fun startDownload(manifest: UpdateManifest) {
+        scope.launch {
+            runCatching { download(manifest) }
+        }
+    }
 
     suspend fun download(manifest: UpdateManifest): ApkDownloadResult = mutex.withLock {
         val ready = mutableState.value as? UpdateDownloadState.Ready

@@ -24,7 +24,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -39,7 +38,6 @@ import com.harnessapk.updater.ApkDownloadResult
 import com.harnessapk.updater.UpdateCheckResult
 import com.harnessapk.updater.UpdateDownloadState
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -50,7 +48,6 @@ fun UpdateSettingsScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
     val downloadState by container.updateDownloadCoordinator.state.collectAsState()
     var status by remember { mutableStateOf<String?>(null) }
     var statusIsError by remember { mutableStateOf(false) }
@@ -58,6 +55,26 @@ fun UpdateSettingsScreen(
     var result by remember { mutableStateOf(initialResult) }
     var launchedInstallForSha by remember { mutableStateOf<String?>(null) }
     val downloaded = (downloadState as? UpdateDownloadState.Ready)?.result
+    val showingProgress = checking || downloadState is UpdateDownloadState.Downloading
+
+    fun startDownloadIfNeeded(updateResult: UpdateCheckResult) {
+        if (!shouldAutoDownload(updateResult)) {
+            statusIsError = false
+            status = "当前已是最新版本"
+            return
+        }
+        val manifest = updateResult.manifest ?: return
+        if (
+            shouldStartUpdateDownload(
+                manifestVersionCode = manifest.versionCode,
+                state = container.updateDownloadCoordinator.state.value,
+            )
+        ) {
+            statusIsError = false
+            status = "发现新版本，准备后台下载..."
+            container.updateDownloadCoordinator.startDownload(manifest)
+        }
+    }
 
     fun openInstallerOrPermissionSettings(apk: ApkDownloadResult) {
         when (installLaunchTarget(container.apkInstaller.canRequestPackageInstalls())) {
@@ -74,46 +91,23 @@ fun UpdateSettingsScreen(
     }
 
     LaunchedEffect(Unit) {
-        if (initialResult != null) {
-            result = initialResult
-            if (!shouldAutoDownload(initialResult)) {
-                statusIsError = false
-                status = "当前已是最新版本"
-                return@LaunchedEffect
-            }
-        } else {
-            checking = true
-            statusIsError = false
-            status = "正在检查更新..."
-            result = withContext(Dispatchers.IO) {
-                runCatching { container.updateRepository.fetchManifest() }
-            }.onFailure {
-                statusIsError = true
-                status = it.message
-            }.getOrNull()
-            checking = false
-        }
-
-        if (result?.let(::shouldAutoDownload) == true) {
-            result?.manifest?.let { manifest ->
-                val shouldStart = when (val state = downloadState) {
-                    UpdateDownloadState.Idle -> true
-                    is UpdateDownloadState.Downloading -> state.versionCode != manifest.versionCode
-                    is UpdateDownloadState.Ready -> state.versionCode != manifest.versionCode
-                    is UpdateDownloadState.Failed -> state.versionCode != manifest.versionCode
-                }
-                if (shouldStart) {
-                    runCatching { container.updateDownloadCoordinator.download(manifest) }
-                }
-            }
-        } else if (result != null) {
-            statusIsError = false
-            status = "当前已是最新版本"
-        }
-    }
-
-    LaunchedEffect(initialResult) {
         if (initialResult != null) result = initialResult
+
+        checking = true
+        statusIsError = false
+        status = "正在检查更新..."
+        val refreshed = withContext(Dispatchers.IO) {
+            runCatching { container.updateRepository.fetchManifest() }
+        }
+        checking = false
+
+        refreshed.onSuccess { freshResult ->
+            result = freshResult
+            startDownloadIfNeeded(freshResult)
+        }.onFailure {
+            statusIsError = true
+            status = it.message ?: "更新检查失败"
+        }
     }
 
     LaunchedEffect(downloadState) {
@@ -121,7 +115,6 @@ fun UpdateSettingsScreen(
             status = message
             statusIsError = downloadState is UpdateDownloadState.Failed
         }
-        checking = downloadState is UpdateDownloadState.Downloading
     }
 
     LaunchedEffect(downloaded?.sha256) {
@@ -180,7 +173,7 @@ fun UpdateSettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (checking) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (showingProgress) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
         }
@@ -288,11 +281,7 @@ fun UpdateSettingsScreen(
                                 enabled = manifest != null,
                                 onClick = {
                                     if (manifest != null) {
-                                        scope.launch {
-                                            runCatching {
-                                                container.updateDownloadCoordinator.download(manifest)
-                                            }
-                                        }
+                                        container.updateDownloadCoordinator.startDownload(manifest)
                                     }
                                 },
                             ) {

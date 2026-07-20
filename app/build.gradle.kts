@@ -29,12 +29,117 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { it.isPresent }
 
+val agentV2FixtureWorkspace = rootProject.layout.buildDirectory.dir("agent-v2-fixture")
+val agentV2FixtureDist = rootProject.layout.buildDirectory.dir("agent-v2-dist")
+val agentV2FixtureCompleteDist = rootProject.layout.buildDirectory.dir("agent-v2-complete-dist")
+val agentV2FixtureSourceDist = rootProject.layout.buildDirectory.dir("agent-v2-source-dist")
+val generatedAgentV2Assets = layout.buildDirectory.dir("generated/agent-v2-fixture-assets")
+
+val prepareAgentV2Fixture = tasks.register<Exec>("prepareAgentV2Fixture") {
+    doFirst {
+        delete(agentV2FixtureCompleteDist, agentV2FixtureSourceDist)
+    }
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/agent-builder.sh",
+        "-m",
+        "tools.agent_builder.tests.fixture_v2",
+        "--source",
+        "app/src/test/resources/agent/source.md",
+        "--workspace",
+        agentV2FixtureWorkspace.get().asFile.absolutePath,
+        "--dist",
+        agentV2FixtureDist.get().asFile.absolutePath,
+        "--reset",
+    )
+}
+
+val validateAgentV2Fixture = tasks.register<Exec>("validateAgentV2Fixture") {
+    dependsOn(prepareAgentV2Fixture)
+    workingDir(rootProject.projectDir)
+    commandLine("scripts/agent-builder.sh", "validate", agentV2FixtureWorkspace.get().asFile.absolutePath)
+}
+
+val recommendAgentV2Fixture = tasks.register<Exec>("recommendAgentV2Fixture") {
+    dependsOn(validateAgentV2Fixture)
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/agent-builder.sh",
+        "recommend",
+        agentV2FixtureWorkspace.get().asFile.absolutePath,
+        "--key",
+        agentV2FixtureWorkspace.get().file("test-key.pem").asFile.absolutePath,
+    )
+}
+
+val packAgentV2Fixture = tasks.register<Exec>("packAgentV2Fixture") {
+    dependsOn(recommendAgentV2Fixture)
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/agent-builder.sh",
+        "pack",
+        agentV2FixtureWorkspace.get().asFile.absolutePath,
+        "--output",
+        agentV2FixtureDist.get().asFile.absolutePath,
+        "--key",
+        agentV2FixtureWorkspace.get().file("test-key.pem").asFile.absolutePath,
+        "--profile",
+        "balanced",
+    )
+}
+
+val packCompleteAgentV2Fixture = tasks.register<Exec>("packCompleteAgentV2Fixture") {
+    dependsOn(recommendAgentV2Fixture)
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/agent-builder.sh",
+        "pack",
+        agentV2FixtureWorkspace.get().asFile.absolutePath,
+        "--output",
+        agentV2FixtureCompleteDist.get().asFile.absolutePath,
+        "--key",
+        agentV2FixtureWorkspace.get().file("test-key.pem").asFile.absolutePath,
+        "--profile",
+        "complete",
+    )
+}
+
+val packSourceAgentV2Fixture = tasks.register<Exec>("packSourceAgentV2Fixture") {
+    dependsOn(recommendAgentV2Fixture)
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/agent-builder.sh",
+        "pack",
+        agentV2FixtureWorkspace.get().asFile.absolutePath,
+        "--output",
+        agentV2FixtureSourceDist.get().asFile.absolutePath,
+        "--key",
+        agentV2FixtureWorkspace.get().file("test-key.pem").asFile.absolutePath,
+        "--profile",
+        "source",
+    )
+}
+
+val syncAgentV2FixtureAssets = tasks.register<Sync>("syncAgentV2FixtureAssets") {
+    dependsOn(packAgentV2Fixture, packCompleteAgentV2Fixture, packSourceAgentV2Fixture)
+    from(agentV2FixtureDist) {
+        include("*.hbundle", "*.hcorpus")
+    }
+    from(agentV2FixtureCompleteDist) {
+        include("*-complete.hbundle")
+    }
+    from(agentV2FixtureSourceDist) {
+        include("*-source.hbundle", "*.hsource")
+    }
+    into(generatedAgentV2Assets)
+}
+
 val appVersionCode = providers.gradleProperty("versionCodeOverride")
     .map { it.toInt() }
-    .orElse(1016000)
+    .orElse(2000000)
     .get()
 val appVersionName = providers.gradleProperty("versionNameOverride")
-    .orElse("0.1.16")
+    .orElse("0.2.0")
     .get()
 
 android {
@@ -130,6 +235,10 @@ android {
         compose = true
     }
 
+    sourceSets.getByName("androidTest").assets.directories.add(
+        generatedAgentV2Assets.get().asFile.absolutePath,
+    )
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -140,6 +249,10 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
+    dependsOn(syncAgentV2FixtureAssets)
 }
 
 dependencies {
@@ -164,6 +277,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("org.commonmark:commonmark:0.25.1")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.25.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.84")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
     implementation("org.eclipse.jgit:org.eclipse.jgit:7.7.0.202606012155-r")
     implementation("org.slf4j:slf4j-nop:2.0.17")

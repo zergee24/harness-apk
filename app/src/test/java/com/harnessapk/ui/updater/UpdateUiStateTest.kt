@@ -1,8 +1,10 @@
 package com.harnessapk.ui.updater
 
+import com.harnessapk.updater.ApkDownloadResult
 import com.harnessapk.updater.UpdateCheckResult
 import com.harnessapk.updater.UpdateDownloadState
 import com.harnessapk.updater.UpdateManifest
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -65,6 +67,31 @@ class UpdateUiStateTest {
     fun downloadingAndIdleStatesAreNotRetryable() {
         assertFalse(canRetryUpdateDownload(UpdateDownloadState.Downloading(6)))
         assertFalse(canRetryUpdateDownload(UpdateDownloadState.Idle))
+    }
+
+    @Test
+    fun autoDownloadDoesNotRestartCurrentVersion() {
+        assertFalse(shouldStartUpdateDownload(6, UpdateDownloadState.Downloading(6)))
+        assertFalse(
+            shouldStartUpdateDownload(
+                6,
+                UpdateDownloadState.Ready(6, ApkDownloadResult(File("app.apk"), "sha")),
+            ),
+        )
+        assertFalse(shouldStartUpdateDownload(6, UpdateDownloadState.Failed(6, "下载失败")))
+    }
+
+    @Test
+    fun autoDownloadStartsForIdleOrNewVersion() {
+        assertTrue(shouldStartUpdateDownload(6, UpdateDownloadState.Idle))
+        assertTrue(shouldStartUpdateDownload(7, UpdateDownloadState.Downloading(6)))
+        assertTrue(
+            shouldStartUpdateDownload(
+                7,
+                UpdateDownloadState.Ready(6, ApkDownloadResult(File("app.apk"), "sha")),
+            ),
+        )
+        assertTrue(shouldStartUpdateDownload(7, UpdateDownloadState.Failed(6, "下载失败")))
     }
 
     private fun updateResult(updateAvailable: Boolean, forceUpdate: Boolean): UpdateCheckResult =

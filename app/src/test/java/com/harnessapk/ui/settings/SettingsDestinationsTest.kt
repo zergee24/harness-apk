@@ -5,13 +5,21 @@ import org.junit.Test
 
 class SettingsDestinationsTest {
     @Test
+    fun settingsContainsAgentPackagesAsLowFrequencyManagement() {
+        val destination = settingsDestinations().single { it.id == "agents" }
+
+        assertEquals("智能体包", destination.title)
+        assertEquals("安装、更新并查看人物身份与资料覆盖。", destination.description)
+    }
+
+    @Test
     fun settingsPageUsesTopLevelDestinationsInsteadOfOverflowMenuItems() {
         assertEquals(
-            listOf("models", "search", "voice", "git", "skills", "updates"),
+            listOf("models", "search", "voice", "git", "skills", "agents", "updates"),
             settingsDestinations().map { it.id },
         )
         assertEquals(
-            listOf("模型配置", "搜索能力", "语音能力", "Git / Gitee", "技能 / 插件", "检查更新"),
+            listOf("模型配置", "搜索能力", "语音能力", "Git / Gitee", "技能 / 插件", "智能体包", "检查更新"),
             settingsDestinations().map { it.title },
         )
     }
