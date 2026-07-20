@@ -1,5 +1,6 @@
 import base64
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -71,9 +72,13 @@ V2_AGENT_ENTRY_MAX_BYTES = 16 * 1024 * 1024
 V2_AGENT_TOTAL_MAX_BYTES = 64 * 1024 * 1024
 WORKSPACE_MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 SOURCE_DESCRIPTOR_CACHE_SCHEMA_VERSION = 1
-SOURCE_PACKAGE_FORMAT_VERSION = "hsource-v2-deflate9-stream-v1"
+SOURCE_PACKAGE_FORMAT_VERSION = "hsource-v2-deflate9-stream-v2"
 SOURCE_DESCRIPTOR_CACHE_DIRECTORY = ".agent-builder-cache"
 SOURCE_DESCRIPTOR_CACHE_FILE = "source-artifacts-v2.json"
+RELEASE_STAGING_MARKER_FILE = ".harness-agent-builder-staging.json"
+RELEASE_STAGING_LOCK_FILE = ".harness-agent-builder-staging.lock"
+RELEASE_STAGING_SCHEMA_VERSION = 1
+RELEASE_STAGING_TYPE = "harness-agent-builder-staging"
 
 
 @dataclass(frozen=True)
@@ -864,6 +869,137 @@ def pack_workspace(
     return PackResult(agent_package, corpus_packages, source_packages, bundle_package, report_path)
 
 
+def _release_staging_marker_v2(output: Path) -> dict[str, Any]:
+    return {
+        "outputName": output.name,
+        "schemaVersion": RELEASE_STAGING_SCHEMA_VERSION,
+        "type": RELEASE_STAGING_TYPE,
+    }
+
+
+def _cleanup_stale_release_staging_v2(output: Path) -> None:
+    pattern = re.compile(
+        rf"\.{re.escape(output.name)}\.harness-release-[0-9a-f]{{32}}\.staging"
+    )
+    expected_marker = _release_staging_marker_v2(output)
+    for candidate in output.parent.iterdir():
+        if pattern.fullmatch(candidate.name) is None:
+            continue
+        try:
+            candidate_info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(candidate_info.st_mode) or not stat.S_ISDIR(candidate_info.st_mode):
+            continue
+        marker = candidate / RELEASE_STAGING_MARKER_FILE
+        lock = candidate / RELEASE_STAGING_LOCK_FILE
+        try:
+            marker_info = marker.lstat()
+            lock_info = lock.lstat()
+            if (
+                stat.S_ISLNK(marker_info.st_mode)
+                or not stat.S_ISREG(marker_info.st_mode)
+                or stat.S_ISLNK(lock_info.st_mode)
+                or not stat.S_ISREG(lock_info.st_mode)
+                or marker_info.st_size > WORKSPACE_MANIFEST_MAX_BYTES
+                or _read_small_json(marker) != expected_marker
+            ):
+                continue
+            lock_fd = os.open(
+                lock,
+                os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except (BuildError, OSError, ValueError):
+            continue
+        try:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise BuildError(f"检测到正在进行的发布构建：{candidate.name}")
+            current_info = candidate.lstat()
+            if (
+                current_info.st_dev != candidate_info.st_dev
+                or current_info.st_ino != candidate_info.st_ino
+                or stat.S_ISLNK(current_info.st_mode)
+                or not stat.S_ISDIR(current_info.st_mode)
+            ):
+                continue
+            try:
+                shutil.rmtree(candidate)
+            except OSError as error:
+                raise BuildError(f"无法回收旧发布 staging：{candidate.name}：{error}") from error
+        finally:
+            os.close(lock_fd)
+
+
+def _prepare_release_output_v2(output: Path) -> None:
+    try:
+        info = output.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise BuildError(f"输出路径无法检查：{output}：{error}") from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise BuildError(f"输出路径不是安全目录：{output}")
+    try:
+        if next(output.iterdir(), None) is not None:
+            raise BuildError(f"输出目录必须不存在或为空，当前目录非空：{output}")
+        output.rmdir()
+    except BuildError:
+        raise
+    except OSError as error:
+        raise BuildError(f"空输出目录无法用于原子发布：{output}：{error}") from error
+
+
+def _create_release_staging_v2(output: Path) -> tuple[Path, int]:
+    marker_bytes = _canonical_json_bytes(_release_staging_marker_v2(output))
+    for _ in range(16):
+        staging = output.parent / (
+            f".{output.name}.harness-release-{os.urandom(16).hex()}.staging"
+        )
+        try:
+            staging.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        lock_fd = -1
+        try:
+            lock_fd = os.open(
+                staging / RELEASE_STAGING_LOCK_FILE,
+                os.O_CREAT
+                | os.O_EXCL
+                | os.O_RDWR
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with (staging / RELEASE_STAGING_MARKER_FILE).open("xb") as stream:
+                stream.write(marker_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return staging, lock_fd
+        except BaseException:
+            if lock_fd >= 0:
+                os.close(lock_fd)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    raise BuildError("无法创建唯一发布 staging")
+
+
+def _publish_release_directory_v2(package_root: Path, output: Path) -> None:
+    try:
+        package_info = package_root.lstat()
+    except OSError as error:
+        raise BuildError(f"发布 staging 不可用：{error}") from error
+    if stat.S_ISLNK(package_info.st_mode) or not stat.S_ISDIR(package_info.st_mode):
+        raise BuildError("发布 staging 必须是普通目录")
+    if output.exists() or output.is_symlink():
+        raise BuildError(f"发布前输出路径已出现，拒绝覆盖：{output}")
+    try:
+        os.replace(package_root, output)
+    except OSError as error:
+        raise BuildError(f"原子发布失败：{error}") from error
+
+
 def pack_workspace_v2(
     workspace: Path,
     output_dir: Path,
@@ -881,14 +1017,17 @@ def pack_workspace_v2(
     manifest, validation = _validate_workspace_v2_for_pack(workspace)
     if not validation.publishable:
         raise BuildError("构建验证未通过：" + "；".join(validation.errors))
-    output = Path(output_dir).expanduser().resolve()
+    requested_output = Path(output_dir).expanduser()
+    if requested_output.name in {"", ".", ".."}:
+        raise BuildError(f"输出路径无效：{requested_output}")
+    output = requested_output.parent.resolve() / requested_output.name
     output_parent = output.parent
     output_parent.mkdir(parents=True, exist_ok=True)
+    _cleanup_stale_release_staging_v2(output)
     private_key = _load_private_key(Path(private_key_path))
+    _prepare_release_output_v2(output)
     stem = f"{_safe_filename(manifest.agent_id)}-v{manifest.version}"
-    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output_parent))
-    published: list[Path] = []
-    created_output = False
+    staging, staging_lock_fd = _create_release_staging_v2(output)
     try:
         package_root = staging / "packages"
         package_root.mkdir()
@@ -1069,27 +1208,7 @@ def pack_workspace_v2(
                 },
             )
 
-        final_names = sorted(path.name for path in package_root.iterdir())
-        if output.exists():
-            if not output.is_dir():
-                raise BuildError(f"输出路径不是目录：{output}")
-        else:
-            output.mkdir()
-            created_output = True
-        conflicts = [name for name in final_names if (output / name).exists()]
-        if conflicts:
-            raise BuildError("输出文件已存在：" + ", ".join(conflicts))
-        try:
-            for name in final_names:
-                source = package_root / name
-                destination = output / name
-                os.link(source, destination, follow_symlinks=False)
-                published.append(destination)
-                source.unlink()
-        except BaseException:
-            for path in published:
-                path.unlink(missing_ok=True)
-            raise
+        _publish_release_directory_v2(package_root, output)
 
         corpus_packages = [
             output / corpus_paths[shard.package_id].name for shard in corpus_artifacts
@@ -1107,20 +1226,12 @@ def pack_workspace_v2(
             output / report_target.name,
         )
     except BuildError:
-        for path in published:
-            path.unlink(missing_ok=True)
         raise
     except BaseException as error:
-        for path in published:
-            path.unlink(missing_ok=True)
         raise BuildError(f"V2 打包失败：{error}") from error
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-        if created_output:
-            try:
-                output.rmdir()
-            except OSError:
-                pass
+        os.close(staging_lock_fd)
 
 
 def repack_agent_install_plan_v2(
@@ -1419,22 +1530,34 @@ def _source_package_entries_v2(
     return (
         {
             payload_path: source_path,
-            "manifest.json": _canonical_json_bytes(
-                {
-                    "agentId": agent_id,
-                    "fileName": source.file_name,
-                    "id": f"source-{source.source_id}",
-                    "rawSizeBytes": source.raw_size_bytes,
-                    "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
-                    "sourceHash": source.source_hash,
-                    "sourceId": source.source_id,
-                    "storedName": source.stored_name,
-                    "type": "hsource",
-                    "version": version,
-                }
+            "manifest.json": _source_package_manifest_v2(
+                agent_id,
+                version,
+                source,
             ),
         },
         {payload_path: (source.source_hash, source.raw_size_bytes)},
+    )
+
+
+def _source_package_manifest_v2(
+    agent_id: str,
+    version: int,
+    source: SourceRecord,
+) -> bytes:
+    return _canonical_json_bytes(
+        {
+            "agentId": agent_id,
+            "fileName": source.file_name,
+            "id": f"source-{source.source_id}",
+            "rawSizeBytes": source.raw_size_bytes,
+            "schemaVersion": WORKSPACE_V2_SCHEMA_VERSION,
+            "sourceHash": source.source_hash,
+            "sourceId": source.source_id,
+            "storedName": source.stored_name,
+            "type": "hsource",
+            "version": version,
+        }
     )
 
 
@@ -1545,8 +1668,10 @@ def _source_descriptor_identity_v2(
     private_key: Ed25519PrivateKey,
 ) -> dict[str, Any]:
     public_key = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    source_manifest = _source_package_manifest_v2(agent_id, version, source)
     return {
         "agentId": agent_id,
+        "fileName": source.file_name,
         "formatVersion": SOURCE_PACKAGE_FORMAT_VERSION,
         "packageFileName": f"source-{source.source_id}.hsource",
         "publisherFingerprint": hashlib.sha256(public_key).hexdigest(),
@@ -1557,6 +1682,7 @@ def _source_descriptor_identity_v2(
         "rawSizeBytes": source.raw_size_bytes,
         "sourceHash": source.source_hash,
         "sourceId": source.source_id,
+        "sourceManifestSha256": hashlib.sha256(source_manifest).hexdigest(),
         "storedName": source.stored_name,
         "version": version,
         "zlibCompileVersion": zlib.ZLIB_VERSION,

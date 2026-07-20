@@ -18,6 +18,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -28,6 +29,9 @@ class AgentUiStateTest {
         var statFsReads = 0
 
         val result = attemptAgentPackageInstall(
+            sessionId = "session-1",
+            profileId = "balanced",
+            packageKind = AgentPackageKind.V2_BUNDLE,
             install = {
                 throw AgentInsufficientStorageException(
                     requiredBytes = 300L,
@@ -43,10 +47,42 @@ class AgentUiStateTest {
         assertEquals(1, statFsReads)
         assertTrue(result is AgentPackageInstallAttempt.Failure)
         result as AgentPackageInstallAttempt.Failure
-        assertEquals(250L, result.availableBytes)
+        assertEquals(
+            AgentStorageFailure(
+                sessionId = "session-1",
+                failedProfileId = "balanced",
+                packageKind = AgentPackageKind.V2_BUNDLE,
+                requiredBytes = 300L,
+                availableBytes = 250L,
+            ),
+            result.storageFailure,
+        )
         assertTrue(result.message.contains("需要 300 字节"))
         assertTrue(result.message.contains("可用 250 字节"))
         assertTrue(result.message.contains("释放空间后重试，或调整资料"))
+    }
+
+    @Test
+    fun standaloneStorageFailureOnlyOffersReleaseSpaceAndRetry() = runTest {
+        val result = attemptAgentPackageInstall(
+            sessionId = "standalone-session",
+            profileId = "balanced",
+            packageKind = AgentPackageKind.STANDALONE,
+            install = {
+                throw AgentInsufficientStorageException(
+                    requiredBytes = 600L,
+                    availableBytes = 200L,
+                )
+            },
+            refreshAvailableBytes = { 150L },
+        ) as AgentPackageInstallAttempt.Failure
+
+        assertEquals(AgentPackageKind.STANDALONE, result.storageFailure?.packageKind)
+        assertEquals(
+            "安装空间不足：需要 600 字节，可用 150 字节。释放空间后重试。",
+            result.message,
+        )
+        assertFalse(result.message.contains("调整资料"))
     }
 
     @Test
@@ -91,6 +127,93 @@ class AgentUiStateTest {
                 reason = "推荐安装空间不足",
             ),
             decision,
+        )
+    }
+
+    @Test
+    fun actualRepositoryBudgetBlocksOnlyFailedProfileWithinSameSession() {
+        val failure = AgentStorageFailure(
+            sessionId = "session-1",
+            failedProfileId = "balanced",
+            packageKind = AgentPackageKind.V2_BUNDLE,
+            requiredBytes = 500L,
+            availableBytes = 350L,
+        )
+
+        assertEquals(
+            AgentInstallationDecision.ShowAdjustment(
+                selectedProfileId = "balanced",
+                suggestedProfileId = "lite",
+                reason = "推荐安装空间不足",
+            ),
+            installationDecision(
+                plan = plan(),
+                availableBytes = 350L,
+                requestedProfileId = "balanced",
+                storageFailure = failure,
+                sessionId = "session-1",
+            ),
+        )
+        assertEquals(
+            AgentInstallationDecision.InstallDirectly("lite"),
+            installationDecision(
+                plan = plan(),
+                availableBytes = 350L,
+                requestedProfileId = "lite",
+                storageFailure = failure,
+                sessionId = "session-1",
+            ),
+        )
+        assertEquals(
+            AgentInstallationDecision.InstallDirectly("balanced"),
+            installationDecision(
+                plan = plan(),
+                availableBytes = 350L,
+                requestedProfileId = "balanced",
+                storageFailure = failure,
+                sessionId = "different-session",
+            ),
+        )
+        assertEquals(
+            AgentInstallationDecision.InstallDirectly("balanced"),
+            installationDecision(
+                plan = plan(),
+                availableBytes = 500L,
+                requestedProfileId = "balanced",
+                storageFailure = failure,
+                sessionId = "session-1",
+            ),
+        )
+    }
+
+    @Test
+    fun storageRefreshOnlyPollsKnownBundleThresholdAndClearsRecoveredFailure() {
+        val known = AgentStorageFailure(
+            sessionId = "session-1",
+            failedProfileId = "balanced",
+            packageKind = AgentPackageKind.V2_BUNDLE,
+            requiredBytes = 500L,
+            availableBytes = 350L,
+        )
+        val unknown = known.copy(requiredBytes = -1L)
+        val standalone = known.copy(packageKind = AgentPackageKind.STANDALONE)
+        val failure = AgentPackageInstallAttempt.Failure(
+            message = "旧错误",
+            storageFailure = known,
+        )
+
+        assertTrue(shouldAutoRefreshStorageFailure(known, "session-1"))
+        assertFalse(shouldAutoRefreshStorageFailure(unknown, "session-1"))
+        assertFalse(shouldAutoRefreshStorageFailure(standalone, "session-1"))
+        assertFalse(shouldAutoRefreshStorageFailure(known, "different-session"))
+        assertEquals(failure, clearRecoveredStorageFailure(failure, availableBytes = 499L))
+        assertNull(clearRecoveredStorageFailure(failure, availableBytes = 500L))
+        assertEquals(
+            AgentPackageInstallAttempt.Failure("普通错误"),
+            clearRecoveredStorageFailure(
+                AgentPackageInstallAttempt.Failure("普通错误"),
+                availableBytes = Long.MAX_VALUE,
+            ),
         )
     }
 

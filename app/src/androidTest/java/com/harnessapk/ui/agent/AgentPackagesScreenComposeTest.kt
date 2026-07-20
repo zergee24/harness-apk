@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.Density
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentBundleReader
+import com.harnessapk.agent.AgentImportPreview
 import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agent.AgentStatus
 import com.harnessapk.agent.V2Bundle
@@ -149,7 +150,7 @@ class AgentPackagesScreenComposeTest {
     @Test
     fun finalStorageRaceStaysInDialogAndCanRetryTheSameFlowWithLite() {
         val availableBytes = mutableStateOf(350L)
-        val inlineError = mutableStateOf<String?>(null)
+        val inlineFailure = mutableStateOf<AgentPackageInstallAttempt.Failure?>(null)
         val installedProfiles = mutableListOf<String>()
         composeRule.setContent {
             HarnessApkTheme {
@@ -157,21 +158,30 @@ class AgentPackagesScreenComposeTest {
                     name = "研究者",
                     version = 2,
                     publisherFingerprint = "fingerprint",
+                    sessionId = "session-1",
                     plan = plan(),
                     availableBytes = availableBytes.value,
                     sourceRecords = emptyList(),
                     isInstalling = false,
-                    installErrorText = inlineError.value,
+                    installFailure = inlineFailure.value,
                     onDismiss = {},
                     onInstall = { profile ->
                         if (installedProfiles.isEmpty()) {
                             installedProfiles += profile
-                            availableBytes.value = 250L
-                            inlineError.value =
-                                "安装空间不足：需要 300 字节，可用 250 字节。释放空间后重试，或调整资料。"
+                            inlineFailure.value = AgentPackageInstallAttempt.Failure(
+                                message =
+                                    "安装空间不足：需要 500 字节，可用 350 字节。释放空间后重试，或调整资料。",
+                                storageFailure = AgentStorageFailure(
+                                    sessionId = "session-1",
+                                    failedProfileId = "balanced",
+                                    packageKind = AgentPackageKind.V2_BUNDLE,
+                                    requiredBytes = 500L,
+                                    availableBytes = 350L,
+                                ),
+                            )
                         } else {
                             installedProfiles += profile
-                            inlineError.value = null
+                            inlineFailure.value = null
                         }
                     },
                 )
@@ -180,15 +190,115 @@ class AgentPackagesScreenComposeTest {
 
         composeRule.onNodeWithText("安装").performClick()
         composeRule.onNodeWithText(
-            "安装空间不足：需要 300 字节，可用 250 字节。释放空间后重试，或调整资料。",
+            "安装空间不足：需要 500 字节，可用 350 字节。释放空间后重试，或调整资料。",
         ).assertIsDisplayed()
         composeRule.onNodeWithText("推荐安装空间不足").assertIsDisplayed()
+        composeRule.onNodeWithText("安装").assertIsNotEnabled()
+        assertEquals(1, composeRule.onAllNodesWithText("调整资料").fetchSemanticsNodes().size)
         composeRule.onNodeWithText("调整资料").performClick()
         composeRule.onNodeWithText("轻量").performClick()
+        assertEquals(
+            0,
+            composeRule.onAllNodesWithText(
+                "安装空间不足：需要 500 字节，可用 350 字节。释放空间后重试，或调整资料。",
+            ).fetchSemanticsNodes().size,
+        )
         composeRule.onNodeWithText("安装").assertIsEnabled().performClick()
         composeRule.runOnIdle {
             assertEquals(listOf("balanced", "lite"), installedProfiles)
         }
+    }
+
+    @Test
+    fun releasedSpaceClearsKnownFailureAndReenablesSameProfileWithoutStaleText() {
+        val availableBytes = mutableStateOf(350L)
+        val failure = mutableStateOf<AgentPackageInstallAttempt.Failure?>(
+            AgentPackageInstallAttempt.Failure(
+                message =
+                    "安装空间不足：需要 500 字节，可用 350 字节。释放空间后重试，或调整资料。",
+                storageFailure = AgentStorageFailure(
+                    sessionId = "session-1",
+                    failedProfileId = "balanced",
+                    packageKind = AgentPackageKind.V2_BUNDLE,
+                    requiredBytes = 500L,
+                    availableBytes = 350L,
+                ),
+            ),
+        )
+        composeRule.setContent {
+            HarnessApkTheme {
+                AgentV2InstallPreview(
+                    name = "研究者",
+                    version = 2,
+                    publisherFingerprint = "fingerprint",
+                    sessionId = "session-1",
+                    plan = plan(),
+                    availableBytes = availableBytes.value,
+                    sourceRecords = emptyList(),
+                    isInstalling = false,
+                    installFailure = failure.value,
+                    onDismiss = {},
+                    onInstall = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(failure.value!!.message).assertIsDisplayed()
+        composeRule.onNodeWithText("安装").assertIsNotEnabled()
+        composeRule.runOnIdle {
+            availableBytes.value = 500L
+            failure.value = clearRecoveredStorageFailure(failure.value, 500L)
+        }
+        assertEquals(
+            0,
+            composeRule.onAllNodesWithText(
+                "安装空间不足：需要 500 字节，可用 350 字节。释放空间后重试，或调整资料。",
+            ).fetchSemanticsNodes().size,
+        )
+        composeRule.onNodeWithText("安装").assertIsEnabled()
+        assertEquals(1, composeRule.onAllNodesWithText("调整资料").fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun standaloneStorageModalNeverOffersProfileAdjustment() {
+        val failure = AgentPackageInstallAttempt.Failure(
+            message = "安装空间不足：需要 600 字节，可用 150 字节。释放空间后重试。",
+            storageFailure = AgentStorageFailure(
+                sessionId = "standalone-session",
+                failedProfileId = "balanced",
+                packageKind = AgentPackageKind.STANDALONE,
+                requiredBytes = 600L,
+                availableBytes = 150L,
+            ),
+        )
+        composeRule.setContent {
+            HarnessApkTheme {
+                AgentImportDialog(
+                    preview = AgentImportPreview(
+                        agentId = "fixture.agent",
+                        name = "研究者",
+                        version = 2,
+                        summary = "",
+                        publisherFingerprint = "fingerprint",
+                        corpora = emptyList(),
+                        compressedSizeBytes = 100L,
+                        includesOriginalSources = false,
+                    ),
+                    sourceReadOnly = false,
+                    isInstalling = false,
+                    installFailure = failure,
+                    onDismiss = {},
+                    onInstall = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(failure.message).assertIsDisplayed()
+        assertEquals(
+            0,
+            composeRule.onAllNodesWithText("调整资料", substring = true).fetchSemanticsNodes().size,
+        )
+        composeRule.onNodeWithText("安装").assertIsEnabled()
     }
 
     @Test

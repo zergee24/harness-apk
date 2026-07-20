@@ -54,16 +54,32 @@ internal sealed interface AgentInstallationDecision {
     ) : AgentInstallationDecision
 }
 
+internal enum class AgentPackageKind {
+    V2_BUNDLE,
+    STANDALONE,
+}
+
+internal data class AgentStorageFailure(
+    val sessionId: String,
+    val failedProfileId: String,
+    val packageKind: AgentPackageKind,
+    val requiredBytes: Long,
+    val availableBytes: Long,
+)
+
 internal sealed interface AgentPackageInstallAttempt {
     data class Success(val result: AgentInstallResult) : AgentPackageInstallAttempt
 
     data class Failure(
         val message: String,
-        val availableBytes: Long? = null,
+        val storageFailure: AgentStorageFailure? = null,
     ) : AgentPackageInstallAttempt
 }
 
 internal suspend fun attemptAgentPackageInstall(
+    sessionId: String,
+    profileId: String,
+    packageKind: AgentPackageKind,
     install: suspend () -> AgentInstallResult,
     refreshAvailableBytes: () -> Long,
 ): AgentPackageInstallAttempt = try {
@@ -71,24 +87,75 @@ internal suspend fun attemptAgentPackageInstall(
 } catch (error: CancellationException) {
     throw error
 } catch (error: AgentInsufficientStorageException) {
-    val refreshed = runCatching(refreshAvailableBytes).getOrDefault(error.availableBytes)
-    val available = refreshed.takeIf { it >= 0L } ?: error.availableBytes.takeIf { it >= 0L }
-    val message = if (error.requiredBytes >= 0L && available != null) {
-        "安装空间不足：需要 ${error.requiredBytes} 字节，可用 $available 字节。释放空间后重试，或调整资料。"
-    } else if (available != null) {
-        "安装空间在数据库写入期间耗尽，可用 $available 字节。释放空间后重试，或调整资料。"
-    } else {
-        "安装空间不足。释放空间后重试，或调整资料。"
+    val refreshed = try {
+        refreshAvailableBytes()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        error.availableBytes
     }
-    AgentPackageInstallAttempt.Failure(message, available)
+    val available = refreshed.takeIf { it >= 0L } ?: error.availableBytes
+    val action = if (packageKind == AgentPackageKind.V2_BUNDLE) {
+        "释放空间后重试，或调整资料。"
+    } else {
+        "释放空间后重试。"
+    }
+    val message = if (error.requiredBytes >= 0L && available >= 0L) {
+        "安装空间不足：需要 ${error.requiredBytes} 字节，可用 $available 字节。$action"
+    } else if (available >= 0L) {
+        "安装空间在数据库写入期间耗尽，可用 $available 字节。$action"
+    } else {
+        "安装空间不足。$action"
+    }
+    AgentPackageInstallAttempt.Failure(
+        message = message,
+        storageFailure = AgentStorageFailure(
+            sessionId = sessionId,
+            failedProfileId = profileId,
+            packageKind = packageKind,
+            requiredBytes = error.requiredBytes,
+            availableBytes = available,
+        ),
+    )
 } catch (error: Throwable) {
     AgentPackageInstallAttempt.Failure(error.message ?: "智能体安装失败")
+}
+
+internal fun shouldAutoRefreshStorageFailure(
+    storageFailure: AgentStorageFailure,
+    sessionId: String,
+): Boolean =
+    storageFailure.sessionId == sessionId &&
+        storageFailure.packageKind == AgentPackageKind.V2_BUNDLE &&
+        storageFailure.requiredBytes >= 0L
+
+internal fun clearRecoveredStorageFailure(
+    failure: AgentPackageInstallAttempt.Failure?,
+    availableBytes: Long,
+): AgentPackageInstallAttempt.Failure? {
+    val storage = failure?.storageFailure ?: return failure
+    return failure.takeUnless {
+        storage.requiredBytes >= 0L && availableBytes >= storage.requiredBytes
+    }
+}
+
+internal fun visibleInstallFailure(
+    failure: AgentPackageInstallAttempt.Failure?,
+    sessionId: String,
+    selectedProfileId: String,
+): AgentPackageInstallAttempt.Failure? {
+    val storage = failure?.storageFailure ?: return failure
+    return failure.takeIf {
+        storage.sessionId == sessionId && storage.failedProfileId == selectedProfileId
+    }
 }
 
 internal fun installationDecision(
     plan: AgentInstallationPlan,
     availableBytes: Long,
     requestedProfileId: String?,
+    storageFailure: AgentStorageFailure? = null,
+    sessionId: String? = null,
 ): AgentInstallationDecision {
     val blocked = AgentInstallationDecision.BlockMissingRequired(plan.requiredPackageIds.distinct().sorted())
     if (availableBytes < 0L) return blocked
@@ -107,7 +174,18 @@ internal fun installationDecision(
     if (missingSelected.isNotEmpty()) {
         return AgentInstallationDecision.BlockUnavailableProfile(selectedProfileId, missingSelected)
     }
-    val selectedBytes = validated.exactBytes(selectedProfileId) ?: return blocked
+    val signedSelectedBytes = validated.exactBytes(selectedProfileId) ?: return blocked
+    val selectedBytes = storageFailure
+        ?.takeIf {
+            it.packageKind == AgentPackageKind.V2_BUNDLE &&
+                it.sessionId == sessionId &&
+                it.failedProfileId == selectedProfileId &&
+                it.requiredBytes >= 0L &&
+                availableBytes < it.requiredBytes
+        }
+        ?.requiredBytes
+        ?.coerceAtLeast(signedSelectedBytes)
+        ?: signedSelectedBytes
     if (selectedBytes <= availableBytes) {
         return AgentInstallationDecision.InstallDirectly(selectedProfileId)
     }

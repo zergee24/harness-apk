@@ -59,6 +59,7 @@ import com.harnessapk.agent.V2Corpus
 import com.harnessapk.agent.V2Source
 import com.harnessapk.agent.V2SourceRecord
 import com.harnessapk.common.AppContainer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -95,7 +96,7 @@ fun AgentPackagesScreen(
         }.toMap()
     }
     var previewAvailableBytes by remember { mutableStateOf(Long.MAX_VALUE) }
-    var previewInstallError by remember { mutableStateOf<String?>(null) }
+    var previewInstallFailure by remember { mutableStateOf<AgentPackageInstallAttempt.Failure?>(null) }
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
 
@@ -110,7 +111,7 @@ fun AgentPackagesScreen(
                 }
                 previewViewModel.replace(session)
                 previewAvailableBytes = privateInstallAvailableBytes(context.filesDir.absolutePath)
-                previewInstallError = null
+                previewInstallFailure = null
             } catch (error: Throwable) {
                 errorText = error.message ?: "智能体包读取失败"
             }
@@ -193,6 +194,30 @@ fun AgentPackagesScreen(
     }
 
     importSession?.let { session ->
+        val packageKind = if (session.parsedPackage is V2Bundle) {
+            AgentPackageKind.V2_BUNDLE
+        } else {
+            AgentPackageKind.STANDALONE
+        }
+        val currentInstallFailure = previewInstallFailure
+        val storageFailure = currentInstallFailure?.storageFailure
+        LaunchedEffect(session.id, currentInstallFailure) {
+            if (storageFailure != null && shouldAutoRefreshStorageFailure(storageFailure, session.id)) {
+                while (true) {
+                    delay(STORAGE_REFRESH_INTERVAL_MILLIS)
+                    val refreshed = privateInstallAvailableBytes(context.filesDir.absolutePath)
+                    if (refreshed >= 0L) {
+                        previewAvailableBytes = refreshed
+                    }
+                    if (clearRecoveredStorageFailure(currentInstallFailure, refreshed) == null) {
+                        if (previewInstallFailure == currentInstallFailure) {
+                            previewInstallFailure = null
+                        }
+                        break
+                    }
+                }
+            }
+        }
         val dismiss = {
             scope.launch { runCatching { previewViewModel.discardIfCurrent(session) } }
             Unit
@@ -202,14 +227,26 @@ fun AgentPackagesScreen(
                 val availableBytes = privateInstallAvailableBytes(context.filesDir.absolutePath)
                 previewAvailableBytes = availableBytes
                 val plan = (session.parsedPackage as? V2Bundle)?.toInstallationPlan()
-                if (plan != null && installationDecision(plan, availableBytes, profileId) !is AgentInstallationDecision.InstallDirectly) {
+                if (
+                    plan != null &&
+                    installationDecision(
+                        plan = plan,
+                        availableBytes = availableBytes,
+                        requestedProfileId = profileId,
+                        storageFailure = previewInstallFailure?.storageFailure,
+                        sessionId = session.id,
+                    ) !is AgentInstallationDecision.InstallDirectly
+                ) {
                     return@launch
                 }
                 isWorking = true
                 errorText = null
-                previewInstallError = null
+                previewInstallFailure = null
                 when (
                     val attempt = attemptAgentPackageInstall(
+                        sessionId = session.id,
+                        profileId = profileId,
+                        packageKind = packageKind,
                         install = { container.agentRepository.installPackage(session, profileId) },
                         refreshAvailableBytes = {
                             privateInstallAvailableBytes(context.filesDir.absolutePath)
@@ -222,8 +259,11 @@ fun AgentPackagesScreen(
                         expandedAgentId = attempt.result.agent.id
                     }
                     is AgentPackageInstallAttempt.Failure -> {
-                        previewInstallError = attempt.message
-                        attempt.availableBytes?.let { previewAvailableBytes = it }
+                        previewInstallFailure = attempt
+                        attempt.storageFailure
+                            ?.availableBytes
+                            ?.takeIf { it >= 0L }
+                            ?.let { previewAvailableBytes = it }
                     }
                 }
                 isWorking = false
@@ -234,11 +274,12 @@ fun AgentPackagesScreen(
                 name = parsed.agent.manifest.name,
                 version = parsed.agent.manifest.version,
                 publisherFingerprint = parsed.publisherFingerprint,
+                sessionId = session.id,
                 plan = parsed.toInstallationPlan(),
                 availableBytes = previewAvailableBytes,
                 sourceRecords = parsed.corpora.flatMap(V2Corpus::sources),
                 isInstalling = isWorking,
-                installErrorText = previewInstallError,
+                installFailure = previewInstallFailure,
                 onDismiss = dismiss,
                 onInstall = install,
             )
@@ -246,7 +287,7 @@ fun AgentPackagesScreen(
                 preview = session.preview,
                 sourceReadOnly = parsed is V2Source,
                 isInstalling = isWorking,
-                installErrorText = previewInstallError,
+                installFailure = previewInstallFailure,
                 onDismiss = dismiss,
                 onInstall = { install(DEFAULT_INSTALLATION_PROFILE_ID) },
             )
@@ -311,11 +352,11 @@ internal fun AgentPackageRow(
 }
 
 @Composable
-private fun AgentImportDialog(
+internal fun AgentImportDialog(
     preview: AgentImportPreview,
     sourceReadOnly: Boolean,
     isInstalling: Boolean,
-    installErrorText: String?,
+    installFailure: AgentPackageInstallAttempt.Failure?,
     onDismiss: () -> Unit,
     onInstall: () -> Unit,
 ) {
@@ -341,7 +382,7 @@ private fun AgentImportDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                installErrorText?.let { message ->
+                installFailure?.message?.let { message ->
                     Text(
                         text = message,
                         color = MaterialTheme.colorScheme.error,
@@ -371,18 +412,30 @@ internal fun AgentV2InstallPreview(
     name: String,
     version: Int,
     publisherFingerprint: String,
+    sessionId: String = "",
     plan: AgentInstallationPlan,
     availableBytes: Long,
     sourceRecords: List<V2SourceRecord>,
     isInstalling: Boolean,
-    installErrorText: String? = null,
+    installFailure: AgentPackageInstallAttempt.Failure? = null,
     initialProfileId: String = DEFAULT_INSTALLATION_PROFILE_ID,
     onDismiss: () -> Unit,
     onInstall: (String) -> Unit,
 ) {
     var selectedProfileId by remember(plan, initialProfileId) { mutableStateOf(initialProfileId) }
     var showAdjustment by remember(plan) { mutableStateOf(false) }
-    val decision = installationDecision(plan, availableBytes, selectedProfileId)
+    val displayedInstallFailure = visibleInstallFailure(
+        failure = installFailure,
+        sessionId = sessionId,
+        selectedProfileId = selectedProfileId,
+    )
+    val decision = installationDecision(
+        plan = plan,
+        availableBytes = availableBytes,
+        requestedProfileId = selectedProfileId,
+        storageFailure = installFailure?.storageFailure,
+        sessionId = sessionId,
+    )
     val installEnabled = !isInstalling && decision is AgentInstallationDecision.InstallDirectly
     val exactBytes = exactInstallationBytes(plan, selectedProfileId)
 
@@ -428,7 +481,7 @@ internal fun AgentV2InstallPreview(
                     )
                     is AgentInstallationDecision.InstallDirectly -> Unit
                 }
-                installErrorText?.let { message ->
+                displayedInstallFailure?.message?.let { message ->
                     Text(
                         text = message,
                         color = MaterialTheme.colorScheme.error,
@@ -550,6 +603,8 @@ private val INSTALLATION_PROFILE_LABELS = mapOf(
     "source" to "包含原文",
     "custom" to "自定义覆盖",
 )
+
+private const val STORAGE_REFRESH_INTERVAL_MILLIS = 1_000L
 
 internal typealias AgentPackageCount = AgentPackageClassCount
 internal typealias AgentPackageDetailUiState = AgentPackageDetail

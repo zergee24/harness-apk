@@ -43,8 +43,8 @@ def build_recommendation(workspace: Path, key_path: Path) -> dict[str, Any]:
             workspace,
             root / "signed",
             key_path,
-            profile_id="source",
-            emit_sources=True,
+            profile_id="balanced",
+            emit_sources=False,
         )
         signed_agent_manifest, signed_plan = read_verified_agent_snapshot_v2(
             result.agent_package,
@@ -58,16 +58,16 @@ def build_recommendation(workspace: Path, key_path: Path) -> dict[str, Any]:
             agent_id,
             version,
         )
-        source_metadata = _read_signed_source_metadata(
-            result.source_packages,
+        source_metadata = _read_signed_source_metadata_from_corpora(
+            result.corpus_packages,
             source_plan,
             agent_id,
             version,
         )
-        source_bundle_name = result.bundle_package.name
-        if not source_bundle_name.endswith("-source.hbundle"):
-            raise BuildError("source 预检产物名称无效")
-        bundle_prefix = source_bundle_name.removesuffix("-source.hbundle")
+        snapshot_bundle_name = result.bundle_package.name
+        if not snapshot_bundle_name.endswith("-balanced.hbundle"):
+            raise BuildError("推荐预检产物名称无效")
+        bundle_prefix = snapshot_bundle_name.removesuffix("-balanced.hbundle")
         canonical_agent_sha256, canonical_agent_bytes = _hash_regular_file(
             result.agent_package
         )
@@ -409,68 +409,71 @@ def _read_signed_corpus_metadata(
     return result
 
 
-def _read_signed_source_metadata(
+def _read_signed_source_metadata_from_corpora(
     paths: list[Path],
     plan: InstallPlan,
     agent_id: str,
     version: int,
 ) -> dict[str, dict[str, Any]]:
-    declared = {
+    declared_corpora = {
         package.file_name: package
+        for package in plan.packages
+        if package.package_type == "hcorpus"
+    }
+    if set(declared_corpora) != {path.name for path in paths}:
+        raise BuildError("签名安装计划与已生成语料包集合不一致")
+    expected_source_ids = {
+        package.package_id.removeprefix("source-")
         for package in plan.packages
         if package.package_type == "hsource"
     }
-    if set(declared) != {path.name for path in paths}:
-        raise BuildError("签名安装计划与已生成原文包集合不一致")
-    result = {}
+    result: dict[str, dict[str, Any]] = {}
+    signed_rows: dict[str, bytes] = {}
     for path in paths:
-        package = declared[path.name]
+        package = declared_corpora[path.name]
         digest, size = _hash_regular_file(path)
         if digest != package.sha256 or size != package.size_bytes:
-            raise BuildError(f"签名原文包大小或哈希不匹配：{package.package_id}")
-        manifest = _read_zip_json_object(path, "manifest.json")
-        source_id = manifest.get("sourceId")
-        stored_name = manifest.get("storedName")
-        raw_size = manifest.get("rawSizeBytes")
-        source_hash = manifest.get("sourceHash")
-        if (
-            manifest.get("schemaVersion") != 2
-            or manifest.get("type") != "hsource"
-            or manifest.get("id") != package.package_id
-            or manifest.get("agentId") != agent_id
-            or manifest.get("version") != version
-            or not isinstance(source_id, str)
-            or package.package_id != f"source-{source_id}"
-            or not isinstance(stored_name, str)
-            or not stored_name
-            or type(raw_size) is not int
-            or raw_size < 0
-            or not isinstance(source_hash, str)
-            or len(source_hash) != 64
-            or any(character not in "0123456789abcdef" for character in source_hash)
-        ):
-            raise BuildError(f"签名原文包身份或大小无效：{package.package_id}")
-        try:
-            with zipfile.ZipFile(path) as archive:
-                payload = archive.getinfo(f"files/{stored_name}")
-                payload_names = [
-                    info.filename
-                    for info in archive.infolist()
-                    if info.filename.startswith("files/")
-                ]
-        except (KeyError, OSError, zipfile.BadZipFile) as error:
-            raise BuildError(f"签名原文包文件无法读取：{package.package_id}：{error}") from error
-        if (
-            payload.is_dir()
-            or payload_names != [f"files/{stored_name}"]
-            or payload.file_size != raw_size
-            or source_id in result
-        ):
-            raise BuildError(f"签名原文包文件声明不一致：{package.package_id}")
-        result[source_id] = {
-            "rawSizeBytes": raw_size,
-            "sourceHash": source_hash,
-        }
+            raise BuildError(f"签名语料包大小或哈希不匹配：{package.package_id}")
+        rows = _read_zip_json_array(path, "sources.json")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise BuildError(f"签名语料包来源元数据无效：{package.package_id}")
+            source_id = row.get("sourceId")
+            source_hash = row.get("sourceHash")
+            raw_size = row.get("rawSizeBytes")
+            file_name = row.get("fileName")
+            stored_name = row.get("storedName")
+            if (
+                not isinstance(source_id, str)
+                or not source_id
+                or source_id not in expected_source_ids
+                or not isinstance(source_hash, str)
+                or len(source_hash) != 64
+                or any(character not in "0123456789abcdef" for character in source_hash)
+                or type(raw_size) is not int
+                or raw_size < 0
+                or not isinstance(file_name, str)
+                or not file_name
+                or not isinstance(stored_name, str)
+                or not stored_name
+            ):
+                raise BuildError(f"签名语料包来源元数据无效：{package.package_id}")
+            canonical_row = json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            previous = signed_rows.get(source_id)
+            if previous is not None and previous != canonical_row:
+                raise BuildError(f"签名语料包来源元数据冲突：{source_id}")
+            signed_rows[source_id] = canonical_row
+            result[source_id] = {
+                "rawSizeBytes": raw_size,
+                "sourceHash": source_hash,
+            }
+    if set(result) != expected_source_ids:
+        raise BuildError("签名语料包未覆盖安装计划中的全部原文来源")
     return result
 
 
@@ -491,6 +494,26 @@ def _read_zip_json_object(path: Path, name: str) -> dict[str, Any]:
         raise BuildError(f"签名包 JSON 无法读取：{path.name} / {name}：{error}") from error
     if not isinstance(value, dict):
         raise BuildError(f"签名包 JSON 必须是对象：{path.name} / {name}")
+    return value
+
+
+def _read_zip_json_array(path: Path, name: str) -> list[Any]:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            info = archive.getinfo(name)
+            if info.is_dir() or info.file_size > 4 * 1024 * 1024:
+                raise BuildError(f"签名包 JSON 条目过大：{path.name} / {name}")
+            with archive.open(info) as stream:
+                raw = stream.read(4 * 1024 * 1024 + 1)
+        if len(raw) != info.file_size or len(raw) > 4 * 1024 * 1024:
+            raise BuildError(f"签名包 JSON 条目大小不一致：{path.name} / {name}")
+        value = json.loads(raw)
+    except BuildError:
+        raise
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile) as error:
+        raise BuildError(f"签名包 JSON 无法读取：{path.name} / {name}：{error}") from error
+    if not isinstance(value, list):
+        raise BuildError(f"签名包 JSON 必须是数组：{path.name} / {name}")
     return value
 
 

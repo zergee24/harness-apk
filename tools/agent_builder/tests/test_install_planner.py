@@ -1,7 +1,10 @@
+import fcntl
 import hashlib
 import json
 import os
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -904,10 +907,91 @@ class InstallPlannerTest(unittest.TestCase):
         )
         payloads = [entry["payload"] for entry in cache["entries"].values()]
         self.assertTrue(payloads)
+        self.assertEqual(
+            "hsource-v2-deflate9-stream-v2",
+            builder.SOURCE_PACKAGE_FORMAT_VERSION,
+        )
         for payload in payloads:
+            self.assertEqual(
+                builder.SOURCE_PACKAGE_FORMAT_VERSION,
+                payload["formatVersion"],
+            )
             self.assertIn("pythonRuntime", payload)
+            self.assertIn("sourceManifestSha256", payload)
             self.assertIn("zlibCompileVersion", payload)
             self.assertIn("zlibRuntimeVersion", payload)
+
+    def test_source_manifest_file_name_change_invalidates_cache_and_public_packs_match(self):
+        first = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-file-name-first",
+            self.private_key_path,
+            profile_id="balanced",
+            emit_sources=False,
+        )
+        cache_path = (
+            self.workspace
+            / builder.SOURCE_DESCRIPTOR_CACHE_DIRECTORY
+            / builder.SOURCE_DESCRIPTOR_CACHE_FILE
+        )
+        first_cache = json.loads(cache_path.read_text("utf-8"))
+        manifest_path = self.workspace / "workspace.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        changed_source = manifest["sources"][0]
+        changed_source["fileName"] = "renamed-original.txt"
+        self._write_json(manifest_path, manifest)
+
+        with mock.patch.object(
+            builder,
+            "_measure_source_v2",
+            wraps=builder._measure_source_v2,
+        ) as measured:
+            second = pack_workspace_v2(
+                self.workspace,
+                self.root / "dist-file-name-second",
+                self.private_key_path,
+                profile_id="balanced",
+                emit_sources=False,
+            )
+
+        source = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-file-name-source",
+            self.private_key_path,
+            profile_id="source",
+            emit_sources=True,
+        )
+        second_cache = json.loads(cache_path.read_text("utf-8"))
+        with zipfile.ZipFile(first.agent_package) as archive:
+            first_plan = archive.read("install-plan.json")
+        with zipfile.ZipFile(second.agent_package) as archive:
+            second_plan = archive.read("install-plan.json")
+        with zipfile.ZipFile(source.agent_package) as archive:
+            source_plan = archive.read("install-plan.json")
+
+        self.assertGreaterEqual(measured.call_count, 1)
+        self.assertNotEqual(first_plan, second_plan)
+        self.assertEqual(second_plan, source_plan)
+        self.assertGreater(
+            len(second_cache["entries"]),
+            len(first_cache["entries"]),
+        )
+        changed_package = next(
+            path
+            for path in source.source_packages
+            if path.name == f"source-{changed_source['sourceId']}.hsource"
+        )
+        with zipfile.ZipFile(changed_package) as archive:
+            source_manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual("renamed-original.txt", source_manifest["fileName"])
+        declared = {
+            row["fileName"]: row
+            for row in json.loads(second_plan)["packages"]
+            if row["type"] == "hsource"
+        }
+        for path in source.source_packages:
+            self.assertEqual(declared[path.name]["sha256"], self._sha256(path))
+            self.assertEqual(declared[path.name]["sizeBytes"], path.stat().st_size)
 
     def test_source_pack_fails_closed_before_publish_when_cached_descriptor_mismatches(self):
         pack_workspace_v2(
@@ -1004,6 +1088,147 @@ class InstallPlannerTest(unittest.TestCase):
 
         self.assertEqual(["keep.txt"], sorted(path.name for path in output.iterdir()))
         self.assertFalse(any(".staging-" in path.name for path in output.parent.iterdir()))
+
+    def test_nonempty_output_fails_closed_before_package_building(self):
+        output = self.root / "dist-nonempty"
+        output.mkdir()
+        (output / "keep.txt").write_text("keep", encoding="utf-8")
+
+        with (
+            mock.patch.object(
+                builder,
+                "_pack_corpus_shard_v2",
+                side_effect=AssertionError("nonempty output must fail before building"),
+            ),
+            self.assertRaisesRegex(BuildError, "非空"),
+        ):
+            pack_workspace_v2(
+                self.workspace,
+                output,
+                self.private_key_path,
+                profile_id="balanced",
+                emit_sources=False,
+            )
+
+        self.assertEqual(["keep.txt"], [path.name for path in output.iterdir()])
+
+    def test_empty_output_directory_is_atomically_replaced_with_complete_release(self):
+        output = self.root / "dist-empty"
+        output.mkdir()
+
+        result = pack_workspace_v2(
+            self.workspace,
+            output,
+            self.private_key_path,
+            profile_id="balanced",
+            emit_sources=False,
+        )
+
+        self.assertTrue(output.is_dir())
+        self.assertTrue(result.agent_package.is_file())
+        self.assertTrue(result.bundle_package.is_file())
+        self.assertEqual(
+            sorted(path.name for path in output.iterdir()),
+            sorted(
+                [
+                    result.agent_package.name,
+                    result.bundle_package.name,
+                    result.report_path.name,
+                    *(path.name for path in result.corpus_packages),
+                ]
+            ),
+        )
+
+    def test_atomic_balanced_publish_recovers_after_pre_rename_process_exit(self):
+        self._assert_atomic_crash_recovery("balanced", emit_sources=False)
+
+    def test_atomic_source_publish_never_exposes_partial_originals(self):
+        self._assert_atomic_crash_recovery("source", emit_sources=True)
+
+    def test_stale_staging_cleanup_requires_exact_builder_marker_and_rejects_symlinks(self):
+        output = self.root / "dist-stale-cleanup"
+        valid = self.root / f".{output.name}.harness-release-{'a' * 32}.staging"
+        unmarked = self.root / f".{output.name}.harness-release-{'b' * 32}.staging"
+        symlink = self.root / f".{output.name}.harness-release-{'c' * 32}.staging"
+        outside = self.root / "outside-staging"
+        valid.mkdir()
+        unmarked.mkdir()
+        outside.mkdir()
+        symlink.symlink_to(outside, target_is_directory=True)
+        self._write_json(
+            valid / ".harness-agent-builder-staging.json",
+            {
+                "outputName": output.name,
+                "schemaVersion": 1,
+                "type": "harness-agent-builder-staging",
+            },
+        )
+        (valid / ".harness-agent-builder-staging.lock").touch()
+
+        result = pack_workspace_v2(
+            self.workspace,
+            output,
+            self.private_key_path,
+            profile_id="balanced",
+            emit_sources=False,
+        )
+
+        self.assertTrue(result.bundle_package.is_file())
+        self.assertFalse(valid.exists())
+        self.assertTrue(unmarked.is_dir())
+        self.assertTrue(symlink.is_symlink())
+        self.assertTrue(outside.is_dir())
+
+    def test_output_leaf_symlink_is_rejected_without_touching_target(self):
+        outside = self.root / "outside-output"
+        outside.mkdir()
+        output = self.root / "dist-output-link"
+        output.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(BuildError, "安全目录"):
+            pack_workspace_v2(
+                self.workspace,
+                output,
+                self.private_key_path,
+                profile_id="balanced",
+                emit_sources=False,
+            )
+
+        self.assertTrue(output.is_symlink())
+        self.assertTrue(outside.is_dir())
+        self.assertEqual([], list(outside.iterdir()))
+
+    def test_active_builder_staging_lock_is_preserved_and_blocks_concurrent_publish(self):
+        output = self.root / "dist-active-builder"
+        active = self.root / f".{output.name}.harness-release-{'d' * 32}.staging"
+        active.mkdir()
+        self._write_json(
+            active / ".harness-agent-builder-staging.json",
+            {
+                "outputName": output.name,
+                "schemaVersion": 1,
+                "type": "harness-agent-builder-staging",
+            },
+        )
+        lock_path = active / ".harness-agent-builder-staging.lock"
+        lock_path.touch()
+        lock_fd = os.open(lock_path, os.O_RDWR)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with self.assertRaisesRegex(BuildError, "正在进行"):
+                pack_workspace_v2(
+                    self.workspace,
+                    output,
+                    self.private_key_path,
+                    profile_id="balanced",
+                    emit_sources=False,
+                )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+        self.assertTrue(active.is_dir())
+        self.assertFalse(output.exists())
 
     def test_cli_validate_dispatches_schema_and_retains_validate_v2_alias(self):
         for command in ("validate", "validate-v2"):
@@ -1290,6 +1515,12 @@ class InstallPlannerTest(unittest.TestCase):
                 )
             )
 
+    def test_recommend_then_balanced_pack_is_bounded_and_uses_same_signed_plan(self):
+        self._assert_bounded_recommend_then_pack("balanced")
+
+    def test_recommend_then_complete_pack_is_bounded_and_uses_same_signed_plan(self):
+        self._assert_bounded_recommend_then_pack("complete")
+
     def test_recommendation_uses_signed_snapshot_and_true_incremental_coverage(self):
         chunks_path = self.workspace / "corpora" / "index" / "chunks.jsonl"
         original_chunks = chunks_path.read_bytes()
@@ -1465,6 +1696,126 @@ class InstallPlannerTest(unittest.TestCase):
         after = set(Path(tempfile.gettempdir()).glob(".harness-install-plan-*"))
 
         self.assertEqual(before, after)
+
+    def _assert_bounded_recommend_then_pack(self, profile_id: str) -> None:
+        observed = {}
+        original_pack = recommendation.pack_workspace_v2
+
+        def inspect_recommend_pack(*args, **kwargs):
+            result = original_pack(*args, **kwargs)
+            observed["profileId"] = kwargs["profile_id"]
+            observed["emitSources"] = kwargs["emit_sources"]
+            observed["sourcePackages"] = list(result.source_packages)
+            observed["files"] = sorted(path.name for path in Path(args[1]).iterdir())
+            with zipfile.ZipFile(result.agent_package) as archive:
+                observed["installPlan"] = archive.read("install-plan.json")
+            return result
+
+        with mock.patch.object(
+            recommendation,
+            "pack_workspace_v2",
+            side_effect=inspect_recommend_pack,
+        ):
+            recommendation_result = recommendation.build_recommendation(
+                self.workspace,
+                self.private_key_path,
+            )
+
+        self.assertEqual("balanced", observed["profileId"])
+        self.assertFalse(observed["emitSources"])
+        self.assertEqual([], observed["sourcePackages"])
+        self.assertFalse(any(name.endswith(".hsource") for name in observed["files"]))
+        self.assertFalse(any(name.endswith("-source.hbundle") for name in observed["files"]))
+
+        packed = pack_workspace_v2(
+            self.workspace,
+            self.root / f"recommend-then-{profile_id}",
+            self.private_key_path,
+            profile_id=profile_id,
+            emit_sources=False,
+        )
+        with zipfile.ZipFile(packed.agent_package) as archive:
+            packed_plan_bytes = archive.read("install-plan.json")
+        self.assertEqual(observed["installPlan"], packed_plan_bytes)
+        packed_plan = json.loads(packed_plan_bytes)
+        selected = next(
+            profile["packageIds"]
+            for profile in packed_plan["profiles"]
+            if profile["id"] == profile_id
+        )
+        packages = {row["id"]: row for row in packed_plan["packages"]}
+        recommendation_profile = next(
+            profile
+            for profile in recommendation_result["profiles"]
+            if profile["id"] == profile_id
+        )
+        self.assertEqual(
+            packed.agent_package.stat().st_size
+            + sum(packages[package_id]["sizeBytes"] for package_id in selected),
+            recommendation_profile["exactSignedBytes"],
+        )
+        self.assertEqual(
+            self._sha256(packed.agent_package),
+            recommendation_profile["agentPackage"]["sha256"],
+        )
+
+    def _assert_atomic_crash_recovery(self, profile_id: str, *, emit_sources: bool) -> None:
+        output = self.root / f"atomic-{profile_id}"
+        repository = Path(__file__).resolve().parents[3]
+        script = "\n".join(
+            (
+                "import os",
+                "from pathlib import Path",
+                "from tools.agent_builder import builder",
+                "def crash_before_publish(package_root, output):",
+                "    os._exit(99)",
+                "builder._publish_release_directory_v2 = crash_before_publish",
+                (
+                    "builder.pack_workspace_v2("
+                    f"Path({str(self.workspace)!r}),"
+                    f"Path({str(output)!r}),"
+                    f"Path({str(self.private_key_path)!r}),"
+                    f"profile_id={profile_id!r},"
+                    f"emit_sources={emit_sources!r})"
+                ),
+            )
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repository,
+            env={**os.environ, "PYTHONPATH": str(repository)},
+            check=False,
+        )
+
+        self.assertEqual(99, completed.returncode)
+        self.assertFalse(output.exists())
+        stale = list(
+            output.parent.glob(
+                f".{output.name}.harness-release-????????????????????????????????.staging"
+            )
+        )
+        self.assertEqual(1, len(stale))
+        self.assertTrue((stale[0] / ".harness-agent-builder-staging.json").is_file())
+        self.assertTrue((stale[0] / ".harness-agent-builder-staging.lock").is_file())
+
+        result = pack_workspace_v2(
+            self.workspace,
+            output,
+            self.private_key_path,
+            profile_id=profile_id,
+            emit_sources=emit_sources,
+        )
+
+        self.assertTrue(result.agent_package.is_file())
+        self.assertTrue(result.bundle_package.is_file())
+        self.assertEqual(emit_sources, bool(result.source_packages))
+        self.assertFalse(
+            list(
+                output.parent.glob(
+                    f".{output.name}.harness-release-????????????????????????????????.staging"
+                )
+            )
+        )
 
     def _workspace(self, name: str = "workspace") -> Path:
         workspace = self.root / name
