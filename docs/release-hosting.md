@@ -39,9 +39,9 @@ scripts/release_apk.sh test --version-code 1015009 --upload
 
 版本策略：
 
-- `versionName` 是给人看的产品版本，例如 `0.1.15`；测试通道生成的更新清单和 APK 会显示为 `0.1.15-debug`。
+- `versionName` 是给人看的产品版本，例如 `0.2.0`；测试通道生成的更新清单和 APK 会显示为 `0.2.0-debug`。
 - `versionCode` 是给系统和更新器看的机器版本，只有远端 `versionCode` 大于已安装包时才提示更新。
-- `app/build.gradle.kts` 中维护产品版本基础值，例如 `versionName=0.1.15`、`versionCode=1015000`。
+- `app/build.gradle.kts` 中维护产品版本基础值，例如 `versionName=0.2.0`、`versionCode=2000000`。
 - GitHub Actions 的 `test` / `prod` 通道在未显式传 `version_code` 时，默认用 `基础 versionCode + GitHub run number` 生成递增构建号；因此同一个产品版本可以多次打包。
 - 手动运行 workflow 或本地脚本时，可以显式传入 `version_code` / `--version-code` 覆盖自动值。
 
