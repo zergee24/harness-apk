@@ -143,10 +143,11 @@ class AgentRepository(
                 consumeOwnedSessionUnlocked(owned)
                 result
             } catch (error: Throwable) {
-                if (error !is AgentInsufficientStorageException) {
+                val failure = normalizeInstallFailure(error)
+                if (failure !is AgentInsufficientStorageException) {
                     invalidateOwnedSessionUnlocked(owned)
                 }
-                throw error
+                throw failure
             }
         }
     }
@@ -432,7 +433,6 @@ class AgentRepository(
             sources,
             stagedFile,
             "bundle.hbundle",
-            profileId,
         )
     }
 
@@ -443,7 +443,6 @@ class AgentRepository(
             emptyList(),
             stagedFile,
             "agent.hagent",
-            selectedProfileId = "agent-only",
         )
 
     private suspend fun installV2AgentContent(
@@ -452,7 +451,6 @@ class AgentRepository(
         sources: List<V2Source>,
         stagedFile: File,
         installedName: String,
-        selectedProfileId: String,
     ): AgentInstallResult {
         val existingAgent = dao.findAgent(agent.manifest.id)
         if (existingAgent != null && existingAgent.publisherFingerprint != agent.publisherFingerprint) {
@@ -462,7 +460,7 @@ class AgentRepository(
         if (existingVersion != null && existingVersion.bundleSha256 != agent.packageSha256) {
             throw AgentBundleException("同一版本的智能体内容不同，请发布新版本")
         }
-        val evidenceExpanded = existingVersion == null || corpora.any { corpus ->
+        val evidenceExpanded = corpora.any { corpus ->
             dao.findVersionPackage(agent.manifest.id, agent.manifest.version, corpus.manifest.id)?.installed != true
         }
         val versionDirectory = File(
@@ -532,7 +530,7 @@ class AgentRepository(
                                 agent.evaluations.map(V2Evaluation::corpusId).distinct().sorted(),
                             ),
                             agentPackageSizeBytes = agent.compressedSizeBytes,
-                            selectedProfileId = selectedProfileId,
+                            selectedProfileId = "agent-only",
                         ),
                     )
                     dao.upsertVersionPackages(
@@ -555,7 +553,7 @@ class AgentRepository(
                 }
                 corpora.forEach { corpus ->
                     if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
-                        requirePrivateInstallSpace(installWriteBytes(corpus.uncompressedSizeBytes))
+                        requirePrivateInstallSpace(conservativeCorpusInstallWorkspaceBytes(corpus.uncompressedSizeBytes))
                     }
                     installV2Corpus(readablePackage, corpus, now)
                     dao.markVersionPackageInstalled(
@@ -579,7 +577,9 @@ class AgentRepository(
                 dao.updateVersionSelectedProfile(
                     agent.manifest.id,
                     agent.manifest.version,
-                    selectedProfileId,
+                    inferredSelectedProfileId(
+                        dao.listVersionPackages(agent.manifest.id, agent.manifest.version),
+                    ),
                 )
                 result = refreshV2InstallState(agent, now, evidenceExpanded = evidenceExpanded)
             }
@@ -590,8 +590,9 @@ class AgentRepository(
             }
             return AgentInstallResult(outcome, requireNotNull(result).toDomain())
         } catch (error: Throwable) {
+            val failure = normalizeInstallFailure(error)
             if (finalPackage != null) {
-                if (error is AgentInsufficientStorageException && finalPackage.isFile && !stagedFile.exists()) {
+                if (failure is AgentInsufficientStorageException && finalPackage.isFile && !stagedFile.exists()) {
                     fileOps.moveAtomically(finalPackage, stagedFile)
                 } else {
                     retireUnreferencedFile(finalPackage)
@@ -602,7 +603,7 @@ class AgentRepository(
                 retireUnreferencedFile(prepared.file)
                 prepared.file.parentFile?.let(::deleteEmptyDirectory)
             }
-            throw error
+            throw failure
         }
     }
 
@@ -712,7 +713,7 @@ class AgentRepository(
         val createdFile = !finalPackage.exists()
         val installCorpus = if (createdFile) {
             val corpusWriteBytes = if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
-                installWriteBytes(corpus.uncompressedSizeBytes)
+                conservativeCorpusInstallWorkspaceBytes(corpus.uncompressedSizeBytes)
             } else {
                 INSTALL_METADATA_SAFETY_BYTES
             }
@@ -739,7 +740,7 @@ class AgentRepository(
             var updated: AgentEntity? = null
             transactionRunner.run {
                 if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
-                    requirePrivateInstallSpace(installWriteBytes(corpus.uncompressedSizeBytes))
+                    requirePrivateInstallSpace(conservativeCorpusInstallWorkspaceBytes(corpus.uncompressedSizeBytes))
                 } else {
                     requirePrivateInstallSpace(INSTALL_METADATA_SAFETY_BYTES)
                 }
@@ -796,14 +797,15 @@ class AgentRepository(
             }
             return AgentInstallResult(AgentInstallOutcome.INSTALLED, requireNotNull(updated).toDomain())
         } catch (error: Throwable) {
+            val failure = normalizeInstallFailure(error)
             if (createdFile) {
-                if (error is AgentInsufficientStorageException && finalPackage.isFile && !stagedFile.exists()) {
+                if (failure is AgentInsufficientStorageException && finalPackage.isFile && !stagedFile.exists()) {
                     fileOps.moveAtomically(finalPackage, stagedFile)
                 } else {
                     retireUnreferencedFile(finalPackage)
                 }
             }
-            throw error
+            throw failure
         }
     }
 
@@ -921,11 +923,12 @@ class AgentRepository(
             }
             return AgentInstallResult(AgentInstallOutcome.INSTALLED, requireNotNull(dao.findAgent(agent.id)).toDomain())
         } catch (error: Throwable) {
+            val failure = normalizeInstallFailure(error)
             if (createdFile) {
                 retireUnreferencedFile(finalSource)
                 deleteEmptyDirectory(sourceDirectory)
             }
-            throw error
+            throw failure
         }
     }
 
@@ -1404,8 +1407,7 @@ class AgentRepository(
             .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
         val sourceIds = packages.filter { it.installClass == V2InstallClass.SOURCE.wireName }
             .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
-        val selectedProfileId = storedVersion.selectedProfileId.takeIf(String::isNotBlank)
-            ?: inferredSelectedProfileId(packages)
+        val selectedProfileId = inferredSelectedProfileId(packages)
         val agentBytes = storedVersion.agentPackageSizeBytes.takeIf { it > 0L }
             ?: legacyAgentPackageBytes(storedVersion)
         val exactBytes = installedIds.fold(agentBytes) { total, packageId ->
@@ -1449,11 +1451,12 @@ class AgentRepository(
         val optional = byClass.getValue(V2InstallClass.OPTIONAL)
         val source = byClass.getValue(V2InstallClass.SOURCE)
         return when {
-            source.isNotEmpty() && installedIds.containsAll(required + recommended + optional + source) -> "source"
-            optional.isNotEmpty() && installedIds.containsAll(required + recommended + optional) -> "complete"
-            recommended.isNotEmpty() && installedIds.containsAll(required + recommended) -> "balanced"
-            installedIds.containsAll(required) && required.isNotEmpty() -> "lite"
-            else -> "agent-only"
+            source.isNotEmpty() && installedIds == required + recommended + optional + source -> "source"
+            optional.isNotEmpty() && installedIds == required + recommended + optional -> "complete"
+            recommended.isNotEmpty() && installedIds == required + recommended -> "balanced"
+            required.isNotEmpty() && installedIds == required -> "lite"
+            installedIds.isEmpty() -> "agent-only"
+            else -> "custom"
         }
     }
 
@@ -1787,6 +1790,99 @@ class AgentRepository(
             deleteEmptyDirectory(directory)
         }
         canonicalizeLegacySourcePayloads()
+        reconcileManagedInstallFiles()
+    }
+
+    private suspend fun reconcileManagedInstallFiles() {
+        val liveSnapshots = packageSessions.values.mapNotNull(OwnedPackageSession::snapshotFile)
+            .mapTo(hashSetOf()) { it.canonicalPath }
+        File(cacheDir, INSTALL_SNAPSHOT_DIRECTORY).let { snapshots ->
+            snapshots.listFiles().orEmpty()
+                .filter { it.isFile && INSTALL_SNAPSHOT_FILE_REGEX.matches(it.name) }
+                .filterNot { it.canonicalPath in liveSnapshots }
+                .forEach(::deleteOrRecordOrphan)
+            if (snapshots.isDirectory) deleteEmptyDirectory(snapshots)
+        }
+
+        val agentsRoot = File(filesDir, "agents")
+        agentsRoot.listFiles().orEmpty()
+            .filter {
+                it.isDirectory &&
+                    !Files.isSymbolicLink(it.toPath()) &&
+                    MANAGED_AGENT_DIRECTORY_REGEX.matches(it.name)
+            }
+            .forEach { agentDirectory ->
+                agentDirectory.listFiles().orEmpty()
+                    .filter {
+                        it.isDirectory &&
+                            !Files.isSymbolicLink(it.toPath()) &&
+                            MANAGED_VERSION_DIRECTORY_REGEX.matches(it.name)
+                    }
+                    .forEach { versionDirectory ->
+                        versionDirectory.listFiles().orEmpty()
+                            .filter { it.isFile && it.name in MANAGED_AGENT_PACKAGE_NAMES }
+                            .forEach { file ->
+                                val referenced = managedFileIsReferenced(file) { path ->
+                                    dao.countVersionBundlePathReferences(path) > 0 ||
+                                        dao.countInstalledPackagePathReferences(path) > 0 ||
+                                        dao.countSourceFilePathReferences(path) > 0
+                                }
+                                if (!referenced) {
+                                    deleteOrRecordOrphan(file)
+                                }
+                            }
+                        deleteEmptyDirectory(versionDirectory)
+                    }
+                deleteEmptyDirectory(agentDirectory)
+            }
+
+        File(agentsRoot, "packages").let { packages ->
+            packages.listFiles().orEmpty()
+                .filter { it.isFile && MANAGED_CORPUS_PACKAGE_REGEX.matches(it.name) }
+                .forEach { file ->
+                    val referenced = managedFileIsReferenced(file) { path ->
+                        dao.countInstalledPackagePathReferences(path) > 0
+                    }
+                    if (!referenced) {
+                        deleteOrRecordOrphan(file)
+                    }
+                }
+            if (packages.isDirectory) deleteEmptyDirectory(packages)
+        }
+
+        File(agentsRoot, "sources").let { sources ->
+            sources.listFiles().orEmpty()
+                .filter {
+                    it.isDirectory &&
+                        !Files.isSymbolicLink(it.toPath()) &&
+                        SHA256_DIRECTORY_REGEX.matches(it.name)
+                }
+                .forEach { directory ->
+                    directory.listFiles().orEmpty()
+                        .filter { it.isFile && MANAGED_SOURCE_PART_REGEX.matches(it.name) }
+                        .forEach(::deleteOrRecordOrphan)
+                    directory.resolve(SOURCE_PAYLOAD_NAME).takeIf(File::isFile)?.let { payload ->
+                        val referenced = managedFileIsReferenced(payload) { path ->
+                            dao.countSourceFilePathReferences(path) > 0 ||
+                                dao.countInstalledPackagePathReferences(path) > 0
+                        }
+                        if (!referenced) deleteOrRecordOrphan(payload)
+                    }
+                    deleteEmptyDirectory(directory)
+                }
+            if (sources.isDirectory) deleteEmptyDirectory(sources)
+        }
+    }
+
+    private suspend fun managedFileIsReferenced(
+        file: File,
+        referenceCheck: suspend (String) -> Boolean,
+    ): Boolean {
+        val paths = listOf(file.absolutePath, file.canonicalPath).distinct()
+        for (path in paths) {
+            if (referenceCheck(path)) return true
+        }
+        return false
     }
 
     private suspend fun canonicalizeLegacySourcePayloads() {
@@ -1991,7 +2087,7 @@ class AgentRepository(
         }
         corpora.forEach { corpus ->
             if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
-                total = addInstallBytes(total, corpus.uncompressedSizeBytes)
+                total = addInstallBytes(total, conservativeCorpusInstallWorkspaceBytes(corpus.uncompressedSizeBytes))
             }
         }
         sources.forEach { source ->
@@ -2008,6 +2104,27 @@ class AgentRepository(
         if (availableBytes < 0L || availableBytes < requiredBytes) {
             throw AgentInsufficientStorageException(requiredBytes, availableBytes)
         }
+    }
+
+    private fun normalizeInstallFailure(error: Throwable): Throwable {
+        if (error is CancellationException || error is AgentInsufficientStorageException) return error
+        var current: Throwable? = error
+        while (current != null) {
+            val name = current::class.java.name
+            val message = current.message.orEmpty().lowercase()
+            if (
+                name == "android.database.sqlite.SQLiteFullException" ||
+                message.contains("sqlite_full") ||
+                message.contains("database or disk is full") ||
+                message.contains("no space left on device") ||
+                message.contains("enospc")
+            ) {
+                val available = runCatching(privateInstallAvailableBytes).getOrDefault(-1L)
+                return AgentInsufficientStorageException(-1L, available, error)
+            }
+            current = current.cause
+        }
+        return error
     }
 
     private fun installWriteBytes(payloadBytes: Long): Long =
@@ -2690,4 +2807,36 @@ private const val MAX_QUERY_TERM_COUNT = 24
 private const val MAX_IMPORT_BUNDLE_BYTES = 2L * 1024 * 1024 * 1024
 private const val IMPORT_STAGING_TTL_MILLIS = 24L * 60 * 60 * 1000
 private const val INSTALL_SNAPSHOT_DIRECTORY = "agent-install-snapshots"
+private const val SQLITE_PAGE_BYTES = 4096L
+private const val CORPUS_DATABASE_MULTIPLIER = 8L
+private const val CORPUS_DATABASE_PAGE_RESERVE_BYTES = 4L * 1024 * 1024
+private const val UUID_FILE_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+private val INSTALL_SNAPSHOT_FILE_REGEX = Regex("^$UUID_FILE_PATTERN\\.package$")
+private val MANAGED_AGENT_DIRECTORY_REGEX = Regex("^[A-Za-z0-9._-]+$")
+private val MANAGED_VERSION_DIRECTORY_REGEX = Regex("^[1-9][0-9]*$")
+private val MANAGED_AGENT_PACKAGE_NAMES = setOf("agent.hagent", "bundle.hbundle")
+private val MANAGED_CORPUS_PACKAGE_REGEX = Regex("^[0-9a-f]{64}\\.hcorpus$")
+private val SHA256_DIRECTORY_REGEX = Regex("^[0-9a-f]{64}$")
+private val MANAGED_SOURCE_PART_REGEX = Regex("^\\.payload\\.$UUID_FILE_PATTERN\\.part$")
 private val FTS_OPERATORS = setOf("and", "or", "not", "near")
+
+internal fun conservativeCorpusInstallWorkspaceBytes(uncompressedPayloadBytes: Long): Long {
+    if (
+        uncompressedPayloadBytes < 0L ||
+        uncompressedPayloadBytes > Long.MAX_VALUE / CORPUS_DATABASE_MULTIPLIER
+    ) {
+        throw AgentBundleException("语料数据库写入预算溢出")
+    }
+    val expanded = uncompressedPayloadBytes * CORPUS_DATABASE_MULTIPLIER
+    if (expanded > Long.MAX_VALUE - CORPUS_DATABASE_PAGE_RESERVE_BYTES) {
+        throw AgentBundleException("语料数据库写入预算溢出")
+    }
+    val reserved = expanded + CORPUS_DATABASE_PAGE_RESERVE_BYTES
+    val remainder = reserved % SQLITE_PAGE_BYTES
+    if (remainder == 0L) return reserved
+    val padding = SQLITE_PAGE_BYTES - remainder
+    if (reserved > Long.MAX_VALUE - padding) {
+        throw AgentBundleException("语料数据库写入预算溢出")
+    }
+    return reserved + padding
+}

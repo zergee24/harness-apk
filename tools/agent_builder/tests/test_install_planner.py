@@ -787,24 +787,18 @@ class InstallPlannerTest(unittest.TestCase):
 
         self.assertEqual(3, len(result.source_packages))
 
-    def test_emit_sources_false_never_opens_original_source_payload(self):
-        original_open = os.open
-        source_names = {source.name for source in (self.workspace / "sources").iterdir()}
-
-        def protected_open(path, flags, *args, **kwargs):
-            if str(path) in source_names:
-                raise AssertionError(f"source payload opened: {path}")
-            return original_open(path, flags, *args, **kwargs)
-
-        with mock.patch.object(builder.os, "open", protected_open):
-            result = pack_workspace_v2(
-                self.workspace,
-                self.root / "dist-no-sources",
-                self.private_key_path,
-                emit_sources=False,
-            )
+    def test_emit_sources_false_keeps_source_declarations_without_publishing_payloads(self):
+        result = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-no-sources",
+            self.private_key_path,
+            emit_sources=False,
+        )
 
         self.assertEqual([], result.source_packages)
+        with zipfile.ZipFile(result.agent_package) as archive:
+            plan = json.loads(archive.read("install-plan.json"))
+        self.assertTrue(any(package["type"] == "hsource" for package in plan["packages"]))
 
     def test_emit_sources_false_still_rejects_symlink_source_metadata(self):
         outside = self.root / "outside.txt"
@@ -1074,6 +1068,69 @@ class InstallPlannerTest(unittest.TestCase):
             temp_before,
             set(Path(tempfile.gettempdir()).glob(".harness-recommend-*")),
         )
+
+    def test_recommend_and_pack_share_one_canonical_agent_plan_for_all_profiles(self):
+        recommendation_result = recommendation.build_recommendation(
+            self.workspace,
+            self.private_key_path,
+        )
+        balanced = pack_workspace_v2(
+            self.workspace,
+            self.root / "canonical-balanced",
+            self.private_key_path,
+            profile_id="balanced",
+            emit_sources=False,
+        )
+        complete = pack_workspace_v2(
+            self.workspace,
+            self.root / "canonical-complete",
+            self.private_key_path,
+            profile_id="complete",
+            emit_sources=False,
+        )
+        source = pack_workspace_v2(
+            self.workspace,
+            self.root / "canonical-source",
+            self.private_key_path,
+            profile_id="source",
+            emit_sources=True,
+        )
+
+        agent_hashes = {
+            self._sha256(result.agent_package)
+            for result in (balanced, complete, source)
+        }
+        recommendation_hashes = {
+            profile["agentPackage"]["sha256"]
+            for profile in recommendation_result["profiles"]
+        }
+        self.assertEqual(1, len(agent_hashes))
+        self.assertEqual(agent_hashes, recommendation_hashes)
+
+        plans = []
+        for result in (balanced, complete, source):
+            with zipfile.ZipFile(result.agent_package) as archive:
+                plans.append(archive.read("install-plan.json"))
+        self.assertEqual(plans[0], plans[1])
+        self.assertEqual(plans[0], plans[2])
+        canonical_plan = json.loads(plans[0])
+        source_ids = {
+            package["id"]
+            for package in canonical_plan["packages"]
+            if package["type"] == "hsource"
+        }
+        self.assertTrue(source_ids)
+
+        with zipfile.ZipFile(complete.bundle_package) as archive:
+            manifest = json.loads(archive.read("bundle-manifest.json"))
+            self.assertTrue(source_ids.isdisjoint(manifest["selectedPackageIds"]))
+            self.assertTrue(
+                all(
+                    f"packages/{package['fileName']}" not in archive.namelist()
+                    for package in canonical_plan["packages"]
+                    if package["id"] in source_ids
+                )
+            )
 
     def test_recommendation_uses_signed_snapshot_and_true_incremental_coverage(self):
         chunks_path = self.workspace / "corpora" / "index" / "chunks.jsonl"

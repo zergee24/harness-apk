@@ -237,4 +237,12 @@ open class AgentBundleException(message: String, cause: Throwable? = null) :
 class AgentInsufficientStorageException(
     val requiredBytes: Long,
     val availableBytes: Long,
-) : AgentBundleException("私有安装空间不足：需要 $requiredBytes 字节，可用 $availableBytes 字节")
+    cause: Throwable? = null,
+) : AgentBundleException(
+    if (requiredBytes >= 0L) {
+        "私有安装空间不足：需要 $requiredBytes 字节，可用 $availableBytes 字节"
+    } else {
+        "私有安装空间在数据库写入期间耗尽，可用 $availableBytes 字节"
+    },
+    cause,
+)

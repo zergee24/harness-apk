@@ -1,6 +1,7 @@
 package com.harnessapk.agent
 
 import android.content.Context
+import android.database.sqlite.SQLiteFullException
 import androidx.room.Room
 import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
@@ -23,6 +24,8 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.UUID
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Proxy
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -44,8 +47,12 @@ class AgentRepositoryLifecycleInstrumentedTest {
         assertEquals("conflict-0", fixture.db.scalarString("SELECT conflictKey FROM agent_chunks WHERE chunkId = 'chunk-0'"))
         assertEquals("[]", fixture.db.scalarString("SELECT sourceAliasesJson FROM agent_chunks WHERE chunkId = 'chunk-0'"))
         val sourcePath = fixture.db.scalarString("SELECT filePath FROM agent_source_files LIMIT 1")
+        val bundlePath = fixture.db.scalarString("SELECT bundlePath FROM agent_versions LIMIT 1")
         assertTrue(sourcePath.endsWith("/${fixture.sourceHash}/payload"))
         assertEquals("source", File(sourcePath).readText())
+        fixture.repository.recoverFileLifecycle()
+        assertTrue(File(sourcePath).isFile)
+        assertTrue(File(bundlePath).isFile)
         assertFalse(session.stagedFile.exists())
         fixture.close()
     }
@@ -135,6 +142,32 @@ class AgentRepositoryLifecycleInstrumentedTest {
         assertTrue(committedCleanup.filesRoot.walkTopDown().none(File::isFile))
         committedCleanup.close()
     }
+
+    @Test
+    fun sqliteFullDuringFtsWriteRollsBackAndKeepsTheSameSnapshotSessionRetryable() = runBlocking {
+        val fixture = IntegrationFixture(chunkCount = 2_200, sqliteFullAfterFtsWrite = 2)
+        val session = fixture.repository.preparePackageImport(fixture.bundle.name) {
+            fixture.bundle.inputStream()
+        }
+
+        val failure = runCatching {
+            fixture.repository.installPackage(session, profileId = "source")
+        }.exceptionOrNull()
+
+        assertTrue(failure is AgentInsufficientStorageException)
+        assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agents"))
+        assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_version_packages WHERE installed = 1"))
+        assertTrue(fixture.filesRoot.walkTopDown().none(File::isFile))
+        assertTrue(fixture.snapshotFiles().isNotEmpty())
+
+        fixture.sqliteFullController.enabled = false
+        val installed = fixture.repository.installPackage(session, profileId = "source")
+
+        assertEquals(AgentStatus.READY, installed.agent.status)
+        assertTrue(fixture.snapshotFiles().isEmpty())
+        fixture.close()
+    }
 }
 
 private enum class FailureMode {
@@ -148,6 +181,7 @@ private class IntegrationFixture(
     chunkCount: Int,
     transactionFailure: Throwable? = null,
     fileFailure: FailureMode = FailureMode.NONE,
+    sqliteFullAfterFtsWrite: Int? = null,
 ) {
     private val context = ApplicationProvider.getApplicationContext<Context>()
     private val root = context.cacheDir.resolve("agent-real-integration-${UUID.randomUUID()}").apply { mkdirs() }
@@ -156,13 +190,14 @@ private class IntegrationFixture(
     private val packageRoot: File = root.resolve("packages").apply { mkdirs() }
     val db: AppDatabase = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
     val failureOps = IntegrationFailureFileOps(fileFailure)
+    val sqliteFullController = SQLiteFullController(sqliteFullAfterFtsWrite)
     val sourceHash = "source".encodeToByteArray().sha256()
     private val packages = RealV2Packages(packageRoot, sourceHash)
     val bundle: File = packages.bundle(chunkCount)
     val repository = AgentRepository(
         filesDir = filesRoot,
         cacheDir = cacheRoot,
-        dao = db.agentDao(),
+        dao = sqliteFullController.wrap(db.agentDao()),
         conversationDao = db.conversationDao(),
         reader = AgentBundleReader(temporaryDirectory = root.resolve("reader")),
         transactionRunner = AgentTransactionRunner { block ->
@@ -179,9 +214,34 @@ private class IntegrationFixture(
     fun tombstones(): List<File> =
         filesRoot.resolve("agents/.tombstones").listFiles().orEmpty().filter(File::isFile)
 
+    fun snapshotFiles(): List<File> =
+        cacheRoot.resolve("agent-install-snapshots").listFiles().orEmpty().filter(File::isFile)
+
     fun close() {
         db.close()
         root.deleteRecursively()
+    }
+}
+
+private class SQLiteFullController(private val failAfterCall: Int?) {
+    var enabled: Boolean = failAfterCall != null
+    private var calls = 0
+
+    fun wrap(delegate: com.harnessapk.storage.AgentDao): com.harnessapk.storage.AgentDao {
+        if (failAfterCall == null) return delegate
+        return Proxy.newProxyInstance(
+            delegate::class.java.classLoader,
+            arrayOf(com.harnessapk.storage.AgentDao::class.java),
+        ) { _, method, arguments ->
+            if (enabled && method.name == "insertChunkSearchRows" && ++calls == failAfterCall) {
+                throw SQLiteFullException("database or disk is full")
+            }
+            try {
+                method.invoke(delegate, *(arguments ?: emptyArray()))
+            } catch (error: InvocationTargetException) {
+                throw requireNotNull(error.cause)
+            }
+        } as com.harnessapk.storage.AgentDao
     }
 }
 

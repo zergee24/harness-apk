@@ -31,9 +31,14 @@ val hasReleaseSigning = listOf(
 
 val agentV2FixtureWorkspace = rootProject.layout.buildDirectory.dir("agent-v2-fixture")
 val agentV2FixtureDist = rootProject.layout.buildDirectory.dir("agent-v2-dist")
+val agentV2FixtureCompleteDist = rootProject.layout.buildDirectory.dir("agent-v2-complete-dist")
+val agentV2FixtureSourceDist = rootProject.layout.buildDirectory.dir("agent-v2-source-dist")
 val generatedAgentV2Assets = layout.buildDirectory.dir("generated/agent-v2-fixture-assets")
 
 val prepareAgentV2Fixture = tasks.register<Exec>("prepareAgentV2Fixture") {
+    doFirst {
+        delete(agentV2FixtureCompleteDist, agentV2FixtureSourceDist)
+    }
     workingDir(rootProject.projectDir)
     commandLine(
         "scripts/agent-builder.sh",
@@ -83,10 +88,48 @@ val packAgentV2Fixture = tasks.register<Exec>("packAgentV2Fixture") {
     )
 }
 
+val packCompleteAgentV2Fixture = tasks.register<Exec>("packCompleteAgentV2Fixture") {
+    dependsOn(recommendAgentV2Fixture)
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/agent-builder.sh",
+        "pack",
+        agentV2FixtureWorkspace.get().asFile.absolutePath,
+        "--output",
+        agentV2FixtureCompleteDist.get().asFile.absolutePath,
+        "--key",
+        agentV2FixtureWorkspace.get().file("test-key.pem").asFile.absolutePath,
+        "--profile",
+        "complete",
+    )
+}
+
+val packSourceAgentV2Fixture = tasks.register<Exec>("packSourceAgentV2Fixture") {
+    dependsOn(recommendAgentV2Fixture)
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/agent-builder.sh",
+        "pack",
+        agentV2FixtureWorkspace.get().asFile.absolutePath,
+        "--output",
+        agentV2FixtureSourceDist.get().asFile.absolutePath,
+        "--key",
+        agentV2FixtureWorkspace.get().file("test-key.pem").asFile.absolutePath,
+        "--profile",
+        "source",
+    )
+}
+
 val syncAgentV2FixtureAssets = tasks.register<Sync>("syncAgentV2FixtureAssets") {
-    dependsOn(packAgentV2Fixture)
+    dependsOn(packAgentV2Fixture, packCompleteAgentV2Fixture, packSourceAgentV2Fixture)
     from(agentV2FixtureDist) {
         include("*.hbundle", "*.hcorpus")
+    }
+    from(agentV2FixtureCompleteDist) {
+        include("*-complete.hbundle")
+    }
+    from(agentV2FixtureSourceDist) {
+        include("*-source.hbundle", "*.hsource")
     }
     into(generatedAgentV2Assets)
 }

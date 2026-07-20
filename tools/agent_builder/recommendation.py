@@ -11,7 +11,6 @@ from typing import Any
 from .builder import (
     pack_workspace_v2,
     read_verified_agent_snapshot_v2,
-    repack_agent_install_plan_v2,
 )
 from .models import BuildError, InstallPackage, InstallPlan, InstallProfile
 
@@ -53,13 +52,6 @@ def build_recommendation(workspace: Path, key_path: Path) -> dict[str, Any]:
         )
         agent_id, version = _agent_identity(signed_agent_manifest)
         source_plan = _read_install_plan(signed_plan)
-        runtime_plan = _runtime_install_plan(source_plan)
-        runtime_agent = repack_agent_install_plan_v2(
-            result.agent_package,
-            root / "runtime" / result.agent_package.name,
-            runtime_plan,
-            key_path,
-        )
         metadata = _read_signed_corpus_metadata(
             result.corpus_packages,
             source_plan,
@@ -76,32 +68,20 @@ def build_recommendation(workspace: Path, key_path: Path) -> dict[str, Any]:
         if not source_bundle_name.endswith("-source.hbundle"):
             raise BuildError("source 预检产物名称无效")
         bundle_prefix = source_bundle_name.removesuffix("-source.hbundle")
-        source_agent_sha256, source_agent_bytes = _hash_regular_file(
+        canonical_agent_sha256, canonical_agent_bytes = _hash_regular_file(
             result.agent_package
         )
-        runtime_agent_sha256, runtime_agent_bytes = _hash_regular_file(runtime_agent)
         profiles = []
         previous_coverage: set[str] = set()
         previous_package_ids: set[str] = set()
         for profile_id in PROFILE_ORDER:
-            plan = source_plan if profile_id == "source" else runtime_plan
-            agent_sha256 = (
-                source_agent_sha256
-                if profile_id == "source"
-                else runtime_agent_sha256
-            )
-            agent_bytes = (
-                source_agent_bytes
-                if profile_id == "source"
-                else runtime_agent_bytes
-            )
             summary = _profile_summary(
                 profile_id,
-                plan,
+                source_plan,
                 f"{bundle_prefix}-{profile_id}.hbundle",
                 result.agent_package.name,
-                agent_bytes,
-                agent_sha256,
+                canonical_agent_bytes,
+                canonical_agent_sha256,
                 metadata,
                 set(source_metadata),
                 previous_coverage,
@@ -373,34 +353,6 @@ def _read_install_plan(raw: dict[str, Any]) -> InstallPlan:
         return plan
     except (KeyError, OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as error:
         raise BuildError(f"签名安装计划无法读取：{error}") from error
-
-
-def _runtime_install_plan(source_plan: InstallPlan) -> InstallPlan:
-    runtime_packages = tuple(
-        package
-        for package in source_plan.packages
-        if package.package_type == "hcorpus"
-    )
-    runtime_ids = {package.package_id for package in runtime_packages}
-    runtime_plan = InstallPlan(
-        packages=runtime_packages,
-        profiles=tuple(
-            InstallProfile(
-                profile_id=profile.profile_id,
-                package_ids=tuple(
-                    package_id
-                    for package_id in profile.package_ids
-                    if package_id in runtime_ids
-                ),
-                recommended=profile.recommended,
-            )
-            for profile in source_plan.profiles
-        ),
-        required_corpus_ids=source_plan.required_corpus_ids,
-        recommended_profile_id=source_plan.recommended_profile_id,
-    )
-    runtime_plan.to_dict(require_artifacts=True)
-    return runtime_plan
 
 
 def _read_signed_corpus_metadata(

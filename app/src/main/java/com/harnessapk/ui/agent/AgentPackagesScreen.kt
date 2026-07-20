@@ -459,16 +459,10 @@ internal fun AgentV2InstallPreview(
             TextButton(
                 enabled = !isInstalling,
                 onClick = {
-                    if (showAdjustment) showAdjustment = false else onDismiss()
+                    if (showAdjustment) showAdjustment = false else showAdjustment = true
                 },
             ) {
-                Text(if (showAdjustment) "收起" else "取消")
-            }
-            TextButton(
-                enabled = !isInstalling,
-                onClick = { showAdjustment = true },
-            ) {
-                Text("调整资料")
+                Text(if (showAdjustment) "收起" else "调整资料")
             }
         },
     )
@@ -522,6 +516,7 @@ private val INSTALLATION_PROFILE_LABELS = mapOf(
     "balanced" to "推荐",
     "complete" to "完整证据",
     "source" to "包含原文",
+    "custom" to "自定义覆盖",
 )
 
 internal typealias AgentPackageCount = AgentPackageClassCount

@@ -1,9 +1,13 @@
 package com.harnessapk.ui.agent
 
 import android.graphics.Bitmap
+import android.view.ViewGroup
+import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.room.Room
+import androidx.room.withTransaction
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.CompositionLocalProvider
@@ -25,7 +29,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Density
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentRepository
+import com.harnessapk.agent.AgentBundleReader
+import com.harnessapk.agent.AgentTransactionRunner
 import com.harnessapk.agent.AgentStatus
+import com.harnessapk.agent.V2Bundle
 import com.harnessapk.common.TimeProvider
 import com.harnessapk.storage.AgentEntity
 import com.harnessapk.storage.AgentVersionEntity
@@ -34,6 +41,9 @@ import com.harnessapk.storage.AppDatabase
 import com.harnessapk.ui.theme.HarnessApkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -138,33 +148,48 @@ class AgentPackagesScreenComposeTest {
 
     @Test
     fun largeFontPreviewKeepsActionsVisibleAndProvidesScrollableBody() {
-        composeRule.setContent {
-            CompositionLocalProvider(
-                LocalDensity provides Density(
-                    density = LocalDensity.current.density,
-                    fontScale = 2f,
-                ),
-            ) {
-                HarnessApkTheme {
-                    AgentV2InstallPreview(
-                        name = "资料研究者",
-                        version = 2,
-                        publisherFingerprint = "fingerprint-".repeat(16),
-                        plan = plan(),
-                        availableBytes = 250L,
-                        sourceRecords = emptyList(),
-                        isInstalling = false,
-                        onDismiss = {},
-                        onInstall = {},
-                    )
+        val density = composeRule.activity.resources.displayMetrics.density
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            composeRule.activity.window.setLayout((360 * density).toInt(), (520 * density).toInt())
+        }
+        try {
+            composeRule.setContent {
+                CompositionLocalProvider(
+                    LocalDensity provides Density(
+                        density = LocalDensity.current.density,
+                        fontScale = 2f,
+                    ),
+                ) {
+                    HarnessApkTheme {
+                        AgentV2InstallPreview(
+                            name = "资料研究者",
+                            version = 2,
+                            publisherFingerprint = "fingerprint-".repeat(16),
+                            plan = plan(),
+                            availableBytes = 250L,
+                            sourceRecords = emptyList(),
+                            isInstalling = false,
+                            onDismiss = {},
+                            onInstall = {},
+                        )
+                    }
                 }
             }
-        }
 
-        composeRule.onNodeWithText("调整资料").assertIsDisplayed().performClick()
-        composeRule.onNode(hasScrollAction()).assertExists()
-        composeRule.onNodeWithText("安装").assertIsDisplayed()
-        composeRule.onNodeWithText("收起").assertIsDisplayed()
+            composeRule.onNodeWithText("调整资料").assertIsDisplayed().performClick()
+            composeRule.onNode(hasScrollAction()).assertExists()
+            composeRule.onNodeWithText("安装").assertIsDisplayed()
+            composeRule.onNodeWithText("收起").assertIsDisplayed()
+            assertEquals(0, composeRule.onAllNodesWithText("调整资料").fetchSemanticsNodes().size)
+            assertEquals(1, composeRule.onAllNodesWithText("收起").fetchSemanticsNodes().size)
+        } finally {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                composeRule.activity.window.setLayout(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+            }
+        }
     }
 
     @Test
@@ -297,6 +322,88 @@ class AgentPackagesScreenComposeTest {
         recordUiArtifact("standalone-coverage")
     }
 
+    @Test
+    fun realRepositoryInstallClickRecomposesRoomBackedPersistentDetail() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        val root = context.cacheDir.resolve("agent-compose-install-${UUID.randomUUID()}").apply { mkdirs() }
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val repository = AgentRepository(
+            filesDir = root.resolve("files"),
+            cacheDir = root.resolve("cache"),
+            dao = database.agentDao(),
+            conversationDao = database.conversationDao(),
+            reader = AgentBundleReader(temporaryDirectory = root.resolve("reader")),
+            transactionRunner = AgentTransactionRunner { block -> database.withTransaction { block() } },
+            timeProvider = TimeProvider { 1_000L },
+            ioDispatcher = Dispatchers.IO,
+        )
+        val bundleName = "fixture.researcher-v2-balanced.hbundle"
+        val session = runBlocking {
+            repository.preparePackageImport(bundleName) { assets.open(bundleName) }
+        }
+        val bundle = session.parsedPackage as V2Bundle
+        val installedAgent = mutableStateOf<Agent?>(null)
+        val installedDetail = mutableStateOf<AgentPackageDetailUiState?>(null)
+        val active = mutableStateOf(true)
+        try {
+            composeRule.setContent {
+                val scope = rememberCoroutineScope()
+                HarnessApkTheme {
+                    val agent = installedAgent.value
+                    if (!active.value) {
+                        Box(Modifier.fillMaxSize())
+                    } else if (agent == null) {
+                        AgentV2InstallPreview(
+                            name = bundle.agent.manifest.name,
+                            version = bundle.agent.manifest.version,
+                            publisherFingerprint = bundle.publisherFingerprint,
+                            plan = bundle.toTestInstallationPlan(),
+                            availableBytes = Long.MAX_VALUE,
+                            sourceRecords = bundle.corpora.flatMap { it.sources },
+                            isInstalling = false,
+                            onDismiss = {},
+                            onInstall = { profileId ->
+                                scope.launch {
+                                    val result = repository.installPackage(session, profileId)
+                                    installedDetail.value = repository.packageDetail(
+                                        result.agent.id,
+                                        result.agent.activeVersion,
+                                    )
+                                    installedAgent.value = result.agent
+                                }
+                            },
+                        )
+                    } else {
+                        AgentPackageRow(
+                            agent = agent,
+                            detail = installedDetail.value,
+                            expanded = true,
+                            onToggleDetail = {},
+                            onStartConversation = {},
+                        )
+                    }
+                }
+            }
+
+            composeRule.onNodeWithText("安装").assertIsEnabled().performClick()
+            composeRule.waitUntil(timeoutMillis = 20_000L) {
+                installedAgent.value != null && installedDetail.value != null
+            }
+            composeRule.onNodeWithText("运行状态：READY").assertIsDisplayed()
+            composeRule.onNodeWithText("安装档位：推荐").assertIsDisplayed()
+            composeRule.onNodeWithText("开始对话").assertIsEnabled()
+            val persisted = runBlocking {
+                repository.packageDetail("fixture.researcher", 2)
+            }
+            assertEquals(installedDetail.value, persisted)
+        } finally {
+            composeRule.runOnIdle { active.value = false }
+            database.close()
+            root.deleteRecursively()
+        }
+    }
+
     private fun recordUiArtifact(name: String) {
         composeRule.waitForIdle()
         Thread.sleep(250L)
@@ -416,5 +523,23 @@ class AgentPackagesScreenComposeTest {
         ),
         requiredPackageIds = listOf("core"),
         availablePackageIds = availablePackageIds,
+    )
+
+    private fun V2Bundle.toTestInstallationPlan(): AgentInstallationPlan = AgentInstallationPlan(
+        agentPackageId = manifest.agent.fileName,
+        agentSizeBytes = manifest.agent.sizeBytes,
+        packages = agent.installPlan.packages.map { declaration ->
+            AgentInstallationPackage(
+                id = declaration.id,
+                type = declaration.type,
+                installClass = declaration.installClass,
+                sizeBytes = declaration.sizeBytes,
+            )
+        },
+        profiles = agent.installPlan.profiles.map { profile ->
+            AgentInstallationProfile(profile.id, profile.packageIds)
+        },
+        requiredPackageIds = agent.installPlan.requiredCorpusIds,
+        availablePackageIds = manifest.selectedPackageIds,
     )
 }

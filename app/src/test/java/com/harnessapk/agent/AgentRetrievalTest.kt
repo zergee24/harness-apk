@@ -35,6 +35,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
 import java.util.concurrent.Executors
@@ -123,6 +124,31 @@ class AgentRetrievalTest {
         assertEquals(AgentStatus.READY, fixture.repository.installPackage(blocked, "balanced").agent.status)
         assertTrue(captures >= 2)
         assertTrue(runCatching { fixture.repository.installPackage(blocked, "balanced") }.isFailure)
+    }
+
+    @Test
+    fun nestedEnospcDuringCorpusWriteRollsBackAndKeepsTheSameSessionRetryable() = runTest {
+        val storageFailure = IllegalStateException(
+            "Room transaction failed",
+            IOException("write failed: ENOSPC"),
+        )
+        val fixture = v2InstallFixture(chunkSearchInsertFailure = storageFailure)
+        val session = fixture.repository.preparePackageImport("balanced.hbundle") {
+            "bundle".byteInputStream()
+        }
+
+        val failure = runCatching {
+            fixture.repository.installPackage(session, "balanced")
+        }.exceptionOrNull()
+
+        assertTrue(failure is AgentInsufficientStorageException)
+        assertEquals(storageFailure, failure?.cause)
+        assertTrue(fixture.dao.findAgent("agent-v2") == null)
+        assertTrue(fixture.dao.chunks.isEmpty())
+        assertTrue(fixture.repositoryRoot.resolve("files").walkTopDown().none(File::isFile))
+
+        fixture.dao.chunkSearchInsertFailure = null
+        assertEquals(AgentStatus.READY, fixture.repository.installPackage(session, "balanced").agent.status)
     }
 
     @Test
@@ -244,7 +270,7 @@ class AgentRetrievalTest {
 
         val detail = requireNotNull(fixture.repository.packageDetail("agent-v2", 2))
         assertEquals(20L, detail.lastEvidenceExpandedAt)
-        assertEquals("balanced", detail.selectedProfileId)
+        assertEquals("source", detail.selectedProfileId)
         assertEquals(17L, detail.exactInstalledBytes)
     }
 
@@ -259,8 +285,126 @@ class AgentRetrievalTest {
 
         assertEquals("agent-only", detail.selectedProfileId)
         assertEquals(5L, detail.exactInstalledBytes)
+        assertEquals(null, detail.lastEvidenceExpandedAt)
         assertEquals(AgentPackageClassCount(0, 1), detail.required)
         assertEquals(listOf("corpus-core"), detail.missingRequiredPackageIds)
+    }
+
+    @Test
+    fun reinstallingLowerProfileKeepsTheExactHigherInstalledProfile() = runTest {
+        val fixture = v2InstallFixture()
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("source.hbundle") { "bundle".byteInputStream() },
+            profileId = "source",
+        )
+
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("lite.hbundle") { "bundle".byteInputStream() },
+            profileId = "lite",
+        )
+
+        val detail = requireNotNull(fixture.repository.packageDetail("agent-v2", 2))
+        assertEquals("source", detail.selectedProfileId)
+        assertEquals(17L, detail.exactInstalledBytes)
+    }
+
+    @Test
+    fun nonExactInstalledPackageSetUsesStableCustomCoverageProfile() = runTest {
+        val fixture = v2InstallFixture()
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("lite.hbundle") { "bundle".byteInputStream() },
+            profileId = "lite",
+        )
+        fixture.dao.upsertVersionPackages(
+            listOf(
+                AgentVersionPackageEntity(
+                    agentId = "agent-v2",
+                    version = 2,
+                    packageId = "recommended-missing",
+                    type = V2PackageType.CORPUS.wireName,
+                    fileName = "recommended.hcorpus",
+                    installClass = V2InstallClass.RECOMMENDED.wireName,
+                    packageSha256 = "8".repeat(64),
+                    packageSizeBytes = 8L,
+                    installed = false,
+                    filePath = "",
+                    installedAt = null,
+                ),
+                AgentVersionPackageEntity(
+                    agentId = "agent-v2",
+                    version = 2,
+                    packageId = "optional-without-recommended",
+                    type = V2PackageType.CORPUS.wireName,
+                    fileName = "optional.hcorpus",
+                    installClass = V2InstallClass.OPTIONAL.wireName,
+                    packageSha256 = "9".repeat(64),
+                    packageSizeBytes = 9L,
+                    installed = true,
+                    filePath = "",
+                    installedAt = 20L,
+                ),
+            ),
+        )
+
+        val detail = requireNotNull(fixture.repository.packageDetail("agent-v2", 2))
+
+        assertEquals("custom", detail.selectedProfileId)
+        assertEquals(20L, detail.exactInstalledBytes)
+    }
+
+    @Test
+    fun corpusWorkspaceBudgetIncludesPageAlignedDatabaseFtsIndexAndWalReserve() {
+        val budget = conservativeCorpusInstallWorkspaceBytes(1L * 1024L * 1024L)
+
+        assertTrue(budget >= 8L * 1024L * 1024L)
+        assertEquals(0L, budget % 4096L)
+        assertTrue(
+            runCatching { conservativeCorpusInstallWorkspaceBytes(Long.MAX_VALUE) }
+                .exceptionOrNull() is AgentBundleException,
+        )
+    }
+
+    @Test
+    fun restartReconcilesOnlyUnreferencedRepositoryManagedInstallFiles() = runTest {
+        val fixture = v2InstallFixture()
+        val root = fixture.repositoryRoot
+        val orphanSnapshot = root.resolve(
+            "cache/agent-install-snapshots/${java.util.UUID.randomUUID()}.package",
+        ).apply {
+            parentFile!!.mkdirs()
+            writeText("snapshot")
+        }
+        val orphanAgent = root.resolve("files/agents/person.interrupted/2/agent.hagent").apply {
+            parentFile!!.mkdirs()
+            writeText("agent")
+        }
+        val hash = "a".repeat(64)
+        val orphanSourceDirectory = root.resolve("files/agents/sources/$hash").apply { mkdirs() }
+        val orphanSource = orphanSourceDirectory.resolve("payload").apply { writeText("source") }
+        val orphanPart = orphanSourceDirectory.resolve(".payload.${java.util.UUID.randomUUID()}.part").apply {
+            writeText("partial")
+        }
+        val orphanCorpus = root.resolve("files/agents/packages/${"b".repeat(64)}.hcorpus").apply {
+            parentFile!!.mkdirs()
+            writeText("corpus")
+        }
+        val unknown = root.resolve("files/agents/user-content/keep.txt").apply {
+            parentFile!!.mkdirs()
+            writeText("keep")
+        }
+        val restarted = AgentRepository(
+            filesDir = root.resolve("files"),
+            cacheDir = root.resolve("cache"),
+            dao = fixture.dao,
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+
+        restarted.recoverFileLifecycle()
+
+        listOf(orphanSnapshot, orphanAgent, orphanSource, orphanPart, orphanCorpus).forEach {
+            assertFalse(it.absolutePath, it.exists())
+        }
+        assertTrue(unknown.exists())
     }
 
     @Test
@@ -567,7 +711,7 @@ class AgentRetrievalTest {
     }
 
     @Test
-    fun standaloneCorpusRejectsExistingHashNamedFileWithDifferentValidPackageIdentity() = runTest {
+    fun standaloneCorpusReclaimsUnreferencedHashNamedFileBeforeInstall() = runTest {
         val fixture = v2InstallFixture(existingCorpusTransform = { corpus ->
             corpus.copy(
                 manifestJson = """{"different":true}""",
@@ -581,15 +725,15 @@ class AgentRetrievalTest {
             .resolve("$V2_CORPUS_PACKAGE_HASH.hcorpus")
             .writeText("existing-corpus")
 
-        val failure = runCatching {
-            fixture.repository.installPackage(
-                fixture.repository.preparePackageImport("core.hcorpus") { "corpus".byteInputStream() },
-            )
-        }.exceptionOrNull()
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("core.hcorpus") { "corpus".byteInputStream() },
+        )
 
-        assertTrue(failure is AgentBundleException)
-        assertTrue(fixture.dao.versionCorpora.isEmpty())
-        assertEquals(AgentStatus.WAITING_FOR_CORPUS.name, fixture.dao.version!!.state)
+        assertEquals(1, fixture.dao.versionCorpora.size)
+        assertEquals(AgentStatus.READY.name, fixture.dao.version!!.state)
+        assertEquals("corpus", fixture.repositoryRoot.resolve(
+            "files/agents/packages/$V2_CORPUS_PACKAGE_HASH.hcorpus",
+        ).readText())
     }
 
     @Test
@@ -1729,6 +1873,7 @@ internal class FakeAgentDao : AgentDao {
     var failChunkInsertCall: Int? = null
     var failEvidenceCheck: Boolean = false
     var failReadyTransition: Boolean = false
+    var chunkSearchInsertFailure: Throwable? = null
     private var chunkInsertCalls: Int = 0
 
     override fun observeAgents(): Flow<List<AgentEntity>> = agents
@@ -1921,6 +2066,7 @@ internal class FakeAgentDao : AgentDao {
     }
 
     override suspend fun insertChunkSearchRows(entities: List<AgentChunkFtsEntity>): List<Long> {
+        chunkSearchInsertFailure?.let { throw it }
         searchRows += entities
         return entities.map { 1L }
     }
@@ -2096,6 +2242,7 @@ private fun v2InstallFixture(
     conversationDao: ConversationDao? = null,
     privateInstallAvailableBytes: () -> Long = { Long.MAX_VALUE },
     timeProvider: TimeProvider = TimeProvider { 20L },
+    chunkSearchInsertFailure: Throwable? = null,
 ): V2InstallFixture {
     val root = Files.createTempDirectory("agent-v2-install-test").toFile().apply { deleteOnExit() }
     val packageFile = root.resolve("template.zip").apply { writeText("template") }
@@ -2254,6 +2401,7 @@ private fun v2InstallFixture(
         failChunkInsertCall = if (failure == V2InstallFailure.BATCH_INSERT) 2 else null
         failEvidenceCheck = failure == V2InstallFailure.EVIDENCE_CHECK
         failReadyTransition = failure == V2InstallFailure.READY_TRANSITION
+        this.chunkSearchInsertFailure = chunkSearchInsertFailure
     }
     return V2InstallFixture(
         repository = AgentRepository(

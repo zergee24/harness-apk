@@ -895,7 +895,7 @@ def pack_workspace_v2(
                     source_hashes=(source.source_hash,),
                 )
                 for source in sorted(manifest.sources, key=lambda item: item.source_id)
-            ] if emit_sources else []
+            ]
             logical_plan = choose_install_profiles([*logical_shards, *logical_sources])
             install_classes = {
                 package.package_id: package.install_class
@@ -925,29 +925,28 @@ def pack_workspace_v2(
 
             source_artifacts: list[CorpusShard] = []
             source_paths: dict[str, Path] = {}
-            if emit_sources:
-                for source in sorted(manifest.sources, key=lambda item: item.source_id):
-                    package_id = f"source-{source.source_id}"
-                    target = package_root / f"{package_id}.hsource"
-                    _pack_source_v2(
-                        workspace,
-                        manifest.agent_id,
-                        manifest.version,
-                        source,
-                        target,
-                        private_key,
-                    )
-                    sha256, size_bytes = _hash_regular_file(target)
-                    artifact = CorpusShard.source(
-                        package_id=package_id,
-                        source_ids=(source.source_id,),
-                        source_hashes=(source.source_hash,),
-                        file_name=target.name,
-                        size_bytes=size_bytes,
-                        sha256=sha256,
-                    )
-                    source_artifacts.append(artifact)
-                    source_paths[package_id] = target
+            for source in sorted(manifest.sources, key=lambda item: item.source_id):
+                package_id = f"source-{source.source_id}"
+                target = package_root / f"{package_id}.hsource"
+                _pack_source_v2(
+                    workspace,
+                    manifest.agent_id,
+                    manifest.version,
+                    source,
+                    target,
+                    private_key,
+                )
+                sha256, size_bytes = _hash_regular_file(target)
+                artifact = CorpusShard.source(
+                    package_id=package_id,
+                    source_ids=(source.source_id,),
+                    source_hashes=(source.source_hash,),
+                    file_name=target.name,
+                    size_bytes=size_bytes,
+                    sha256=sha256,
+                )
+                source_artifacts.append(artifact)
+                source_paths[package_id] = target
 
             install_plan = choose_install_profiles([*corpus_artifacts, *source_artifacts])
             install_plan_bytes = _canonical_json_bytes(
@@ -1022,6 +1021,9 @@ def pack_workspace_v2(
                 },
             )
 
+        if not emit_sources:
+            for path in source_paths.values():
+                path.unlink()
         final_names = sorted(path.name for path in package_root.iterdir())
         if output.exists():
             if not output.is_dir():
@@ -1047,9 +1049,11 @@ def pack_workspace_v2(
         corpus_packages = [
             output / corpus_paths[shard.package_id].name for shard in corpus_artifacts
         ]
-        source_packages = [
-            output / source_paths[shard.package_id].name for shard in source_artifacts
-        ]
+        source_packages = (
+            [output / source_paths[shard.package_id].name for shard in source_artifacts]
+            if emit_sources
+            else []
+        )
         return PackResult(
             output / agent_target.name,
             corpus_packages,
