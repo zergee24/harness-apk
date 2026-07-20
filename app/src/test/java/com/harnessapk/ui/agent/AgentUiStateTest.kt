@@ -4,6 +4,7 @@ import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentBundleException
 import com.harnessapk.agent.AgentImportPreview
 import com.harnessapk.agent.AgentImportSession
+import com.harnessapk.agent.AgentImportSessionUnavailableException
 import com.harnessapk.agent.AgentPackageManifest
 import com.harnessapk.agent.ParsedAgentBundle
 import com.harnessapk.agent.AgentStatus
@@ -15,6 +16,8 @@ import com.harnessapk.agent.V2SourceGenre
 import com.harnessapk.agent.V2SourceRecord
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -503,16 +506,66 @@ class AgentUiStateTest {
     }
 
     @Test
-    fun dismissClearsExpiredPreviewEvenWhenRepositoryDiscardFails() = runTest {
+    fun dismissClearsPreviewWhenRepositoryConfirmsSessionIsUnavailable() = runTest {
         val viewModel = AgentImportPreviewViewModel<AgentImportSession>(
-            discardImport = { throw AgentBundleException("session expired") },
+            discardImport = { throw AgentImportSessionUnavailableException() },
             stagedFile = AgentImportSession::stagedFile,
         )
         val expired = session("expired")
         viewModel.replace(expired)
 
-        assertTrue(runCatching { viewModel.discardIfCurrent(expired) }.isFailure)
+        assertTrue(viewModel.discardIfCurrent(expired))
         assertNull(viewModel.session.value)
+    }
+
+    @Test
+    fun dismissRetainsPreviewWhenRepositoryCleanupCanBeRetried() = runTest {
+        val viewModel = AgentImportPreviewViewModel<AgentImportSession>(
+            discardImport = { throw AgentBundleException("delete failed") },
+            stagedFile = AgentImportSession::stagedFile,
+        )
+        val retryable = session("retryable")
+        viewModel.replace(retryable)
+
+        assertTrue(runCatching { viewModel.discardIfCurrent(retryable) }.isFailure)
+        assertTrue(viewModel.session.value === retryable)
+    }
+
+    @Test
+    fun cancelledDismissRetainsTheOnlyPreviewReference() = runTest {
+        val discardStarted = CompletableDeferred<Unit>()
+        val keepDiscardPending = CompletableDeferred<Unit>()
+        val viewModel = AgentImportPreviewViewModel<AgentImportSession>(
+            discardImport = {
+                discardStarted.complete(Unit)
+                keepDiscardPending.await()
+            },
+            stagedFile = AgentImportSession::stagedFile,
+        )
+        val session = session("cancelled")
+        viewModel.replace(session)
+
+        val dismiss = launch { viewModel.discardIfCurrent(session) }
+        discardStarted.await()
+        dismiss.cancelAndJoin()
+
+        assertTrue(viewModel.session.value === session)
+    }
+
+    @Test
+    fun replacingUnavailablePreviewKeepsTheNewSession() = runTest {
+        val viewModel = AgentImportPreviewViewModel<AgentImportSession>(
+            discardImport = { session ->
+                if (session.id == "expired") throw AgentImportSessionUnavailableException()
+            },
+            stagedFile = AgentImportSession::stagedFile,
+        )
+        val expired = session("expired")
+        val replacement = session("replacement")
+        viewModel.replace(expired)
+
+        assertTrue(viewModel.replace(replacement))
+        assertTrue(viewModel.session.value === replacement)
     }
 
     private fun agent(status: AgentStatus, installed: Int, required: Int): Agent = Agent(

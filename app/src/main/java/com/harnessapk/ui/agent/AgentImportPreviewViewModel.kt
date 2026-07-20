@@ -1,5 +1,6 @@
 package com.harnessapk.ui.agent
 
+import com.harnessapk.agent.AgentImportSessionUnavailableException
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +19,8 @@ internal class AgentImportPreviewViewModel<T : Any>(
         if (previous != null) {
             try {
                 discardImport(previous)
+            } catch (_: AgentImportSessionUnavailableException) {
+                // The repository no longer owns the old preview; replacement can proceed.
             } catch (error: Throwable) {
                 discardNewSession(newSession, error)
                 throw error
@@ -32,9 +35,8 @@ internal class AgentImportPreviewViewModel<T : Any>(
         if (mutableSession.value !== expected) return false
         try {
             discardImport(expected)
-        } catch (error: Throwable) {
-            mutableSession.compareAndSet(expected, null)
-            throw error
+        } catch (_: AgentImportSessionUnavailableException) {
+            // The preview is already terminal in the repository.
         }
         return mutableSession.compareAndSet(expected, null)
     }

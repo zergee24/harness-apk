@@ -18,15 +18,18 @@ import com.harnessapk.storage.AgentVersionPackageEntity
 import com.harnessapk.storage.AgentVersionSourceCrossRef
 import com.harnessapk.storage.ConversationDao
 import com.harnessapk.storage.ConversationEntity
+import com.harnessapk.ui.agent.AgentImportPreviewViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -621,6 +624,69 @@ class AgentRetrievalTest {
         assertTrue(
             runCatching { fixture.repository.discardPackageImport(session) }.exceptionOrNull() is AgentBundleException,
         )
+    }
+
+    @Test
+    fun previewRetainsOwnedSessionUntilRetryableDeleteSucceeds() = runTest {
+        val fileOps = FailingAgentFileOps(failDelete = true)
+        val fixture = v2InstallFixture(fileOps = fileOps)
+        val session = fixture.repository.preparePackageImport("agent.hagent") {
+            "agent".byteInputStream()
+        }
+        val preview = AgentImportPreviewViewModel<AgentPackageImportSession>(
+            discardImport = fixture.repository::discardPackageImport,
+            stagedFile = AgentPackageImportSession::stagedFile,
+        )
+        preview.replace(session)
+
+        assertTrue(runCatching { preview.discardIfCurrent(session) }.isFailure)
+        assertTrue(preview.session.value === session)
+        assertTrue(session.stagedFile.isFile)
+
+        fileOps.failDelete = false
+        assertTrue(preview.discardIfCurrent(session))
+        assertTrue(preview.session.value == null)
+        assertFalse(session.stagedFile.exists())
+        assertTrue(
+            runCatching { fixture.repository.discardPackageImport(session) }
+                .exceptionOrNull() is AgentImportSessionUnavailableException,
+        )
+    }
+
+    @Test
+    fun cancelledPreviewDiscardWhileLifecycleIsBusyRetainsOwnedSession() = runTest {
+        val coordinator = AgentLifecycleCoordinator()
+        val fixture = v2InstallFixture(lifecycleCoordinator = coordinator)
+        val session = fixture.repository.preparePackageImport("agent.hagent") {
+            "agent".byteInputStream()
+        }
+        val preview = AgentImportPreviewViewModel<AgentPackageImportSession>(
+            discardImport = fixture.repository::discardPackageImport,
+            stagedFile = AgentPackageImportSession::stagedFile,
+        )
+        preview.replace(session)
+        val lockEntered = CompletableDeferred<Unit>()
+        val releaseLock = CompletableDeferred<Unit>()
+        val holder = launch {
+            coordinator.serialized {
+                lockEntered.complete(Unit)
+                releaseLock.await()
+            }
+        }
+        lockEntered.await()
+
+        val dismiss = launch { preview.discardIfCurrent(session) }
+        yield()
+        dismiss.cancelAndJoin()
+
+        assertTrue(preview.session.value === session)
+        assertTrue(session.stagedFile.isFile)
+
+        releaseLock.complete(Unit)
+        holder.join()
+        assertTrue(preview.discardIfCurrent(session))
+        assertTrue(preview.session.value == null)
+        assertFalse(session.stagedFile.exists())
     }
 
     @Test

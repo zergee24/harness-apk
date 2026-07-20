@@ -234,6 +234,9 @@ data class AgentRuntimeContext(
 open class AgentBundleException(message: String, cause: Throwable? = null) :
     IllegalArgumentException(message, cause)
 
+class AgentImportSessionUnavailableException :
+    AgentBundleException("导入会话已经失效或已使用")
+
 class AgentInsufficientStorageException(
     val requiredBytes: Long,
     val availableBytes: Long,

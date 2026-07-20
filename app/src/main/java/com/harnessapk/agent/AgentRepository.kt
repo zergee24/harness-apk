@@ -258,7 +258,7 @@ class AgentRepository(
     suspend fun discardImport(session: AgentImportSession) = withContext(ioDispatcher) {
         lifecycleCoordinator.serialized {
             val owned = packageSessions[session.id]
-                ?: throw AgentBundleException("导入会话已经失效或已使用")
+                ?: throw AgentImportSessionUnavailableException()
             if (session !== owned.v1CompatibilitySession) {
                 throw AgentBundleException("V1 导入会话并非 repository 实际签发对象")
             }
@@ -269,7 +269,7 @@ class AgentRepository(
     suspend fun discardPackageImport(session: AgentPackageImportSession) = withContext(ioDispatcher) {
         lifecycleCoordinator.serialized {
             val owned = packageSessions[session.id]
-                ?: throw AgentBundleException("导入会话已经失效或已使用")
+                ?: throw AgentImportSessionUnavailableException()
             if (session !== owned.session) {
                 throw AgentBundleException("导入会话并非 repository 实际签发对象")
             }
@@ -279,7 +279,7 @@ class AgentRepository(
 
     private suspend fun consumeOwnedV1SessionUnlocked(session: AgentImportSession): OwnedPackageSession {
         val owned = packageSessions.remove(session.id)
-            ?: throw AgentBundleException("导入会话已经失效或已使用")
+            ?: throw AgentImportSessionUnavailableException()
         val expected = owned.v1CompatibilitySession
         if (session !== expected) {
             deleteOrRecordOrphan(owned.session.stagedFile)
@@ -292,7 +292,7 @@ class AgentRepository(
         session: AgentPackageImportSession,
     ): OwnedPackageSession {
         val owned = packageSessions[session.id]
-            ?: throw AgentBundleException("导入会话已经失效或已使用")
+            ?: throw AgentImportSessionUnavailableException()
         if (session !== owned.session) {
             invalidateOwnedSessionUnlocked(owned)
             throw AgentBundleException("导入会话并非 repository 实际签发对象")
@@ -302,7 +302,7 @@ class AgentRepository(
 
     private fun discardOwnedSessionUnlocked(owned: OwnedPackageSession) {
         if (packageSessions[owned.session.id] !== owned) {
-            throw AgentBundleException("导入会话已经失效或已使用")
+            throw AgentImportSessionUnavailableException()
         }
         deleteOwnedSessionFiles(owned)
         consumeOwnedSessionRecord(owned)
@@ -320,7 +320,7 @@ class AgentRepository(
 
     private fun consumeOwnedSessionRecord(owned: OwnedPackageSession) {
         if (!packageSessions.remove(owned.session.id, owned)) {
-            throw AgentBundleException("导入会话已经失效或已使用")
+            throw AgentImportSessionUnavailableException()
         }
     }
 
