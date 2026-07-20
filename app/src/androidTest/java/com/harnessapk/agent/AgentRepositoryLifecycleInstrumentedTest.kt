@@ -35,7 +35,7 @@ class AgentRepositoryLifecycleInstrumentedTest {
             fixture.bundle.inputStream()
         }
 
-        val result = fixture.repository.installPackage(session)
+        val result = fixture.repository.installPackage(session, profileId = "source")
 
         assertEquals(AgentStatus.READY, result.agent.status)
         assertEquals(2_200, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -65,7 +65,9 @@ class AgentRepositoryLifecycleInstrumentedTest {
                 fixture.bundle.inputStream()
             }
 
-            val failure = runCatching { fixture.repository.installPackage(session) }.exceptionOrNull()
+            val failure = runCatching {
+                fixture.repository.installPackage(session, profileId = "source")
+            }.exceptionOrNull()
 
             assertEquals(injected::class, failure!!::class)
             assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agents"))
@@ -87,7 +89,7 @@ class AgentRepositoryLifecycleInstrumentedTest {
                 fixture.bundle.inputStream()
             }
 
-            assertTrue(runCatching { fixture.repository.installPackage(session) }.isFailure)
+            assertTrue(runCatching { fixture.repository.installPackage(session, profileId = "source") }.isFailure)
             assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agents"))
             assertEquals(0, fixture.db.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
             assertFalse(session.stagedFile.exists())
@@ -103,7 +105,7 @@ class AgentRepositoryLifecycleInstrumentedTest {
         val session = cleanup.repository.preparePackageImport(cleanup.bundle.name) {
             cleanup.bundle.inputStream()
         }
-        assertTrue(runCatching { cleanup.repository.installPackage(session) }.isFailure)
+        assertTrue(runCatching { cleanup.repository.installPackage(session, profileId = "source") }.isFailure)
         assertEquals(0, cleanup.db.scalarInt("SELECT COUNT(*) FROM agents"))
         assertTrue(cleanup.tombstones().any { it.name.endsWith(".data") })
 
@@ -116,7 +118,7 @@ class AgentRepositoryLifecycleInstrumentedTest {
         val installed = committedCleanup.repository.preparePackageImport(committedCleanup.bundle.name) {
             committedCleanup.bundle.inputStream()
         }
-        committedCleanup.repository.installPackage(installed)
+        committedCleanup.repository.installPackage(installed, profileId = "source")
         val installedSourcePath = committedCleanup.db.scalarString("SELECT filePath FROM agent_source_files LIMIT 1")
         assertTrue(File(installedSourcePath).isFile)
         committedCleanup.failureOps.failureMode = FailureMode.DELETE
@@ -226,10 +228,10 @@ private class RealV2Packages(
         val source = source()
         val agent = agent(corpus, source)
         return signed(
-            "person.integration-v2-balanced.hbundle",
+            "person.integration-v2-source.hbundle",
             linkedMapOf(
                 "bundle-manifest.json" to """
-                    {"agent":{"fileName":"${agent.name}","id":"person.integration","sha256":"${agent.sha256()}","sizeBytes":${agent.length()},"version":2},"profile":"balanced","schemaVersion":2,"selectedPackageIds":["core-evidence","source-source-direct"],"type":"hbundle"}
+                    {"agent":{"fileName":"${agent.name}","id":"person.integration","sha256":"${agent.sha256()}","sizeBytes":${agent.length()},"version":2},"profile":"source","schemaVersion":2,"selectedPackageIds":["core-evidence","source-source-direct"],"type":"hbundle"}
                 """.trimIndent().encodeToByteArray(),
                 "packages/${agent.name}" to agent.readBytes(),
                 "packages/${corpus.name}" to corpus.readBytes(),
@@ -277,7 +279,7 @@ private class RealV2Packages(
 
     private fun agent(corpus: File, source: File): File {
         val installPlan = """
-            {"packages":[{"dependencies":[],"fileName":"${corpus.name}","id":"core-evidence","installClass":"required","sha256":"${corpus.sha256()}","sizeBytes":${corpus.length()},"type":"hcorpus"},{"dependencies":[],"fileName":"${source.name}","id":"source-source-direct","installClass":"source","sha256":"${source.sha256()}","sizeBytes":${source.length()},"type":"hsource"}],"profiles":[{"id":"balanced","packageIds":["core-evidence","source-source-direct"],"recommended":true}],"recommendedProfileId":"balanced","requiredCorpusIds":["core-evidence"],"schemaVersion":2}
+            {"packages":[{"dependencies":[],"fileName":"${corpus.name}","id":"core-evidence","installClass":"required","sha256":"${corpus.sha256()}","sizeBytes":${corpus.length()},"type":"hcorpus"},{"dependencies":[],"fileName":"${source.name}","id":"source-source-direct","installClass":"source","sha256":"${source.sha256()}","sizeBytes":${source.length()},"type":"hsource"}],"profiles":[{"id":"lite","packageIds":["core-evidence"],"recommended":false},{"id":"balanced","packageIds":["core-evidence"],"recommended":true},{"id":"complete","packageIds":["core-evidence"],"recommended":false},{"id":"source","packageIds":["core-evidence","source-source-direct"],"recommended":false}],"recommendedProfileId":"balanced","requiredCorpusIds":["core-evidence"],"schemaVersion":2}
         """.trimIndent()
         return signed(
             "person.integration-v2.hagent",

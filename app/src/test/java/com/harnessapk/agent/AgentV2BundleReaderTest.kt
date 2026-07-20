@@ -99,6 +99,85 @@ class AgentV2BundleReaderTest {
     }
 
     @Test
+    fun rejectsMalformedFourProfileMembershipAndPackageTypeContracts() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val declarations = listOf(
+            """{"dependencies":[],"fileName":"${corpus.name}","id":"$CORE_ID","installClass":"required","sha256":"${corpus.sha256()}","sizeBytes":${corpus.length()},"type":"hcorpus"}""",
+            """{"dependencies":[],"fileName":"recommended.hcorpus","id":"recommended","installClass":"recommended","sha256":"${"b".repeat(64)}","sizeBytes":10,"type":"hcorpus"}""",
+            """{"dependencies":[],"fileName":"optional.hcorpus","id":"optional","installClass":"optional","sha256":"${"c".repeat(64)}","sizeBytes":10,"type":"hcorpus"}""",
+            """{"dependencies":[],"fileName":"source.hsource","id":"source","installClass":"source","sha256":"${"d".repeat(64)}","sizeBytes":10,"type":"hsource"}""",
+        )
+        fun installPlan(
+            packages: List<String> = declarations,
+            lite: List<String> = listOf(CORE_ID),
+            balanced: List<String> = listOf(CORE_ID, "recommended"),
+            complete: List<String> = listOf(CORE_ID, "recommended", "optional"),
+            source: List<String> = listOf(CORE_ID, "recommended", "optional", "source"),
+        ): String {
+            val profiles = listOf(
+                "lite" to lite,
+                "balanced" to balanced,
+                "complete" to complete,
+                "source" to source,
+            ).joinToString(",") { (id, ids) ->
+                """{"id":"$id","packageIds":${ids.jsonArray()},"recommended":${id == "balanced"}}"""
+            }
+            return """
+                {"packages":[${packages.joinToString(",")}],"profiles":[$profiles],"recommendedProfileId":"balanced","requiredCorpusIds":["$CORE_ID"],"schemaVersion":2}
+            """.trimIndent()
+        }
+        val malformedMembershipPlans = listOf(
+            installPlan(lite = listOf(CORE_ID, "source")),
+            installPlan(balanced = listOf(CORE_ID)),
+            installPlan(complete = listOf(CORE_ID, "recommended")),
+            installPlan(source = listOf(CORE_ID, "recommended", "optional")),
+        )
+        malformedMembershipPlans.forEach { plan ->
+            assertPackageFailure("install plan") {
+                AgentBundleReader().readPackage(
+                    fixture.agentPackage(
+                        corpus,
+                        runtimeAssets = minimalRuntimeAssets(corpus, installPlan = plan),
+                    ),
+                )
+            }
+        }
+
+        val malformedTypePlans = listOf(
+            installPlan(
+                packages = declarations.map { declaration ->
+                    if ("\"id\":\"source\"" in declaration) {
+                        declaration.replace("\"type\":\"hsource\"", "\"type\":\"hcorpus\"")
+                    } else {
+                        declaration
+                    }
+                },
+            ),
+            installPlan(
+                packages = declarations.map { declaration ->
+                    if ("\"id\":\"optional\"" in declaration) {
+                        declaration.replace("\"type\":\"hcorpus\"", "\"type\":\"hsource\"")
+                    } else {
+                        declaration
+                    }
+                },
+            ),
+        )
+
+        malformedTypePlans.forEach { plan ->
+            assertPackageFailure("installClass") {
+                AgentBundleReader().readPackage(
+                    fixture.agentPackage(
+                        corpus,
+                        runtimeAssets = minimalRuntimeAssets(corpus, installPlan = plan),
+                    ),
+                )
+            }
+        }
+    }
+
+    @Test
     fun corpusValidationUsesBoundedDiskIndex() {
         val fixture = Fixture()
         val chunks = (1..2_000).joinToString("") { index ->
@@ -251,7 +330,7 @@ class AgentV2BundleReaderTest {
     fun acceptsExactAggregateArrayLimitWithEscapedStrings() {
         val fixture = Fixture()
         val corpus = fixture.corpusPackage()
-        val alternatives = List(9_996) { index ->
+        val alternatives = List(9_990) { index ->
             if (index == 0) "\"escaped\\\" quote \\\\ slash \\u4e2d\"" else "\"opener-$index\""
         }.joinToString(prefix = "[", postfix = "]")
 
@@ -265,7 +344,7 @@ class AgentV2BundleReaderTest {
             ),
         ) as V2Agent
 
-        assertEquals(9_996, parsed.openers.alternatives.size)
+        assertEquals(9_990, parsed.openers.alternatives.size)
         assertEquals("escaped\" quote \\ slash 中", parsed.openers.alternatives.first())
     }
 
@@ -817,7 +896,7 @@ private fun minimalRuntimeAssets(
 )
 
 private fun minimalInstallPlan(corpus: File): String =
-    """{"packages":[{"dependencies":[],"fileName":"${corpus.name}","id":"core-evidence","installClass":"required","sha256":"${corpus.sha256()}","sizeBytes":${corpus.length()},"type":"hcorpus"}],"profiles":[{"id":"balanced","packageIds":["core-evidence"],"recommended":true}],"recommendedProfileId":"balanced","requiredCorpusIds":["core-evidence"],"schemaVersion":2}"""
+    """{"packages":[{"dependencies":[],"fileName":"${corpus.name}","id":"core-evidence","installClass":"required","sha256":"${corpus.sha256()}","sizeBytes":${corpus.length()},"type":"hcorpus"}],"profiles":[{"id":"lite","packageIds":["core-evidence"],"recommended":false},{"id":"balanced","packageIds":["core-evidence"],"recommended":true},{"id":"complete","packageIds":["core-evidence"],"recommended":false},{"id":"source","packageIds":["core-evidence"],"recommended":false}],"recommendedProfileId":"balanced","requiredCorpusIds":["core-evidence"],"schemaVersion":2}"""
 
 private fun worldviewJson(id: String, statement: String): String =
     """{"aliases":[],"conditions":[],"confidence":1.0,"evidence":["chunk-core"],"id":"$id","period":"1926","statement":"$statement","topic":"调查"}""" + "\n"

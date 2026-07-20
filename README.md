@@ -56,10 +56,11 @@ scripts/agent-builder.sh pack build/agent-v2-fixture \
 ```
 
 生成的 key、workspace、`.hagent`、`.hcorpus`、`.hsource` 和 `.hbundle` 都是临时测试产物，不进入 Git。
+该验收是离线 reader/repository/assembler 集成测试：验证送入模型的 grounded 输入和稳定来源元数据，不调用 Provider，也不把 assembler context 记作模型答案。
 
 ## Android 智能体导入
 
-人物身份在新会话输入区选择，发送第一条消息后固定。“设置 -> 智能体包”用于导入和安装：V2 `.hbundle` 默认展示一张紧凑预览并直接安装推荐的 `balanced` 档；只有空间不足或用户主动调整时，才展示 `轻量 / 推荐 / 完整证据 / 包含原文` 四档选择。安装完成后直接回到包列表并展开状态详情，不再显示二次成功确认。
+人物身份在新会话输入区选择，发送第一条消息后固定。“设置 -> 智能体包”用于导入和安装：V2 `.hbundle` 是按 profile 生成的 convenience bundle，只有当前 manifest 实际包含全部子包的档位可以选择；例如 `balanced.hbundle` 不能直接切换为未随包提供的 `complete` 或 `source`。默认展示一张紧凑预览并直接安装推荐的 `balanced` 档；只有空间不足或用户主动调整时，才展示 `轻量 / 推荐 / 完整证据 / 包含原文` 四档选择。安装完成后直接回到包列表并展开状态详情，不再显示二次成功确认。
 
 只有 `READY` 智能体可开始新对话；`WAITING_FOR_CORPUS`、`DISABLED` 和 `FAILED` 都会阻止入口。独立 `.hcorpus` 仅扩展当前版本覆盖，历史会话仍绑定原 version；`.hsource` 只用于阅读核验，不参与回答。人格运行时使用固定会话版本、可选项目上下文和本地资料证据，不启用联网补写，也不创建智能体所属项目。
 

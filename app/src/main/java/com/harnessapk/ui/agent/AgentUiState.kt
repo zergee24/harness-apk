@@ -2,11 +2,15 @@ package com.harnessapk.ui.agent
 
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentStatus
+import com.harnessapk.agent.InstallContractPackage
+import com.harnessapk.agent.InstallContractProfile
 import com.harnessapk.agent.V2Authorship
 import com.harnessapk.agent.V2InstallClass
+import com.harnessapk.agent.V2_INSTALLATION_PROFILE_ORDER
 import com.harnessapk.agent.V2PackageType
 import com.harnessapk.agent.V2SourceGenre
 import com.harnessapk.agent.V2SourceRecord
+import com.harnessapk.agent.installPlanContractError
 import java.util.Locale
 
 internal data class AgentInstallationPackage(
@@ -27,6 +31,7 @@ internal data class AgentInstallationPlan(
     val packages: List<AgentInstallationPackage>,
     val profiles: List<AgentInstallationProfile>,
     val requiredPackageIds: List<String>,
+    val availablePackageIds: List<String>,
 )
 
 internal sealed interface AgentInstallationDecision {
@@ -39,6 +44,11 @@ internal sealed interface AgentInstallationDecision {
     ) : AgentInstallationDecision
 
     data class BlockMissingRequired(val missingPackageIds: List<String>) : AgentInstallationDecision
+
+    data class BlockUnavailableProfile(
+        val profileId: String,
+        val missingPackageIds: List<String>,
+    ) : AgentInstallationDecision
 }
 
 internal fun installationDecision(
@@ -47,40 +57,23 @@ internal fun installationDecision(
     requestedProfileId: String?,
 ): AgentInstallationDecision {
     val blocked = AgentInstallationDecision.BlockMissingRequired(plan.requiredPackageIds.distinct().sorted())
-    if (availableBytes < 0L || plan.agentPackageId.isBlank() || plan.agentSizeBytes <= 0L) return blocked
-    if (plan.requiredPackageIds.isEmpty() || plan.requiredPackageIds.distinct().size != plan.requiredPackageIds.size) {
-        return blocked
-    }
-    if (plan.packages.any { it.id.isBlank() || it.sizeBytes <= 0L }) return blocked
-    val packages = plan.packages.associateBy(AgentInstallationPackage::id)
-    if (packages.size != plan.packages.size || plan.requiredPackageIds.any { it !in packages }) return blocked
-    if (plan.requiredPackageIds.any { packages.getValue(it).installClass != V2InstallClass.REQUIRED }) return blocked
-
-    val profiles = plan.profiles.associateBy(AgentInstallationProfile::id)
-    if (profiles.size != plan.profiles.size || profiles.keys != INSTALLATION_PROFILE_ORDER.toSet()) return blocked
-    if (plan.profiles.any { profile ->
-            profile.packageIds.distinct().size != profile.packageIds.size ||
-                profile.packageIds.any { it !in packages } ||
-                plan.requiredPackageIds.any { it !in profile.packageIds }
-        }
-    ) {
-        return blocked
-    }
-
-    fun exactBytes(profileId: String): Long? {
-        var total = plan.agentSizeBytes
-        profiles.getValue(profileId).packageIds.forEach { packageId ->
-            val packageBytes = packages.getValue(packageId).sizeBytes
-            if (total > Long.MAX_VALUE - packageBytes) return null
-            total += packageBytes
-        }
-        return total
-    }
+    if (availableBytes < 0L) return blocked
+    val validated = validateInstallationPlan(plan) ?: return blocked
 
     val selectedProfileId = requestedProfileId ?: DEFAULT_INSTALLATION_PROFILE_ID
     val selectedIndex = INSTALLATION_PROFILE_ORDER.indexOf(selectedProfileId)
     if (selectedIndex < 0) return blocked
-    val selectedBytes = exactBytes(selectedProfileId) ?: return blocked
+    val unavailableRequired = plan.requiredPackageIds.filterNot(validated.availablePackageIds::contains).sorted()
+    if (unavailableRequired.isNotEmpty()) {
+        return AgentInstallationDecision.BlockMissingRequired(unavailableRequired)
+    }
+    val missingSelected = validated.profiles.getValue(selectedProfileId).packageIds
+        .filterNot(validated.availablePackageIds::contains)
+        .sorted()
+    if (missingSelected.isNotEmpty()) {
+        return AgentInstallationDecision.BlockUnavailableProfile(selectedProfileId, missingSelected)
+    }
+    val selectedBytes = validated.exactBytes(selectedProfileId) ?: return blocked
     if (selectedBytes <= availableBytes) {
         return AgentInstallationDecision.InstallDirectly(selectedProfileId)
     }
@@ -88,7 +81,10 @@ internal fun installationDecision(
     val suggested = INSTALLATION_PROFILE_ORDER
         .take(selectedIndex)
         .asReversed()
-        .firstOrNull { profileId -> exactBytes(profileId)?.let { it <= availableBytes } == true }
+        .firstOrNull { profileId ->
+            validated.profiles.getValue(profileId).packageIds.all(validated.availablePackageIds::contains) &&
+                validated.exactBytes(profileId)?.let { it <= availableBytes } == true
+        }
         ?: return blocked
     return AgentInstallationDecision.ShowAdjustment(
         selectedProfileId = selectedProfileId,
@@ -102,15 +98,63 @@ internal fun installationDecision(
 }
 
 internal fun exactInstallationBytes(plan: AgentInstallationPlan, profileId: String): Long? =
-    when (val decision = installationDecision(plan, Long.MAX_VALUE, profileId)) {
-        is AgentInstallationDecision.InstallDirectly -> {
-            val packages = plan.packages.associateBy(AgentInstallationPackage::id)
-            plan.profiles.first { it.id == decision.profileId }.packageIds.fold(plan.agentSizeBytes) { total, id ->
-                Math.addExact(total, packages.getValue(id).sizeBytes)
+    validateInstallationPlan(plan)?.exactBytes(profileId)
+
+internal fun profileAvailableInBundle(plan: AgentInstallationPlan, profileId: String): Boolean {
+    val validated = validateInstallationPlan(plan) ?: return false
+    return validated.profiles[profileId]?.packageIds?.all(validated.availablePackageIds::contains) == true
+}
+
+private data class ValidatedInstallationPlan(
+    val agentSizeBytes: Long,
+    val packages: Map<String, AgentInstallationPackage>,
+    val profiles: Map<String, AgentInstallationProfile>,
+    val availablePackageIds: Set<String>,
+) {
+    fun exactBytes(profileId: String): Long? {
+        val profile = profiles[profileId] ?: return null
+        return try {
+            profile.packageIds.fold(agentSizeBytes) { subtotal, packageId ->
+                Math.addExact(subtotal, packages.getValue(packageId).sizeBytes)
             }
+        } catch (_: ArithmeticException) {
+            null
         }
-        else -> null
     }
+}
+
+private fun validateInstallationPlan(plan: AgentInstallationPlan): ValidatedInstallationPlan? {
+    if (plan.agentPackageId.isBlank() || plan.agentSizeBytes <= 0L) return null
+    if (plan.packages.any { it.id.isBlank() || it.sizeBytes <= 0L }) return null
+    if (
+        installPlanContractError(
+            packages = plan.packages.map { declaration ->
+                InstallContractPackage(declaration.id, declaration.type, declaration.installClass)
+            },
+            profiles = plan.profiles.map { profile ->
+                InstallContractProfile(profile.id, profile.packageIds)
+            },
+            requiredCorpusIds = plan.requiredPackageIds,
+        ) != null
+    ) {
+        return null
+    }
+    val packages = plan.packages.associateBy(AgentInstallationPackage::id)
+    if (plan.availablePackageIds.distinct().size != plan.availablePackageIds.size ||
+        plan.availablePackageIds.any { it !in packages }
+    ) {
+        return null
+    }
+    val profiles = plan.profiles.associateBy(AgentInstallationProfile::id)
+    val validated = ValidatedInstallationPlan(
+        agentSizeBytes = plan.agentSizeBytes,
+        packages = packages,
+        profiles = profiles,
+        availablePackageIds = plan.availablePackageIds.toSet(),
+    )
+    if (profiles.keys.any { profileId -> validated.exactBytes(profileId) == null }) return null
+    return validated
+}
 
 internal fun sourceParticipationLabel(): String = "仅阅读核验，不参与回答"
 
@@ -138,7 +182,7 @@ internal fun formatAgentPackageSize(bytes: Long): String = when {
     else -> String.format(Locale.US, "%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0))
 }
 
-internal val INSTALLATION_PROFILE_ORDER = listOf("lite", "balanced", "complete", "source")
+internal val INSTALLATION_PROFILE_ORDER = V2_INSTALLATION_PROFILE_ORDER
 internal const val DEFAULT_INSTALLATION_PROFILE_ID = "balanced"
 
 private val CONVERSATIONAL_SOURCE_GENRES = setOf(

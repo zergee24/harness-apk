@@ -124,7 +124,11 @@ class AgentRepository(
     suspend fun install(session: AgentImportSession): AgentInstallResult = withContext(ioDispatcher) {
         lifecycleCoordinator.serialized {
             val owned = consumeOwnedV1SessionUnlocked(session)
-            installConsumedPackageUnlocked(owned, profileId = "balanced")
+            try {
+                installConsumedPackageUnlocked(owned, profileId = "balanced")
+            } finally {
+                deleteOwnedSessionFiles(owned)
+            }
         }
     }
 
@@ -133,8 +137,17 @@ class AgentRepository(
         profileId: String = "balanced",
     ): AgentInstallResult = withContext(ioDispatcher) {
         lifecycleCoordinator.serialized {
-            val owned = consumeOwnedPackageSessionUnlocked(session)
-            installConsumedPackageUnlocked(owned, profileId)
+            val owned = requireOwnedPackageSessionUnlocked(session)
+            try {
+                val result = installConsumedPackageUnlocked(owned, profileId)
+                consumeOwnedSessionUnlocked(owned)
+                result
+            } catch (error: Throwable) {
+                if (error !is AgentInsufficientStorageException) {
+                    invalidateOwnedSessionUnlocked(owned)
+                }
+                throw error
+            }
         }
     }
 
@@ -210,9 +223,11 @@ class AgentRepository(
                         worldviewJsonl = bundle.worldviewJsonl,
                         installedAt = now,
                         state = status.name,
-                        requiredCorpusCount = bundle.agent.requiredCorpora.size,
-                    ),
-                )
+                            requiredCorpusCount = bundle.agent.requiredCorpora.size,
+                            agentPackageSizeBytes = bundle.compressedSizeBytes,
+                            selectedProfileId = "v1",
+                        ),
+                    )
                 availableCorpora.values.forEach { corpus ->
                     dao.insertVersionCorpus(
                         AgentVersionCorpusCrossRef(
@@ -267,13 +282,13 @@ class AgentRepository(
         return owned
     }
 
-    private suspend fun consumeOwnedPackageSessionUnlocked(
+    private fun requireOwnedPackageSessionUnlocked(
         session: AgentPackageImportSession,
     ): OwnedPackageSession {
-        val owned = packageSessions.remove(session.id)
+        val owned = packageSessions[session.id]
             ?: throw AgentBundleException("导入会话已经失效或已使用")
         if (session !== owned.session) {
-            deleteOrRecordOrphan(owned.session.stagedFile)
+            invalidateOwnedSessionUnlocked(owned)
             throw AgentBundleException("导入会话并非 repository 实际签发对象")
         }
         return owned
@@ -283,76 +298,98 @@ class AgentRepository(
         if (packageSessions[owned.session.id] !== owned) {
             throw AgentBundleException("导入会话已经失效或已使用")
         }
-        deleteOrRecordOrphan(owned.session.stagedFile)
+        deleteOwnedSessionFiles(owned)
+        consumeOwnedSessionRecord(owned)
+    }
+
+    private fun consumeOwnedSessionUnlocked(owned: OwnedPackageSession) {
+        deleteOwnedSessionFiles(owned)
+        consumeOwnedSessionRecord(owned)
+    }
+
+    private fun invalidateOwnedSessionUnlocked(owned: OwnedPackageSession) {
+        deleteOwnedSessionFiles(owned)
+        packageSessions.remove(owned.session.id, owned)
+    }
+
+    private fun consumeOwnedSessionRecord(owned: OwnedPackageSession) {
         if (!packageSessions.remove(owned.session.id, owned)) {
             throw AgentBundleException("导入会话已经失效或已使用")
         }
+    }
+
+    private fun deleteOwnedSessionFiles(owned: OwnedPackageSession) {
+        owned.snapshotFile?.let(::deleteOrRecordOrphan)
+        owned.snapshotFile = null
+        deleteOrRecordOrphan(owned.session.stagedFile)
     }
 
     private suspend fun installConsumedPackageUnlocked(
         owned: OwnedPackageSession,
         profileId: String,
     ): AgentInstallResult {
-        var snapshot: File? = null
-        try {
-            recoverFileLifecycleLocked()
-            validateOwnedSessionForConsumption(owned)
-            val consumed = snapshotOwnedPackageUnlocked(owned)
-            snapshot = consumed.file
-            return when (val parsed = consumed.parsed) {
-                is V1Bundle -> installV1Unlocked(
-                    AgentImportSession(owned.session.id, consumed.file, parsed.bundle, consumed.preview),
-                )
-                is V2Bundle -> installV2Bundle(parsed, consumed.file, profileId)
-                is V2Agent -> installV2Agent(parsed, consumed.file)
-                is V2Corpus -> installStandaloneV2Corpus(parsed, consumed.file, owned.session.sourceName)
-                is V2Source -> installStandaloneV2Source(parsed, consumed.file, owned.session.sourceName)
-            }
-        } finally {
-            snapshot?.let(::deleteOrRecordOrphan)
-            deleteEmptyDirectory(File(cacheDir, INSTALL_SNAPSHOT_DIRECTORY))
+        recoverFileLifecycleLocked()
+        validateOwnedSessionForConsumption(owned)
+        val consumed = snapshotOwnedPackageUnlocked(owned)
+        return when (val parsed = consumed.parsed) {
+            is V1Bundle -> installV1Unlocked(
+                AgentImportSession(owned.session.id, consumed.file, parsed.bundle, consumed.preview),
+            )
+            is V2Bundle -> installV2Bundle(parsed, consumed.file, profileId)
+            is V2Agent -> installV2Agent(parsed, consumed.file)
+            is V2Corpus -> installStandaloneV2Corpus(parsed, consumed.file, owned.session.sourceName)
+            is V2Source -> installStandaloneV2Source(parsed, consumed.file, owned.session.sourceName)
         }
     }
 
     private suspend fun snapshotOwnedPackageUnlocked(owned: OwnedPackageSession): ConsumedPackageSnapshot {
+        owned.snapshotFile?.let { snapshot ->
+            return validatePackageSnapshot(owned, snapshot)
+        }
         val snapshotDirectory = File(cacheDir, INSTALL_SNAPSHOT_DIRECTORY).also(fileOps::createDirectories)
         val snapshot = File(snapshotDirectory, "${UUID.randomUUID()}.package")
         val stagedFile = owned.session.stagedFile
         val sourceFileKey = stagedFile.fileKeyOrNull()
         try {
-            stagedFile.inputStream().use { input ->
-                fileOps.copyBounded(input, snapshot, MAX_IMPORT_BUNDLE_BYTES)
-            }
-            val packageBytes = snapshot.length()
-            val packageSha256 = snapshot.sha256Hex()
-            val parsed = reader.readPackageSuspending(snapshot)
-            val preview = if (parsed is V1Bundle) reader.inspect(snapshot) else parsed.toPreview()
             if (
-                packageBytes != owned.session.packageBytes ||
-                packageSha256 != owned.session.packageSha256 ||
-                parsed::class != owned.session.parsedPackage::class ||
-                parsed.publisherFingerprint != owned.session.publisherFingerprint ||
-                preview != owned.session.preview
-            ) {
-                throw AgentBundleException("导入会话快照与签发内容不匹配")
-            }
-            if (stagedFile.fileKeyOrNull() == sourceFileKey &&
-                (!stagedFile.isFile ||
-                    stagedFile.length() != owned.session.packageBytes ||
-                    stagedFile.sha256Hex() != owned.session.packageSha256)
+                !stagedFile.isFile ||
+                stagedFile.length() != owned.session.packageBytes ||
+                stagedFile.sha256Hex() != owned.session.packageSha256 ||
+                stagedFile.fileKeyOrNull() != sourceFileKey
             ) {
                 throw AgentBundleException("导入会话在创建私有快照期间被原地修改")
             }
-            return ConsumedPackageSnapshot(snapshot, parsed, preview)
+            fileOps.moveAtomically(stagedFile, snapshot)
+            owned.snapshotFile = snapshot
+            return validatePackageSnapshot(owned, snapshot)
         } catch (error: Throwable) {
             deleteOrRecordOrphan(snapshot)
+            owned.snapshotFile = null
             throw when (error) {
                 is CancellationException, is AgentBundleException -> error
                 else -> AgentBundleException("无法验证导入会话快照", error)
             }
-        } finally {
-            deleteOrRecordOrphan(owned.session.stagedFile)
         }
+    }
+
+    private suspend fun validatePackageSnapshot(
+        owned: OwnedPackageSession,
+        snapshot: File,
+    ): ConsumedPackageSnapshot {
+        val packageBytes = snapshot.length()
+        val packageSha256 = snapshot.sha256Hex()
+        val parsed = reader.readPackageSuspending(snapshot)
+        val preview = if (parsed is V1Bundle) reader.inspect(snapshot) else parsed.toPreview()
+        if (
+            packageBytes != owned.session.packageBytes ||
+            packageSha256 != owned.session.packageSha256 ||
+            parsed::class != owned.session.parsedPackage::class ||
+            parsed.publisherFingerprint != owned.session.publisherFingerprint ||
+            preview != owned.session.preview
+        ) {
+            throw AgentBundleException("导入会话快照与签发内容不匹配")
+        }
+        return ConsumedPackageSnapshot(snapshot, parsed, preview)
     }
 
     private suspend fun installV2Bundle(
@@ -378,7 +415,7 @@ class AgentRepository(
         if (declarations.size != bundle.agent.installPlan.packages.size || selectedIds.any { it !in declarations }) {
             throw AgentBundleException("install plan package 声明无效")
         }
-        val exactInstallBytes = exactSignedInstallBytes(
+        exactSignedInstallBytes(
             agentBytes = bundle.manifest.agent.sizeBytes,
             packageBytes = profile.packageIds.map { declarations.getValue(it).sizeBytes },
         )
@@ -395,12 +432,19 @@ class AgentRepository(
             sources,
             stagedFile,
             "bundle.hbundle",
-            exactInstallBytes,
+            profileId,
         )
     }
 
     private suspend fun installV2Agent(agent: V2Agent, stagedFile: File): AgentInstallResult =
-        installV2AgentContent(agent, emptyList(), emptyList(), stagedFile, "agent.hagent")
+        installV2AgentContent(
+            agent,
+            emptyList(),
+            emptyList(),
+            stagedFile,
+            "agent.hagent",
+            selectedProfileId = "agent-only",
+        )
 
     private suspend fun installV2AgentContent(
         agent: V2Agent,
@@ -408,7 +452,7 @@ class AgentRepository(
         sources: List<V2Source>,
         stagedFile: File,
         installedName: String,
-        requiredInstallBytes: Long? = null,
+        selectedProfileId: String,
     ): AgentInstallResult {
         val existingAgent = dao.findAgent(agent.manifest.id)
         if (existingAgent != null && existingAgent.publisherFingerprint != agent.publisherFingerprint) {
@@ -418,16 +462,20 @@ class AgentRepository(
         if (existingVersion != null && existingVersion.bundleSha256 != agent.packageSha256) {
             throw AgentBundleException("同一版本的智能体内容不同，请发布新版本")
         }
+        val evidenceExpanded = existingVersion == null || corpora.any { corpus ->
+            dao.findVersionPackage(agent.manifest.id, agent.manifest.version, corpus.manifest.id)?.installed != true
+        }
         val versionDirectory = File(
             filesDir,
             "agents/${safeFileSegment(agent.manifest.id)}/${agent.manifest.version}",
         )
         val finalPackage = if (existingVersion == null) File(versionDirectory, installedName) else null
+        val additionalWriteBytes = additionalV2WriteBytes(existingVersion, corpora, sources)
+        if (additionalWriteBytes > 0L) {
+            requirePrivateInstallSpace(additionalWriteBytes)
+        }
         if (finalPackage != null) {
             fileOps.createDirectories(versionDirectory)
-            requiredInstallBytes?.let { exactBytes ->
-                requirePrivateInstallSpace(maxOf(exactBytes, stagedFile.length()))
-            }
             fileOps.moveAtomically(stagedFile, finalPackage)
         }
         val readablePackage = finalPackage ?: stagedFile
@@ -436,6 +484,7 @@ class AgentRepository(
             sources.forEach { source -> preparedSources += prepareV2SourceFile(readablePackage, source) }
             val now = timeProvider.nowMillis()
             var result: AgentEntity? = null
+            requirePrivateInstallSpace(INSTALL_METADATA_SAFETY_BYTES)
             transactionRunner.run {
                 if (existingVersion == null) {
                     val initial = AgentEntity(
@@ -482,6 +531,8 @@ class AgentRepository(
                             evaluationCorpusIdsJson = storageJson.encodeToString(
                                 agent.evaluations.map(V2Evaluation::corpusId).distinct().sorted(),
                             ),
+                            agentPackageSizeBytes = agent.compressedSizeBytes,
+                            selectedProfileId = selectedProfileId,
                         ),
                     )
                     dao.upsertVersionPackages(
@@ -503,6 +554,9 @@ class AgentRepository(
                     )
                 }
                 corpora.forEach { corpus ->
+                    if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
+                        requirePrivateInstallSpace(installWriteBytes(corpus.uncompressedSizeBytes))
+                    }
                     installV2Corpus(readablePackage, corpus, now)
                     dao.markVersionPackageInstalled(
                         agent.manifest.id,
@@ -522,7 +576,12 @@ class AgentRepository(
                         now,
                     )
                 }
-                result = refreshV2InstallState(agent, now)
+                dao.updateVersionSelectedProfile(
+                    agent.manifest.id,
+                    agent.manifest.version,
+                    selectedProfileId,
+                )
+                result = refreshV2InstallState(agent, now, evidenceExpanded = evidenceExpanded)
             }
             val outcome = if (existingVersion == null || corpora.isNotEmpty()) {
                 AgentInstallOutcome.INSTALLED
@@ -532,7 +591,11 @@ class AgentRepository(
             return AgentInstallResult(outcome, requireNotNull(result).toDomain())
         } catch (error: Throwable) {
             if (finalPackage != null) {
-                retireUnreferencedFile(finalPackage)
+                if (error is AgentInsufficientStorageException && finalPackage.isFile && !stagedFile.exists()) {
+                    fileOps.moveAtomically(finalPackage, stagedFile)
+                } else {
+                    retireUnreferencedFile(finalPackage)
+                }
                 deleteEmptyDirectory(versionDirectory)
             }
             preparedSources.filter(PreparedSourceFile::created).forEach { prepared ->
@@ -557,6 +620,7 @@ class AgentRepository(
         }
         val part = File(directory, ".$SOURCE_PAYLOAD_NAME.${UUID.randomUUID()}.part")
         try {
+            requirePrivateInstallSpace(installWriteBytes(source.manifest.rawSizeBytes))
             fileOps.write(part) { output ->
                 reader.copyV2SourcePayload(packageFile, source.manifest.id, output)
             }
@@ -647,7 +711,12 @@ class AgentRepository(
         val finalPackage = File(packageDirectory, "${corpus.packageSha256}.hcorpus")
         val createdFile = !finalPackage.exists()
         val installCorpus = if (createdFile) {
-            requirePrivateInstallSpace(corpus.compressedSizeBytes)
+            val corpusWriteBytes = if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
+                installWriteBytes(corpus.uncompressedSizeBytes)
+            } else {
+                INSTALL_METADATA_SAFETY_BYTES
+            }
+            requirePrivateInstallSpace(corpusWriteBytes)
             fileOps.moveAtomically(stagedFile, finalPackage)
             corpus.copy(file = finalPackage)
         } else {
@@ -669,6 +738,11 @@ class AgentRepository(
             val now = timeProvider.nowMillis()
             var updated: AgentEntity? = null
             transactionRunner.run {
+                if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
+                    requirePrivateInstallSpace(installWriteBytes(corpus.uncompressedSizeBytes))
+                } else {
+                    requirePrivateInstallSpace(INSTALL_METADATA_SAFETY_BYTES)
+                }
                 installV2Corpus(finalPackage, installCorpus, now)
                 dao.markVersionPackageInstalled(
                     corpus.manifest.agentId,
@@ -676,6 +750,13 @@ class AgentRepository(
                     corpus.manifest.id,
                     finalPackage.absolutePath,
                     now,
+                )
+                dao.updateVersionSelectedProfile(
+                    corpus.manifest.agentId,
+                    corpus.manifest.version,
+                    inferredSelectedProfileId(
+                        dao.listVersionPackages(corpus.manifest.agentId, corpus.manifest.version),
+                    ),
                 )
                 val installedAgent = V2Agent(
                     file = File(version.bundlePath),
@@ -715,7 +796,13 @@ class AgentRepository(
             }
             return AgentInstallResult(AgentInstallOutcome.INSTALLED, requireNotNull(updated).toDomain())
         } catch (error: Throwable) {
-            if (createdFile) retireUnreferencedFile(finalPackage)
+            if (createdFile) {
+                if (error is AgentInsufficientStorageException && finalPackage.isFile && !stagedFile.exists()) {
+                    fileOps.moveAtomically(finalPackage, stagedFile)
+                } else {
+                    retireUnreferencedFile(finalPackage)
+                }
+            }
             throw error
         }
     }
@@ -762,7 +849,7 @@ class AgentRepository(
         val finalSource = File(sourceDirectory, SOURCE_PAYLOAD_NAME)
         val createdFile = !finalSource.exists()
         if (createdFile) {
-            requirePrivateInstallSpace(source.compressedSizeBytes)
+            requirePrivateInstallSpace(installWriteBytes(source.manifest.rawSizeBytes))
             val part = File(sourceDirectory, ".$SOURCE_PAYLOAD_NAME.${UUID.randomUUID()}.part")
             try {
                 fileOps.write(part) { output ->
@@ -788,6 +875,7 @@ class AgentRepository(
         }
         try {
             val now = timeProvider.nowMillis()
+            requirePrivateInstallSpace(INSTALL_METADATA_SAFETY_BYTES)
             transactionRunner.run {
                 val existing = dao.findSource(source.manifest.sourceId, source.manifest.sourceHash)
                 existing?.requireSameDescriptor(source.manifest)
@@ -822,6 +910,13 @@ class AgentRepository(
                     source.manifest.id,
                     finalSource.absolutePath,
                     now,
+                )
+                dao.updateVersionSelectedProfile(
+                    source.manifest.agentId,
+                    source.manifest.version,
+                    inferredSelectedProfileId(
+                        dao.listVersionPackages(source.manifest.agentId, source.manifest.version),
+                    ),
                 )
             }
             return AgentInstallResult(AgentInstallOutcome.INSTALLED, requireNotNull(dao.findAgent(agent.id)).toDomain())
@@ -984,6 +1079,7 @@ class AgentRepository(
         agent: V2Agent,
         now: Long,
         evidenceIds: Set<String> = agent.requiredEvidenceIds(),
+        evidenceExpanded: Boolean = true,
     ): AgentEntity {
         val corpora = dao.listVersionCorpora(agent.manifest.id, agent.manifest.version)
         val installedRequired = corpora.count { it.required }
@@ -998,7 +1094,9 @@ class AgentRepository(
         } else {
             AgentStatus.WAITING_FOR_CORPUS
         }
-        dao.updateVersionState(agent.manifest.id, agent.manifest.version, status.name, now)
+        val storedVersion = requireNotNull(dao.findVersion(agent.manifest.id, agent.manifest.version))
+        val expandedAt = if (evidenceExpanded) now else storedVersion.lastEvidenceExpandedAt
+        dao.updateVersionState(agent.manifest.id, agent.manifest.version, status.name, expandedAt)
         val currentAgent = requireNotNull(dao.findAgent(agent.manifest.id))
         if (currentAgent.activeVersion == agent.manifest.version) {
             dao.updateAgentInstallState(
@@ -1016,10 +1114,18 @@ class AgentRepository(
         storageJson.decodeFromString<List<String>>(requiredEvidenceJson).toSet()
     }.getOrElse { emptySet() }
 
+    private fun AgentVersionEntity.v1RequiredCorpusIds(): List<String> = runCatching {
+        val root = storageJson.parseToJsonElement(manifestJson) as JsonObject
+        val agent = root["agent"] as JsonObject
+        val required = agent["requiredCorpora"] as JsonArray
+        required.mapNotNull { element -> (element as? JsonPrimitive)?.contentOrNull }
+    }.getOrElse { emptyList() }
+
     private fun validateOwnedSessionForConsumption(owned: OwnedPackageSession) {
         val expected = owned.session
         val expired = timeProvider.nowMillis() - owned.createdAt >= IMPORT_STAGING_TTL_MILLIS
-        if (expired || !expected.stagedFile.isFile) {
+        val ownedFile = owned.snapshotFile ?: expected.stagedFile
+        if (expired || !ownedFile.isFile) {
             throw AgentBundleException("导入会话已经失效、被修改或不匹配")
         }
     }
@@ -1027,7 +1133,7 @@ class AgentRepository(
     private fun purgeExpiredOwnedSessions(now: Long) {
         packageSessions.entries.toList().forEach { (id, owned) ->
             if (now - owned.createdAt >= IMPORT_STAGING_TTL_MILLIS && packageSessions.remove(id, owned)) {
-                deleteOrRecordOrphan(owned.session.stagedFile)
+                deleteOwnedSessionFiles(owned)
             }
         }
     }
@@ -1077,6 +1183,11 @@ class AgentRepository(
             transactionRunner.run {
             dao.deleteVersionCorpus(agentId, version, corpusId)
             dao.markVersionPackageRemoved(agentId, version, corpusId)
+            dao.updateVersionSelectedProfile(
+                agentId,
+                version,
+                inferredSelectedProfileId(dao.listVersionPackages(agentId, version)),
+            )
             if (dao.countVersionCorpusReferences(reference.corpusId, reference.sourceHash) == 0) {
                 dao.deleteCorpus(reference.corpusId, reference.sourceHash)
                 dao.deleteOrphanChunks()
@@ -1255,6 +1366,95 @@ class AgentRepository(
         val storedVersion = dao.findVersion(agentId, version) ?: return@withContext null
         if (storedVersion.schemaVersion < 2) return@withContext null
         parseContextObject(storedVersion.openersJson)?.string("default")?.trim()?.takeIf(String::isNotBlank)
+    }
+
+    suspend fun packageDetail(agentId: String, version: Int): AgentPackageDetail? = withContext(ioDispatcher) {
+        val storedVersion = dao.findVersion(agentId, version) ?: return@withContext null
+        if (storedVersion.schemaVersion < 2) {
+            val corpora = dao.listVersionCorpora(agentId, version)
+            val required = corpora.count(AgentVersionCorpusCrossRef::required)
+            val optional = corpora.size - required
+            val requiredIds = storedVersion.v1RequiredCorpusIds()
+            return@withContext AgentPackageDetail(
+                schemaVersion = storedVersion.schemaVersion,
+                selectedProfileId = "v1",
+                exactInstalledBytes = File(storedVersion.bundlePath).takeIf(File::isFile)?.length() ?: 0L,
+                required = AgentPackageClassCount(required, storedVersion.requiredCorpusCount),
+                recommended = AgentPackageClassCount(0, 0),
+                optional = AgentPackageClassCount(optional, optional),
+                source = AgentPackageClassCount(0, 0),
+                lastEvidenceExpandedAt = storedVersion.lastEvidenceExpandedAt,
+                missingRequiredPackageIds = requiredIds
+                    .filterNot(corpora.map(AgentVersionCorpusCrossRef::corpusId).toSet()::contains)
+                    .sorted(),
+            )
+        }
+        val packages = dao.listVersionPackages(agentId, version)
+        fun count(installClass: V2InstallClass) = AgentPackageClassCount(
+            installed = packages.count { it.installClass == installClass.wireName && it.installed },
+            planned = packages.count { it.installClass == installClass.wireName },
+        )
+        val installedIds = packages.filter(AgentVersionPackageEntity::installed)
+            .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        val requiredIds = packages.filter { it.installClass == V2InstallClass.REQUIRED.wireName }
+            .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        val recommendedIds = packages.filter { it.installClass == V2InstallClass.RECOMMENDED.wireName }
+            .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        val optionalIds = packages.filter { it.installClass == V2InstallClass.OPTIONAL.wireName }
+            .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        val sourceIds = packages.filter { it.installClass == V2InstallClass.SOURCE.wireName }
+            .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        val selectedProfileId = storedVersion.selectedProfileId.takeIf(String::isNotBlank)
+            ?: inferredSelectedProfileId(packages)
+        val agentBytes = storedVersion.agentPackageSizeBytes.takeIf { it > 0L }
+            ?: legacyAgentPackageBytes(storedVersion)
+        val exactBytes = installedIds.fold(agentBytes) { total, packageId ->
+            val packageBytes = packages.first { it.packageId == packageId }.packageSizeBytes
+            addInstallBytes(total, packageBytes)
+        }
+        AgentPackageDetail(
+            schemaVersion = storedVersion.schemaVersion,
+            selectedProfileId = selectedProfileId,
+            exactInstalledBytes = exactBytes,
+            required = count(V2InstallClass.REQUIRED),
+            recommended = count(V2InstallClass.RECOMMENDED),
+            optional = count(V2InstallClass.OPTIONAL),
+            source = count(V2InstallClass.SOURCE),
+            lastEvidenceExpandedAt = storedVersion.lastEvidenceExpandedAt,
+            missingRequiredPackageIds = requiredIds.filterNot(installedIds::contains).sorted(),
+        )
+    }
+
+    private suspend fun legacyAgentPackageBytes(version: AgentVersionEntity): Long {
+        val installed = File(version.bundlePath)
+        if (!installed.isFile) return 0L
+        return runCatching {
+            when (val parsed = reader.readPackageSuspending(installed)) {
+                is V2Bundle -> parsed.manifest.agent.sizeBytes
+                is V2Agent -> parsed.compressedSizeBytes
+                else -> installed.length()
+            }
+        }.getOrDefault(0L)
+    }
+
+    private fun inferredSelectedProfileId(packages: List<AgentVersionPackageEntity>): String {
+        val installedIds = packages.filter(AgentVersionPackageEntity::installed)
+            .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        val byClass = V2InstallClass.entries.associateWith { installClass ->
+            packages.filter { it.installClass == installClass.wireName }
+                .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        }
+        val required = byClass.getValue(V2InstallClass.REQUIRED)
+        val recommended = byClass.getValue(V2InstallClass.RECOMMENDED)
+        val optional = byClass.getValue(V2InstallClass.OPTIONAL)
+        val source = byClass.getValue(V2InstallClass.SOURCE)
+        return when {
+            source.isNotEmpty() && installedIds.containsAll(required + recommended + optional + source) -> "source"
+            optional.isNotEmpty() && installedIds.containsAll(required + recommended + optional) -> "complete"
+            recommended.isNotEmpty() && installedIds.containsAll(required + recommended) -> "balanced"
+            installedIds.containsAll(required) && required.isNotEmpty() -> "lite"
+            else -> "agent-only"
+        }
     }
 
     override suspend fun loadPackage(agentId: String, version: Int): AgentContextPackage? =
@@ -1779,11 +1979,45 @@ class AgentRepository(
 
     private fun tombstoneDirectory(): File = File(filesDir, "agents/.tombstones")
 
+    private suspend fun additionalV2WriteBytes(
+        existingVersion: AgentVersionEntity?,
+        corpora: List<V2Corpus>,
+        sources: List<V2Source>,
+    ): Long {
+        var total = if (existingVersion == null || corpora.isNotEmpty() || sources.isNotEmpty()) {
+            INSTALL_METADATA_SAFETY_BYTES
+        } else {
+            0L
+        }
+        corpora.forEach { corpus ->
+            if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
+                total = addInstallBytes(total, corpus.uncompressedSizeBytes)
+            }
+        }
+        sources.forEach { source ->
+            val destination = File(filesDir, "agents/sources/${source.manifest.sourceHash}/$SOURCE_PAYLOAD_NAME")
+            if (!destination.isFile) {
+                total = addInstallBytes(total, source.manifest.rawSizeBytes)
+            }
+        }
+        return total
+    }
+
     private fun requirePrivateInstallSpace(requiredBytes: Long) {
         val availableBytes = privateInstallAvailableBytes()
         if (availableBytes < 0L || availableBytes < requiredBytes) {
-            throw AgentBundleException("私有安装空间不足：需要 $requiredBytes 字节，可用 $availableBytes 字节")
+            throw AgentInsufficientStorageException(requiredBytes, availableBytes)
         }
+    }
+
+    private fun installWriteBytes(payloadBytes: Long): Long =
+        addInstallBytes(payloadBytes, INSTALL_METADATA_SAFETY_BYTES)
+
+    private fun addInstallBytes(left: Long, right: Long): Long {
+        if (left < 0L || right < 0L || left > Long.MAX_VALUE - right) {
+            throw AgentBundleException("实际安装写入字节溢出")
+        }
+        return left + right
     }
 
     private fun exactSignedInstallBytes(agentBytes: Long, packageBytes: List<Long>): Long {
@@ -1803,6 +2037,7 @@ class AgentRepository(
         private const val CHUNK_BATCH_SIZE = 200
         private const val FTS_SCAN_PAGE_SIZE = 64
         private const val ROUTED_CHILDREN_PER_ROUTE = 2
+        private const val INSTALL_METADATA_SAFETY_BYTES = 64L * 1024L
         private const val SOURCE_PAYLOAD_NAME = "payload"
         private const val TOMBSTONE_META_SUFFIX = ".meta"
         private const val TOMBSTONE_DATA_SUFFIX = ".data"
@@ -2270,6 +2505,7 @@ private data class OwnedPackageSession(
     val createdAt: Long,
 ) {
     var v1CompatibilitySession: AgentImportSession? = null
+    var snapshotFile: File? = null
 }
 
 private data class ConsumedPackageSnapshot(

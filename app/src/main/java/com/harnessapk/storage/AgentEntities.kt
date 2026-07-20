@@ -59,6 +59,8 @@ data class AgentVersionEntity(
     @ColumnInfo(defaultValue = "0") val requiredCorpusCount: Int = 0,
     @ColumnInfo(defaultValue = "''") val requiredEvidenceJson: String = "",
     @ColumnInfo(defaultValue = "''") val evaluationCorpusIdsJson: String = "",
+    @ColumnInfo(defaultValue = "0") val agentPackageSizeBytes: Long = 0L,
+    @ColumnInfo(defaultValue = "''") val selectedProfileId: String = "",
 )
 
 @Entity(

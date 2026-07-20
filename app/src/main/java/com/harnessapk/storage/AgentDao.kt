@@ -211,6 +211,11 @@ interface AgentDao {
     suspend fun updateVersionState(agentId: String, version: Int, state: String, expandedAt: Long?): Int
 
     @Query(
+        "UPDATE agent_versions SET selectedProfileId = :profileId WHERE agentId = :agentId AND version = :version",
+    )
+    suspend fun updateVersionSelectedProfile(agentId: String, version: Int, profileId: String): Int
+
+    @Query(
         """
         UPDATE agents
         SET status = :status, requiredCorpusCount = :requiredCount,

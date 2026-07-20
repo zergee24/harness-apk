@@ -252,6 +252,7 @@ private class NewConversationFakeAgentDao : AgentDao {
         filePath: String,
     ) = 0
     override suspend fun updateVersionState(agentId: String, version: Int, state: String, expandedAt: Long?) = 0
+    override suspend fun updateVersionSelectedProfile(agentId: String, version: Int, profileId: String) = 0
     override suspend fun updateAgentInstallState(agentId: String, status: String, requiredCount: Int, installedCount: Int, updatedAt: Long) = 0
     override suspend fun updateAgentStatus(agentId: String, status: String, updatedAt: Long) = 0
     override suspend fun deleteVersionCorpus(agentId: String, version: Int, corpusId: String) = 0

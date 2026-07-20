@@ -556,12 +556,15 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_11_12,
                 AppDatabase.MIGRATION_12_13,
                 AppDatabase.MIGRATION_13_14,
+                AppDatabase.MIGRATION_14_15,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(14, sqlite.version)
+        assertEquals(15, sqlite.version)
         assertEquals(1, sqlite.scalarInt("SELECT requiredCorpusCount FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
+        assertEquals(0, sqlite.scalarInt("SELECT agentPackageSizeBytes FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
+        assertEquals("", sqlite.string("SELECT selectedProfileId FROM agent_versions WHERE agentId = 'agent-1' AND version = 1"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_version_packages"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_sources"))
         assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_hierarchy"))
@@ -619,6 +622,7 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_11_12,
                 AppDatabase.MIGRATION_12_13,
                 AppDatabase.MIGRATION_13_14,
+                AppDatabase.MIGRATION_14_15,
             )
             .build()
         db.openHelper.writableDatabase
@@ -661,6 +665,7 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_11_12,
                     AppDatabase.MIGRATION_12_13,
                     AppDatabase.MIGRATION_13_14,
+                    AppDatabase.MIGRATION_14_15,
                 )
                 .build()
                 .openHelper

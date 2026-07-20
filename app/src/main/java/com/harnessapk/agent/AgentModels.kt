@@ -122,6 +122,23 @@ data class AgentInstallResult(
     val agent: Agent,
 )
 
+data class AgentPackageClassCount(
+    val installed: Int,
+    val planned: Int,
+)
+
+data class AgentPackageDetail(
+    val schemaVersion: Int,
+    val selectedProfileId: String,
+    val exactInstalledBytes: Long,
+    val required: AgentPackageClassCount,
+    val recommended: AgentPackageClassCount,
+    val optional: AgentPackageClassCount,
+    val source: AgentPackageClassCount,
+    val lastEvidenceExpandedAt: Long?,
+    val missingRequiredPackageIds: List<String>,
+)
+
 data class AgentEvidence(
     val chunkId: String,
     val sourceTitle: String,
@@ -214,5 +231,10 @@ data class AgentRuntimeContext(
     val diagnostics: AgentRuntimeDiagnostics = AgentRuntimeDiagnostics(),
 )
 
-class AgentBundleException(message: String, cause: Throwable? = null) :
+open class AgentBundleException(message: String, cause: Throwable? = null) :
     IllegalArgumentException(message, cause)
+
+class AgentInsufficientStorageException(
+    val requiredBytes: Long,
+    val availableBytes: Long,
+) : AgentBundleException("私有安装空间不足：需要 $requiredBytes 字节，可用 $availableBytes 字节")

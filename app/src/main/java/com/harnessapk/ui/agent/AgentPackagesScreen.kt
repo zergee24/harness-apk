@@ -11,10 +11,13 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
@@ -33,7 +36,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -45,13 +50,12 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentBundleException
 import com.harnessapk.agent.AgentImportPreview
+import com.harnessapk.agent.AgentPackageClassCount
+import com.harnessapk.agent.AgentPackageDetail
 import com.harnessapk.agent.AgentPackageImportSession
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
-import com.harnessapk.agent.V1Bundle
-import com.harnessapk.agent.V2Agent
 import com.harnessapk.agent.V2Bundle
 import com.harnessapk.agent.V2Corpus
-import com.harnessapk.agent.V2InstallClass
 import com.harnessapk.agent.V2Source
 import com.harnessapk.agent.V2SourceRecord
 import com.harnessapk.common.AppContainer
@@ -80,7 +84,16 @@ fun AgentPackagesScreen(
     }
     val importSession by previewViewModel.session.collectAsState()
     var expandedAgentId by remember { mutableStateOf<String?>(null) }
-    var installedDetails by remember { mutableStateOf<Map<String, AgentPackageDetailUiState>>(emptyMap()) }
+    var detailsRevision by remember { mutableIntStateOf(0) }
+    val installedDetails by produceState<Map<String, AgentPackageDetailUiState>>(
+        initialValue = emptyMap(),
+        agents,
+        detailsRevision,
+    ) {
+        value = agents.mapNotNull { agent ->
+            container.agentRepository.packageDetail(agent.id, agent.activeVersion)?.let { agent.id to it }
+        }.toMap()
+    }
     var previewAvailableBytes by remember { mutableStateOf(Long.MAX_VALUE) }
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
@@ -195,9 +208,7 @@ fun AgentPackagesScreen(
                 runCatching { container.agentRepository.installPackage(session, profileId) }
                     .onSuccess { result ->
                         previewViewModel.clearIfCurrent(session)
-                        installedDetails = installedDetails + (
-                            result.agent.id to installedDetail(session, profileId, installedDetails[result.agent.id])
-                            )
+                        detailsRevision += 1
                         expandedAgentId = result.agent.id
                     }
                     .onFailure { error -> errorText = error.message ?: "智能体安装失败" }
@@ -295,7 +306,13 @@ private fun AgentImportDialog(
         onDismissRequest = { if (!isInstalling) onDismiss() },
         title = { Text("安装智能体") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text(preview.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text("基于资料模拟 · v${preview.version}")
                 Text("资料：${preview.corpora.joinToString("、").ifBlank { "未包含" }}")
@@ -348,7 +365,13 @@ internal fun AgentV2InstallPreview(
         onDismissRequest = { if (!isInstalling) onDismiss() },
         title = { Text("推荐安装") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text("基于资料模拟 · v$version", style = MaterialTheme.typography.bodySmall)
                 Text("人物身份 · 必装")
@@ -370,6 +393,11 @@ internal fun AgentV2InstallPreview(
                         } else {
                             "必装资料不可用：${decision.missingPackageIds.joinToString()}"
                         },
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    is AgentInstallationDecision.BlockUnavailableProfile -> Text(
+                        "当前安装包不包含此档位：${decision.missingPackageIds.joinToString()}",
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -400,8 +428,11 @@ internal fun AgentV2InstallPreview(
                             SegmentedButton(
                                 selected = selectedProfileId == profileId,
                                 onClick = { selectedProfileId = profileId },
+                                enabled = profileAvailableInBundle(plan, profileId),
                                 shape = SegmentedButtonDefaults.itemShape(index, INSTALLATION_PROFILE_ORDER.size),
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 56.dp),
                                 label = {
                                     Text(
                                         text = INSTALLATION_PROFILE_LABELS.getValue(profileId),
@@ -470,7 +501,7 @@ private fun AgentPackageDetail(
         Text("原文：${state.source.installed}/${state.source.planned}", style = MaterialTheme.typography.bodySmall)
         Text("安装档位：${INSTALLATION_PROFILE_LABELS[state.selectedProfileId] ?: state.selectedProfileId}", style = MaterialTheme.typography.bodySmall)
         Text("准确安装大小：${formatAgentPackageSize(state.exactInstalledBytes)}", style = MaterialTheme.typography.bodySmall)
-        state.lastEvidenceExpansionAt?.let { timestamp ->
+        state.lastEvidenceExpandedAt?.let { timestamp ->
             Text("最近资料扩展：${formatExpansionTime(timestamp)}", style = MaterialTheme.typography.bodySmall)
         }
         if (state.missingRequiredPackageIds.isNotEmpty()) {
@@ -493,19 +524,8 @@ private val INSTALLATION_PROFILE_LABELS = mapOf(
     "source" to "包含原文",
 )
 
-internal data class AgentPackageCount(val installed: Int, val planned: Int)
-
-internal data class AgentPackageDetailUiState(
-    val schemaVersion: Int,
-    val selectedProfileId: String,
-    val exactInstalledBytes: Long,
-    val required: AgentPackageCount,
-    val recommended: AgentPackageCount,
-    val optional: AgentPackageCount,
-    val source: AgentPackageCount,
-    val lastEvidenceExpansionAt: Long?,
-    val missingRequiredPackageIds: List<String>,
-)
+internal typealias AgentPackageCount = AgentPackageClassCount
+internal typealias AgentPackageDetailUiState = AgentPackageDetail
 
 private fun V2Bundle.toInstallationPlan(): AgentInstallationPlan = AgentInstallationPlan(
     agentPackageId = manifest.agent.fileName,
@@ -522,88 +542,8 @@ private fun V2Bundle.toInstallationPlan(): AgentInstallationPlan = AgentInstalla
         AgentInstallationProfile(profile.id, profile.packageIds)
     },
     requiredPackageIds = agent.installPlan.requiredCorpusIds,
+    availablePackageIds = manifest.selectedPackageIds,
 )
-
-private fun installedDetail(
-    session: AgentPackageImportSession,
-    profileId: String,
-    previous: AgentPackageDetailUiState?,
-): AgentPackageDetailUiState = when (val parsed = session.parsedPackage) {
-    is V2Bundle -> {
-        val plan = parsed.toInstallationPlan()
-        val selectedIds = plan.profiles.first { it.id == profileId }.packageIds.toSet()
-        fun count(installClass: V2InstallClass) = AgentPackageCount(
-            installed = plan.packages.count { it.installClass == installClass && it.id in selectedIds },
-            planned = plan.packages.count { it.installClass == installClass },
-        )
-        AgentPackageDetailUiState(
-            schemaVersion = 2,
-            selectedProfileId = profileId,
-            exactInstalledBytes = requireNotNull(exactInstallationBytes(plan, profileId)),
-            required = count(V2InstallClass.REQUIRED),
-            recommended = count(V2InstallClass.RECOMMENDED),
-            optional = count(V2InstallClass.OPTIONAL),
-            source = count(V2InstallClass.SOURCE),
-            lastEvidenceExpansionAt = null,
-            missingRequiredPackageIds = plan.requiredPackageIds.filterNot(selectedIds::contains),
-        )
-    }
-    is V2Corpus -> previous.withAddedPackage(parsed.manifest.installClass, parsed.compressedSizeBytes)
-    is V2Source -> previous.withAddedPackage(V2InstallClass.SOURCE, parsed.compressedSizeBytes)
-    is V2Agent -> {
-        fun planned(installClass: V2InstallClass) = parsed.installPlan.packages.count { it.installClass == installClass }
-        AgentPackageDetailUiState(
-            schemaVersion = 2,
-            selectedProfileId = profileId,
-            exactInstalledBytes = parsed.compressedSizeBytes,
-            required = AgentPackageCount(0, planned(V2InstallClass.REQUIRED)),
-            recommended = AgentPackageCount(0, planned(V2InstallClass.RECOMMENDED)),
-            optional = AgentPackageCount(0, planned(V2InstallClass.OPTIONAL)),
-            source = AgentPackageCount(0, planned(V2InstallClass.SOURCE)),
-            lastEvidenceExpansionAt = null,
-            missingRequiredPackageIds = parsed.installPlan.requiredCorpusIds.sorted(),
-        )
-    }
-    is V1Bundle -> AgentPackageDetailUiState(
-        schemaVersion = 1,
-        selectedProfileId = "v1",
-        exactInstalledBytes = parsed.compressedSizeBytes,
-        required = AgentPackageCount(parsed.bundle.corpora.size, parsed.bundle.agent.requiredCorpora.size),
-        recommended = AgentPackageCount(0, 0),
-        optional = AgentPackageCount(0, 0),
-        source = AgentPackageCount(0, 0),
-        lastEvidenceExpansionAt = null,
-        missingRequiredPackageIds = parsed.bundle.agent.requiredCorpora
-            .filterNot(parsed.bundle.corpora.map { it.id }.toSet()::contains),
-    )
-}
-
-private fun AgentPackageDetailUiState?.withAddedPackage(
-    installClass: V2InstallClass,
-    packageBytes: Long,
-): AgentPackageDetailUiState {
-    val base = this ?: AgentPackageDetailUiState(
-        schemaVersion = 2,
-        selectedProfileId = "standalone",
-        exactInstalledBytes = 0L,
-        required = AgentPackageCount(0, 0),
-        recommended = AgentPackageCount(0, 0),
-        optional = AgentPackageCount(0, 0),
-        source = AgentPackageCount(0, 0),
-        lastEvidenceExpansionAt = null,
-        missingRequiredPackageIds = emptyList(),
-    )
-    fun AgentPackageCount.increment() = copy(installed = (installed + 1).coerceAtMost(planned.coerceAtLeast(installed + 1)))
-    return base.copy(
-        exactInstalledBytes = Math.addExact(base.exactInstalledBytes, packageBytes),
-        required = if (installClass == V2InstallClass.REQUIRED) base.required.increment() else base.required,
-        recommended = if (installClass == V2InstallClass.RECOMMENDED) base.recommended.increment() else base.recommended,
-        optional = if (installClass == V2InstallClass.OPTIONAL) base.optional.increment() else base.optional,
-        source = if (installClass == V2InstallClass.SOURCE) base.source.increment() else base.source,
-        lastEvidenceExpansionAt = System.currentTimeMillis(),
-        missingRequiredPackageIds = if (installClass == V2InstallClass.REQUIRED) emptyList() else base.missingRequiredPackageIds,
-    )
-}
 
 private fun privateInstallAvailableBytes(path: String): Long =
     runCatching { StatFs(path).availableBytes }.getOrDefault(-1L)

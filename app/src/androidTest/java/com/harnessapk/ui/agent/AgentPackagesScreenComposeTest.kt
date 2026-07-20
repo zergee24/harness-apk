@@ -2,15 +2,19 @@ package com.harnessapk.ui.agent
 
 import android.graphics.Bitmap
 import androidx.activity.ComponentActivity
+import androidx.room.Room
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.isRoot
+import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -18,13 +22,23 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.printToString
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Density
 import com.harnessapk.agent.Agent
+import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentStatus
+import com.harnessapk.common.TimeProvider
+import com.harnessapk.storage.AgentEntity
+import com.harnessapk.storage.AgentVersionEntity
+import com.harnessapk.storage.AgentVersionPackageEntity
+import com.harnessapk.storage.AppDatabase
 import com.harnessapk.ui.theme.HarnessApkTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import java.io.FileOutputStream
+import java.util.UUID
 
 class AgentPackagesScreenComposeTest {
     @get:Rule
@@ -123,6 +137,37 @@ class AgentPackagesScreenComposeTest {
     }
 
     @Test
+    fun largeFontPreviewKeepsActionsVisibleAndProvidesScrollableBody() {
+        composeRule.setContent {
+            CompositionLocalProvider(
+                LocalDensity provides Density(
+                    density = LocalDensity.current.density,
+                    fontScale = 2f,
+                ),
+            ) {
+                HarnessApkTheme {
+                    AgentV2InstallPreview(
+                        name = "资料研究者",
+                        version = 2,
+                        publisherFingerprint = "fingerprint-".repeat(16),
+                        plan = plan(),
+                        availableBytes = 250L,
+                        sourceRecords = emptyList(),
+                        isInstalling = false,
+                        onDismiss = {},
+                        onInstall = {},
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("调整资料").assertIsDisplayed().performClick()
+        composeRule.onNode(hasScrollAction()).assertExists()
+        composeRule.onNodeWithText("安装").assertIsDisplayed()
+        composeRule.onNodeWithText("收起").assertIsDisplayed()
+    }
+
+    @Test
     fun sourceProfileIsExplicitlyReadOnlyForAnswers() {
         composeRule.setContent {
             HarnessApkTheme {
@@ -142,6 +187,31 @@ class AgentPackagesScreenComposeTest {
         }
 
         composeRule.onNodeWithText("仅阅读核验，不参与回答").assertIsDisplayed()
+    }
+
+    @Test
+    fun balancedConvenienceBundleDisablesProfilesWhosePackagesAreAbsent() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                AgentV2InstallPreview(
+                    name = "研究者",
+                    version = 2,
+                    publisherFingerprint = "fingerprint",
+                    plan = plan(availablePackageIds = listOf("core", "recommended")),
+                    availableBytes = Long.MAX_VALUE,
+                    sourceRecords = emptyList(),
+                    isInstalling = false,
+                    onDismiss = {},
+                    onInstall = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("调整资料").performClick()
+        composeRule.onNodeWithText("轻量").assertIsEnabled()
+        composeRule.onNodeWithText("推荐").assertIsEnabled()
+        composeRule.onNodeWithText("完整证据").assertIsNotEnabled()
+        composeRule.onNodeWithText("包含原文").assertIsNotEnabled()
     }
 
     @Test
@@ -192,7 +262,7 @@ class AgentPackagesScreenComposeTest {
 
     @Test
     fun capturesReadyDetailAndStandaloneCoverageAcceptanceArtifacts() {
-        val detail = mutableStateOf(detail(optionalInstalled = 1, expansionAt = null))
+        val detail = mutableStateOf(roomRecoveredDetail(optionalInstalled = 1, expansionAt = null))
         composeRule.setContent {
             HarnessApkTheme {
                 Box(Modifier.padding(16.dp)) {
@@ -220,7 +290,7 @@ class AgentPackagesScreenComposeTest {
         composeRule.onNodeWithText("开始对话").assertIsEnabled()
         recordUiArtifact("ready-detail")
         composeRule.runOnIdle {
-            detail.value = detail(optionalInstalled = 2, expansionAt = 1_752_979_200_000L)
+            detail.value = roomRecoveredDetail(optionalInstalled = 2, expansionAt = 1_752_979_200_000L)
         }
         composeRule.onNodeWithText("可选：2/2").assertIsDisplayed()
         composeRule.onNodeWithText("最近资料扩展：", substring = true).assertIsDisplayed()
@@ -246,19 +316,90 @@ class AgentPackagesScreenComposeTest {
         directory.resolve("$name-tree.txt").writeText(tree, Charsets.UTF_8)
     }
 
-    private fun detail(optionalInstalled: Int, expansionAt: Long?) = AgentPackageDetailUiState(
-        schemaVersion = 2,
-        selectedProfileId = "balanced",
-        exactInstalledBytes = 300L + optionalInstalled * 100L,
-        required = AgentPackageCount(1, 1),
-        recommended = AgentPackageCount(1, 1),
-        optional = AgentPackageCount(optionalInstalled, 2),
-        source = AgentPackageCount(0, 1),
-        lastEvidenceExpansionAt = expansionAt,
-        missingRequiredPackageIds = emptyList(),
-    )
+    private fun roomRecoveredDetail(
+        optionalInstalled: Int,
+        expansionAt: Long?,
+    ): AgentPackageDetailUiState = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val root = context.cacheDir.resolve("agent-detail-${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            database.agentDao().upsertAgent(
+                AgentEntity(
+                    id = "fixture.researcher",
+                    name = "资料研究者",
+                    summary = "",
+                    activeVersion = 2,
+                    publisherPublicKey = byteArrayOf(1),
+                    publisherFingerprint = "fixture-publisher",
+                    installSource = "LOCAL_FILE",
+                    status = AgentStatus.READY.name,
+                    requiredCorpusCount = 1,
+                    installedCorpusCount = 1,
+                    createdAt = 1L,
+                    updatedAt = 1L,
+                ),
+            )
+            val agentFile = root.resolve("agent.hagent").apply { writeBytes(ByteArray(100)) }
+            database.agentDao().insertVersion(
+                AgentVersionEntity(
+                    agentId = "fixture.researcher",
+                    version = 2,
+                    schemaVersion = 2,
+                    bundlePath = agentFile.absolutePath,
+                    bundleSha256 = "a".repeat(64),
+                    manifestJson = "{}",
+                    persona = "",
+                    worldviewJsonl = "",
+                    installedAt = 1L,
+                    state = AgentStatus.READY.name,
+                    lastEvidenceExpandedAt = expansionAt,
+                    agentPackageSizeBytes = 100L,
+                    selectedProfileId = if (optionalInstalled == 2) "complete" else "balanced",
+                ),
+            )
+            val declarations = listOf(
+                Triple("core", "required", true),
+                Triple("recommended", "recommended", true),
+                Triple("optional-1", "optional", optionalInstalled >= 1),
+                Triple("optional-2", "optional", optionalInstalled >= 2),
+                Triple("source", "source", false),
+            )
+            database.agentDao().upsertVersionPackages(
+                declarations.map { (id, installClass, installed) ->
+                    AgentVersionPackageEntity(
+                        agentId = "fixture.researcher",
+                        version = 2,
+                        packageId = id,
+                        type = if (installClass == "source") "hsource" else "hcorpus",
+                        fileName = "$id.package",
+                        installClass = installClass,
+                        packageSha256 = id.padEnd(64, 'a').take(64),
+                        packageSizeBytes = 100L,
+                        installed = installed,
+                        filePath = "",
+                        installedAt = 1L.takeIf { installed },
+                    )
+                },
+            )
+            requireNotNull(
+                AgentRepository(
+                    filesDir = root.resolve("files"),
+                    cacheDir = root.resolve("cache"),
+                    dao = database.agentDao(),
+                    timeProvider = TimeProvider { 2L },
+                    ioDispatcher = Dispatchers.IO,
+                ).packageDetail("fixture.researcher", 2),
+            )
+        } finally {
+            database.close()
+            root.deleteRecursively()
+        }
+    }
 
-    private fun plan(): AgentInstallationPlan = AgentInstallationPlan(
+    private fun plan(
+        availablePackageIds: List<String> = listOf("core", "recommended", "optional", "source"),
+    ): AgentInstallationPlan = AgentInstallationPlan(
         agentPackageId = "fixture.hagent",
         agentSizeBytes = 100L,
         packages = listOf(
@@ -274,5 +415,6 @@ class AgentPackagesScreenComposeTest {
             AgentInstallationProfile("source", listOf("core", "recommended", "optional", "source")),
         ),
         requiredPackageIds = listOf("core"),
+        availablePackageIds = availablePackageIds,
     )
 }

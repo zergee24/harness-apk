@@ -1484,6 +1484,18 @@ class AgentBundleReader(
             }
             if (profiles.any { id !in it.packageIds }) throw AgentBundleException("profile 缺少 required corpus：$id")
         }
+        installPlanContractError(
+            packages = packages.map { declaration ->
+                InstallContractPackage(declaration.id, declaration.type, declaration.installClass)
+            },
+            profiles = profiles.map { profile ->
+                InstallContractProfile(profile.id, profile.packageIds)
+            },
+            requiredCorpusIds = required,
+        )?.let { message -> throw AgentBundleException(message) }
+        if (recommended != "balanced") {
+            throw AgentBundleException("install plan 推荐 profile 必须为 balanced")
+        }
         return V2InstallPlan(packages, profiles, recommended, required)
     }
 

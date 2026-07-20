@@ -99,8 +99,8 @@ class AgentRetrievalTest {
     }
 
     @Test
-    fun v2InstallRecapturesPrivateFilesystemSpaceAndFailsBeforeFinalCopy() = runTest {
-        var availableBytes = 16L
+    fun v2InstallSpaceFailureKeepsTheSameSessionRetryable() = runTest {
+        var availableBytes = 0L
         var captures = 0
         val fixture = v2InstallFixture(
             privateInstallAvailableBytes = {
@@ -119,12 +119,67 @@ class AgentRetrievalTest {
         assertTrue(fixture.dao.findAgent("agent-v2") == null)
         assertTrue(fixture.repositoryRoot.resolve("files").walkTopDown().none(File::isFile))
 
-        availableBytes = 17L
-        val installable = fixture.repository.preparePackageImport("balanced.hbundle") {
+        availableBytes = Long.MAX_VALUE
+        assertEquals(AgentStatus.READY, fixture.repository.installPackage(blocked, "balanced").agent.status)
+        assertTrue(captures >= 2)
+        assertTrue(runCatching { fixture.repository.installPackage(blocked, "balanced") }.isFailure)
+    }
+
+    @Test
+    fun sameVersionConvenienceSupplementRecapturesSpaceAndCanRetryLowerRaceFailure() = runTest {
+        var availableBytes = Long.MAX_VALUE
+        var captures = 0
+        val fixture = v2InstallFixture(
+            privateInstallAvailableBytes = {
+                captures += 1
+                availableBytes
+            },
+        )
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("balanced.hbundle") { "bundle".byteInputStream() },
+            profileId = "lite",
+        )
+        val supplement = fixture.repository.preparePackageImport("balanced.hbundle") {
             "bundle".byteInputStream()
         }
-        assertEquals(AgentStatus.READY, fixture.repository.installPackage(installable, "balanced").agent.status)
-        assertEquals(2, captures)
+        val capturesBeforeSupplement = captures
+        availableBytes = 0L
+
+        val failure = runCatching {
+            fixture.repository.installPackage(supplement, profileId = "balanced")
+        }.exceptionOrNull()
+
+        assertTrue(failure is AgentBundleException)
+        assertTrue(captures > capturesBeforeSupplement)
+        assertFalse(fixture.dao.versionPackages.getValue("agent-v2:2:source-package").installed)
+
+        availableBytes = Long.MAX_VALUE
+        val installed = fixture.repository.installPackage(supplement, profileId = "balanced")
+        assertEquals(AgentInstallOutcome.INSTALLED, installed.outcome)
+        assertTrue(fixture.dao.versionPackages.getValue("agent-v2:2:source-package").installed)
+    }
+
+    @Test
+    fun standaloneSourceBudgetsRawPayloadInsteadOfCompressedPackageBytesAndRemainsRetryable() = runTest {
+        var availableBytes = Long.MAX_VALUE
+        val fixture = v2InstallFixture(privateInstallAvailableBytes = { availableBytes })
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("agent.hagent") { "agent".byteInputStream() },
+        )
+        val sourceSession = fixture.repository.preparePackageImport("source.hsource") {
+            "source".byteInputStream()
+        }
+        availableBytes = 7L
+
+        val failure = runCatching { fixture.repository.installPackage(sourceSession) }.exceptionOrNull()
+
+        assertTrue(failure is AgentBundleException)
+        assertTrue(fixture.dao.sources.isEmpty())
+        availableBytes = Long.MAX_VALUE
+        assertEquals(
+            AgentInstallOutcome.INSTALLED,
+            fixture.repository.installPackage(sourceSession).outcome,
+        )
     }
 
     @Test
@@ -141,6 +196,71 @@ class AgentRetrievalTest {
         assertTrue(
             fixture.repositoryRoot.resolve("files/agents/sources").walkTopDown().none(File::isFile),
         )
+    }
+
+    @Test
+    fun packageDetailRebuildsV2CoverageProfileAndExactBytesFromPersistedRows() = runTest {
+        val fixture = v2InstallFixture()
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("balanced.hbundle") { "bundle".byteInputStream() },
+            profileId = "lite",
+        )
+
+        val detail = requireNotNull(fixture.repository.packageDetail("agent-v2", 2))
+        val reopened = AgentRepository(
+            filesDir = fixture.repositoryRoot.resolve("files"),
+            cacheDir = fixture.repositoryRoot.resolve("cache"),
+            dao = fixture.dao,
+            timeProvider = TimeProvider { 99L },
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+
+        assertEquals(2, detail.schemaVersion)
+        assertEquals("lite", detail.selectedProfileId)
+        assertEquals(11L, detail.exactInstalledBytes)
+        assertEquals(AgentPackageClassCount(1, 1), detail.required)
+        assertEquals(AgentPackageClassCount(0, 0), detail.recommended)
+        assertEquals(AgentPackageClassCount(0, 0), detail.optional)
+        assertEquals(AgentPackageClassCount(0, 1), detail.source)
+        assertTrue(detail.missingRequiredPackageIds.isEmpty())
+        assertEquals(detail, reopened.packageDetail("agent-v2", 2))
+    }
+
+    @Test
+    fun sourceOnlySupplementDoesNotAdvancePersistedEvidenceExpansionTime() = runTest {
+        var now = 20L
+        val fixture = v2InstallFixture(timeProvider = TimeProvider { now })
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("balanced.hbundle") { "bundle".byteInputStream() },
+            profileId = "lite",
+        )
+        assertEquals(20L, fixture.repository.packageDetail("agent-v2", 2)?.lastEvidenceExpandedAt)
+        now = 30L
+
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("balanced.hbundle") { "bundle".byteInputStream() },
+            profileId = "balanced",
+        )
+
+        val detail = requireNotNull(fixture.repository.packageDetail("agent-v2", 2))
+        assertEquals(20L, detail.lastEvidenceExpandedAt)
+        assertEquals("balanced", detail.selectedProfileId)
+        assertEquals(17L, detail.exactInstalledBytes)
+    }
+
+    @Test
+    fun packageDetailRebuildsAgentOnlyMissingRequiredState() = runTest {
+        val fixture = v2InstallFixture()
+        fixture.repository.installPackage(
+            fixture.repository.preparePackageImport("agent.hagent") { "agent".byteInputStream() },
+        )
+
+        val detail = requireNotNull(fixture.repository.packageDetail("agent-v2", 2))
+
+        assertEquals("agent-only", detail.selectedProfileId)
+        assertEquals(5L, detail.exactInstalledBytes)
+        assertEquals(AgentPackageClassCount(0, 1), detail.required)
+        assertEquals(listOf("corpus-core"), detail.missingRequiredPackageIds)
     }
 
     @Test
@@ -1721,6 +1841,11 @@ internal class FakeAgentDao : AgentDao {
         this.version = row.copy(state = state, lastEvidenceExpandedAt = expandedAt)
         return 1
     }
+    override suspend fun updateVersionSelectedProfile(agentId: String, version: Int, profileId: String): Int {
+        val row = this.version?.takeIf { it.agentId == agentId && it.version == version } ?: return 0
+        this.version = row.copy(selectedProfileId = profileId)
+        return 1
+    }
     override suspend fun updateAgentInstallState(
         agentId: String,
         status: String,
@@ -1970,6 +2095,7 @@ private fun v2InstallFixture(
     lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
     conversationDao: ConversationDao? = null,
     privateInstallAvailableBytes: () -> Long = { Long.MAX_VALUE },
+    timeProvider: TimeProvider = TimeProvider { 20L },
 ): V2InstallFixture {
     val root = Files.createTempDirectory("agent-v2-install-test").toFile().apply { deleteOnExit() }
     val packageFile = root.resolve("template.zip").apply { writeText("template") }
@@ -2146,7 +2272,7 @@ private fun v2InstallFixture(
             },
             lifecycleCoordinator = lifecycleCoordinator,
             fileOps = fileOps,
-            timeProvider = TimeProvider { 20L },
+            timeProvider = timeProvider,
             ioDispatcher = Dispatchers.Unconfined,
             privateInstallAvailableBytes = privateInstallAvailableBytes,
         ),
@@ -2354,6 +2480,17 @@ private class StagedMutationAgentFileOps(
     }
 
     override suspend fun moveAtomically(source: File, destination: File) {
+        if (!mutated && source == stagedFile && destination.parentFile?.name == "agent-install-snapshots") {
+            mutated = true
+            when (mode) {
+                StagedMutationMode.REPLACE_PATH -> {
+                    delegate.moveAtomically(source, destination)
+                    stagedFile.writeText("evil")
+                    return
+                }
+                StagedMutationMode.OVERWRITE_IN_PLACE -> stagedFile.writeText("evil")
+            }
+        }
         if (!mutated && destination.name == "agent.hagent" && source == stagedFile) {
             mutateOriginal()
         }

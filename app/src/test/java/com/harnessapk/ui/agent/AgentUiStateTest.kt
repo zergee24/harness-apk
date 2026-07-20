@@ -92,6 +92,50 @@ class AgentUiStateTest {
     }
 
     @Test
+    fun profileSelectionIsLimitedByCurrentBundleAvailability() {
+        val balancedBundle = plan(availablePackageIds = listOf("core", "recommended"))
+
+        assertEquals(
+            AgentInstallationDecision.InstallDirectly("balanced"),
+            installationDecision(balancedBundle, availableBytes = 1_000L, requestedProfileId = null),
+        )
+        assertEquals(
+            AgentInstallationDecision.BlockUnavailableProfile(
+                profileId = "complete",
+                missingPackageIds = listOf("optional"),
+            ),
+            installationDecision(balancedBundle, availableBytes = 1_000L, requestedProfileId = "complete"),
+        )
+        assertEquals(
+            AgentInstallationDecision.BlockUnavailableProfile(
+                profileId = "source",
+                missingPackageIds = listOf("optional", "source"),
+            ),
+            installationDecision(balancedBundle, availableBytes = 1_000L, requestedProfileId = "source"),
+        )
+        assertTrue(profileAvailableInBundle(balancedBundle, "lite"))
+        assertTrue(profileAvailableInBundle(balancedBundle, "balanced"))
+        assertFalse(profileAvailableInBundle(balancedBundle, "complete"))
+        assertFalse(profileAvailableInBundle(balancedBundle, "source"))
+    }
+
+    @Test
+    fun lowSpaceSuggestionOnlyUsesProfilesPresentInCurrentBundle() {
+        val completeOnlyBundle = plan(
+            availablePackageIds = listOf("core", "recommended", "optional"),
+        )
+
+        assertEquals(
+            AgentInstallationDecision.ShowAdjustment(
+                selectedProfileId = "complete",
+                suggestedProfileId = "balanced",
+                reason = "所选资料空间不足",
+            ),
+            installationDecision(completeOnlyBundle, availableBytes = 350L, requestedProfileId = "complete"),
+        )
+    }
+
+    @Test
     fun requiredShortageAndOverflowFailClosed() {
         assertEquals(
             AgentInstallationDecision.BlockMissingRequired(listOf("core")),
@@ -145,6 +189,57 @@ class AgentUiStateTest {
             installationDecision(plan(), Long.MAX_VALUE, "unknown") is
                 AgentInstallationDecision.BlockMissingRequired,
         )
+    }
+
+    @Test
+    fun malformedProfileClassMembershipAndPackageTypesFailClosed() {
+        val malformedPlans = listOf(
+            plan().copy(
+                profiles = plan().profiles.map { profile ->
+                    if (profile.id == "lite") profile.copy(packageIds = listOf("core", "source")) else profile
+                },
+            ),
+            plan().copy(
+                profiles = plan().profiles.map { profile ->
+                    if (profile.id == "balanced") profile.copy(packageIds = listOf("core")) else profile
+                },
+            ),
+            plan().copy(
+                profiles = plan().profiles.map { profile ->
+                    if (profile.id == "complete") {
+                        profile.copy(packageIds = listOf("core", "recommended"))
+                    } else {
+                        profile
+                    }
+                },
+            ),
+            plan().copy(
+                profiles = plan().profiles.map { profile ->
+                    if (profile.id == "source") {
+                        profile.copy(packageIds = listOf("core", "recommended", "optional"))
+                    } else {
+                        profile
+                    }
+                },
+            ),
+            plan().copy(
+                packages = plan().packages.map { declaration ->
+                    if (declaration.id == "source") declaration.copy(type = V2PackageType.CORPUS) else declaration
+                },
+            ),
+            plan().copy(
+                packages = plan().packages.map { declaration ->
+                    if (declaration.id == "optional") declaration.copy(type = V2PackageType.SOURCE) else declaration
+                },
+            ),
+        )
+
+        malformedPlans.forEach { malformed ->
+            assertTrue(
+                installationDecision(malformed, Long.MAX_VALUE, null) is
+                    AgentInstallationDecision.BlockMissingRequired,
+            )
+        }
     }
 
     @Test
@@ -277,6 +372,7 @@ class AgentUiStateTest {
     private fun plan(
         agentSizeBytes: Long = 100L,
         coreSizeBytes: Long = 100L,
+        availablePackageIds: List<String> = listOf("core", "recommended", "optional", "source"),
     ): AgentInstallationPlan = AgentInstallationPlan(
         agentPackageId = "fixture.hagent",
         agentSizeBytes = agentSizeBytes,
@@ -293,6 +389,7 @@ class AgentUiStateTest {
             AgentInstallationProfile("source", listOf("core", "recommended", "optional", "source")),
         ),
         requiredPackageIds = listOf("core"),
+        availablePackageIds = availablePackageIds,
     )
 
     private fun source(
