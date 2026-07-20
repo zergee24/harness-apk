@@ -278,6 +278,50 @@ class AgentRetrievalTest {
     }
 
     @Test
+    fun explicitProfileSurvivesEquivalentMembershipAndRepositoryReopen() = runTest {
+        suspend fun installAndRead(profileId: String): Pair<String, String> {
+            val fixture = v2InstallFixture(
+                installPlanTransform = { plan ->
+                    plan.copy(
+                        profiles = plan.profiles.map { profile ->
+                            when (profile.id) {
+                                "lite", "balanced", "complete" ->
+                                    profile.copy(packageIds = listOf("corpus-core"))
+                                "source" ->
+                                    profile.copy(packageIds = listOf("corpus-core", "source-package"))
+                                else -> profile
+                            }
+                        },
+                    )
+                },
+            )
+            fixture.repository.installPackage(
+                fixture.repository.preparePackageImport("$profileId.hbundle") {
+                    "bundle".byteInputStream()
+                },
+                profileId = profileId,
+            )
+            assertEquals(profileId, fixture.dao.version?.selectedProfileId)
+            val first = requireNotNull(
+                fixture.repository.packageDetail("agent-v2", 2),
+            ).selectedProfileId
+            val reopened = AgentRepository(
+                filesDir = fixture.repositoryRoot.resolve("files"),
+                cacheDir = fixture.repositoryRoot.resolve("cache"),
+                dao = fixture.dao,
+                timeProvider = TimeProvider { 99L },
+                ioDispatcher = Dispatchers.Unconfined,
+            )
+            return first to requireNotNull(
+                reopened.packageDetail("agent-v2", 2),
+            ).selectedProfileId
+        }
+
+        assertEquals("balanced" to "balanced", installAndRead("balanced"))
+        assertEquals("complete" to "complete", installAndRead("complete"))
+    }
+
+    @Test
     fun sourceOnlySupplementDoesNotAdvancePersistedEvidenceExpansionTime() = runTest {
         var now = 20L
         val fixture = v2InstallFixture(timeProvider = TimeProvider { now })
@@ -2268,6 +2312,7 @@ private fun v2InstallFixture(
     privateInstallAvailableBytes: () -> Long = { Long.MAX_VALUE },
     timeProvider: TimeProvider = TimeProvider { 20L },
     chunkSearchInsertFailure: Throwable? = null,
+    installPlanTransform: (V2InstallPlan) -> V2InstallPlan = { it },
 ): V2InstallFixture {
     val root = Files.createTempDirectory("agent-v2-install-test").toFile().apply { deleteOnExit() }
     val packageFile = root.resolve("template.zip").apply { writeText("template") }
@@ -2290,7 +2335,7 @@ private fun v2InstallFixture(
         sizeBytes = 6L,
         sha256 = "e".repeat(64),
     )
-    val plan = V2InstallPlan(
+    val plan = installPlanTransform(V2InstallPlan(
         packages = listOf(installPackage, sourceInstallPackage),
         profiles = listOf(
             V2InstallProfile("lite", listOf("corpus-core"), false),
@@ -2300,7 +2345,7 @@ private fun v2InstallFixture(
         ),
         recommendedProfileId = "balanced",
         requiredCorpusIds = listOf("corpus-core"),
-    )
+    ))
     val agent = V2Agent(
         file = packageFile,
         packageSha256 = "c".repeat(64),

@@ -30,7 +30,12 @@ internal class AgentImportPreviewViewModel<T : Any>(
 
     suspend fun discardIfCurrent(expected: T): Boolean {
         if (mutableSession.value !== expected) return false
-        discardImport(expected)
+        try {
+            discardImport(expected)
+        } catch (error: Throwable) {
+            mutableSession.compareAndSet(expected, null)
+            throw error
+        }
         return mutableSession.compareAndSet(expected, null)
     }
 

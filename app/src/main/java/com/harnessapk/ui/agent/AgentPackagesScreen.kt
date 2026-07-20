@@ -259,11 +259,17 @@ fun AgentPackagesScreen(
                         expandedAgentId = attempt.result.agent.id
                     }
                     is AgentPackageInstallAttempt.Failure -> {
-                        previewInstallFailure = attempt
-                        attempt.storageFailure
-                            ?.availableBytes
-                            ?.takeIf { it >= 0L }
-                            ?.let { previewAvailableBytes = it }
+                        if (attempt.sessionRetained) {
+                            previewInstallFailure = attempt
+                            attempt.storageFailure
+                                ?.availableBytes
+                                ?.takeIf { it >= 0L }
+                                ?.let { previewAvailableBytes = it }
+                        } else {
+                            previewViewModel.clearIfCurrent(session)
+                            previewInstallFailure = null
+                            errorText = attempt.message
+                        }
                     }
                 }
                 isWorking = false

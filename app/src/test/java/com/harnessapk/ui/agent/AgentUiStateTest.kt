@@ -60,6 +60,7 @@ class AgentUiStateTest {
         assertTrue(result.message.contains("需要 300 字节"))
         assertTrue(result.message.contains("可用 250 字节"))
         assertTrue(result.message.contains("释放空间后重试，或调整资料"))
+        assertTrue(result.sessionRetained)
     }
 
     @Test
@@ -83,6 +84,24 @@ class AgentUiStateTest {
             result.message,
         )
         assertFalse(result.message.contains("调整资料"))
+        assertTrue(result.sessionRetained)
+    }
+
+    @Test
+    fun ordinaryInstallFailureIsNotRetainedForEitherPackageKind() = runTest {
+        AgentPackageKind.entries.forEach { packageKind ->
+            val result = attemptAgentPackageInstall(
+                sessionId = "ordinary-failure",
+                profileId = "balanced",
+                packageKind = packageKind,
+                install = { throw AgentBundleException("同一版本内容不同") },
+                refreshAvailableBytes = { error("普通失败不应刷新空间") },
+            ) as AgentPackageInstallAttempt.Failure
+
+            assertEquals("同一版本内容不同", result.message)
+            assertNull(result.storageFailure)
+            assertFalse(result.sessionRetained)
+        }
     }
 
     @Test
@@ -481,6 +500,19 @@ class AgentUiStateTest {
         assertTrue(runCatching { viewModel.replace(replacement) }.isFailure)
         assertTrue(viewModel.session.value === previous)
         assertFalse(replacement.stagedFile.exists())
+    }
+
+    @Test
+    fun dismissClearsExpiredPreviewEvenWhenRepositoryDiscardFails() = runTest {
+        val viewModel = AgentImportPreviewViewModel<AgentImportSession>(
+            discardImport = { throw AgentBundleException("session expired") },
+            stagedFile = AgentImportSession::stagedFile,
+        )
+        val expired = session("expired")
+        viewModel.replace(expired)
+
+        assertTrue(runCatching { viewModel.discardIfCurrent(expired) }.isFailure)
+        assertNull(viewModel.session.value)
     }
 
     private fun agent(status: AgentStatus, installed: Int, required: Int): Agent = Agent(

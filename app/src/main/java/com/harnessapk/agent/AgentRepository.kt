@@ -438,6 +438,7 @@ class AgentRepository(
             sources,
             stagedFile,
             "bundle.hbundle",
+            requestedProfileId = profileId,
         )
     }
 
@@ -456,6 +457,7 @@ class AgentRepository(
         sources: List<V2Source>,
         stagedFile: File,
         installedName: String,
+        requestedProfileId: String? = null,
     ): AgentInstallResult {
         val existingAgent = dao.findAgent(agent.manifest.id)
         if (existingAgent != null && existingAgent.publisherFingerprint != agent.publisherFingerprint) {
@@ -582,8 +584,12 @@ class AgentRepository(
                 dao.updateVersionSelectedProfile(
                     agent.manifest.id,
                     agent.manifest.version,
-                    inferredSelectedProfileId(
-                        dao.listVersionPackages(agent.manifest.id, agent.manifest.version),
+                    resolvedSelectedProfileId(
+                        packages = dao.listVersionPackages(agent.manifest.id, agent.manifest.version),
+                        preferredProfileIds = listOfNotNull(
+                            requestedProfileId,
+                            existingVersion?.selectedProfileId,
+                        ),
                     ),
                 )
                 result = refreshV2InstallState(agent, now, evidenceExpanded = evidenceExpanded)
@@ -760,8 +766,9 @@ class AgentRepository(
                 dao.updateVersionSelectedProfile(
                     corpus.manifest.agentId,
                     corpus.manifest.version,
-                    inferredSelectedProfileId(
-                        dao.listVersionPackages(corpus.manifest.agentId, corpus.manifest.version),
+                    resolvedSelectedProfileId(
+                        packages = dao.listVersionPackages(corpus.manifest.agentId, corpus.manifest.version),
+                        preferredProfileIds = listOf(version.selectedProfileId),
                     ),
                 )
                 val installedAgent = V2Agent(
@@ -821,7 +828,7 @@ class AgentRepository(
     ): AgentInstallResult {
         val agent = dao.findAgent(source.manifest.agentId)
             ?: throw AgentBundleException("hsource 对应的人格版本尚未安装")
-        dao.findVersion(source.manifest.agentId, source.manifest.version)
+        val version = dao.findVersion(source.manifest.agentId, source.manifest.version)
             ?: throw AgentBundleException("hsource 对应的人格版本尚未安装")
         if (agent.publisherFingerprint != source.publisherFingerprint) {
             throw AgentBundleException("hsource 发布者指纹不匹配")
@@ -921,8 +928,9 @@ class AgentRepository(
                 dao.updateVersionSelectedProfile(
                     source.manifest.agentId,
                     source.manifest.version,
-                    inferredSelectedProfileId(
-                        dao.listVersionPackages(source.manifest.agentId, source.manifest.version),
+                    resolvedSelectedProfileId(
+                        packages = dao.listVersionPackages(source.manifest.agentId, source.manifest.version),
+                        preferredProfileIds = listOf(version.selectedProfileId),
                     ),
                 )
             }
@@ -1191,10 +1199,14 @@ class AgentRepository(
             transactionRunner.run {
             dao.deleteVersionCorpus(agentId, version, corpusId)
             dao.markVersionPackageRemoved(agentId, version, corpusId)
+            val storedVersion = dao.findVersion(agentId, version)
             dao.updateVersionSelectedProfile(
                 agentId,
                 version,
-                inferredSelectedProfileId(dao.listVersionPackages(agentId, version)),
+                resolvedSelectedProfileId(
+                    packages = dao.listVersionPackages(agentId, version),
+                    preferredProfileIds = listOfNotNull(storedVersion?.selectedProfileId),
+                ),
             )
             if (dao.countVersionCorpusReferences(reference.corpusId, reference.sourceHash) == 0) {
                 dao.deleteCorpus(reference.corpusId, reference.sourceHash)
@@ -1412,7 +1424,10 @@ class AgentRepository(
             .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
         val sourceIds = packages.filter { it.installClass == V2InstallClass.SOURCE.wireName }
             .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
-        val selectedProfileId = inferredSelectedProfileId(packages)
+        val selectedProfileId = resolvedSelectedProfileId(
+            packages = packages,
+            preferredProfileIds = listOf(storedVersion.selectedProfileId),
+        )
         val agentBytes = storedVersion.agentPackageSizeBytes.takeIf { it > 0L }
             ?: legacyAgentPackageBytes(storedVersion)
         val exactBytes = installedIds.fold(agentBytes) { total, packageId ->
@@ -1462,6 +1477,40 @@ class AgentRepository(
             required.isNotEmpty() && installedIds == required -> "lite"
             installedIds.isEmpty() -> "agent-only"
             else -> "custom"
+        }
+    }
+
+    private fun resolvedSelectedProfileId(
+        packages: List<AgentVersionPackageEntity>,
+        preferredProfileIds: List<String>,
+    ): String {
+        val installedIds = packages.filter(AgentVersionPackageEntity::installed)
+            .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        preferredProfileIds.firstOrNull { profileId ->
+            expectedProfilePackageIds(packages, profileId) == installedIds
+        }?.let { return it }
+        return inferredSelectedProfileId(packages)
+    }
+
+    private fun expectedProfilePackageIds(
+        packages: List<AgentVersionPackageEntity>,
+        profileId: String,
+    ): Set<String>? {
+        val byClass = V2InstallClass.entries.associateWith { installClass ->
+            packages.filter { it.installClass == installClass.wireName }
+                .mapTo(linkedSetOf(), AgentVersionPackageEntity::packageId)
+        }
+        val required = byClass.getValue(V2InstallClass.REQUIRED)
+        val recommended = byClass.getValue(V2InstallClass.RECOMMENDED)
+        val optional = byClass.getValue(V2InstallClass.OPTIONAL)
+        val source = byClass.getValue(V2InstallClass.SOURCE)
+        return when (profileId) {
+            "agent-only" -> emptySet()
+            "lite" -> required
+            "balanced" -> required + recommended
+            "complete" -> required + recommended + optional
+            "source" -> required + recommended + optional + source
+            else -> null
         }
     }
 

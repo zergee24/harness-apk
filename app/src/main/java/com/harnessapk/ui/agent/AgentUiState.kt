@@ -73,6 +73,7 @@ internal sealed interface AgentPackageInstallAttempt {
     data class Failure(
         val message: String,
         val storageFailure: AgentStorageFailure? = null,
+        val sessionRetained: Boolean = storageFailure != null,
     ) : AgentPackageInstallAttempt
 }
 
