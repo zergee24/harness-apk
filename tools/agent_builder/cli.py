@@ -17,6 +17,17 @@ from .builder import (
     validate_workspace_v2,
 )
 from .recommendation import build_recommendation, format_recommendation_summary
+from .persona_benchmark import (
+    load_benchmark_cases,
+    load_benchmark_responses,
+    load_blind_bundle,
+    load_blind_choices,
+    load_blind_responses,
+    prepare_blind_bundle,
+    publish_new_canonical_json,
+    score_benchmark,
+    score_blind_choices,
+)
 
 
 class _ProfileAction(argparse.Action):
@@ -67,6 +78,40 @@ def build_parser() -> argparse.ArgumentParser:
         action=_ProfileAction,
     )
     pack.set_defaults(profile_explicit=False)
+
+    benchmark_score = subparsers.add_parser(
+        "benchmark-score",
+        help="离线评分人格回归响应",
+    )
+    benchmark_score.add_argument("cases", type=Path)
+    benchmark_score.add_argument("--responses", required=True, type=Path)
+    benchmark_score.add_argument("--output", type=Path)
+
+    benchmark_blind = subparsers.add_parser(
+        "benchmark-blind",
+        help="准备或评分隐藏版本映射的盲测",
+    )
+    blind_subparsers = benchmark_blind.add_subparsers(
+        dest="blind_command",
+        required=True,
+    )
+    blind_prepare = blind_subparsers.add_parser(
+        "prepare",
+        help="生成公开 A/B 对和私有 answer key",
+    )
+    blind_prepare.add_argument("--v1", required=True, type=Path)
+    blind_prepare.add_argument("--v2", required=True, type=Path)
+    blind_prepare.add_argument("--output", required=True, type=Path)
+    blind_prepare.add_argument("--seed", type=int, default=20260718)
+
+    blind_score = blind_subparsers.add_parser(
+        "score",
+        help="使用私有 answer key 汇总人工 choices",
+    )
+    blind_score.add_argument("--pairs", required=True, type=Path)
+    blind_score.add_argument("--answer-key", required=True, type=Path)
+    blind_score.add_argument("--choices", required=True, type=Path)
+    blind_score.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -118,6 +163,42 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(format_recommendation_summary(recommendation))
             return 0
+        if args.command == "benchmark-score":
+            report = score_benchmark(
+                load_benchmark_cases(args.cases),
+                load_benchmark_responses(args.responses),
+            )
+            if args.output is None:
+                print(
+                    json.dumps(
+                        report.to_dict(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            else:
+                publish_new_canonical_json(args.output, report.to_dict())
+                print(args.output)
+            return 0 if report.passed else 2
+        if args.command == "benchmark-blind":
+            if args.blind_command == "prepare":
+                bundle = prepare_blind_bundle(
+                    load_blind_responses(args.v1),
+                    load_blind_responses(args.v2),
+                    args.output,
+                    seed=args.seed,
+                )
+                print(bundle.output_dir)
+                return 0
+            pairs = load_blind_bundle(args.pairs, args.answer_key)
+            report = score_blind_choices(
+                pairs,
+                load_blind_choices(args.choices),
+            )
+            publish_new_canonical_json(args.output, report.to_dict())
+            print(args.output)
+            return 0 if report.passed else 2
         schema_version = _workspace_schema_version(args.workspace)
         if schema_version == 2:
             if args.include_sources:
