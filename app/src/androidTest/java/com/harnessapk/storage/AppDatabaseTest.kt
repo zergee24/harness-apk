@@ -3,6 +3,9 @@ package com.harnessapk.storage
 import android.content.Context
 import androidx.room.Room
 import androidx.room.withTransaction
+import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.db.SupportSQLiteOpenHelper
+import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.harnessapk.agent.AgentBundleAccess
@@ -593,7 +596,64 @@ class AppDatabaseTest {
     }
 
     @Test
-    fun migration15To16PreservesExistingDataAndCreatesIndependentAgentMemories() = runBlocking {
+    fun migration15To16PreservesRealHistoricalSchemaAndV2Data() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-15-16-real-${System.nanoTime()}.db"
+        createVersion15Fixture(context, name)
+
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(AppDatabase.MIGRATION_15_16)
+            .build()
+        val sqlite = migrated.openHelper.writableDatabase
+
+        assertEquals(16, sqlite.version)
+        assertEquals(3, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+        assertEquals(
+            "默认使用中文",
+            sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"),
+        )
+        assertEquals(
+            "notes/project.md",
+            sqlite.string(
+                """
+                SELECT relativePath
+                FROM conversation_markdown_links
+                WHERE conversationId = 'project-conversation'
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(
+            "balanced",
+            sqlite.string(
+                "SELECT selectedProfileId FROM agent_versions WHERE agentId = 'agent-v2'",
+            ),
+        )
+        assertEquals(
+            1,
+            sqlite.scalarInt(
+                "SELECT COUNT(*) FROM agent_version_packages WHERE agentId = 'agent-v2'",
+            ),
+        )
+        assertEquals(
+            1,
+            sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks WHERE sourceId = 'source-v2'"),
+        )
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_source_files"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_hierarchy_nodes"))
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM agent_memories"))
+        assertEquals(
+            0,
+            sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_list('agent_memories')"),
+        )
+        assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_check"))
+
+        migrated.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
+    fun agentMemoryWeakAssociationSurvivesSourceDeletion() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-15-16-${System.nanoTime()}.db"
         val version15 = Room.databaseBuilder(context, AppDatabase::class.java, name).build()
@@ -769,15 +829,7 @@ class AppDatabaseTest {
             listOf(AgentCorpusHierarchyCrossRef("core", sourceHash, "source-1:root")),
         )
 
-        val rawVersion15 = version15.openHelper.writableDatabase
-        rawVersion15.execSQL("DROP INDEX IF EXISTS index_agent_memories_agentId_updatedAt")
-        rawVersion15.execSQL("DROP TABLE IF EXISTS agent_memories")
-        rawVersion15.version = 15
-        version15.close()
-
-        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_15_16)
-            .build()
+        val migrated = version15
         val sqlite = migrated.openHelper.writableDatabase
 
         assertEquals(16, sqlite.version)
@@ -1278,6 +1330,191 @@ class AppDatabaseTest {
 
         assertEquals(listOf(entry), db.chatExecutionEntryDao().listForConversation("conversation-queue"))
         db.close()
+    }
+
+    private fun createVersion15Fixture(
+        context: Context,
+        name: String,
+    ) {
+        createVersion11Fixture(context, name, conflictingChunk = false)
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(
+                    object : SupportSQLiteOpenHelper.Callback(15) {
+                        override fun onConfigure(db: SupportSQLiteDatabase) {
+                            db.setForeignKeyConstraintsEnabled(true)
+                        }
+
+                        override fun onCreate(db: SupportSQLiteDatabase) {
+                            error("version 11 fixture must already exist")
+                        }
+
+                        override fun onUpgrade(
+                            db: SupportSQLiteDatabase,
+                            oldVersion: Int,
+                            newVersion: Int,
+                        ) {
+                            check(oldVersion == 11 && newVersion == 15)
+                            AppDatabase.MIGRATION_11_12.migrate(db)
+                            AppDatabase.MIGRATION_12_13.migrate(db)
+                            AppDatabase.MIGRATION_13_14.migrate(db)
+                            AppDatabase.MIGRATION_14_15.migrate(db)
+                        }
+                    },
+                )
+                .build(),
+        )
+        val db = helper.writableDatabase
+        check(db.version == 15)
+        val sourceHash = "a".repeat(64)
+
+        db.execSQL(
+            """
+            INSERT INTO conversations (
+                id, title, createdAt, updatedAt, defaultProviderId, defaultModel, isArchived,
+                projectId, promptOriginal, promptOptimized, promptFinal, agentId, agentVersion
+            ) VALUES ('daily-conversation', '日常会话', 1, 20, NULL, NULL, 0,
+                NULL, '', '', '', 'agent-v2', 2)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO conversations (
+                id, title, createdAt, updatedAt, defaultProviderId, defaultModel, isArchived,
+                projectId, promptOriginal, promptOptimized, promptFinal, agentId, agentVersion
+            ) VALUES ('project-conversation', '项目会话', 1, 10, NULL, NULL, 0,
+                'project-1', '', '', '', 'agent-v2', 2)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO messages (
+                id, conversationId, role, content, status, providerId, model,
+                createdAt, updatedAt, errorCode, errorMessage
+            ) VALUES ('daily-message', 'daily-conversation', 'USER', '默认使用中文',
+                'SUCCEEDED', 'provider-1', 'model-1', 1, 1, NULL, NULL)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO conversation_markdown_links (
+                conversationId, projectId, relativePath, linkedAt, updatedAt
+            ) VALUES ('project-conversation', 'project-1', 'notes/project.md', 2, 2)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agents (
+                id, name, summary, activeVersion, publisherPublicKey, publisherFingerprint,
+                installSource, status, requiredCorpusCount, installedCorpusCount, createdAt, updatedAt
+            ) VALUES ('agent-v2', '测试人物', '', 2, X'01', 'publisher',
+                'LOCAL_FILE', 'READY', 1, 1, 1, 2)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_versions (
+                agentId, version, schemaVersion, bundlePath, bundleSha256, manifestJson,
+                persona, worldviewJsonl, installedAt, state, identityJson, voiceJson,
+                installPlanJson, requiredCorpusCount, agentPackageSizeBytes, selectedProfileId
+            ) VALUES ('agent-v2', 2, 2, '/tmp/agent.hagent', '${"b".repeat(64)}', '{}',
+                '第一人称', '', 2, 'READY', '{}', '{}', '{}', 1, 100, 'balanced')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_version_packages (
+                agentId, version, packageId, type, fileName, installClass, packageSha256,
+                packageSizeBytes, installed, filePath, installedAt
+            ) VALUES ('agent-v2', 2, 'core', 'corpus', 'core.hcorpus', 'required',
+                '${"c".repeat(64)}', 50, 1, '/tmp/core.hcorpus', 2)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_corpora (corpusId, sourceHash, title, indexedAt, sizeBytes)
+            VALUES ('core', '$sourceHash', '核心资料', 2, 50)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_version_corpora (
+                agentId, version, corpusId, sourceHash, required, installClass,
+                packageSha256, packageSizeBytes, installedAt
+            ) VALUES ('agent-v2', 2, 'core', '$sourceHash', 1, 'required',
+                '${"c".repeat(64)}', 50, 2)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_source_files (
+                sourceId, sourceHash, title, fileName, storedName, format, genre,
+                authorship, period, rawSizeBytes, filePath, packageSha256, installedAt
+            ) VALUES ('source-v2', '$sourceHash', '来源', 'source.md', 'source.md', 'md',
+                'conversation', 'direct', '2026', 20, '/tmp/source.md',
+                '${"d".repeat(64)}', 2)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_version_sources (agentId, version, sourceId, sourceHash)
+            VALUES ('agent-v2', 2, 'source-v2', '$sourceHash')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_corpus_sources (corpusId, corpusHash, sourceId, sourceHash)
+            VALUES ('core', '$sourceHash', 'source-v2', '$sourceHash')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_chunks (
+                chunkKey, sourceId, sourceHash, chunkId, sourceTitle, period, genre,
+                authorship, location, parentPath, context, text, keywordsText,
+                duplicateGroup, conflictKey, sourceAliasesJson, simHash
+            ) VALUES ('source-v2:chunk-1', 'source-v2', '$sourceHash', 'chunk-1', '来源',
+                '2026', 'conversation', 'direct', '第一段', '', '', '默认使用中文',
+                '默认 中文', '', '', '[]', '')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_corpus_chunks (corpusId, corpusHash, chunkKey)
+            VALUES ('core', '$sourceHash', 'source-v2:chunk-1')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_chunk_fts (chunkKey, searchableText)
+            VALUES ('source-v2:chunk-1', '默认 中文')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_hierarchy_nodes (
+                nodeKey, sourceId, sourceHash, nodeId, kind, title, parentNodeKey, path, summary
+            ) VALUES ('source-v2:root', 'source-v2', '$sourceHash', 'root', 'document',
+                '来源', NULL, '来源', '摘要')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_hierarchy_fts (nodeKey, searchableText)
+            VALUES ('source-v2:root', '来源 摘要')
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO agent_corpus_hierarchy (corpusId, corpusHash, nodeKey)
+            VALUES ('core', '$sourceHash', 'source-v2:root')
+            """.trimIndent(),
+        )
+        db.query("PRAGMA foreign_key_check").use { cursor ->
+            check(!cursor.moveToFirst())
+        }
+        helper.close()
     }
 
     private fun createVersion11Fixture(

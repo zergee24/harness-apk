@@ -115,6 +115,32 @@ class AgentMemoryRepositoryTest {
     }
 
     @Test
+    fun invalidUserEditLeavesStoredMemoryUnchanged() = runTest {
+        val invalidContents = listOf(
+            " ",
+            "x".repeat(MAX_AGENT_MEMORY_CONTENT_CHARS + 1),
+        )
+
+        invalidContents.forEach { invalidContent ->
+            val fixture = fixture()
+            fixture.repository.merge(
+                "agent-1",
+                "conversation-1",
+                listOf(candidate("language", "默认英文", "message-1")),
+            )
+            val before = fixture.repository.list("agent-1").single()
+            fixture.now.set(20L)
+
+            val failure = runCatching {
+                fixture.repository.edit(before.id, invalidContent)
+            }.exceptionOrNull()
+
+            assertTrue(failure is AgentMemoryValidationException)
+            assertEquals(before, fixture.repository.list("agent-1").single())
+        }
+    }
+
+    @Test
     fun deleteAndClearRemainScopedToTheRequestedMemoryOrAgent() = runTest {
         val fixture = fixture()
         fixture.repository.merge(

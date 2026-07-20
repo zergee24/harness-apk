@@ -15,8 +15,7 @@ fun interface AgentMemoryTransactionRunner {
 
 class AgentMemoryRepository(
     private val dao: AgentMemoryDao,
-    private val transactionRunner: AgentMemoryTransactionRunner =
-        AgentMemoryTransactionRunner { block -> block() },
+    private val transactionRunner: AgentMemoryTransactionRunner,
     private val timeProvider: TimeProvider = SystemTimeProvider,
 ) {
     fun observe(agentId: String): Flow<List<AgentMemory>> {
