@@ -1161,13 +1161,13 @@ class AppDatabaseTest {
     }
 
     @Test
-    fun migrationFailsWhenCollapsedPhysicalEvidenceConflicts() {
+    fun migrationWithConflictingLegacyChunksPreservesConversationsAndRemainsWritable() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-11-12-conflict-${System.nanoTime()}.db"
         createVersion11Fixture(context, name, conflictingChunk = true)
 
         try {
-            Room.databaseBuilder(context, AppDatabase::class.java, name)
+            val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
                 .addMigrations(
                     AppDatabase.MIGRATION_11_12,
                     AppDatabase.MIGRATION_12_13,
@@ -1176,14 +1176,25 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_15_16,
                 )
                 .build()
-                .openHelper
-                .writableDatabase
-            fail("Expected conflicting physical evidence to fail migration")
-        } catch (expected: Throwable) {
-            assertTrue(expected.stackTraceToString().contains("conflicting physical chunk"))
+            val sqlite = db.openHelper.writableDatabase
+
+            assertEquals(16, sqlite.version)
+            assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+            assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
+            assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+            assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
+            assertEquals(
+                "调查以后再下结论",
+                sqlite.string("SELECT text FROM agent_chunks WHERE chunkKey = 'source-hash:chunk-1'"),
+            )
+            db.conversationDao().insert(conversation("post-upgrade", updatedAt = 30L))
+            assertEquals("post-upgrade", db.conversationDao().findById("post-upgrade")?.id)
+            sqlite.assertNoForeignKeyViolations()
+            db.close()
         } finally {
             context.deleteDatabase(name)
         }
+        Unit
     }
 
     @Test

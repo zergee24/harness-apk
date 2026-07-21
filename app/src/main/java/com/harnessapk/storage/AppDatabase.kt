@@ -361,25 +361,6 @@ abstract class AppDatabase : RoomDatabase() {
                     """.trimIndent(),
                 )
 
-                db.query(
-                    """
-                    SELECT sourceHash, chunkId
-                    FROM agent_chunks
-                    GROUP BY sourceHash, chunkId
-                    HAVING MIN(sourceTitle) <> MAX(sourceTitle)
-                        OR MIN(location) <> MAX(location)
-                        OR MIN(text) <> MAX(text)
-                        OR MIN(keywordsText) <> MAX(keywordsText)
-                    LIMIT 1
-                    """.trimIndent(),
-                ).use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        throw IllegalStateException(
-                            "conflicting physical chunk: ${cursor.getString(0)}:${cursor.getString(1)}",
-                        )
-                    }
-                }
-
                 db.execSQL(
                     """
                     CREATE TABLE agent_chunk_fts_v11_physical (
@@ -432,11 +413,17 @@ abstract class AppDatabase : RoomDatabase() {
                         genre, authorship, location, parentPath, context, text,
                         keywordsText, duplicateGroup
                     )
-                    SELECT sourceHash || ':' || chunkId, sourceHash, sourceHash, chunkId,
-                        MIN(sourceTitle), '', 'unknown', 'unknown', MIN(location), '',
-                        '', MIN(text), MIN(keywordsText), ''
-                    FROM agent_chunks_v11
-                    GROUP BY sourceHash, chunkId
+                    SELECT legacy.sourceHash || ':' || legacy.chunkId,
+                        legacy.sourceHash, legacy.sourceHash, legacy.chunkId,
+                        legacy.sourceTitle, '', 'unknown', 'unknown', legacy.location, '',
+                        '', legacy.text, legacy.keywordsText, ''
+                    FROM agent_chunks_v11 AS legacy
+                    WHERE legacy.chunkKey = (
+                        SELECT MIN(candidate.chunkKey)
+                        FROM agent_chunks_v11 AS candidate
+                        WHERE candidate.sourceHash = legacy.sourceHash
+                          AND candidate.chunkId = legacy.chunkId
+                    )
                     """.trimIndent(),
                 )
                 db.execSQL(
