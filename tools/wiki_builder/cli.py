@@ -10,6 +10,12 @@ from pathlib import Path
 
 from .builder import prepare_workspace
 from .enrichment import import_enrichment
+from .history.rights import RightsConfirmation, verify_build_rights
+from .history.source_inventory import (
+    inventory_history_sources,
+    load_source_lock,
+    write_source_lock,
+)
 from .models import BuildError
 from .packaging import inspect_package, pack_workspace
 from .validation import validate_workspace
@@ -45,12 +51,54 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect = commands.add_parser("inspect", help="独立检查签名 .hwiki")
     inspect.add_argument("package", type=Path)
+
+    history = commands.add_parser("history", help="构建二十四史与资治通鉴 profile")
+    history_commands = history.add_subparsers(dest="history_command", required=True)
+    inventory = history_commands.add_parser("inventory", help="锁定两个史书 Git 来源")
+    inventory.add_argument("--twenty-four", required=True, type=Path)
+    inventory.add_argument("--zizhi-tongjian", required=True, type=Path)
+    inventory.add_argument("--output", required=True, type=Path)
+    inventory.add_argument("--expected-lock", type=Path)
+
+    rights = history_commands.add_parser("verify-rights", help="验证用户提供的权利记录")
+    rights.add_argument("--lock", required=True, type=Path)
+    rights.add_argument("--rights", required=True, type=Path)
+    rights.add_argument("--distribution", action="store_true")
+    rights.add_argument("--semantic-processing", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "history":
+            if args.history_command == "inventory":
+                expected = (
+                    load_source_lock(args.expected_lock) if args.expected_lock else None
+                )
+                lock = inventory_history_sources(
+                    args.twenty_four,
+                    args.zizhi_tongjian,
+                    expected_lock=expected,
+                )
+                output = write_source_lock(args.output, lock)
+                print(output)
+                return 0
+            result = verify_build_rights(
+                RightsConfirmation.from_path(args.rights),
+                load_source_lock(args.lock),
+                distribution=args.distribution,
+                semantic_processing=args.semantic_processing,
+            )
+            print(
+                json.dumps(
+                    result,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            return 0
         if args.command == "prepare":
             workspace = prepare_workspace(
                 args.inputs,

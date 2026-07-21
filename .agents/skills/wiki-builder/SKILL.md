@@ -17,7 +17,26 @@ description: Use when building, enriching, validating, inspecting, or packing an
 
 ## 固定流程
 
-1. 信息齐备后立即准备工作区：
+1. 对二十四史或资治通鉴，先生成不可覆盖的来源锁：
+
+```bash
+scripts/wiki-builder.sh history inventory \
+  --twenty-four <china-history> --zizhi-tongjian <zizhitongjian> \
+  --output <source-lock.json>
+```
+
+若 rights 文件缺失或 revision 不匹配，只问一次合并问题：请用户确认锁中两个来源及 revision、用途为 `private-local-install`、不分发，并分别说明 basis。明确这是构建流程记录而非法律意见。构建器和 Agent 都不能替用户写入或推断 `userConfirmed=true`；用户提供 canonical `rights-confirmation.json` 后执行：
+
+字段定义与安全默认值见 [rights-confirmation-v1.md](references/rights-confirmation-v1.md)。
+
+```bash
+scripts/wiki-builder.sh history verify-rights \
+  --lock <source-lock.json> --rights <rights-confirmation.json>
+```
+
+需要 Codex 处理真实语义 job 时，若记录尚未为两个来源分别设置 `semanticProcessingApproved=true`，再用一个合并问题说明有界原文会发送给当前配置的 Codex 服务并取得一次授权；不得把本地安装授权等同于语义处理授权。
+
+2. 通用资料在信息齐备后立即准备工作区：
 
 ```bash
 scripts/wiki-builder.sh prepare <inputs...> \
@@ -25,20 +44,20 @@ scripts/wiki-builder.sh prepare <inputs...> \
   --concept-namespace <namespace> --output <workspace>
 ```
 
-2. 只生成 `enrichment/` 中约定的 canonical JSONL。每个文件按主 ID 升序，单行字段严格匹配协议：
+3. 只生成 `enrichment/` 中约定的 canonical JSONL。每个文件按主 ID 升序，单行字段严格匹配协议：
    - `summaries.jsonl`、`terms.jsonl`、`aliases.jsonl`、`annotations.jsonl`、`links.jsonl` 必须有非空 `evidence`。
    - `mentions.jsonl` 必须给出 `chunkId`、精确字符 offsets 和与原文完全一致的 `text`。
    - term 的 `conceptKey` 必须存在于同命名空间的 `concept-registry.jsonl`；低置信度关系保留置信度，不硬合并。
    - 每个文档和每个含原文的叶级章节都生成证据化摘要；评测题人工核验 gold chunk 后再写入 `evaluation/retrieval-eval.jsonl`。
-3. 事务导入并验证：
+4. 事务导入并验证：
 
 ```bash
 scripts/wiki-builder.sh enrich <workspace>
 scripts/wiki-builder.sh validate <workspace>
 ```
 
-4. `validate` 返回 2 时读取错误码，修复后重跑。只有所有结构、证据、locator、FTS 和 Recall 门槛通过才继续。
-5. 使用已有 Ed25519 私钥直接打包，不生成或替换私钥：
+5. `validate` 返回 2 时读取错误码，修复后重跑。只有所有结构、证据、locator、FTS 和 Recall 门槛通过才继续。
+6. 使用已有 Ed25519 私钥直接打包，不生成或替换私钥：
 
 ```bash
 scripts/wiki-builder.sh pack <workspace> --output <dist> --key <publisher-key.pem>
