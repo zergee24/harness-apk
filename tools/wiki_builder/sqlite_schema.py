@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 
 CONTENT_SCHEMA_VERSION = 1
@@ -226,6 +227,55 @@ def validate_sqlite_shape(connection: sqlite3.Connection) -> None:
         sql = virtual_tables.get(name, "").upper()
         if "USING FTS4" not in sql:
             raise ValueError(f"SQLite 表 {name} 必须使用 FTS4")
+
+    expected = _reference_schema_signature()
+    actual = _schema_signature(connection)
+    if actual != expected:
+        missing_objects = sorted(set(expected) - set(actual))
+        extra_objects = sorted(set(actual) - set(expected))
+        changed_objects = sorted(
+            key for key in set(actual).intersection(expected) if actual[key] != expected[key]
+        )
+        details: list[str] = []
+        if missing_objects:
+            details.append(
+                "缺少 " + ", ".join(name for _kind, name in missing_objects)
+            )
+        if extra_objects:
+            details.append(
+                "新增 " + ", ".join(name for _kind, name in extra_objects)
+            )
+        if changed_objects:
+            details.append(
+                "变更 " + ", ".join(name for _kind, name in changed_objects)
+            )
+        raise ValueError(f"SQLite 协议结构漂移：{'; '.join(details)}")
+
+
+def _schema_signature(connection: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    return {
+        (kind, name): _normalize_schema_sql(sql)
+        for kind, name, sql in connection.execute(
+            """
+            SELECT type, name, sql FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+            """
+        )
+    }
+
+
+@lru_cache(maxsize=1)
+def _reference_schema_signature() -> dict[tuple[str, str], str]:
+    reference = sqlite3.connect(":memory:")
+    try:
+        reference.executescript(CORE_DDL)
+        return _schema_signature(reference)
+    finally:
+        reference.close()
+
+
+def _normalize_schema_sql(sql: str | None) -> str:
+    return " ".join((sql or "").split()).lower()
 
 
 __all__ = [

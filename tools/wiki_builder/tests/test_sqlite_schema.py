@@ -111,6 +111,31 @@ class SqliteSchemaTest(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_shape_validation_rejects_extra_table_missing_index_and_altered_columns(self):
+        extra = create_content_database(self.root / "extra.sqlite")
+        try:
+            extra.execute("CREATE TABLE unexpected(value TEXT)")
+            with self.assertRaisesRegex(ValueError, "unexpected|协议"):
+                validate_sqlite_shape(extra)
+        finally:
+            extra.close()
+
+        missing_index = create_content_database(self.root / "missing-index.sqlite")
+        try:
+            missing_index.execute("DROP INDEX index_links_target")
+            with self.assertRaisesRegex(ValueError, "index_links_target|协议"):
+                validate_sqlite_shape(missing_index)
+        finally:
+            missing_index.close()
+
+        altered = create_content_database(self.root / "altered.sqlite")
+        try:
+            altered.execute("ALTER TABLE documents ADD COLUMN mutable TEXT")
+            with self.assertRaisesRegex(ValueError, "documents|协议"):
+                validate_sqlite_shape(altered)
+        finally:
+            altered.close()
+
 
 if __name__ == "__main__":
     unittest.main()
