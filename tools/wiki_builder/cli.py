@@ -83,6 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
     inventory.add_argument("--output", required=True, type=Path)
     inventory.add_argument("--expected-lock", type=Path)
 
+    validate_lock = history_commands.add_parser(
+        "validate-lock",
+        help="只读校验两个史书来源仍与既有锁完全一致",
+    )
+    validate_lock.add_argument("--twenty-four", required=True, type=Path)
+    validate_lock.add_argument("--zizhi-tongjian", required=True, type=Path)
+    validate_lock.add_argument("--lock", required=True, type=Path)
+
     rights = history_commands.add_parser("verify-rights", help="验证用户提供的权利记录")
     rights.add_argument("--lock", required=True, type=Path)
     rights.add_argument("--rights", required=True, type=Path)
@@ -184,6 +192,31 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 output = write_source_lock(args.output, lock)
                 print(output)
+                return 0
+            if args.history_command == "validate-lock":
+                lock = inventory_history_sources(
+                    args.twenty_four,
+                    args.zizhi_tongjian,
+                    expected_lock=load_source_lock(args.lock),
+                )
+                print(
+                    json.dumps(
+                        {
+                            "valid": True,
+                            "sources": [
+                                {
+                                    "sourceId": source.source_id,
+                                    "gitRevision": source.git_revision,
+                                    "treeHash": source.tree_hash,
+                                }
+                                for source in lock.sources
+                            ],
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
                 return 0
             if args.history_command == "verify-rights":
                 result = verify_build_rights(

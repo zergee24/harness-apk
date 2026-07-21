@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tools.package_format import canonical_json_bytes
+from tools.wiki_builder.cli import main
 from tools.wiki_builder.history.source_inventory import (
     InventoryError,
     SourceLock,
@@ -84,6 +86,31 @@ class SourceInventoryTest(unittest.TestCase):
         self._commit(self.twenty, "new revision")
         with self.assertRaisesRegex(InventoryError, "revision|版本"):
             inventory_history_sources(self.twenty, self.zizhi, expected_lock=lock)
+
+    def test_cli_validates_an_existing_lock_without_writing_another_lock(self):
+        lock = inventory_history_sources(self.twenty, self.zizhi)
+        lock_path = self.root / "source-lock.json"
+        lock_path.write_bytes(canonical_json_bytes(lock.to_dict()))
+
+        self.assertEqual(
+            0,
+            main(
+                [
+                    "history",
+                    "validate-lock",
+                    "--twenty-four",
+                    str(self.twenty),
+                    "--zizhi-tongjian",
+                    str(self.zizhi),
+                    "--lock",
+                    str(lock_path),
+                ]
+            ),
+        )
+        self.assertEqual(
+            {"source-lock.json"},
+            {path.name for path in self.root.glob("*lock*.json")},
+        )
 
     def test_missing_repo_bad_encoding_and_escaping_symlink_fail_closed(self):
         with self.assertRaisesRegex(InventoryError, "Git"):

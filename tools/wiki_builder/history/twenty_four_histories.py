@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import unicodedata
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
@@ -56,7 +57,16 @@ PACKAGE_TITLE = "二十四史"
 PACKAGE_VERSION = 1
 CONCEPT_NAMESPACE = "cn-history-v1"
 _BUFFER_BYTES = 1024 * 1024
-_NAVIGATION_WORDS = ("上一页", "下一页", "上一章", "下一章", "返回目录", "目录")
+_NAVIGATION_WORDS = (
+    "上一页",
+    "下一页",
+    "上一章",
+    "下一章",
+    "上一节",
+    "下一节",
+    "返回目录",
+    "目录",
+)
 _IGNORED_TAGS = {"script", "style", "nav", "header", "footer", "noscript"}
 _IGNORED_ATTR_WORDS = {
     "nav",
@@ -71,10 +81,42 @@ _IGNORED_ATTR_WORDS = {
     "breadcrumb",
     "menu",
 }
+_KNOWN_EMPTY_CHAPTERS: dict[str, tuple[str, str]] = {
+    "旧唐书/列传/第一百四十章-卷一百四十-原文.html": (
+        "9157bf4debfba4eab0d465b62565dc04e16c6a946da034d8e10aed37d68338a7",
+        "upstream-html-empty-v1",
+    ),
+}
 
 
 class HistoryAdapterError(BuildError):
     """Raised when source HTML cannot be consumed without ambiguity."""
+
+
+@dataclass(frozen=True)
+class _VerifiedDuplicateSource:
+    duplicate_path: str
+    canonical_path: str
+    duplicate_hash: str
+    canonical_hash: str
+    duplicate_size_bytes: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "duplicatePath": self.duplicate_path,
+            "canonicalPath": self.canonical_path,
+            "duplicateSha256": self.duplicate_hash,
+            "canonicalSha256": self.canonical_hash,
+            "duplicateSizeBytes": self.duplicate_size_bytes,
+            "reason": "verified-body-identical-leading-hyphen-variant-v1",
+        }
+
+
+@dataclass(frozen=True)
+class _ChapterBlock:
+    text: str
+    block_type: str
+    heading_level: int | None = None
 
 
 def prepare_twenty_four_histories(
@@ -124,7 +166,14 @@ def prepare_twenty_four_histories(
         concept_namespace=CONCEPT_NAMESPACE,
         source_id=TWENTY_FOUR_HISTORIES_SOURCE_ID,
         source_revision=expected.git_revision,
-        exclusions=("-白话", "-译文", "-段译", "原始 HTML 载体"),
+        exclusions=(
+            "-白话",
+            "-译文",
+            "-段译",
+            "原始 HTML 载体",
+            "正文相同的重复 HTML 变体（严格校验后不重复索引）",
+            "上游已锁定的空白章节（保留层级与来源哈希，不生成正文）",
+        ),
         before_publish=verify_unchanged,
     )
 
@@ -163,19 +212,26 @@ def _build_document(
     }
     unlinked = sorted(actual_sources - linked_relative)
     unexpected_links = sorted(linked_relative - actual_sources)
-    if unlinked:
-        raise HistoryAdapterError(f"{title} 存在未链接原文：{', '.join(unlinked[:10])}")
     if unexpected_links:
         raise HistoryAdapterError(
             f"{title} 索引链接不在原文集合：{', '.join(unexpected_links[:10])}"
         )
+    verified_duplicates = _verify_duplicate_sources(
+        root,
+        title,
+        linked_relative,
+        unlinked,
+    )
 
     document_id = stable_id("doc", PACKAGE_ID, revision, title)
     sections: list[HistorySectionRecord] = []
     category_ids: dict[tuple[str, ...], str] = {}
     chapter_descriptors: list[dict[str, object]] = []
+    known_empty_sources: list[dict[str, str]] = []
     section_ordinal = 0
-    total_size = index_size
+    total_size = index_size + sum(
+        duplicate.duplicate_size_bytes for duplicate in verified_duplicates
+    )
     for chapter_path in linked_paths:
         relative = _relative_nfc(chapter_path, root)
         chapter_text, chapter_hash, chapter_size = _read_utf8(chapter_path, root)
@@ -210,31 +266,56 @@ def _build_document(
                 section_ordinal += 1
             parent_id = category_id
 
-        chapter_title, paragraph_texts = _parse_chapter_html(chapter_text, relative)
-        leaf_id = stable_id("section", PACKAGE_ID, revision, relative)
-        paragraphs = tuple(
-            HistoryParagraphRecord(
-                paragraph_id=stable_id(
-                    "paragraph",
-                    PACKAGE_ID,
-                    revision,
-                    relative,
-                    paragraph_ordinal,
-                ),
-                text=text,
-                ordinal=paragraph_ordinal,
-                locator={
-                    "documentTitle": title,
-                    "categoryPath": list(category_path),
-                    "chapterTitle": chapter_title,
-                    "paragraphNumber": paragraph_ordinal + 1,
-                    "sourcePath": relative,
-                    "sourceHash": chapter_hash,
-                },
-                source_hash=chapter_hash,
-            )
-            for paragraph_ordinal, text in enumerate(paragraph_texts)
+        empty_source_reason = _known_empty_source_reason(relative, chapter_hash)
+        chapter_title, blocks = _parse_chapter_html(
+            chapter_text,
+            relative,
+            allow_empty=empty_source_reason is not None,
         )
+        leaf_id = stable_id("section", PACKAGE_ID, revision, relative)
+        paragraphs: list[HistoryParagraphRecord] = []
+        for block_ordinal, block in enumerate(blocks):
+            locator: dict[str, object] = {
+                "documentTitle": title,
+                "categoryPath": list(category_path),
+                "chapterTitle": chapter_title,
+                "paragraphNumber": block_ordinal + 1,
+                "sourcePath": relative,
+                "sourceHash": chapter_hash,
+                "blockType": block.block_type,
+            }
+            if block.heading_level is not None:
+                locator["headingLevel"] = block.heading_level
+            paragraphs.append(
+                HistoryParagraphRecord(
+                    paragraph_id=stable_id(
+                        "paragraph",
+                        PACKAGE_ID,
+                        revision,
+                        relative,
+                        block_ordinal,
+                    ),
+                    text=block.text,
+                    ordinal=block_ordinal,
+                    locator=locator,
+                    source_hash=chapter_hash,
+                )
+            )
+        section_metadata: dict[str, object] = {"sourceFileName": chapter_path.name}
+        if empty_source_reason is not None:
+            section_metadata.update(
+                {
+                    "sourceState": "known-empty-source",
+                    "emptySourceReason": empty_source_reason,
+                }
+            )
+            known_empty_sources.append(
+                {
+                    "path": relative,
+                    "sha256": chapter_hash,
+                    "reason": empty_source_reason,
+                }
+            )
         sections.append(
             HistorySectionRecord(
                 section_id=leaf_id,
@@ -245,18 +326,30 @@ def _build_document(
                 ordinal=section_ordinal,
                 source_path=relative,
                 source_hash=chapter_hash,
-                paragraphs=paragraphs,
-                metadata={"sourceFileName": chapter_path.name},
+                paragraphs=tuple(paragraphs),
+                metadata=section_metadata,
             )
         )
         section_ordinal += 1
-        chapter_descriptors.append(
-            {"path": relative, "sha256": chapter_hash, "sizeBytes": chapter_size}
-        )
+        chapter_descriptor: dict[str, object] = {
+            "path": relative,
+            "sha256": chapter_hash,
+            "sizeBytes": chapter_size,
+        }
+        if empty_source_reason is not None:
+            chapter_descriptor["sourceState"] = "known-empty-source"
+            chapter_descriptor["emptySourceReason"] = empty_source_reason
+        chapter_descriptors.append(chapter_descriptor)
 
     document_hash = hashlib.sha256(
         canonical_json_bytes(
-            {"indexHash": index_hash, "chapters": chapter_descriptors}
+            {
+                "indexHash": index_hash,
+                "chapters": chapter_descriptors,
+                "verifiedDuplicateSources": [
+                    duplicate.to_dict() for duplicate in verified_duplicates
+                ],
+            }
         )
     ).hexdigest()
     return (
@@ -269,10 +362,72 @@ def _build_document(
             source_size_bytes=total_size,
             source_format="html",
             sections=tuple(sections),
-            metadata={"indexPath": _relative_nfc(index_path, root)},
+            metadata={
+                "indexPath": _relative_nfc(index_path, root),
+                "verifiedDuplicateSources": [
+                    duplicate.to_dict() for duplicate in verified_duplicates
+                ],
+                "knownEmptySources": known_empty_sources,
+            },
         ),
-        len(linked_paths),
+        len(linked_paths) + len(verified_duplicates),
     )
+
+
+def _verify_duplicate_sources(
+    root: Path,
+    title: str,
+    linked_relative: set[str],
+    unlinked: list[str],
+) -> tuple[_VerifiedDuplicateSource, ...]:
+    verified: list[_VerifiedDuplicateSource] = []
+    for duplicate_relative in unlinked:
+        duplicate_path = PurePosixPath(duplicate_relative)
+        if not duplicate_path.name.startswith("-"):
+            raise HistoryAdapterError(
+                f"{title} 存在未链接原文：{duplicate_relative}"
+            )
+        canonical_relative = str(
+            duplicate_path.with_name(duplicate_path.name.removeprefix("-"))
+        )
+        if canonical_relative not in linked_relative:
+            raise HistoryAdapterError(
+                f"{title} 未链接重复来源没有已链接正文：{duplicate_relative}"
+            )
+        duplicate_text, duplicate_hash, duplicate_size = _read_utf8(
+            root / duplicate_relative,
+            root,
+        )
+        canonical_text, canonical_hash, _canonical_size = _read_utf8(
+            root / canonical_relative,
+            root,
+        )
+        duplicate_heading, duplicate_paragraphs = _parse_chapter_html(
+            duplicate_text,
+            duplicate_relative,
+        )
+        canonical_heading, canonical_paragraphs = _parse_chapter_html(
+            canonical_text,
+            canonical_relative,
+        )
+        if (
+            duplicate_heading.removeprefix("-") != canonical_heading
+            or duplicate_paragraphs != canonical_paragraphs
+        ):
+            raise HistoryAdapterError(
+                f"{title} 重复来源正文不一致："
+                f"{duplicate_relative} != {canonical_relative}"
+            )
+        verified.append(
+            _VerifiedDuplicateSource(
+                duplicate_path=duplicate_relative,
+                canonical_path=canonical_relative,
+                duplicate_hash=duplicate_hash,
+                canonical_hash=canonical_hash,
+                duplicate_size_bytes=duplicate_size,
+            )
+        )
+    return tuple(verified)
 
 
 class _IndexLinkParser(HTMLParser):
@@ -303,77 +458,210 @@ class _ChapterParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.label = label
         self.heading_parts: list[str] = []
-        self.paragraphs: list[str] = []
+        self.blocks: list[_ChapterBlock] = []
         self.discarded_visible: list[str] = []
+        self.structure_errors: list[str] = []
         self.heading_count = 0
-        self._ignore_depth = 0
-        self._heading_depth = 0
-        self._paragraph_depth = 0
+        self._ignore_tag: str | None = None
+        self._ignore_same_tag_depth = 0
+        self._heading_open = False
+        self._paragraph_open = False
         self._paragraph_parts: list[str] = []
         self._paragraph_has_link = False
+        self._subheading_tag: str | None = None
+        self._subheading_parts: list[str] = []
+        self._table_depth = 0
+        self._row_depth = 0
+        self._cell_tag: str | None = None
+        self._cell_parts: list[str] = []
+        self._row_cells: list[str] = []
         self._after_heading = False
 
     def handle_starttag(self, tag: str, attrs) -> None:
         name = tag.lower()
-        if self._ignore_depth:
-            self._ignore_depth += 1
+        if self._ignore_tag is not None:
+            if name == self._ignore_tag:
+                self._ignore_same_tag_depth += 1
             return
         if name in _IGNORED_TAGS or _ignored_attrs(attrs):
-            self._ignore_depth = 1
+            self._ignore_tag = name
+            self._ignore_same_tag_depth = 1
             return
+
+        if self._heading_open:
+            if name == "h1":
+                self.structure_errors.append("h1 内嵌套 h1")
+                self.heading_count += 1
+            elif name == "br":
+                self.heading_parts.append("\n")
+            return
+        if self._paragraph_open:
+            if name == "p":
+                self._finish_paragraph()
+                self._paragraph_open = True
+                self._paragraph_parts = []
+                self._paragraph_has_link = False
+            elif name == "br":
+                self._paragraph_parts.append("\n")
+            elif name == "a":
+                self._paragraph_has_link = True
+            return
+        if self._subheading_tag is not None:
+            if name in {"h2", "h3", "h4", "h5", "h6"}:
+                self.structure_errors.append("小标题内嵌套小标题")
+            elif name == "br":
+                self._subheading_parts.append("\n")
+            return
+        if self._cell_tag is not None:
+            if name in {"td", "th", "table", "tr"}:
+                self.structure_errors.append(f"表格单元格内嵌套 {name}")
+            elif name == "br":
+                self._cell_parts.append("\n")
+            return
+
+        if self._table_depth:
+            if name == "table":
+                self._table_depth += 1
+                return
+            if name == "tr":
+                self._row_depth += 1
+                if self._row_depth == 1:
+                    self._row_cells = []
+                else:
+                    self.structure_errors.append("表格行内嵌套表格行")
+                return
+            if name in {"td", "th"}:
+                if self._row_depth != 1:
+                    self.structure_errors.append("表格单元格不在唯一表格行内")
+                    return
+                self._cell_tag = name
+                self._cell_parts = []
+            return
+
         if name == "h1":
             self.heading_count += 1
-            self._heading_depth = 1
+            self._heading_open = True
             self._after_heading = True
             return
-        if self._heading_depth:
-            self._heading_depth += 1
+        if name in {"h2", "h3", "h4", "h5", "h6"} and self._after_heading:
+            self._subheading_tag = name
+            self._subheading_parts = []
             return
-        if name == "p" and self._after_heading and not self._paragraph_depth:
-            self._paragraph_depth = 1
+        if name == "table" and self._after_heading:
+            self._table_depth = 1
+            return
+        if name == "p" and self._after_heading:
+            self._paragraph_open = True
             self._paragraph_parts = []
             self._paragraph_has_link = False
-            return
-        if self._paragraph_depth:
-            self._paragraph_depth += 1
-            if name == "a":
-                self._paragraph_has_link = True
-            if name == "br":
-                self._paragraph_parts.append("\n")
 
     def handle_startendtag(self, tag: str, attrs) -> None:
-        if self._paragraph_depth and tag.lower() == "br":
+        name = tag.lower()
+        if self._ignore_tag is not None:
+            return
+        if self._cell_tag is not None and name == "br":
+            self._cell_parts.append("\n")
+        elif self._paragraph_open and name == "br":
             self._paragraph_parts.append("\n")
+        elif self._subheading_tag is not None and name == "br":
+            self._subheading_parts.append("\n")
+        elif self._heading_open and name == "br":
+            self.heading_parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if self._ignore_depth:
-            self._ignore_depth -= 1
+        name = tag.lower()
+        if self._ignore_tag is not None:
+            if name == self._ignore_tag:
+                self._ignore_same_tag_depth -= 1
+                if self._ignore_same_tag_depth == 0:
+                    self._ignore_tag = None
             return
-        if self._heading_depth:
-            self._heading_depth -= 1
+        if self._heading_open:
+            if name == "h1":
+                self._heading_open = False
             return
-        if self._paragraph_depth:
-            self._paragraph_depth -= 1
-            if self._paragraph_depth == 0:
-                value = _clean_source_text("".join(self._paragraph_parts))
-                if value and not (
-                    self._paragraph_has_link
-                    and any(word in value for word in _NAVIGATION_WORDS)
-                ):
-                    self.paragraphs.append(value)
+        if self._paragraph_open:
+            if name == "p":
+                self._finish_paragraph()
+            return
+        if self._subheading_tag is not None:
+            if name == self._subheading_tag:
+                value = _clean_source_text("".join(self._subheading_parts))
+                if value:
+                    self.blocks.append(
+                        _ChapterBlock(
+                            value,
+                            "subheading",
+                            int(self._subheading_tag[1:]),
+                        )
+                    )
+                else:
+                    self.structure_errors.append("小标题为空")
+                self._subheading_tag = None
+            return
+        if self._cell_tag is not None:
+            if name == self._cell_tag:
+                self._row_cells.append(_clean_source_text("".join(self._cell_parts)))
+                self._cell_tag = None
+            return
+        if self._table_depth:
+            if name == "tr" and self._row_depth:
+                self._row_depth -= 1
+                if self._row_depth == 0:
+                    value = "\t".join(self._row_cells)
+                    if any(cell for cell in self._row_cells):
+                        self.blocks.append(_ChapterBlock(value, "table-row"))
+                return
+            if name == "table":
+                self._table_depth -= 1
 
     def handle_data(self, data: str) -> None:
-        if self._ignore_depth:
+        if self._ignore_tag is not None:
             return
-        if self._heading_depth:
+        if self._heading_open:
             self.heading_parts.append(data)
-        elif self._paragraph_depth:
+        elif self._paragraph_open:
             self._paragraph_parts.append(data)
+        elif self._subheading_tag is not None:
+            self._subheading_parts.append(data)
+        elif self._cell_tag is not None:
+            self._cell_parts.append(data)
         elif self._after_heading and data.strip():
             self.discarded_visible.append(_clean_source_text(data))
 
+    def _finish_paragraph(self) -> None:
+        self._paragraph_open = False
+        value = _clean_source_text("".join(self._paragraph_parts))
+        if value and not (
+            self._paragraph_has_link
+            and any(word in value for word in _NAVIGATION_WORDS)
+        ):
+            self.blocks.append(_ChapterBlock(value, "paragraph"))
 
-def _parse_chapter_html(payload: str, label: str) -> tuple[str, tuple[str, ...]]:
+    def unclosed_source_container(self) -> str | None:
+        if self._heading_open:
+            return "h1"
+        if self._paragraph_open:
+            return "p"
+        if self._subheading_tag is not None:
+            return self._subheading_tag
+        if self._cell_tag is not None:
+            return self._cell_tag
+        if self._row_depth:
+            return "tr"
+        if self._table_depth:
+            return "table"
+        if self._ignore_tag is not None:
+            return self._ignore_tag
+        return None
+
+
+def _parse_chapter_html(
+    payload: str,
+    label: str,
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, tuple[_ChapterBlock, ...]]:
     parser = _ChapterParser(label)
     try:
         parser.feed(payload)
@@ -383,14 +671,28 @@ def _parse_chapter_html(payload: str, label: str) -> tuple[str, tuple[str, ...]]
     heading = _clean_source_text("".join(parser.heading_parts))
     if parser.heading_count != 1 or not heading:
         raise HistoryAdapterError(f"章节必须且只能包含一个非空 h1：{label}")
+    unclosed = parser.unclosed_source_container()
+    if unclosed:
+        raise HistoryAdapterError(f"章节存在未闭合正文容器：{label}：{unclosed}")
+    if parser.structure_errors:
+        raise HistoryAdapterError(
+            f"章节正文结构不明确：{label}：{' | '.join(parser.structure_errors[:3])}"
+        )
     discarded = [value for value in parser.discarded_visible if value]
     if discarded:
         raise HistoryAdapterError(
             f"章节存在被丢弃的可见正文：{label}：{' | '.join(discarded[:3])}"
         )
-    if not parser.paragraphs:
+    if not parser.blocks and not allow_empty:
         raise HistoryAdapterError(f"章节没有可用正文段落：{label}")
-    return heading, tuple(parser.paragraphs)
+    return heading, tuple(parser.blocks)
+
+
+def _known_empty_source_reason(relative: str, source_hash: str) -> str | None:
+    known = _KNOWN_EMPTY_CHAPTERS.get(relative)
+    if known is None or known[0] != source_hash:
+        return None
+    return known[1]
 
 
 def _ignored_attrs(attrs) -> bool:
@@ -407,6 +709,8 @@ def _resolve_document_link(document_title: str, raw_href: str) -> str:
     parsed = urlsplit(raw_href)
     decoded = unicodedata.normalize("NFC", unquote(parsed.path))
     raw_parts = decoded.split("/")
+    if raw_parts and raw_parts[0] == ".":
+        raw_parts = raw_parts[1:]
     if (
         parsed.scheme
         or parsed.netloc

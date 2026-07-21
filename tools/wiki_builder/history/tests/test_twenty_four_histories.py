@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -5,9 +6,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.package_format import canonical_json_bytes
 from tools.wiki_builder.cli import main
+from tools.wiki_builder.history import twenty_four_histories as adapter
 from tools.wiki_builder.history.source_inventory import (
     SourceLock,
     TWENTY_FOUR_HISTORIES_SOURCE_ID,
@@ -128,6 +131,18 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
                 "缺失|不存在",
             ),
             "traversal": ('<a href="../越界-原文.html">越界</a>', "穿越|不安全|越界"),
+            "leading-traversal": (
+                '<a href="./../越界-原文.html">越界</a>',
+                "穿越|不安全|越界",
+            ),
+            "internal-dot": (
+                '<a href="十二本纪/./第一章-五帝本纪-原文.html">越界</a>',
+                "穿越|不安全|越界",
+            ),
+            "empty-segment": (
+                '<a href="十二本纪//第一章-五帝本纪-原文.html">越界</a>',
+                "穿越|不安全|越界",
+            ),
         }
         original = (self.source / "史记/史记.html").read_text(encoding="utf-8")
         for label, (links, pattern) in cases.items():
@@ -145,6 +160,38 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self._git("reset", "--hard", "HEAD~1")
         self._write(self.source / "史记/史记.html", original)
+
+    def test_single_leading_dot_segment_is_a_safe_repository_relative_link(self):
+        index = self.source / "史记/史记.html"
+        payload = index.read_text(encoding="utf-8").replace(
+            'href="十二本纪/',
+            'href="./十二本纪/',
+        )
+        self._write(index, payload)
+        self._commit("leading dot link")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "leading-dot",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            source_path = database.execute(
+                """
+                SELECT json_extract(chunks.locator_json, '$.sourcePath')
+                FROM chunks
+                JOIN sections USING(section_id)
+                JOIN documents USING(document_id)
+                WHERE documents.title='史记'
+                ORDER BY chunks.ordinal
+                LIMIT 1
+                """
+            ).fetchone()[0]
+        self.assertEqual(
+            "史记/十二本纪/第一章-五帝本纪-原文.html",
+            source_path,
+        )
 
     def test_unlinked_or_unknown_document_source_is_rejected(self):
         self._write(
@@ -182,6 +229,307 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
                         self._lock(),
                     )
                 self._git("reset", "--hard", "HEAD~1")
+
+    def test_previous_and_next_section_links_are_not_source_paragraphs(self):
+        chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        payload = chapter.read_text(encoding="utf-8").replace(
+            "</body>",
+            "<div class='pn'><p class='pre'>上一节："
+            "<a href='前卷-原文.html'>前卷</a></p>"
+            "<p class='next'>下一节：<a href='后卷-原文.html'>后卷</a></p>"
+            "</div></body>",
+        )
+        self._write(chapter, payload)
+        self._commit("section navigation")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "section-navigation",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            source = "\n".join(
+                row[0]
+                for row in database.execute(
+                    "SELECT original_text FROM chunks ORDER BY rowid"
+                )
+            )
+        self.assertNotIn("上一节", source)
+        self.assertNotIn("下一节", source)
+
+    def test_unclosed_uppercase_br_is_a_void_line_break_inside_paragraph(self):
+        chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        payload = chapter.read_text(encoding="utf-8").replace(
+            "黄帝者，少典之子也。  </p>",
+            "黄帝者，少典之子也。<BR><BR>  </p>",
+        )
+        self._write(chapter, payload)
+        self._commit("uppercase br")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "uppercase-br",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            paragraphs = database.execute(
+                """
+                SELECT chunks.original_text FROM chunks
+                JOIN sections USING(section_id)
+                JOIN documents USING(document_id)
+                WHERE documents.title='史记'
+                ORDER BY chunks.ordinal
+                """
+            ).fetchall()
+        self.assertEqual(
+            [
+                "黄帝者，少典之子也。",
+                "太史公曰：“学者 & 史家”。",
+                '“曲引”与"直引"皆存。',
+            ],
+            [row[0] for row in paragraphs],
+        )
+
+    def test_html_table_rows_preserve_cell_and_line_break_structure(self):
+        chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        payload = chapter.read_text(encoding="utf-8").replace(
+            '<div class="pager">',
+            "<table><tr><th>常数</th><th>月中节<br>月份</th></tr>"
+            "<tr><td>冬至</td><td>十一月中</td></tr></table>"
+            '<div class="pager">',
+        )
+        self._write(chapter, payload)
+        self._commit("table rows")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "table-rows",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            paragraphs = [
+                row[0]
+                for row in database.execute(
+                    """
+                    SELECT chunks.original_text FROM chunks
+                    JOIN sections USING(section_id)
+                    JOIN documents USING(document_id)
+                    WHERE documents.title='史记'
+                    ORDER BY chunks.ordinal
+                    """
+                )
+            ]
+        self.assertIn("常数\t月中节\n月份", paragraphs)
+        self.assertIn("冬至\t十一月中", paragraphs)
+
+    def test_subheadings_are_preserved_as_ordered_citable_blocks(self):
+        chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        payload = chapter.read_text(encoding="utf-8").replace(
+            '<div class="pager">',
+            "<h3>又仪天法</h3><table><tr><td>冬至</td><td>十一月中</td></tr></table>"
+            '<div class="pager">',
+        )
+        self._write(chapter, payload)
+        self._commit("subheading")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "subheading",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            rows = database.execute(
+                """
+                SELECT chunks.original_text, chunks.locator_json
+                FROM chunks
+                JOIN sections USING(section_id)
+                JOIN documents USING(document_id)
+                WHERE documents.title='史记'
+                ORDER BY chunks.ordinal
+                """
+            ).fetchall()
+        self.assertEqual("又仪天法", rows[-2][0])
+        self.assertEqual("subheading", json.loads(rows[-2][1])["blockType"])
+        self.assertEqual(3, json.loads(rows[-2][1])["headingLevel"])
+        self.assertEqual("冬至\t十一月中", rows[-1][0])
+        self.assertEqual("table-row", json.loads(rows[-1][1])["blockType"])
+
+    def test_orphan_nested_end_tag_does_not_close_the_source_paragraph(self):
+        chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        payload = chapter.read_text(encoding="utf-8").replace(
+            "黄帝者，少典之子也。",
+            "黄帝者，少典</span>之子也。",
+        )
+        self._write(chapter, payload)
+        self._commit("orphan nested end tag")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "orphan-end-tag",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            first = database.execute(
+                """
+                SELECT chunks.original_text FROM chunks
+                JOIN sections USING(section_id)
+                JOIN documents USING(document_id)
+                WHERE documents.title='史记'
+                ORDER BY chunks.ordinal
+                LIMIT 1
+                """
+            ).fetchone()[0]
+        self.assertEqual("黄帝者，少典之子也。", first)
+
+    def test_second_paragraph_start_implicitly_closes_the_first(self):
+        chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        payload = chapter.read_text(encoding="utf-8").replace(
+            "<p>  黄帝者，少典之子也。",
+            "<p><p>  黄帝者，少典之子也。",
+        )
+        self._write(chapter, payload)
+        self._commit("implicit paragraph close")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "implicit-paragraph-close",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            paragraphs = database.execute(
+                """
+                SELECT chunks.original_text FROM chunks
+                JOIN sections USING(section_id)
+                JOIN documents USING(document_id)
+                WHERE documents.title='史记'
+                ORDER BY chunks.ordinal
+                """
+            ).fetchall()
+        self.assertEqual(
+            [
+                "黄帝者，少典之子也。",
+                "太史公曰：“学者 & 史家”。",
+                '“曲引”与"直引"皆存。',
+            ],
+            [row[0] for row in paragraphs],
+        )
+
+    def test_known_empty_chapter_requires_exact_path_and_hash(self):
+        chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        payload = "<html><body><h1>五帝本纪</h1><p></p></body></html>"
+        self._write(chapter, payload)
+        self._commit("known empty chapter")
+        relative = "史记/十二本纪/第一章-五帝本纪-原文.html"
+        source_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+        with patch.dict(
+            adapter._KNOWN_EMPTY_CHAPTERS,
+            {relative: (source_hash, "upstream-html-empty-v1")},
+            clear=True,
+        ):
+            workspace = prepare_twenty_four_histories(
+                self.source,
+                self.root / "known-empty",
+                self._lock(),
+            )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            metadata = json.loads(
+                database.execute(
+                    "SELECT metadata_json FROM sections "
+                    "WHERE json_extract(metadata_json, '$.sourceFileName')=?",
+                    (chapter.name,),
+                ).fetchone()[0]
+            )
+            chunks = database.execute(
+                "SELECT COUNT(*) FROM chunks WHERE section_id=("
+                "SELECT section_id FROM sections "
+                "WHERE json_extract(metadata_json, '$.sourceFileName')=?)",
+                (chapter.name,),
+            ).fetchone()[0]
+        self.assertEqual(0, chunks)
+        self.assertEqual("known-empty-source", metadata["sourceState"])
+        self.assertEqual("upstream-html-empty-v1", metadata["emptySourceReason"])
+
+        changed = payload.replace("<p></p>", "<p> </p>")
+        self._write(chapter, changed)
+        self._commit("changed empty chapter")
+        with patch.dict(
+            adapter._KNOWN_EMPTY_CHAPTERS,
+            {relative: (source_hash, "upstream-html-empty-v1")},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(HistoryAdapterError, "正文|段落"):
+                prepare_twenty_four_histories(
+                    self.source,
+                    self.root / "changed-empty",
+                    self._lock(),
+                )
+
+    def test_unlinked_leading_hyphen_variant_is_consumed_only_when_body_matches(self):
+        canonical = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        duplicate = self.source / "史记/十二本纪/-第一章-五帝本纪-原文.html"
+        duplicate_text = canonical.read_text(encoding="utf-8").replace(
+            "<h1>五帝本纪</h1>",
+            "<h1>-五帝本纪</h1>",
+        )
+        self._write(duplicate, duplicate_text)
+        self._commit("verified duplicate")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "verified-duplicate",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            metadata = json.loads(
+                database.execute(
+                    "SELECT metadata_json FROM documents WHERE title='史记'"
+                ).fetchone()[0]
+            )
+            shiji_chunks = database.execute(
+                """
+                SELECT COUNT(*) FROM chunks
+                JOIN sections USING(section_id)
+                JOIN documents USING(document_id)
+                WHERE documents.title='史记'
+                """
+            ).fetchone()[0]
+        self.assertEqual(3, shiji_chunks)
+        self.assertEqual(
+            [
+                {
+                    "canonicalPath": "史记/十二本纪/第一章-五帝本纪-原文.html",
+                    "duplicatePath": "史记/十二本纪/-第一章-五帝本纪-原文.html",
+                }
+            ],
+            [
+                {
+                    "canonicalPath": row["canonicalPath"],
+                    "duplicatePath": row["duplicatePath"],
+                }
+                for row in metadata["verifiedDuplicateSources"]
+            ],
+        )
+
+        self._write(
+            duplicate,
+            duplicate_text.replace("黄帝者，少典之子也。", "重复版本正文发生变化。"),
+        )
+        self._commit("mismatched duplicate")
+        with self.assertRaisesRegex(HistoryAdapterError, "重复|正文|不一致"):
+            prepare_twenty_four_histories(
+                self.source,
+                self.root / "mismatched-duplicate",
+                self._lock(),
+            )
 
     def test_cli_requires_explicit_rights_and_canonical_package_identity(self):
         lock_path = self.root / "source-lock.json"
