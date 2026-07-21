@@ -21,7 +21,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_private_key
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+from tools.package_format import (
+    PackageFormatError,
+    canonical_json_bytes as _shared_canonical_json_bytes,
+    load_ed25519_private_key as _shared_load_private_key,
+    measure_signed_package as _shared_measure_signed_package,
+    stream_file_into_zip as _shared_stream_file_into_zip,
+    write_signed_package as _shared_write_signed_package,
+    write_signed_package_streaming as _shared_write_signed_package_streaming,
+)
 
 from .corpus_pipeline import build_corpus_index_streaming
 from .evaluation import evaluate_workspace, validate_declared_corpus_question_coverage
@@ -1854,24 +1864,16 @@ def _write_signed_package_v2(
     *,
     expected_files: dict[str, tuple[str, int]] | None = None,
 ) -> Path:
-    package_files, expected_identities = _prepare_signed_package_v2(
-        files,
-        private_key,
-        expected_files,
-    )
     try:
-        with zipfile.ZipFile(
+        return _shared_write_signed_package(
             target,
-            "x",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
-            allowZip64=True,
-        ) as archive:
-            _write_prepared_package_v2(archive, package_files, expected_identities)
-    except BaseException:
-        target.unlink(missing_ok=True)
-        raise
-    return target
+            files,
+            private_key,
+            expected_files=expected_files,
+            stream_file_writer=_stream_file_into_zip,
+        )
+    except PackageFormatError as error:
+        raise BuildError(str(error)) from error
 
 
 def _write_signed_package_v2_streaming(
@@ -1881,26 +1883,16 @@ def _write_signed_package_v2_streaming(
     *,
     expected_files: dict[str, tuple[str, int]] | None = None,
 ) -> Path:
-    package_files, expected_identities = _prepare_signed_package_v2(
-        files,
-        private_key,
-        expected_files,
-    )
     try:
-        with target.open("xb") as raw_target:
-            writer = _NonSeekableWriter(raw_target)
-            with zipfile.ZipFile(
-                writer,
-                "w",
-                compression=zipfile.ZIP_DEFLATED,
-                compresslevel=9,
-                allowZip64=True,
-            ) as archive:
-                _write_prepared_package_v2(archive, package_files, expected_identities)
-    except BaseException:
-        target.unlink(missing_ok=True)
-        raise
-    return target
+        return _shared_write_signed_package_streaming(
+            target,
+            files,
+            private_key,
+            expected_files=expected_files,
+            stream_file_writer=_stream_file_into_zip,
+        )
+    except PackageFormatError as error:
+        raise BuildError(str(error)) from error
 
 
 def _measure_signed_package_v2(
@@ -1909,141 +1901,15 @@ def _measure_signed_package_v2(
     *,
     expected_files: dict[str, tuple[str, int]] | None = None,
 ) -> tuple[str, int]:
-    package_files, expected_identities = _prepare_signed_package_v2(
-        files,
-        private_key,
-        expected_files,
-    )
-    writer = _HashingCountingWriter()
-    with zipfile.ZipFile(
-        writer,
-        "w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=9,
-        allowZip64=True,
-    ) as archive:
-        _write_prepared_package_v2(archive, package_files, expected_identities)
-    return writer.hexdigest(), writer.tell()
-
-
-def _prepare_signed_package_v2(
-    files: dict[str, bytes | Path],
-    private_key: Ed25519PrivateKey,
-    expected_files: dict[str, tuple[str, int]] | None,
-) -> tuple[dict[str, bytes | Path], dict[str, os.stat_result]]:
-    normalized: dict[str, bytes | Path] = {}
-    for raw_path, payload in files.items():
-        path = _safe_package_path_v2(raw_path)
-        if path in normalized or path in {"checksums.json", "signature.json"}:
-            raise BuildError(f"重复或保留的包内路径：{path}")
-        normalized[path] = payload
-    expected = {
-        _safe_package_path_v2(path): value
-        for path, value in (expected_files or {}).items()
-    }
-    if any(path not in normalized or isinstance(normalized[path], bytes) for path in expected):
-        raise BuildError("预期哈希只能绑定已声明的文件条目")
-    checksums: dict[str, str] = {}
-    expected_identities: dict[str, os.stat_result] = {}
-    for path, payload in sorted(normalized.items()):
-        if isinstance(payload, bytes):
-            checksums[path] = hashlib.sha256(payload).hexdigest()
-        else:
-            digest, size, identity = _hash_regular_file(payload, return_identity=True)
-            if path in expected and expected[path] != (digest, size):
-                raise BuildError(f"文件与声明大小或哈希不匹配：{path}")
-            checksums[path] = digest
-            expected_identities[path] = identity
-    checksums_bytes = _canonical_json_bytes({"files": checksums})
-    public_key = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    signature_bytes = _canonical_json_bytes(
-        {
-            "algorithm": "Ed25519",
-            "publicKey": base64.b64encode(public_key).decode("ascii"),
-            "signature": base64.b64encode(
-                private_key.sign(checksums_bytes)
-            ).decode("ascii"),
-            "signedFile": "checksums.json",
-        }
-    )
-    package_files: dict[str, bytes | Path] = {
-        **normalized,
-        "checksums.json": checksums_bytes,
-        "signature.json": signature_bytes,
-    }
-    return package_files, expected_identities
-
-
-def _write_prepared_package_v2(
-    archive: zipfile.ZipFile,
-    package_files: dict[str, bytes | Path],
-    expected_identities: dict[str, os.stat_result],
-) -> None:
-    for path, payload in sorted(package_files.items()):
-        if isinstance(payload, bytes):
-            _write_bytes_into_zip(archive, path, payload)
-        else:
-            _stream_file_into_zip(
-                archive,
-                path,
-                payload,
-                expected_identities.get(path),
-            )
-
-
-class _NonSeekableWriter:
-    def __init__(self, target: Any) -> None:
-        self._target = target
-        self._offset = 0
-
-    def write(self, payload: bytes) -> int:
-        written = self._target.write(payload)
-        if written is None:
-            written = len(payload)
-        if written != len(payload):
-            raise OSError("ZIP 输出发生短写")
-        self._offset += written
-        return written
-
-    def tell(self) -> int:
-        return self._offset
-
-    def flush(self) -> None:
-        self._target.flush()
-
-
-class _HashingCountingWriter:
-    def __init__(self) -> None:
-        self._digest = hashlib.sha256()
-        self._offset = 0
-
-    def write(self, payload: bytes) -> int:
-        self._digest.update(payload)
-        self._offset += len(payload)
-        return len(payload)
-
-    def tell(self) -> int:
-        return self._offset
-
-    def flush(self) -> None:
-        pass
-
-    def hexdigest(self) -> str:
-        return self._digest.hexdigest()
-
-
-def _write_bytes_into_zip(
-    archive: zipfile.ZipFile,
-    path: str,
-    payload: bytes,
-) -> None:
-    info = _zip_info(path)
-    archive.writestr(
-        info,
-        payload,
-        compress_type=zipfile.ZIP_DEFLATED,
-        compresslevel=9,
-    )
+    try:
+        return _shared_measure_signed_package(
+            files,
+            private_key,
+            expected_files=expected_files,
+            stream_file_writer=_stream_file_into_zip,
+        )
+    except PackageFormatError as error:
+        raise BuildError(str(error)) from error
 
 
 def _stream_file_into_zip(
@@ -2052,33 +1918,15 @@ def _stream_file_into_zip(
     source_path: Path,
     expected_identity: os.stat_result | None = None,
 ) -> None:
-    source_path = Path(source_path)
-    descriptor = _open_regular_nofollow(source_path)
     try:
-        before = os.fstat(descriptor)
-        if expected_identity is not None and not _same_file_identity(
-            expected_identity, before
-        ):
-            raise BuildError(f"文件在写入 ZIP 前发生变化：{source_path}")
-        info = _zip_info(path)
-        info.file_size = before.st_size
-        with archive.open(info, "w") as target:
-            with os.fdopen(os.dup(descriptor), "rb") as source:
-                while block := source.read(SOURCE_HASH_BUFFER_SIZE):
-                    target.write(block)
-        after = os.fstat(descriptor)
-        if not _same_file_identity(before, after):
-            raise BuildError(f"文件在写入 ZIP 期间发生变化：{source_path}")
-    finally:
-        os.close(descriptor)
-
-
-def _zip_info(path: str) -> zipfile.ZipInfo:
-    info = zipfile.ZipInfo(path, ZIP_TIMESTAMP)
-    info.compress_type = zipfile.ZIP_DEFLATED
-    info.external_attr = 0o100644 << 16
-    info.create_system = 3
-    return info
+        _shared_stream_file_into_zip(
+            archive,
+            path,
+            source_path,
+            expected_identity,
+        )
+    except PackageFormatError as error:
+        raise BuildError(str(error)) from error
 
 
 def _hash_regular_file(
@@ -2121,22 +1969,6 @@ def _open_regular_nofollow(path: Path) -> int:
         os.close(descriptor)
         raise BuildError(f"文件在打开期间发生变化：{path}")
     return descriptor
-
-
-def _safe_package_path_v2(value: str) -> str:
-    if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
-        raise BuildError(f"不安全的包内路径：{value}")
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or any(part in {"", ".", ".."} for part in path.parts)
-        or ":" in path.parts[0]
-    ):
-        raise BuildError(f"不安全的包内路径：{value}")
-    normalized = str(path)
-    if normalized != value:
-        raise BuildError(f"未规范化的包内路径：{value}")
-    return normalized
 
 
 def _write_jsonl_stream(path: Path, rows: Iterable[dict[str, Any]]) -> None:
@@ -2219,12 +2051,9 @@ def _write_signed_package(
 
 def _load_private_key(path: Path) -> Ed25519PrivateKey:
     try:
-        key = load_pem_private_key(path.read_bytes(), password=None)
-    except (OSError, ValueError, TypeError) as error:
-        raise BuildError(f"发布者私钥无法读取：{path}：{error}") from error
-    if not isinstance(key, Ed25519PrivateKey):
-        raise BuildError("发布者私钥必须是 Ed25519")
-    return key
+        return _shared_load_private_key(path)
+    except PackageFormatError as error:
+        raise BuildError(str(error)) from error
 
 
 def _rank_chunks(query: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2356,7 +2185,7 @@ def _read_jsonl_safe(path: Path, errors: list[str], label: str) -> list[dict[str
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _shared_canonical_json_bytes(value)
 
 
 def _write_report(workspace: Path, report: BuildReport):
