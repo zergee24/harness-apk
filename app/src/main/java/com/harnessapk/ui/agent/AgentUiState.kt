@@ -3,6 +3,7 @@ package com.harnessapk.ui.agent
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentInstallResult
 import com.harnessapk.agent.AgentInsufficientStorageException
+import com.harnessapk.agent.AgentPackageLoadProgress
 import com.harnessapk.agent.AgentStatus
 import com.harnessapk.agent.InstallContractPackage
 import com.harnessapk.agent.InstallContractProfile
@@ -293,6 +294,26 @@ internal fun formatAgentPackageSize(bytes: Long): String = when {
     bytes < 1024 * 1024 -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
     bytes < 1024L * 1024 * 1024 -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
     else -> String.format(Locale.US, "%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0))
+}
+
+internal fun agentPackageLoadFraction(progress: AgentPackageLoadProgress): Float? = when (progress) {
+    is AgentPackageLoadProgress.Copying -> progress.totalBytes
+        ?.takeIf { it > 0L }
+        ?.let { totalBytes -> (progress.copiedBytes.toFloat() / totalBytes).coerceIn(0f, 1f) }
+    AgentPackageLoadProgress.Validating -> null
+}
+
+internal fun agentPackageLoadTitle(progress: AgentPackageLoadProgress): String = when (progress) {
+    is AgentPackageLoadProgress.Copying -> "正在读取智能体包"
+    AgentPackageLoadProgress.Validating -> "正在校验智能体包"
+}
+
+internal fun agentPackageLoadDetail(progress: AgentPackageLoadProgress): String = when (progress) {
+    is AgentPackageLoadProgress.Copying -> progress.totalBytes
+        ?.takeIf { it > 0L }
+        ?.let { totalBytes -> "已读取 ${formatAgentPackageSize(progress.copiedBytes)} / ${formatAgentPackageSize(totalBytes)}" }
+        ?: "已读取 ${formatAgentPackageSize(progress.copiedBytes)}"
+    AgentPackageLoadProgress.Validating -> "正在校验智能体包完整性"
 }
 
 internal val INSTALLATION_PROFILE_ORDER = V2_INSTALLATION_PROFILE_ORDER

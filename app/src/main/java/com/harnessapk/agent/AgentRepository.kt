@@ -41,6 +41,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.put
 import java.io.File
+import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
@@ -93,6 +94,18 @@ class AgentRepository(
     suspend fun preparePackageImport(
         sourceName: String,
         openInputStream: () -> InputStream,
+    ): AgentPackageImportSession = preparePackageImport(
+        sourceName = sourceName,
+        openInputStream = openInputStream,
+        sourceBytes = null,
+        onProgress = {},
+    )
+
+    suspend fun preparePackageImport(
+        sourceName: String,
+        openInputStream: () -> InputStream,
+        sourceBytes: Long?,
+        onProgress: (AgentPackageLoadProgress) -> Unit,
     ): AgentPackageImportSession = withContext(ioDispatcher) {
         val stagingDirectory = File(cacheDir, "agent-staging").also(fileOps::createDirectories)
         val now = timeProvider.nowMillis()
@@ -101,7 +114,16 @@ class AgentRepository(
         purgeStaleImportFilesChecked(stagingDirectory, now)
         val stagedFile = File(stagingDirectory, "${UUID.randomUUID()}.package")
         try {
-            openInputStream().use { input -> fileOps.copyBounded(input, stagedFile, MAX_IMPORT_BUNDLE_BYTES) }
+            val totalBytes = sourceBytes?.takeIf { it > 0L }
+            onProgress(AgentPackageLoadProgress.Copying(copiedBytes = 0L, totalBytes = totalBytes))
+            val copiedBytes = openInputStream().use { rawInput ->
+                val input = AgentPackageProgressInputStream(rawInput) { copied ->
+                    onProgress(AgentPackageLoadProgress.Copying(copiedBytes = copied, totalBytes = totalBytes))
+                }
+                fileOps.copyBounded(input, stagedFile, MAX_IMPORT_BUNDLE_BYTES)
+            }
+            onProgress(AgentPackageLoadProgress.Copying(copiedBytes = copiedBytes, totalBytes = totalBytes))
+            onProgress(AgentPackageLoadProgress.Validating)
             val parsed = reader.readPackageSuspending(stagedFile)
             val id = UUID.randomUUID().toString()
             val session = AgentPackageImportSession(
@@ -2231,6 +2253,34 @@ class AgentRepository(
     }
 }
 
+private class AgentPackageProgressInputStream(
+    input: InputStream,
+    private val onBytesCopied: (Long) -> Unit,
+) : FilterInputStream(input) {
+    private var copiedBytes = 0L
+    private var lastReportedBytes = 0L
+
+    override fun read(): Int {
+        val value = super.read()
+        if (value >= 0) reportBytesCopied(1L)
+        return value
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val read = super.read(buffer, offset, length)
+        if (read > 0) reportBytesCopied(read.toLong())
+        return read
+    }
+
+    private fun reportBytesCopied(bytes: Long) {
+        copiedBytes += bytes
+        if (copiedBytes - lastReportedBytes >= IMPORT_PROGRESS_REPORT_BYTES) {
+            lastReportedBytes = copiedBytes
+            onBytesCopied(copiedBytes)
+        }
+    }
+}
+
 private const val MAX_ROUTE_REPRESENTATIVES = 2
 
 private fun File.fileKeyOrNull(): Any? = runCatching {
@@ -2875,6 +2925,7 @@ private suspend fun File.sha256Hex(): String {
 
 private const val MAX_QUERY_TERM_COUNT = 24
 private const val MAX_IMPORT_BUNDLE_BYTES = 2L * 1024 * 1024 * 1024
+private const val IMPORT_PROGRESS_REPORT_BYTES = 256L * 1024L
 private const val IMPORT_STAGING_TTL_MILLIS = 24L * 60 * 60 * 1000
 private const val INSTALL_SNAPSHOT_DIRECTORY = "agent-install-snapshots"
 private const val SQLITE_PAGE_BYTES = 4096L

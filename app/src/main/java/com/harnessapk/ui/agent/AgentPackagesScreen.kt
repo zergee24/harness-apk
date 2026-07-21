@@ -1,5 +1,6 @@
 package com.harnessapk.ui.agent
 
+import android.content.Context
 import android.net.Uri
 import android.os.StatFs
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -22,7 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -53,6 +53,7 @@ import com.harnessapk.agent.AgentImportPreview
 import com.harnessapk.agent.AgentPackageClassCount
 import com.harnessapk.agent.AgentPackageDetail
 import com.harnessapk.agent.AgentPackageImportSession
+import com.harnessapk.agent.AgentPackageLoadProgress
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
 import com.harnessapk.agent.V2Bundle
 import com.harnessapk.agent.V2Corpus
@@ -60,7 +61,10 @@ import com.harnessapk.agent.V2Source
 import com.harnessapk.agent.V2SourceRecord
 import com.harnessapk.common.AppContainer
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -99,23 +103,35 @@ fun AgentPackagesScreen(
     var previewInstallFailure by remember { mutableStateOf<AgentPackageInstallAttempt.Failure?>(null) }
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    val importLoadProgress = remember { MutableStateFlow<AgentPackageLoadProgress?>(null) }
+    val loadProgress by importLoadProgress.collectAsState()
 
     fun prepareImport(uri: Uri) {
         scope.launch {
             isWorking = true
             errorText = null
+            importLoadProgress.value = AgentPackageLoadProgress.Copying(copiedBytes = 0L, totalBytes = null)
             try {
-                val session = container.agentRepository.preparePackageImport(uri.lastPathSegment ?: "智能体包") {
-                    context.contentResolver.openInputStream(uri)
-                        ?: throw AgentBundleException("无法读取所选文件")
-                }
+                val sourceBytes = withContext(Dispatchers.IO) { packageSourceBytes(context, uri) }
+                importLoadProgress.value = AgentPackageLoadProgress.Copying(copiedBytes = 0L, totalBytes = sourceBytes)
+                val session = container.agentRepository.preparePackageImport(
+                    sourceName = uri.lastPathSegment ?: "智能体包",
+                    openInputStream = {
+                        context.contentResolver.openInputStream(uri)
+                            ?: throw AgentBundleException("无法读取所选文件")
+                    },
+                    sourceBytes = sourceBytes,
+                    onProgress = { progress -> importLoadProgress.value = progress },
+                )
                 previewViewModel.replace(session)
                 previewAvailableBytes = privateInstallAvailableBytes(context.filesDir.absolutePath)
                 previewInstallFailure = null
             } catch (error: Throwable) {
                 errorText = error.message ?: "智能体包读取失败"
+            } finally {
+                importLoadProgress.value = null
+                isWorking = false
             }
-            isWorking = false
         }
     }
 
@@ -189,7 +205,12 @@ fun AgentPackagesScreen(
             }
         }
         if (isWorking && importSession == null) {
-            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+            loadProgress?.let { progress ->
+                AgentPackageLoadIndicator(
+                    progress = progress,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
         }
     }
 
@@ -300,6 +321,39 @@ fun AgentPackagesScreen(
         }
     }
 }
+
+@Composable
+private fun AgentPackageLoadIndicator(
+    progress: AgentPackageLoadProgress,
+    modifier: Modifier = Modifier,
+) {
+    val fraction = agentPackageLoadFraction(progress)
+    Column(
+        modifier = modifier
+            .width(264.dp)
+            .padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(agentPackageLoadTitle(progress), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        if (fraction == null) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        } else {
+            LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+        }
+        Text(
+            text = agentPackageLoadDetail(progress),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private fun packageSourceBytes(context: Context, uri: Uri): Long? = runCatching {
+    context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+        descriptor.length.takeIf { it > 0L }
+    }
+}.getOrNull()
 
 @Composable
 internal fun AgentPackagesEmptyState(

@@ -112,6 +112,15 @@ data class AgentPackageImportSession(
     val preview: AgentImportPreview,
 )
 
+sealed interface AgentPackageLoadProgress {
+    data class Copying(
+        val copiedBytes: Long,
+        val totalBytes: Long?,
+    ) : AgentPackageLoadProgress
+
+    data object Validating : AgentPackageLoadProgress
+}
+
 enum class AgentInstallOutcome {
     INSTALLED,
     ALREADY_INSTALLED,

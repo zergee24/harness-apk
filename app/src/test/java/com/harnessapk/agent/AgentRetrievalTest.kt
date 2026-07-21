@@ -83,6 +83,32 @@ class AgentRetrievalTest {
     }
 
     @Test
+    fun packagePreparationReportsCopyCompletionBeforeValidation() = runTest {
+        val root = Files.createTempDirectory("agent-import-progress-test").toFile().apply { deleteOnExit() }
+        val source = root.resolve("source.hbundle").apply { writeText("validated package") }
+        val repository = AgentRepository(
+            filesDir = root.resolve("files"),
+            cacheDir = root.resolve("cache"),
+            dao = FakeAgentDao(),
+            reader = FakeAgentBundleAccess(parsedBundle = v1ParsedBundle(source)),
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+        val payload = ByteArray(1_024)
+        val progress = mutableListOf<AgentPackageLoadProgress>()
+
+        repository.preparePackageImport(
+            sourceName = "source.hbundle",
+            openInputStream = payload::inputStream,
+            sourceBytes = payload.size.toLong(),
+            onProgress = { event -> progress += event },
+        )
+
+        assertEquals(AgentPackageLoadProgress.Copying(0L, payload.size.toLong()), progress.first())
+        assertTrue(progress.contains(AgentPackageLoadProgress.Copying(payload.size.toLong(), payload.size.toLong())))
+        assertEquals(AgentPackageLoadProgress.Validating, progress.last())
+    }
+
+    @Test
     fun unifiedV2BalancedInstallIsSingleUseAndUsesBoundedChunkBatches() = runTest {
         val fixture = v2InstallFixture(chunkCount = 450)
         val session = fixture.repository.preparePackageImport("balanced.hbundle") {

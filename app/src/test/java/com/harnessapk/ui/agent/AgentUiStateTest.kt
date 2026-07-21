@@ -6,6 +6,7 @@ import com.harnessapk.agent.AgentImportPreview
 import com.harnessapk.agent.AgentImportSession
 import com.harnessapk.agent.AgentImportSessionUnavailableException
 import com.harnessapk.agent.AgentPackageManifest
+import com.harnessapk.agent.AgentPackageLoadProgress
 import com.harnessapk.agent.ParsedAgentBundle
 import com.harnessapk.agent.AgentStatus
 import com.harnessapk.agent.AgentInsufficientStorageException
@@ -438,6 +439,27 @@ class AgentUiStateTest {
     fun formatsPackageSizeWithoutExcessPrecision() {
         assertEquals("900 B", formatAgentPackageSize(900))
         assertEquals("1.5 MB", formatAgentPackageSize(1_572_864))
+    }
+
+    @Test
+    fun packageLoadingProgressUsesSourceSizeForItsRealFractionAndLabel() {
+        val progress = AgentPackageLoadProgress.Copying(copiedBytes = 786_432L, totalBytes = 1_572_864L)
+
+        assertEquals(0.5f, agentPackageLoadFraction(progress))
+        assertEquals("已读取 768.0 KB / 1.5 MB", agentPackageLoadDetail(progress))
+    }
+
+    @Test
+    fun packageLoadingProgressDoesNotInventPercentWhenSourceSizeIsUnknown() {
+        val progress = AgentPackageLoadProgress.Copying(copiedBytes = 1_572_864L, totalBytes = null)
+
+        assertNull(agentPackageLoadFraction(progress))
+        assertEquals("已读取 1.5 MB", agentPackageLoadDetail(progress))
+    }
+
+    @Test
+    fun packageLoadingProgressIdentifiesValidationStage() {
+        assertEquals("正在校验智能体包完整性", agentPackageLoadDetail(AgentPackageLoadProgress.Validating))
     }
 
     @Test
