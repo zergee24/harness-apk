@@ -358,6 +358,38 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
         self.assertEqual("冬至\t十一月中", rows[-1][0])
         self.assertEqual("table-row", json.loads(rows[-1][1])["blockType"])
 
+    def test_chapter_title_excludes_nested_source_and_translation_controls(self):
+        chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
+        payload = chapter.read_text(encoding="utf-8").replace(
+            "<h1>五帝本纪</h1>",
+            "<h1>五帝本纪<span> 原文</span>"
+            "<span><a href='第一章-段译.html'>段译</a></span>"
+            "<span><a href='第一章-译文.html'>译文</a></span></h1>",
+        )
+        self._write(chapter, payload)
+        self._commit("chapter title controls")
+
+        workspace = prepare_twenty_four_histories(
+            self.source,
+            self.root / "chapter-title-controls",
+            self._lock(),
+        )
+
+        with sqlite3.connect(workspace / "content.sqlite") as database:
+            title, locator = database.execute(
+                """
+                SELECT sections.title, chunks.locator_json
+                FROM chunks
+                JOIN sections USING(section_id)
+                JOIN documents USING(document_id)
+                WHERE documents.title='史记'
+                ORDER BY chunks.ordinal
+                LIMIT 1
+                """
+            ).fetchone()
+        self.assertEqual("五帝本纪", title)
+        self.assertEqual("五帝本纪", json.loads(locator)["chapterTitle"])
+
     def test_orphan_nested_end_tag_does_not_close_the_source_paragraph(self):
         chapter = self.source / "史记/十二本纪/第一章-五帝本纪-原文.html"
         payload = chapter.read_text(encoding="utf-8").replace(

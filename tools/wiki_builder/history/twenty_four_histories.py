@@ -465,6 +465,7 @@ class _ChapterParser(HTMLParser):
         self._ignore_tag: str | None = None
         self._ignore_same_tag_depth = 0
         self._heading_open = False
+        self._heading_nested_tags: list[str] = []
         self._paragraph_open = False
         self._paragraph_parts: list[str] = []
         self._paragraph_has_link = False
@@ -492,8 +493,10 @@ class _ChapterParser(HTMLParser):
             if name == "h1":
                 self.structure_errors.append("h1 内嵌套 h1")
                 self.heading_count += 1
-            elif name == "br":
+            elif name == "br" and not self._heading_nested_tags:
                 self.heading_parts.append("\n")
+            elif name != "br":
+                self._heading_nested_tags.append(name)
             return
         if self._paragraph_open:
             if name == "p":
@@ -565,7 +568,11 @@ class _ChapterParser(HTMLParser):
             self._paragraph_parts.append("\n")
         elif self._subheading_tag is not None and name == "br":
             self._subheading_parts.append("\n")
-        elif self._heading_open and name == "br":
+        elif (
+            self._heading_open
+            and not self._heading_nested_tags
+            and name == "br"
+        ):
             self.heading_parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
@@ -578,7 +585,15 @@ class _ChapterParser(HTMLParser):
             return
         if self._heading_open:
             if name == "h1":
+                if self._heading_nested_tags:
+                    self.structure_errors.append("h1 内存在未闭合嵌套标签")
                 self._heading_open = False
+                self._heading_nested_tags = []
+            elif self._heading_nested_tags:
+                if name == self._heading_nested_tags[-1]:
+                    self._heading_nested_tags.pop()
+                elif name in self._heading_nested_tags:
+                    self.structure_errors.append("h1 内嵌套标签闭合顺序不明确")
             return
         if self._paragraph_open:
             if name == "p":
@@ -619,7 +634,8 @@ class _ChapterParser(HTMLParser):
         if self._ignore_tag is not None:
             return
         if self._heading_open:
-            self.heading_parts.append(data)
+            if not self._heading_nested_tags:
+                self.heading_parts.append(data)
         elif self._paragraph_open:
             self._paragraph_parts.append(data)
         elif self._subheading_tag is not None:
