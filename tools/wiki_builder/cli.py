@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -12,6 +13,11 @@ from .builder import prepare_workspace
 from .enrichment import import_enrichment
 from .history.concept_registry import install_shared_registry, validate_pair_registry
 from .history.enrichment_jobs import create_jobs, merge_jobs, validate_job
+from .history.evaluation import (
+    create_evaluation_template,
+    evaluate_pair,
+    validate_evaluation_set,
+)
 from .history.history_profile import PROFILE_ID
 from .history.rights import RightsConfirmation, verify_build_rights
 from .history.source_inventory import (
@@ -137,6 +143,29 @@ def build_parser() -> argparse.ArgumentParser:
     validate_pair.add_argument("left", type=Path)
     validate_pair.add_argument("right", type=Path)
     validate_pair.add_argument("--registry", type=Path)
+
+    create_eval = history_commands.add_parser(
+        "create-eval-template",
+        help="生成必须人工复核的单库或双库评测模板",
+    )
+    create_eval.add_argument("workspaces", nargs="+", type=Path)
+    create_eval.add_argument("--cross-wiki", action="store_true")
+    create_eval.add_argument("--minimum-cases", type=int)
+    create_eval.add_argument("--output", type=Path)
+
+    validate_eval = history_commands.add_parser(
+        "validate-eval",
+        help="验证评测配额、人工状态与 gold 原文引用",
+    )
+    validate_eval.add_argument("evaluation", type=Path)
+
+    evaluate_history_pair = history_commands.add_parser(
+        "evaluate-pair",
+        help="执行双库最终 12 条 gold 证据覆盖评测",
+    )
+    evaluate_history_pair.add_argument("left", type=Path)
+    evaluate_history_pair.add_argument("right", type=Path)
+    evaluate_history_pair.add_argument("--evaluation", required=True, type=Path)
     return parser
 
 
@@ -223,6 +252,49 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
+            if args.history_command == "create-eval-template":
+                output = args.output or _default_evaluation_output(
+                    args.workspaces,
+                    cross_wiki=args.cross_wiki,
+                )
+                result = create_evaluation_template(
+                    args.workspaces,
+                    output,
+                    cross_wiki=args.cross_wiki,
+                    minimum_cases=args.minimum_cases,
+                )
+                print(result)
+                return 0
+            if args.history_command == "validate-eval":
+                evaluation = validate_evaluation_set(args.evaluation)
+                print(
+                    json.dumps(
+                        {
+                            "scope": evaluation.scope,
+                            "caseCount": len(evaluation.cases),
+                            "workspaces": [
+                                {
+                                    "wikiId": workspace.wiki_id,
+                                    "wikiVersion": workspace.wiki_version,
+                                }
+                                for workspace in evaluation.workspaces
+                            ],
+                            "valid": True,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                return 0
+            if args.history_command == "evaluate-pair":
+                report = evaluate_pair(
+                    args.left,
+                    args.right,
+                    args.evaluation,
+                )
+                print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+                return 0 if report.publishable else 2
             if args.history_command == "prepare-twenty-four":
                 _require_history_identity(
                     args,
@@ -331,6 +403,25 @@ def _require_history_identity(
     ]
     if mismatches:
         raise BuildError("史书 profile 包身份不可改写：" + "；".join(mismatches))
+
+
+def _default_evaluation_output(
+    workspaces: list[Path],
+    *,
+    cross_wiki: bool,
+) -> Path:
+    if not cross_wiki:
+        if len(workspaces) != 1:
+            raise BuildError("单库评测模板必须提供一个工作区")
+        return workspaces[0] / "evaluation"
+    if len(workspaces) != 2:
+        raise BuildError("双库评测模板必须提供两个工作区")
+    common = Path(
+        os.path.commonpath([str(workspace.resolve()) for workspace in workspaces])
+    )
+    if common in {workspace.resolve() for workspace in workspaces}:
+        common = common.parent
+    return common / "pair-evaluation"
 
 
 if __name__ == "__main__":

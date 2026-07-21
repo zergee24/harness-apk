@@ -119,6 +119,27 @@ def evaluate_retrieval(
         connection.close()
 
 
+def retrieve_chunks(
+    database: Path,
+    query: str,
+    *,
+    limit: int = RETRIEVAL_LIMIT,
+) -> tuple[str, ...]:
+    """Run the production-equivalent deterministic retrieval without evaluation."""
+
+    if not isinstance(query, str) or not query.strip():
+        raise BuildError("检索 query 必须是非空字符串")
+    if type(limit) is not int or limit < 1 or limit > _CHANNEL_CANDIDATE_LIMIT:
+        raise BuildError(
+            f"检索 limit 必须在 1 到 {_CHANNEL_CANDIDATE_LIMIT} 之间"
+        )
+    connection = _open_read_only(Path(database))
+    try:
+        return tuple(_retrieve(connection, query)[:limit])
+    finally:
+        connection.close()
+
+
 def load_retrieval_cases(path: Path) -> tuple[RetrievalCase, ...]:
     source = Path(path)
     if source.is_symlink() or not source.is_file():
@@ -339,4 +360,5 @@ __all__ = [
     "evaluate_retrieval",
     "load_retrieval_cases",
     "reciprocal_rank_fusion",
+    "retrieve_chunks",
 ]

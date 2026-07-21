@@ -159,12 +159,24 @@ def validate_workspace(
         connection.close()
 
     retrieval = RetrievalReport.empty()
-    eval_path = evaluation_path or loaded.root / "evaluation/retrieval-eval.jsonl"
+    history_default = loaded.root / "evaluation/cases.jsonl"
+    generic_default = loaded.root / "evaluation/retrieval-eval.jsonl"
+    eval_path = evaluation_path or (
+        history_default
+        if (history_default.parent / "evaluation.json").is_file()
+        else generic_default
+    )
     if not eval_path.is_file() or eval_path.is_symlink():
         errors.append(("missing_evaluation", f"缺少检索评测集：{eval_path}"))
     else:
         try:
-            cases = load_retrieval_cases(eval_path)
+            history_index = eval_path.parent / "evaluation.json"
+            if eval_path.name == "cases.jsonl" and history_index.is_file():
+                from .history.evaluation import load_single_retrieval_cases
+
+                cases = load_single_retrieval_cases(eval_path, loaded.root)
+            else:
+                cases = load_retrieval_cases(eval_path)
             retrieval = evaluate_retrieval(loaded.database_path, cases)
         except BuildError as error:
             errors.append(("evaluation_invalid", str(error)))

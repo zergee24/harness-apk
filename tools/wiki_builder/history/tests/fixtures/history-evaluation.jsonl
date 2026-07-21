@@ -1,0 +1,8 @@
+{"caseId":"alias-title-place-001","category":"alias-title-place","expectedResult":"evidence","goldEvidence":[],"query":"待人工改写 alias-title-place 001","reviewed":false,"reviewerNotes":"","scope":"single"}
+{"caseId":"homonym-disambiguation-001","category":"homonym-disambiguation","expectedResult":"evidence","goldEvidence":[],"query":"待人工改写 homonym-disambiguation 001","reviewed":false,"reviewerNotes":"","scope":"single"}
+{"caseId":"known-evidence-gap-001","category":"known-evidence-gap","expectedResult":"no-result","goldEvidence":[],"query":"待人工改写 known-evidence-gap 001","reviewed":false,"reviewerNotes":"","scope":"single"}
+{"caseId":"modern-paraphrase-001","category":"modern-paraphrase","expectedResult":"evidence","goldEvidence":[],"query":"待人工改写 modern-paraphrase 001","reviewed":false,"reviewerNotes":"","scope":"single"}
+{"caseId":"multi-volume-synthesis-001","category":"multi-volume-synthesis","expectedResult":"evidence","goldEvidence":[],"query":"待人工改写 multi-volume-synthesis 001","reviewed":false,"reviewerNotes":"","scope":"single"}
+{"caseId":"no-result-001","category":"no-result","expectedResult":"no-result","goldEvidence":[],"query":"待人工改写 no-result 001","reviewed":false,"reviewerNotes":"","scope":"single"}
+{"caseId":"original-keyword-001","category":"original-keyword","expectedResult":"evidence","goldEvidence":[],"query":"待人工改写 original-keyword 001","reviewed":false,"reviewerNotes":"","scope":"single"}
+{"caseId":"time-expression-001","category":"time-expression","expectedResult":"evidence","goldEvidence":[],"query":"待人工改写 time-expression 001","reviewed":false,"reviewerNotes":"","scope":"single"}

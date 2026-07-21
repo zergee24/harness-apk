@@ -88,20 +88,49 @@ scripts/wiki-builder.sh history validate-pair <twenty-four-workspace> \
   <zizhi-workspace> --registry <cn-history-v1.jsonl>
 ```
 
-4. 通用资料只生成 `enrichment/` 中约定的 canonical JSONL。每个文件按主 ID 升序，单行字段严格匹配协议：
+4. 为每个史书工作区和双库组合生成不可冒充人工结论的评测模板：
+
+```bash
+scripts/wiki-builder.sh history create-eval-template \
+  <twenty-four-workspace> --minimum-cases 160
+scripts/wiki-builder.sh history create-eval-template \
+  <zizhi-workspace> --minimum-cases 160
+scripts/wiki-builder.sh history create-eval-template \
+  <twenty-four-workspace> <zizhi-workspace> \
+  --cross-wiki --minimum-cases 60
+```
+
+模板自动带入候选原文、版本与 locator，但全部为 `reviewed=false`。Agent 可以协助改写 query、定位候选证据和指出歧义，不能替人工把 `reviewed` 改为 `true`。人工逐条查看原文后，正向 case 保留精确 gold，缺口与无结果 case 写明 `reviewerNotes`，再执行：
+
+```bash
+scripts/wiki-builder.sh history validate-eval \
+  <twenty-four-workspace>/evaluation
+scripts/wiki-builder.sh history validate-eval \
+  <zizhi-workspace>/evaluation
+scripts/wiki-builder.sh history validate-eval <pair-evaluation>
+scripts/wiki-builder.sh validate <twenty-four-workspace>
+scripts/wiki-builder.sh validate <zizhi-workspace>
+scripts/wiki-builder.sh history evaluate-pair \
+  <twenty-four-workspace> <zizhi-workspace> \
+  --evaluation <pair-evaluation>/cases.jsonl
+```
+
+字段协议、类别配额与固定阈值见 [history-evaluation-v1.md](references/history-evaluation-v1.md)。评测失败保留失败 case 并修复提取、语义资产或检索；不得改 gold 迎合当前排序，也不得降低阈值。
+
+5. 通用资料只生成 `enrichment/` 中约定的 canonical JSONL。每个文件按主 ID 升序，单行字段严格匹配协议：
    - `summaries.jsonl`、`terms.jsonl`、`aliases.jsonl`、`annotations.jsonl`、`links.jsonl` 必须有非空 `evidence`。
    - `mentions.jsonl` 必须给出 `chunkId`、精确字符 offsets 和与原文完全一致的 `text`。
    - term 的 `conceptKey` 必须存在于同命名空间的 `concept-registry.jsonl`；低置信度关系保留置信度，不硬合并。
-   - 每个文档和每个含原文的叶级章节都生成证据化摘要；评测题人工核验 gold chunk 后再写入 `evaluation/retrieval-eval.jsonl`。
-5. 事务导入并验证：
+   - 每个文档和每个含原文的叶级章节都生成证据化摘要；通用资料的评测题人工核验 gold chunk 后再写入 `evaluation/retrieval-eval.jsonl`，史书使用上一步的 `evaluation/cases.jsonl`。
+6. 事务导入并验证：
 
 ```bash
 scripts/wiki-builder.sh enrich <workspace>
 scripts/wiki-builder.sh validate <workspace>
 ```
 
-6. `validate` 返回 2 时读取错误码，修复后重跑。只有所有结构、证据、locator、FTS 和 Recall 门槛通过才继续。
-7. 使用已有 Ed25519 私钥直接打包，不生成或替换私钥：
+7. `validate` 返回 2 时读取错误码，修复后重跑。只有所有结构、证据、locator、FTS 和 Recall 门槛通过才继续。
+8. 使用已有 Ed25519 私钥直接打包，不生成或替换私钥：
 
 ```bash
 scripts/wiki-builder.sh pack <workspace> --output <dist> --key <publisher-key.pem>
