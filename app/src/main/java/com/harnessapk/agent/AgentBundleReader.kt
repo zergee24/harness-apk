@@ -676,23 +676,28 @@ class AgentBundleReader(
         if (manifest.runnableWithoutCorpora && manifest.requiredCorpora.isNotEmpty()) {
             throw AgentBundleException("hagent runnableWithoutCorpora 与 requiredCorpora 冲突")
         }
-        val assetBudget = AgentRuntimeAssetBudget()
-        val persona = assetBudget.read(archive, V2_PERSONA_PATH).decodeToString().trim()
+        val runtimeAssetBudget = AgentRuntimeAssetBudget()
+        val persona = runtimeAssetBudget.read(archive, V2_PERSONA_PATH).decodeToString().trim()
         if (persona.isBlank()) throw AgentBundleException("$V2_PERSONA_PATH 不能为空")
-        val identity = parseIdentity(archive.readAgentJsonObject(V2_IDENTITY_PATH, assetBudget))
-        val voice = parseVoice(archive.readAgentJsonObject(V2_VOICE_PATH, assetBudget))
-        val worldview = archive.readAgentJsonl(V2_WORLDVIEW_PATH, assetBudget, ::parseWorldview)
-        val episodes = archive.readAgentJsonl(V2_EPISODES_PATH, assetBudget, ::parseEpisode)
-        val conceptsRoot = archive.readAgentJsonObject(V2_CONCEPTS_PATH, assetBudget)
+        val identity = parseIdentity(archive.readAgentJsonObject(V2_IDENTITY_PATH, runtimeAssetBudget))
+        val voice = parseVoice(archive.readAgentJsonObject(V2_VOICE_PATH, runtimeAssetBudget))
+        val worldview = archive.readAgentJsonl(V2_WORLDVIEW_PATH, runtimeAssetBudget, ::parseWorldview)
+        val episodes = archive.readAgentJsonl(V2_EPISODES_PATH, runtimeAssetBudget, ::parseEpisode)
+        val conceptsRoot = archive.readAgentJsonObject(V2_CONCEPTS_PATH, runtimeAssetBudget)
         val concepts = conceptsRoot.requiredArray("concepts", V2_CONCEPTS_PATH)
             .mapIndexed { index, element -> parseConcept(element.asObject("$V2_CONCEPTS_PATH[$index]")) }
         rejectDuplicates(concepts.map(V2Concept::id), "concept id")
-        val examples = archive.readAgentJsonl(V2_EXAMPLES_PATH, assetBudget, ::parseExample)
-        val openers = parseOpeners(archive.readAgentJsonObject(V2_OPENERS_PATH, assetBudget))
-        val evaluations = archive.readAgentJsonl(V2_EVAL_PATH, assetBudget, ::parseEvaluation)
+        val examples = archive.readAgentJsonl(V2_EXAMPLES_PATH, runtimeAssetBudget, ::parseExample)
+        val openers = parseOpeners(archive.readAgentJsonObject(V2_OPENERS_PATH, runtimeAssetBudget))
+        val evaluations = archive.readAgentJsonl(V2_EVAL_PATH, runtimeAssetBudget, ::parseEvaluation)
         var installPlanJson = ""
+        val installPlanBudget = AgentRuntimeAssetBudget(
+            maxBytes = MAX_INSTALL_PLAN_BYTES,
+            maxRecords = MAX_INSTALL_PLAN_RECORDS,
+            assetLabel = "安装计划",
+        )
         val installPlan = parseInstallPlan(
-            archive.readAgentJsonObject(V2_INSTALL_PLAN_PATH, assetBudget) { installPlanJson = it },
+            archive.readAgentJsonObject(V2_INSTALL_PLAN_PATH, installPlanBudget) { installPlanJson = it },
         )
         if (installPlan.requiredCorpusIds.toSet() != manifest.requiredCorpora.toSet()) {
             throw AgentBundleException("hagent requiredCorpora 与 install plan 不一致")
@@ -1343,10 +1348,17 @@ class AgentBundleReader(
         var remainingRuntimeAssetBytes = MAX_AGENT_RUNTIME_ASSET_BYTES.toLong()
         contentEntries.forEach { entry ->
             val actual = if (entry.name in runtimeAssetPaths) {
-                val hashed = archive.getInputStream(entry).use { input ->
-                    input.sha256Limited(remainingRuntimeAssetBytes, entry.name)
+                val maxBytes = if (entry.name == V2_INSTALL_PLAN_PATH) {
+                    MAX_INSTALL_PLAN_BYTES.toLong()
+                } else {
+                    remainingRuntimeAssetBytes
                 }
-                remainingRuntimeAssetBytes -= hashed.bytes
+                val hashed = archive.getInputStream(entry).use { input ->
+                    input.sha256Limited(maxBytes, entry.name)
+                }
+                if (entry.name != V2_INSTALL_PLAN_PATH) {
+                    remainingRuntimeAssetBytes -= hashed.bytes
+                }
                 hashed.sha256
             } else {
                 archive.getInputStream(entry).use(InputStream::sha256)
@@ -1457,12 +1469,12 @@ class AgentBundleReader(
         if (profiles.count { it.id == recommended && it.recommended } != 1 || profiles.count { it.recommended } != 1) {
             throw AgentBundleException("install plan 推荐 profile 无效")
         }
-        val knownIds = packages.mapTo(mutableSetOf(), V2InstallPackage::id)
+        val packageById = packages.associateBy(V2InstallPackage::id)
         profiles.forEach { profile ->
-            val unknown = profile.packageIds.firstOrNull { it !in knownIds }
+            val unknown = profile.packageIds.firstOrNull { it !in packageById }
             if (unknown != null) throw AgentBundleException("profile 引用了未声明 package：$unknown")
             profile.packageIds.forEach { selected ->
-                val declaration = packages.single { it.id == selected }
+                val declaration = packageById.getValue(selected)
                 if (!declaration.dependencies.all(profile.packageIds::contains)) {
                     throw AgentBundleException("profile 缺少 package 依赖：$selected")
                 }
@@ -1728,21 +1740,30 @@ class AgentBundleReader(
                 throw AgentBundleException("运行时资产总字节超过大小上限")
             }
         }
-        return V2_AGENT_RUNTIME_ASSET_FILES
+        val installPlan = archive.getEntry(V2_INSTALL_PLAN_PATH)
+            ?: throw AgentBundleException("缺少包内文件：$V2_INSTALL_PLAN_PATH")
+        if (installPlan.size < 0 || installPlan.size > MAX_INSTALL_PLAN_BYTES) {
+            throw AgentBundleException("安装计划超过大小上限：$V2_INSTALL_PLAN_PATH")
+        }
+        return V2_AGENT_RUNTIME_ASSET_FILES + V2_INSTALL_PLAN_PATH
     }
 
-    private class AgentRuntimeAssetBudget {
+    private class AgentRuntimeAssetBudget(
+        private val maxBytes: Int = MAX_AGENT_RUNTIME_ASSET_BYTES,
+        private val maxRecords: Long = MAX_AGENT_RUNTIME_ASSET_RECORDS,
+        private val assetLabel: String = "运行时资产",
+    ) {
         private var consumedBytes = 0L
         private var recordCount = 0L
 
         fun read(archive: ZipFile, path: String): ByteArray =
-            open(archive, path).use { input -> input.readBytesLimited(MAX_AGENT_RUNTIME_ASSET_BYTES, path) }
+            open(archive, path).use { input -> input.readBytesLimited(maxBytes, path) }
 
         fun open(archive: ZipFile, path: String): InputStream {
             val safePath = safePath(path)
             val entry = archive.getEntry(safePath) ?: throw AgentBundleException("缺少包内文件：$safePath")
-            if (entry.size < 0 || entry.size > MAX_AGENT_RUNTIME_ASSET_BYTES) {
-                throw AgentBundleException("运行时资产超过大小上限：$safePath")
+            if (entry.size < 0 || entry.size > maxBytes) {
+                throw AgentBundleException("$assetLabel 超过大小上限：$safePath")
             }
             return object : FilterInputStream(archive.getInputStream(entry)) {
                 override fun read(): Int {
@@ -1761,15 +1782,15 @@ class AgentBundleReader(
 
         fun addRecords(path: String, count: Int) {
             recordCount = Math.addExact(recordCount, count.toLong())
-            if (recordCount > MAX_AGENT_RUNTIME_ASSET_RECORDS) {
-                throw AgentBundleException("运行时资产记录数超过上限：$path")
+            if (recordCount > maxRecords) {
+                throw AgentBundleException("$assetLabel 记录数超过上限：$path")
             }
         }
 
         private fun addBytes(path: String, count: Int) {
             consumedBytes = Math.addExact(consumedBytes, count.toLong())
-            if (consumedBytes > MAX_AGENT_RUNTIME_ASSET_BYTES) {
-                throw AgentBundleException("运行时资产超过大小上限：$path")
+            if (consumedBytes > maxBytes) {
+                throw AgentBundleException("$assetLabel 超过大小上限：$path")
             }
         }
     }
@@ -1976,6 +1997,8 @@ class AgentBundleReader(
         private const val MAX_WORLDVIEW_BYTES = 32 * 1024 * 1024
         private const val MAX_AGENT_RUNTIME_ASSET_BYTES = 8 * 1024 * 1024
         private const val MAX_AGENT_RUNTIME_ASSET_RECORDS = 10_000L
+        private const val MAX_INSTALL_PLAN_BYTES = 16 * 1024 * 1024
+        private const val MAX_INSTALL_PLAN_RECORDS = 100_000L
         private const val MAX_RUNTIME_JSON_NESTING = 256
         private const val MAX_CORPUS_METADATA_BYTES = 16 * 1024 * 1024
         private const val MAX_JSONL_LINE_BYTES = 4 * 1024 * 1024
@@ -2034,9 +2057,8 @@ class AgentBundleReader(
             V2_EXAMPLES_PATH,
             V2_OPENERS_PATH,
             V2_EVAL_PATH,
-            V2_INSTALL_PLAN_PATH,
         )
-        private val V2_AGENT_FILES = COMMON_PACKAGE_FILES + V2_AGENT_RUNTIME_ASSET_FILES + PACKAGE_MANIFEST_PATH
+        private val V2_AGENT_FILES = COMMON_PACKAGE_FILES + V2_AGENT_RUNTIME_ASSET_FILES + V2_INSTALL_PLAN_PATH + PACKAGE_MANIFEST_PATH
         private val V2_CORPUS_FILES = COMMON_PACKAGE_FILES + setOf(
             PACKAGE_MANIFEST_PATH,
             V2_SOURCES_PATH,

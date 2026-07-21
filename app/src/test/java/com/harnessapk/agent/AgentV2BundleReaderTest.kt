@@ -211,6 +211,24 @@ class AgentV2BundleReaderTest {
     }
 
     @Test
+    fun acceptsInstallPlanWithinDedicatedMetadataLimit() {
+        val fixture = Fixture()
+        val corpus = fixture.corpusPackage()
+        val paddedInstallPlan = minimalInstallPlan(corpus).dropLast(1) +
+            ",\"padding\":\"${randomAscii(9 * 1024 * 1024, seed = 42)}\"}"
+
+        val parsed = AgentBundleReader().readPackage(
+            fixture.agentPackage(
+                corpus,
+                runtimeAssets = mapOf("install-plan.json" to paddedInstallPlan.encodeToByteArray()),
+            ),
+        ) as V2Agent
+
+        assertEquals("balanced", parsed.installPlan.recommendedProfileId)
+        assertTrue(parsed.installPlanJson.length > 8 * 1024 * 1024)
+    }
+
+    @Test
     fun rejectsDeclaredOversizedAgentAssetBeforeChecksumOrSignatureVerification() {
         val fixture = Fixture()
         val corpus = fixture.corpusPackage()
@@ -291,8 +309,8 @@ class AgentV2BundleReaderTest {
     fun rejectsNestedInstallPlanPackageIdsAndDependenciesBeforeDomParsing() {
         val fixture = Fixture()
         val corpus = fixture.corpusPackage()
-        val dependencies = List(5_000) { "dependency-$it" }.jsonArray()
-        val packageIds = List(5_000) { "package-$it" }.jsonArray()
+        val dependencies = List(50_000) { "dependency-$it" }.jsonArray()
+        val packageIds = List(50_000) { "package-$it" }.jsonArray()
         val plan = """
             {"packages":[{"dependencies":$dependencies,"fileName":"${corpus.name}","id":"$CORE_ID","installClass":"required","sha256":"${corpus.sha256()}","sizeBytes":${corpus.length()},"type":"hcorpus"}],"profiles":[{"id":"balanced","packageIds":$packageIds,"recommended":true}],"recommendedProfileId":"balanced","requiredCorpusIds":["$CORE_ID"],"schemaVersion":2} trailing
         """.trimIndent()
