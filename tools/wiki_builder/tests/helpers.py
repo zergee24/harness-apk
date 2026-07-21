@@ -22,6 +22,12 @@ def build_publishable_workspace(root: Path) -> tuple[Path, dict[str, str]]:
         1,
         "fixture-v1",
     )
+    ids = write_fixture_enrichment(workspace)
+    import_enrichment(workspace)
+    return workspace, ids
+
+
+def write_fixture_enrichment(workspace: Path) -> dict[str, str]:
     with sqlite3.connect(workspace / "content.sqlite") as database:
         document_id = database.execute("SELECT document_id FROM documents").fetchone()[0]
         rows = database.execute(
@@ -116,8 +122,6 @@ def build_publishable_workspace(root: Path) -> tuple[Path, dict[str, str]]:
             }
         ],
     )
-    import_enrichment(workspace)
-
     evaluation = workspace / "evaluation"
     evaluation.mkdir()
     cases = [
@@ -147,7 +151,7 @@ def build_publishable_workspace(root: Path) -> tuple[Path, dict[str, str]]:
         },
     ]
     write_jsonl(evaluation / "retrieval-eval.jsonl", cases)
-    return workspace, {
+    return {
         "document": document_id,
         "original": by_title["原文"]["chunk"],
         "summary": by_title["摘要证据"]["chunk"],

@@ -67,6 +67,7 @@ def validate_workspace(
 
     connection = _open_read_only(loaded.database_path)
     try:
+        connection.execute("BEGIN")
         try:
             validate_sqlite_shape(connection)
         except (sqlite3.Error, ValueError) as error:

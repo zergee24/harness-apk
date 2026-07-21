@@ -76,6 +76,19 @@ def prepare_workspace(
             shutil.rmtree(staging, ignore_errors=True)
 
 
+def pack_workspace(
+    workspace: Path,
+    output: Path,
+    private_key_path: Path,
+    evaluation_path: Path | None = None,
+):
+    """Compatibility entry point for signing a prepared workspace."""
+
+    from .packaging import pack_workspace as package_workspace
+
+    return package_workspace(workspace, output, private_key_path, evaluation_path)
+
+
 def _build_content_database(
     database_path: Path,
     documents: tuple[PreparedDocument, ...],
@@ -289,5 +302,6 @@ __all__ = [
     "HARD_CHUNK_CHARS",
     "SEARCH_OVERLAP_CHARS",
     "SOFT_CHUNK_CHARS",
+    "pack_workspace",
     "prepare_workspace",
 ]
