@@ -30,6 +30,7 @@ class WikiWorkspace:
     title: str
     version: int
     concept_namespace: str
+    builder_profile: str
     database_path: Path
     enrichment_path: Path
 
@@ -42,6 +43,7 @@ def initialize_workspace_files(
     title: str,
     version: int,
     concept_namespace: str,
+    builder_profile: str = "generic-v1",
 ) -> None:
     enrichment = root / "enrichment"
     enrichment.mkdir()
@@ -60,7 +62,11 @@ def initialize_workspace_files(
             "version": NORMALIZATION_VERSION,
             "mapHash": NORMALIZATION_MAP_HASH,
         },
-        "builder": {"name": "harness-wiki-builder", "version": "1"},
+        "builder": {
+            "name": "harness-wiki-builder",
+            "version": "1",
+            "profile": builder_profile,
+        },
     }
     catalog = {
         "schemaVersion": 1,
@@ -123,6 +129,16 @@ def load_workspace(root: Path) -> WikiWorkspace:
         raise BuildError("workspace.json database 路径无效")
     if raw["enrichmentDirectory"] != "enrichment":
         raise BuildError("workspace.json enrichmentDirectory 路径无效")
+    builder = raw["builder"]
+    if (
+        not isinstance(builder, dict)
+        or set(builder) != {"name", "version", "profile"}
+        or builder["name"] != "harness-wiki-builder"
+        or not isinstance(builder["version"], str)
+        or not isinstance(builder["profile"], str)
+        or not builder["profile"]
+    ):
+        raise BuildError("workspace.json builder 字段无效")
     if type(wiki["version"]) is not int or wiki["version"] <= 0:
         raise BuildError("workspace.json wiki.version 无效")
     for value, label in (
@@ -144,6 +160,7 @@ def load_workspace(root: Path) -> WikiWorkspace:
         title=wiki["title"],
         version=wiki["version"],
         concept_namespace=raw["conceptNamespace"],
+        builder_profile=builder["profile"],
         database_path=database_path,
         enrichment_path=enrichment_path,
     )

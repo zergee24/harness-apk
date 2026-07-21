@@ -16,6 +16,13 @@ from .history.source_inventory import (
     load_source_lock,
     write_source_lock,
 )
+from .history.twenty_four_histories import (
+    CONCEPT_NAMESPACE as TWENTY_FOUR_CONCEPT_NAMESPACE,
+    PACKAGE_ID as TWENTY_FOUR_PACKAGE_ID,
+    PACKAGE_TITLE as TWENTY_FOUR_PACKAGE_TITLE,
+    PACKAGE_VERSION as TWENTY_FOUR_PACKAGE_VERSION,
+    prepare_twenty_four_histories,
+)
 from .models import BuildError
 from .packaging import inspect_package, pack_workspace
 from .validation import validate_workspace
@@ -65,6 +72,19 @@ def build_parser() -> argparse.ArgumentParser:
     rights.add_argument("--rights", required=True, type=Path)
     rights.add_argument("--distribution", action="store_true")
     rights.add_argument("--semantic-processing", action="store_true")
+
+    prepare_twenty_four = history_commands.add_parser(
+        "prepare-twenty-four",
+        help="将锁定的二十四史古文转换为 Wiki 工作区",
+    )
+    prepare_twenty_four.add_argument("source", type=Path)
+    prepare_twenty_four.add_argument("--lock", required=True, type=Path)
+    prepare_twenty_four.add_argument("--rights", required=True, type=Path)
+    prepare_twenty_four.add_argument("--wiki-id", required=True)
+    prepare_twenty_four.add_argument("--title", required=True)
+    prepare_twenty_four.add_argument("--version", required=True, type=int)
+    prepare_twenty_four.add_argument("--concept-namespace", required=True)
+    prepare_twenty_four.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -84,20 +104,40 @@ def main(argv: list[str] | None = None) -> int:
                 output = write_source_lock(args.output, lock)
                 print(output)
                 return 0
-            result = verify_build_rights(
-                RightsConfirmation.from_path(args.rights),
-                load_source_lock(args.lock),
-                distribution=args.distribution,
-                semantic_processing=args.semantic_processing,
-            )
-            print(
-                json.dumps(
-                    result,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
+            if args.history_command == "verify-rights":
+                result = verify_build_rights(
+                    RightsConfirmation.from_path(args.rights),
+                    load_source_lock(args.lock),
+                    distribution=args.distribution,
+                    semantic_processing=args.semantic_processing,
                 )
+                print(
+                    json.dumps(
+                        result,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                return 0
+            _require_history_identity(
+                args,
+                wiki_id=TWENTY_FOUR_PACKAGE_ID,
+                title=TWENTY_FOUR_PACKAGE_TITLE,
+                version=TWENTY_FOUR_PACKAGE_VERSION,
+                concept_namespace=TWENTY_FOUR_CONCEPT_NAMESPACE,
             )
+            source_lock = load_source_lock(args.lock)
+            verify_build_rights(
+                RightsConfirmation.from_path(args.rights),
+                source_lock,
+            )
+            workspace = prepare_twenty_four_histories(
+                args.source,
+                args.output,
+                source_lock,
+            )
+            print(workspace)
             return 0
         if args.command == "prepare":
             workspace = prepare_workspace(
@@ -142,6 +182,35 @@ def main(argv: list[str] | None = None) -> int:
     except (BuildError, FileExistsError) as error:
         print(f"构建失败：{error}", file=sys.stderr)
         return 1
+
+
+def _require_history_identity(
+    args: argparse.Namespace,
+    *,
+    wiki_id: str,
+    title: str,
+    version: int,
+    concept_namespace: str,
+) -> None:
+    expected = {
+        "wiki-id": wiki_id,
+        "title": title,
+        "version": version,
+        "concept-namespace": concept_namespace,
+    }
+    actual = {
+        "wiki-id": args.wiki_id,
+        "title": args.title,
+        "version": args.version,
+        "concept-namespace": args.concept_namespace,
+    }
+    mismatches = [
+        f"--{name}={actual[name]!r}，期望 {value!r}"
+        for name, value in expected.items()
+        if actual[name] != value
+    ]
+    if mismatches:
+        raise BuildError("史书 profile 包身份不可改写：" + "；".join(mismatches))
 
 
 if __name__ == "__main__":

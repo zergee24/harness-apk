@@ -278,7 +278,7 @@ def _build_manifest(
         "builder": {
             "name": "harness-wiki-builder",
             "version": "1",
-            "profile": "generic-v1",
+            "profile": workspace.builder_profile,
         },
     }
     return WikiManifest.from_dict(raw).to_dict()

@@ -216,6 +216,29 @@ def inventory_history_sources(
     return lock
 
 
+def inventory_history_repository(
+    source_id: str,
+    path: Path,
+    *,
+    expected: SourceInventory | None = None,
+) -> SourceInventory:
+    if source_id not in {
+        TWENTY_FOUR_HISTORIES_SOURCE_ID,
+        ZIZHI_TONGJIAN_SOURCE_ID,
+    }:
+        raise InventoryError(f"不支持的 history sourceId：{source_id}")
+    actual = _inventory_repository(source_id, path)
+    if expected is not None:
+        if actual.git_revision != expected.git_revision:
+            raise InventoryError(
+                f"{source_id} Git revision 与既有锁不一致："
+                f"{expected.git_revision} -> {actual.git_revision}"
+            )
+        if actual != expected:
+            raise InventoryError(f"{source_id} 内容或来源元数据与既有锁不一致")
+    return actual
+
+
 def write_source_lock(path: Path, lock: SourceLock) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -514,6 +537,7 @@ __all__ = [
     "TWENTY_FOUR_HISTORIES_SOURCE_ID",
     "ZIZHI_TONGJIAN_SOURCE_ID",
     "inventory_history_sources",
+    "inventory_history_repository",
     "load_source_lock",
     "write_source_lock",
 ]

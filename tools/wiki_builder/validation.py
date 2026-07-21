@@ -354,7 +354,7 @@ def _invalid_locator_count(connection: sqlite3.Connection) -> int:
             invalid += 1
             continue
         value = json.loads(source_locator)
-        if set(value) != {"chunkOrdinal", "documentId", "fileName", "sectionPath"}:
+        if not {"chunkOrdinal", "documentId", "fileName", "sectionPath"}.issubset(value):
             invalid += 1
     return invalid
 
