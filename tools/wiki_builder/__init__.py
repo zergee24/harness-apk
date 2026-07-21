@@ -1,5 +1,5 @@
 """Deterministic builders for signed offline ``.hwiki`` packages."""
 
-from .models import ManifestError, WikiBuildError
+from .models import BuildError, ManifestError, WikiBuildError
 
-__all__ = ["ManifestError", "WikiBuildError"]
+__all__ = ["BuildError", "ManifestError", "WikiBuildError"]

@@ -57,6 +57,12 @@ def _require_identifier(value: object, path: str) -> str:
     return identifier
 
 
+def validate_identifier(value: object, path: str = "identifier") -> str:
+    """Validate and return a canonical schema-v1 identifier."""
+
+    return _require_identifier(value, path)
+
+
 def _require_hash(value: object, path: str) -> str:
     digest = _require_string(value, path)
     if not _HASH_PATTERN.fullmatch(digest):
@@ -290,4 +296,9 @@ class WikiManifest:
         }
 
 
-__all__ = ["ManifestError", "WikiCapabilities", "WikiManifest"]
+__all__ = [
+    "ManifestError",
+    "WikiCapabilities",
+    "WikiManifest",
+    "validate_identifier",
+]
