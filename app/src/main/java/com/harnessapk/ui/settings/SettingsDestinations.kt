@@ -11,6 +11,12 @@ fun settingsDestinations(
     showUpdateBadge: Boolean = false,
 ): List<SettingsDestination> = listOf(
     SettingsDestination(
+        id = "updates",
+        title = "检查更新",
+        description = "查看新版本并安装 APK 更新。",
+        showBadge = showUpdateBadge,
+    ),
+    SettingsDestination(
         id = "models",
         title = "模型配置",
         description = "维护供应商、模型列表和默认模型。",
@@ -39,11 +45,5 @@ fun settingsDestinations(
         id = "agents",
         title = "智能体包",
         description = "安装、更新并查看人物身份与资料覆盖。",
-    ),
-    SettingsDestination(
-        id = "updates",
-        title = "检查更新",
-        description = "查看新版本并安装 APK 更新。",
-        showBadge = showUpdateBadge,
     ),
 )

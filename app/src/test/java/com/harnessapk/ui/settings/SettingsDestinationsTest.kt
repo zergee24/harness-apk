@@ -15,11 +15,11 @@ class SettingsDestinationsTest {
     @Test
     fun settingsPageUsesTopLevelDestinationsInsteadOfOverflowMenuItems() {
         assertEquals(
-            listOf("models", "search", "voice", "git", "skills", "agents", "updates"),
+            listOf("updates", "models", "search", "voice", "git", "skills", "agents"),
             settingsDestinations().map { it.id },
         )
         assertEquals(
-            listOf("模型配置", "搜索能力", "语音能力", "Git / Gitee", "技能 / 插件", "智能体包", "检查更新"),
+            listOf("检查更新", "模型配置", "搜索能力", "语音能力", "Git / Gitee", "技能 / 插件", "智能体包"),
             settingsDestinations().map { it.title },
         )
     }
