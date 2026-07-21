@@ -1198,6 +1198,47 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun migrationWithDuplicateLegacyChunkInsideOneCorpusPreservesConversationsAndRemainsWritable() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-11-12-duplicate-ref-${System.nanoTime()}.db"
+        createVersion11Fixture(
+            context = context,
+            name = name,
+            conflictingChunk = false,
+            duplicateWithinCorpus = true,
+        )
+
+        try {
+            val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+                .addMigrations(
+                    AppDatabase.MIGRATION_11_12,
+                    AppDatabase.MIGRATION_12_13,
+                    AppDatabase.MIGRATION_13_14,
+                    AppDatabase.MIGRATION_14_15,
+                    AppDatabase.MIGRATION_15_16,
+                )
+                .build()
+            val sqlite = db.openHelper.writableDatabase
+
+            assertEquals(16, sqlite.version)
+            assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+            assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
+            assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+            assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM agent_corpus_chunks"))
+            db.conversationDao().insert(conversation("post-duplicate-upgrade", updatedAt = 31L))
+            assertEquals(
+                "post-duplicate-upgrade",
+                db.conversationDao().findById("post-duplicate-upgrade")?.id,
+            )
+            sqlite.assertNoForeignKeyViolations()
+            db.close()
+        } finally {
+            context.deleteDatabase(name)
+        }
+        Unit
+    }
+
+    @Test
     fun storesConversation() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
@@ -1711,6 +1752,7 @@ class AppDatabaseTest {
         context: Context,
         name: String,
         conflictingChunk: Boolean,
+        duplicateWithinCorpus: Boolean = false,
     ) {
         context.deleteDatabase(name)
         val db = context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null)
@@ -1870,6 +1912,16 @@ class AppDatabaseTest {
                 'chunk-1', '测试资料', '第一章', '调查以后再下结论', '调查 事实')
             """.trimIndent(),
         )
+        if (duplicateWithinCorpus) {
+            db.execSQL(
+                """
+                INSERT INTO agent_chunks (
+                    chunkKey, corpusId, sourceHash, chunkId, sourceTitle, location, text, keywordsText
+                ) VALUES ('corpus-core:source-hash:chunk-1-copy', 'corpus-core', 'source-hash',
+                    'chunk-1', '测试资料', '第一章', '调查以后再下结论', '调查 事实')
+                """.trimIndent(),
+            )
+        }
         db.execSQL(
             """
             INSERT INTO agent_chunks (
@@ -1886,6 +1938,15 @@ class AppDatabaseTest {
                 '调查 legacy_core_only legacy_shared')
             """.trimIndent(),
         )
+        if (duplicateWithinCorpus) {
+            db.execSQL(
+                """
+                INSERT INTO agent_chunk_fts (chunkKey, corpusKey, searchableText)
+                VALUES ('corpus-core:source-hash:chunk-1-copy', 'corpus-core:source-hash',
+                    '调查 legacy_core_copy')
+                """.trimIndent(),
+            )
+        }
         db.execSQL(
             """
             INSERT INTO agent_chunk_fts (chunkKey, corpusKey, searchableText)

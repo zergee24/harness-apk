@@ -444,7 +444,7 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     """
                     INSERT INTO agent_corpus_chunks (corpusId, corpusHash, chunkKey)
-                    SELECT corpusId, sourceHash, sourceHash || ':' || chunkId
+                    SELECT DISTINCT corpusId, sourceHash, sourceHash || ':' || chunkId
                     FROM agent_chunks_v11
                     """.trimIndent(),
                 )
