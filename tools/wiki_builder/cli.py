@@ -23,6 +23,13 @@ from .history.twenty_four_histories import (
     PACKAGE_VERSION as TWENTY_FOUR_PACKAGE_VERSION,
     prepare_twenty_four_histories,
 )
+from .history.zizhi_tongjian import (
+    CONCEPT_NAMESPACE as ZIZHI_CONCEPT_NAMESPACE,
+    PACKAGE_ID as ZIZHI_PACKAGE_ID,
+    PACKAGE_TITLE as ZIZHI_PACKAGE_TITLE,
+    PACKAGE_VERSION as ZIZHI_PACKAGE_VERSION,
+    prepare_zizhi_tongjian,
+)
 from .models import BuildError
 from .packaging import inspect_package, pack_workspace
 from .validation import validate_workspace
@@ -85,6 +92,20 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_twenty_four.add_argument("--version", required=True, type=int)
     prepare_twenty_four.add_argument("--concept-namespace", required=True)
     prepare_twenty_four.add_argument("--output", required=True, type=Path)
+
+    prepare_zizhi = history_commands.add_parser(
+        "prepare-zizhi-tongjian",
+        help="将锁定的资治通鉴文白对照稿转换为古文 Wiki 工作区",
+    )
+    prepare_zizhi.add_argument("source", type=Path)
+    prepare_zizhi.add_argument("--lock", required=True, type=Path)
+    prepare_zizhi.add_argument("--rights", required=True, type=Path)
+    prepare_zizhi.add_argument("--wiki-id", required=True)
+    prepare_zizhi.add_argument("--title", required=True)
+    prepare_zizhi.add_argument("--version", required=True, type=int)
+    prepare_zizhi.add_argument("--concept-namespace", required=True)
+    prepare_zizhi.add_argument("--output", required=True, type=Path)
+    prepare_zizhi.add_argument("--include-translation", action="store_true")
     return parser
 
 
@@ -120,23 +141,40 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
-            _require_history_identity(
-                args,
-                wiki_id=TWENTY_FOUR_PACKAGE_ID,
-                title=TWENTY_FOUR_PACKAGE_TITLE,
-                version=TWENTY_FOUR_PACKAGE_VERSION,
-                concept_namespace=TWENTY_FOUR_CONCEPT_NAMESPACE,
-            )
+            if args.history_command == "prepare-twenty-four":
+                _require_history_identity(
+                    args,
+                    wiki_id=TWENTY_FOUR_PACKAGE_ID,
+                    title=TWENTY_FOUR_PACKAGE_TITLE,
+                    version=TWENTY_FOUR_PACKAGE_VERSION,
+                    concept_namespace=TWENTY_FOUR_CONCEPT_NAMESPACE,
+                )
+            else:
+                _require_history_identity(
+                    args,
+                    wiki_id=ZIZHI_PACKAGE_ID,
+                    title=ZIZHI_PACKAGE_TITLE,
+                    version=ZIZHI_PACKAGE_VERSION,
+                    concept_namespace=ZIZHI_CONCEPT_NAMESPACE,
+                )
             source_lock = load_source_lock(args.lock)
             verify_build_rights(
                 RightsConfirmation.from_path(args.rights),
                 source_lock,
             )
-            workspace = prepare_twenty_four_histories(
-                args.source,
-                args.output,
-                source_lock,
-            )
+            if args.history_command == "prepare-twenty-four":
+                workspace = prepare_twenty_four_histories(
+                    args.source,
+                    args.output,
+                    source_lock,
+                )
+            else:
+                workspace = prepare_zizhi_tongjian(
+                    args.source,
+                    args.output,
+                    source_lock,
+                    include_translation=args.include_translation,
+                )
             print(workspace)
             return 0
         if args.command == "prepare":

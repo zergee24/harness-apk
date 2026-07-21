@@ -7,12 +7,24 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class HistoryExclusionAudit:
+    record_id: str
+    kind: str
+    source_text_hash: str
+    excluded_text_hash: str
+    reason: str
+    source_line: int
+    excluded_line: int
+
+
+@dataclass(frozen=True)
 class HistoryParagraphRecord:
     paragraph_id: str
     text: str
     ordinal: int
     locator: dict[str, object]
     source_hash: str
+    exclusion_audit: HistoryExclusionAudit | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +39,7 @@ class HistorySectionRecord:
     source_hash: str | None
     paragraphs: tuple[HistoryParagraphRecord, ...] = ()
     metadata: dict[str, object] | None = None
+    exclusion_audit: HistoryExclusionAudit | None = None
 
 
 @dataclass(frozen=True)

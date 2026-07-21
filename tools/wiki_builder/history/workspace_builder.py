@@ -23,7 +23,12 @@ from ..normalization import (
 )
 from ..sqlite_schema import create_content_database, validate_sqlite_shape
 from ..workspace import initialize_workspace_files
-from .models import HistoryDocumentRecord, HistoryParagraphRecord, HistorySectionRecord
+from .models import (
+    HistoryDocumentRecord,
+    HistoryExclusionAudit,
+    HistoryParagraphRecord,
+    HistorySectionRecord,
+)
 
 
 def populate_history_workspace(
@@ -217,6 +222,14 @@ def _insert_document(
                 )
                 + b"\n"
             )
+        if section.exclusion_audit is not None:
+            _write_exclusion_audit(
+                source_map,
+                section.exclusion_audit,
+                document.document_id,
+                section.section_id,
+                section.source_path,
+            )
         for paragraph in section.paragraphs:
             source_records.write(
                 canonical_json_bytes(
@@ -233,6 +246,14 @@ def _insert_document(
                 )
                 + b"\n"
             )
+            if paragraph.exclusion_audit is not None:
+                _write_exclusion_audit(
+                    source_map,
+                    paragraph.exclusion_audit,
+                    document.document_id,
+                    section.section_id,
+                    section.source_path,
+                )
             for segment_number, original_text in enumerate(_chunk_text(paragraph.text), start=1):
                 ordinal = ordinals[section.section_id]
                 locator = {
@@ -325,6 +346,32 @@ def _rewrite_source_catalog(
         ],
     }
     (staging / "source-catalog.json").write_bytes(canonical_json_bytes(catalog))
+
+
+def _write_exclusion_audit(
+    stream,
+    audit: HistoryExclusionAudit,
+    document_id: str,
+    section_id: str,
+    source_path: str | None,
+) -> None:
+    stream.write(
+        canonical_json_bytes(
+            {
+                "recordId": audit.record_id,
+                "documentId": document_id,
+                "sectionId": section_id,
+                "sourcePath": source_path,
+                "kind": audit.kind,
+                "sourceTextSha256": audit.source_text_hash,
+                "excludedTextSha256": audit.excluded_text_hash,
+                "reason": audit.reason,
+                "sourceLine": audit.source_line,
+                "excludedLine": audit.excluded_line,
+            }
+        )
+        + b"\n"
+    )
 
 
 def _chunk_text(text: str):
