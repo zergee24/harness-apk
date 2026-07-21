@@ -10,6 +10,9 @@ from pathlib import Path
 
 from .builder import prepare_workspace
 from .enrichment import import_enrichment
+from .history.concept_registry import install_shared_registry, validate_pair_registry
+from .history.enrichment_jobs import create_jobs, merge_jobs, validate_job
+from .history.history_profile import PROFILE_ID
 from .history.rights import RightsConfirmation, verify_build_rights
 from .history.source_inventory import (
     inventory_history_sources,
@@ -106,6 +109,34 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_zizhi.add_argument("--concept-namespace", required=True)
     prepare_zizhi.add_argument("--output", required=True, type=Path)
     prepare_zizhi.add_argument("--include-translation", action="store_true")
+
+    create_history_jobs = history_commands.add_parser(
+        "create-jobs",
+        help="创建或恢复有界的史书语义任务",
+    )
+    create_history_jobs.add_argument("workspace", type=Path)
+    create_history_jobs.add_argument("--profile", default=PROFILE_ID)
+
+    validate_history_job = history_commands.add_parser(
+        "validate-job",
+        help="验证一个 Agent 语义任务输出",
+    )
+    validate_history_job.add_argument("workspace", type=Path)
+    validate_history_job.add_argument("job_id")
+
+    merge_history_jobs = history_commands.add_parser(
+        "merge-jobs",
+        help="事务合并全部已验证语义任务",
+    )
+    merge_history_jobs.add_argument("workspace", type=Path)
+
+    validate_pair = history_commands.add_parser(
+        "validate-pair",
+        help="安装或验证双 Wiki 共享概念注册表",
+    )
+    validate_pair.add_argument("left", type=Path)
+    validate_pair.add_argument("right", type=Path)
+    validate_pair.add_argument("--registry", type=Path)
     return parser
 
 
@@ -131,6 +162,57 @@ def main(argv: list[str] | None = None) -> int:
                     load_source_lock(args.lock),
                     distribution=args.distribution,
                     semantic_processing=args.semantic_processing,
+                )
+                print(
+                    json.dumps(
+                        result,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                return 0
+            if args.history_command == "create-jobs":
+                plan = create_jobs(args.workspace, profile=args.profile)
+                print(
+                    json.dumps(
+                        asdict(plan),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                return 0
+            if args.history_command == "validate-job":
+                validation = validate_job(args.workspace, args.job_id)
+                print(
+                    json.dumps(
+                        asdict(validation),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                return 0
+            if args.history_command == "merge-jobs":
+                stats = merge_jobs(args.workspace)
+                print(
+                    json.dumps(
+                        asdict(stats),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                return 0
+            if args.history_command == "validate-pair":
+                result = (
+                    install_shared_registry(
+                        args.registry,
+                        (args.left, args.right),
+                    )
+                    if args.registry
+                    else validate_pair_registry(args.left, args.right)
                 )
                 print(
                     json.dumps(

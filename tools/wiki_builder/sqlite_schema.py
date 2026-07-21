@@ -113,7 +113,8 @@ CREATE TABLE links(
   target_type TEXT NOT NULL,
   target_id TEXT NOT NULL,
   kind TEXT NOT NULL,
-  confidence REAL NOT NULL
+  confidence REAL NOT NULL,
+  metadata_json TEXT NOT NULL
 );
 CREATE TABLE evidence_refs(
   owner_type TEXT NOT NULL,

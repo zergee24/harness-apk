@@ -44,20 +44,64 @@ scripts/wiki-builder.sh prepare <inputs...> \
   --concept-namespace <namespace> --output <workspace>
 ```
 
-3. 只生成 `enrichment/` 中约定的 canonical JSONL。每个文件按主 ID 升序，单行字段严格匹配协议：
+史书 profile 使用固定身份，不能自定义改名；先执行对应 prepare：
+
+```bash
+scripts/wiki-builder.sh history prepare-twenty-four <china-history> \
+  --lock <source-lock.json> --rights <rights-confirmation.json> \
+  --wiki-id cn.history.twenty-four-histories --title 二十四史 --version 1 \
+  --concept-namespace cn-history-v1 --output <twenty-four-workspace>
+
+scripts/wiki-builder.sh history prepare-zizhi-tongjian <zizhitongjian> \
+  --lock <source-lock.json> --rights <rights-confirmation.json> \
+  --wiki-id cn.history.zizhi-tongjian --title 资治通鉴 --version 1 \
+  --concept-namespace cn-history-v1 --output <zizhi-workspace>
+```
+
+资治通鉴 v1 只打包古文；现代译文只用于本地配对校验并留下 SHA-256 审计，不进入 chunk。推荐安装“完整古文原文 + `history-retrieval-v1` 语义层”，不推荐安装 PDF/EPUB 载体、现代译文或来源仓库已有的衍生知识图谱。
+
+3. 对史书工作区创建有界、可恢复任务：
+
+```bash
+scripts/wiki-builder.sh history create-jobs <workspace> \
+  --profile history-retrieval-v1
+```
+
+读取 `<workspace>/history-jobs/manifest.json`，只处理 `pending_job_ids`，并按 `job_ids` 中的稳定顺序逐个执行。每个 input 最多含 18,000 个原文字符，只允许把该 input 的 `chunks[].text` 提供给当前配置的 Codex 服务；若 rights 未对对应来源显式设置 `semanticProcessingApproved=true`，先向用户一次性说明并取得授权，不得开始处理。
+
+输出协议与逐字段约束见 [history-retrieval-v1.md](references/history-retrieval-v1.md)。每个 job 只写一个 canonical JSONL 对象到 `<workspace>/history-jobs/outputs/<jobId>.jsonl`，然后立即执行：
+
+```bash
+scripts/wiki-builder.sh history validate-job <workspace> <jobId>
+```
+
+验证失败只修复并重试该 job；不得跳过、伪造空结果或改 input。中断后重新执行 `create-jobs`，输入 hash 与 profile/prompt 版本完全一致的 VALID 输出会复用，其余仍为 pending。全部通过后执行：
+
+```bash
+scripts/wiki-builder.sh history merge-jobs <workspace>
+```
+
+双库共享 registry 经人工复核后安装并校验：
+
+```bash
+scripts/wiki-builder.sh history validate-pair <twenty-four-workspace> \
+  <zizhi-workspace> --registry <cn-history-v1.jsonl>
+```
+
+4. 通用资料只生成 `enrichment/` 中约定的 canonical JSONL。每个文件按主 ID 升序，单行字段严格匹配协议：
    - `summaries.jsonl`、`terms.jsonl`、`aliases.jsonl`、`annotations.jsonl`、`links.jsonl` 必须有非空 `evidence`。
    - `mentions.jsonl` 必须给出 `chunkId`、精确字符 offsets 和与原文完全一致的 `text`。
    - term 的 `conceptKey` 必须存在于同命名空间的 `concept-registry.jsonl`；低置信度关系保留置信度，不硬合并。
    - 每个文档和每个含原文的叶级章节都生成证据化摘要；评测题人工核验 gold chunk 后再写入 `evaluation/retrieval-eval.jsonl`。
-4. 事务导入并验证：
+5. 事务导入并验证：
 
 ```bash
 scripts/wiki-builder.sh enrich <workspace>
 scripts/wiki-builder.sh validate <workspace>
 ```
 
-5. `validate` 返回 2 时读取错误码，修复后重跑。只有所有结构、证据、locator、FTS 和 Recall 门槛通过才继续。
-6. 使用已有 Ed25519 私钥直接打包，不生成或替换私钥：
+6. `validate` 返回 2 时读取错误码，修复后重跑。只有所有结构、证据、locator、FTS 和 Recall 门槛通过才继续。
+7. 使用已有 Ed25519 私钥直接打包，不生成或替换私钥：
 
 ```bash
 scripts/wiki-builder.sh pack <workspace> --output <dist> --key <publisher-key.pem>

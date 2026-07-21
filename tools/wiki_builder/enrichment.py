@@ -403,6 +403,7 @@ def _import_links(database: sqlite3.Connection, workspace: WikiWorkspace) -> int
                 "confidence",
                 "evidence",
             },
+            optional={"metadata"},
             label=label,
         )
         link_id = _token(row["id"], f"{label} id")
@@ -423,13 +424,16 @@ def _import_links(database: sqlite3.Connection, workspace: WikiWorkspace) -> int
         target_id = _text(row["targetId"], f"{label} targetId")
         kind = _token(row["kind"], f"{label} kind")
         confidence = _confidence(row["confidence"], f"{label} confidence")
+        metadata = row.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise BuildError(f"{label} metadata 必须是对象")
         evidence = _evidence(row["evidence"], label)
         database.execute(
             """
             INSERT INTO links(
                 link_id, source_type, source_id, target_namespace, target_type,
-                target_id, kind, confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                target_id, kind, confidence, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 link_id,
@@ -440,6 +444,7 @@ def _import_links(database: sqlite3.Connection, workspace: WikiWorkspace) -> int
                 target_id,
                 kind,
                 confidence,
+                canonical_json_bytes(metadata).decode("utf-8"),
             ),
         )
         _insert_evidence(database, "link", link_id, evidence)
