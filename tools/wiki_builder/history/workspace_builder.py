@@ -382,10 +382,15 @@ def _chunk_text(text: str):
 
 
 def _locator_label(locator: dict[str, object], segment_number: int) -> str:
-    label = (
-        f"{locator.get('documentTitle', '')} · {locator.get('chapterTitle', '')} · "
-        f"第 {locator.get('paragraphNumber', '')} 段"
-    )
+    if locator.get("blockType") == "heading":
+        heading = locator.get("eraHeading") or locator.get("chapterTitle", "")
+        label = f"{locator.get('documentTitle', '')} · {heading} · 标题"
+    else:
+        label = (
+            f"{locator.get('documentTitle', '')} · "
+            f"{locator.get('chapterTitle', '')} · "
+            f"第 {locator.get('paragraphNumber', '')} 段"
+        )
     return f"{label} · 分段 {segment_number}" if segment_number > 1 else label
 
 

@@ -273,7 +273,33 @@ def _build_document(
             allow_empty=empty_source_reason is not None,
         )
         leaf_id = stable_id("section", PACKAGE_ID, revision, relative)
-        paragraphs: list[HistoryParagraphRecord] = []
+        heading_locator: dict[str, object] = {
+            "documentTitle": title,
+            "categoryPath": list(category_path),
+            "chapterTitle": chapter_title,
+            "paragraphNumber": 0,
+            "sourcePath": relative,
+            "sourceHash": chapter_hash,
+            "blockType": "heading",
+            "headingLevel": 1,
+        }
+        if empty_source_reason is not None:
+            heading_locator["sourceState"] = "known-empty-source"
+        paragraphs: list[HistoryParagraphRecord] = [
+            HistoryParagraphRecord(
+                paragraph_id=stable_id(
+                    "paragraph",
+                    PACKAGE_ID,
+                    revision,
+                    relative,
+                    "heading",
+                ),
+                text=chapter_title,
+                ordinal=0,
+                locator=heading_locator,
+                source_hash=chapter_hash,
+            )
+        ]
         for block_ordinal, block in enumerate(blocks):
             locator: dict[str, object] = {
                 "documentTitle": title,
@@ -296,7 +322,7 @@ def _build_document(
                         block_ordinal,
                     ),
                     text=block.text,
-                    ordinal=block_ordinal,
+                    ordinal=block_ordinal + 1,
                     locator=locator,
                     source_hash=chapter_hash,
                 )

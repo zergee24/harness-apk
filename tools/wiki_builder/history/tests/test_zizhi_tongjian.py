@@ -9,6 +9,7 @@ from pathlib import Path
 
 from tools.package_format import canonical_json_bytes
 from tools.wiki_builder.cli import main
+from tools.wiki_builder.history.enrichment_jobs import create_jobs
 from tools.wiki_builder.history.source_inventory import (
     SourceLock,
     ZIZHI_TONGJIAN_SOURCE_ID,
@@ -180,6 +181,7 @@ class ZizhiTongjianAdapterTest(unittest.TestCase):
         )
         self.assertEqual(
             [
+                "周纪一 威烈王二十三年（戊寅、前403）",
                 "[1]初命晋大夫魏斯、赵籍、韩虔为诸侯。",
                 "臣光曰：“才者，德之资也；德者，才之帅也。”",
             ],
@@ -187,7 +189,10 @@ class ZizhiTongjianAdapterTest(unittest.TestCase):
         )
         self.assertNotIn("周威烈王初次分封", all_text)
         self.assertNotIn("臣司马光说", all_text)
-        locator = json.loads(first_chunks[0][1])
+        heading_locator = json.loads(first_chunks[0][1])
+        self.assertEqual("heading", heading_locator["blockType"])
+        self.assertEqual(-403, heading_locator["year"])
+        locator = json.loads(first_chunks[1][1])
         self.assertEqual("资治通鉴", locator["documentTitle"])
         self.assertEqual(1, locator["volumeNumber"])
         self.assertEqual(1, locator["paragraphNumber"])
@@ -219,6 +224,22 @@ class ZizhiTongjianAdapterTest(unittest.TestCase):
         self.assertEqual(294, len(heading_exclusions))
         self.assertEqual(locator["translationHash"], excluded[0]["excludedTextSha256"])
         self.assertEqual("modern-translation-not-packaged-v1", excluded[0]["reason"])
+
+        plan = create_jobs(first)
+        first_job = json.loads(
+            (
+                first
+                / "history-jobs"
+                / "inputs"
+                / f"{plan.job_ids[0]}.json"
+            ).read_bytes()
+        )
+        self.assertEqual(
+            "周纪一 威烈王二十三年（戊寅、前403）",
+            first_job["chunks"][0]["text"],
+        )
+        self.assertEqual("heading", first_job["chunks"][0]["locator"]["blockType"])
+        self.assertEqual(-403, first_job["chunks"][0]["locator"]["year"])
 
     def test_summary_order_title_and_full_consumption_are_fail_closed(self):
         summary_path = self.source / "SUMMARY.md"

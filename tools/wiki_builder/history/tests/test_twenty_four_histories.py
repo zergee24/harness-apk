@@ -98,6 +98,7 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
         self.assertEqual([(title,) for title in TWENTY_FOUR_HISTORIES], documents)
         self.assertEqual(
             [
+                "五帝本纪",
                 "黄帝者，少典之子也。",
                 "太史公曰：“学者 & 史家”。",
                 '“曲引”与"直引"皆存。',
@@ -105,7 +106,10 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
             [row[0] for row in shiji],
         )
         self.assertNotIn("现代译文", "".join(row[0] for row in shiji))
-        locator = json.loads(shiji[0][1])
+        heading_locator = json.loads(shiji[0][1])
+        self.assertEqual("heading", heading_locator["blockType"])
+        self.assertEqual(1, heading_locator["headingLevel"])
+        locator = json.loads(shiji[1][1])
         self.assertEqual("史记", locator["documentTitle"])
         self.assertEqual(["十二本纪"], locator["categoryPath"])
         self.assertEqual(1, locator["paragraphNumber"])
@@ -184,6 +188,7 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
                 JOIN sections USING(section_id)
                 JOIN documents USING(document_id)
                 WHERE documents.title='史记'
+                  AND json_extract(chunks.locator_json, '$.blockType')='paragraph'
                 ORDER BY chunks.ordinal
                 LIMIT 1
                 """
@@ -285,6 +290,7 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
             ).fetchall()
         self.assertEqual(
             [
+                "五帝本纪",
                 "黄帝者，少典之子也。",
                 "太史公曰：“学者 & 史家”。",
                 '“曲引”与"直引"皆存。',
@@ -412,6 +418,7 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
                 JOIN sections USING(section_id)
                 JOIN documents USING(document_id)
                 WHERE documents.title='史记'
+                  AND json_extract(chunks.locator_json, '$.blockType')='paragraph'
                 ORDER BY chunks.ordinal
                 LIMIT 1
                 """
@@ -445,6 +452,7 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
             ).fetchall()
         self.assertEqual(
             [
+                "五帝本纪",
                 "黄帝者，少典之子也。",
                 "太史公曰：“学者 & 史家”。",
                 '“曲引”与"直引"皆存。',
@@ -479,13 +487,15 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
                     (chapter.name,),
                 ).fetchone()[0]
             )
-            chunks = database.execute(
-                "SELECT COUNT(*) FROM chunks WHERE section_id=("
+            chunk_rows = database.execute(
+                "SELECT original_text, locator_json FROM chunks WHERE section_id=("
                 "SELECT section_id FROM sections "
-                "WHERE json_extract(metadata_json, '$.sourceFileName')=?)",
+                "WHERE json_extract(metadata_json, '$.sourceFileName')=?) "
+                "ORDER BY ordinal",
                 (chapter.name,),
-            ).fetchone()[0]
-        self.assertEqual(0, chunks)
+            ).fetchall()
+        self.assertEqual(["五帝本纪"], [row[0] for row in chunk_rows])
+        self.assertEqual("heading", json.loads(chunk_rows[0][1])["blockType"])
         self.assertEqual("known-empty-source", metadata["sourceState"])
         self.assertEqual("upstream-html-empty-v1", metadata["emptySourceReason"])
 
@@ -534,7 +544,7 @@ class TwentyFourHistoriesAdapterTest(unittest.TestCase):
                 WHERE documents.title='史记'
                 """
             ).fetchone()[0]
-        self.assertEqual(3, shiji_chunks)
+        self.assertEqual(4, shiji_chunks)
         self.assertEqual(
             [
                 {

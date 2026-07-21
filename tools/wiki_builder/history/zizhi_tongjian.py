@@ -231,7 +231,44 @@ def _build_document(root: Path, expected: SourceInventory) -> HistoryDocumentRec
                 segment_number,
                 heading_hash,
             )
-            paragraphs: list[HistoryParagraphRecord] = []
+            heading_record_id = stable_id(
+                "source-pair",
+                PACKAGE_ID,
+                expected.git_revision,
+                entry.relative_path,
+                segment.heading.original_line,
+                "time-heading",
+                heading_hash,
+            )
+            heading_locator = {
+                "documentTitle": PACKAGE_TITLE,
+                "chapterTitle": volume_title,
+                "volumeNumber": entry.volume_number,
+                "eraHeading": segment.heading.original,
+                "year": segment.year,
+                "blockType": "heading",
+                "headingLevel": 2,
+                "sourcePath": entry.relative_path,
+                "sourceLine": segment.heading.original_line,
+                "translationLine": segment.heading.translation_line,
+                "sourceHash": heading_hash,
+                "translationHash": translation_heading_hash,
+                "translationExclusionReason": TRANSLATION_EXCLUSION_REASON,
+            }
+            paragraphs: list[HistoryParagraphRecord] = [
+                HistoryParagraphRecord(
+                    paragraph_id=heading_record_id,
+                    text=segment.heading.original,
+                    ordinal=0,
+                    locator=heading_locator,
+                    source_hash=heading_hash,
+                    exclusion_audit=_exclusion_audit(
+                        heading_record_id,
+                        "time-heading",
+                        segment.heading,
+                    ),
+                )
+            ]
             for section_paragraph_number, pair in enumerate(
                 segment.paragraphs,
                 start=1,
@@ -257,6 +294,7 @@ def _build_document(root: Path, expected: SourceInventory) -> HistoryDocumentRec
                     "year": segment.year,
                     "paragraphNumber": volume_paragraph_number,
                     "sectionParagraphNumber": section_paragraph_number,
+                    "blockType": "paragraph",
                     "sourcePath": entry.relative_path,
                     "sourceLine": pair.original_line,
                     "translationLine": pair.translation_line,
@@ -268,7 +306,7 @@ def _build_document(root: Path, expected: SourceInventory) -> HistoryDocumentRec
                     HistoryParagraphRecord(
                         paragraph_id=paragraph_id,
                         text=pair.original,
-                        ordinal=section_paragraph_number - 1,
+                        ordinal=section_paragraph_number,
                         locator=locator,
                         source_hash=source_hash,
                         exclusion_audit=_exclusion_audit(
@@ -278,15 +316,6 @@ def _build_document(root: Path, expected: SourceInventory) -> HistoryDocumentRec
                         ),
                     )
                 )
-            heading_record_id = stable_id(
-                "source-pair",
-                PACKAGE_ID,
-                expected.git_revision,
-                entry.relative_path,
-                segment.heading.original_line,
-                "time-heading",
-                heading_hash,
-            )
             sections.append(
                 HistorySectionRecord(
                     section_id=section_id,
@@ -306,11 +335,6 @@ def _build_document(root: Path, expected: SourceInventory) -> HistoryDocumentRec
                         "translationHeadingHash": translation_heading_hash,
                         "pairingMode": segment.pairing_mode,
                     },
-                    exclusion_audit=_exclusion_audit(
-                        heading_record_id,
-                        "time-heading",
-                        segment.heading,
-                    ),
                 )
             )
             section_ordinal += 1
