@@ -1,6 +1,7 @@
 package com.harnessapk.session
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.room.Room
 import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
@@ -26,12 +27,14 @@ import com.harnessapk.wiki.WikiContentStore
 import com.harnessapk.wiki.WikiContextAssembler
 import com.harnessapk.wiki.WikiEvidence
 import com.harnessapk.wiki.WikiPackageReader
+import com.harnessapk.wiki.WikiQueryGateway
 import com.harnessapk.wiki.WikiQueryAuthorization
 import com.harnessapk.wiki.WikiRef
 import com.harnessapk.wiki.WikiRetrievalResult
 import com.harnessapk.wiki.WikiRetrievalStatus
 import com.harnessapk.wiki.WikiRouteDecision
 import com.harnessapk.wiki.WikiRouteReason
+import com.harnessapk.wiki.WikiRouter
 import com.harnessapk.wiki.WikiRuntimeContext
 import com.harnessapk.wiki.WikiSourceDescriptor
 import com.harnessapk.wiki.WikiTurnAlias
@@ -151,6 +154,105 @@ class TwoWikiProjectMarkdownFlowTest {
         }
     }
 
+    @Test
+    fun actualTwoWikiRetrievalKeepsComparisonAndOneTurnScopeSeparate() = runBlocking {
+        withEnvironment { environment ->
+            val conversationId = environment.chatRepository.createConversation(title = "双 Wiki 路由")
+            environment.conversationWikiRepository.copyDefaultsToConversation(conversationId)
+            val scope = environment.conversationWikiRepository.snapshotEnabled(conversationId)
+            val historyRef = environment.titles.entries.single { it.value == "史料测试库" }.key
+            val assembler = environment.actualContextAssembler()
+
+            val oneTurn = assembler.assemble(
+                query = "这一轮只看《史料测试库》，司马光礼制如何？",
+                scope = scope,
+            )
+            assertEquals(WikiTurnIntentMode.ONLY_NAMED, oneTurn.intent.mode)
+            assertEquals(setOf(historyRef.wikiId), oneTurn.intent.namedWikiIds)
+            assertEquals(listOf(historyRef), oneTurn.retrieval?.routeDecision?.selectedRefs)
+            assertEquals(WikiRetrievalStatus.HIT, oneTurn.retrieval?.status)
+
+            val comparison = assembler.assemble(
+                query = "比较《史料测试库》和《纪事测试库》中的司马光礼制",
+                scope = scope,
+            )
+            assertEquals(WikiTurnIntentMode.COMPARE_NAMED, comparison.intent.mode)
+            assertEquals(scope.toSet(), comparison.retrieval?.routeDecision?.selectedRefs?.toSet())
+            assertEquals(scope.toSet(), comparison.retrieval?.evidence?.map { it.ref }?.toSet())
+
+            val assistantMessageId = environment.chatRepository.insertAssistantPending(
+                conversationId = conversationId,
+                providerId = "fixture-provider",
+                model = "fixture-model",
+            )
+            val prepared = WikiSourcePartWriter(
+                conversationWikiRepository = environment.conversationWikiRepository,
+                chatRepository = environment.chatRepository,
+                contentStore = environment.contentStore,
+                timeProvider = FIXTURE_TIME,
+            ).persist(
+                messageId = assistantMessageId,
+                snapshot = StreamingMessageSnapshot(
+                    status = MessageStatus.SUCCEEDED,
+                    parts = listOf(
+                        UiMessagePartDraft(
+                            index = 0,
+                            type = UiMessagePartType.TEXT,
+                            content = comparison.retrieval.orEmptyEvidenceTokens(),
+                            stable = true,
+                        ),
+                    ),
+                ),
+                context = comparison,
+            )
+            assertEquals(1, prepared.parts.count { it.type == UiMessagePartType.WIKI_SOURCES })
+            val persistedCitations = environment.database.conversationWikiDao().listCitationsForMessage(assistantMessageId)
+            val expectedCitationCount = comparison.retrieval
+                ?.evidence
+                .orEmpty()
+                .distinctBy { evidence -> evidence.ref to evidence.chunkId }
+                .size
+            assertEquals(expectedCitationCount, persistedCitations.size)
+            assertEquals(scope.toSet(), persistedCitations.map { WikiRef(it.wikiId, it.wikiVersion) }.toSet())
+
+            val nextTurn = assembler.assemble(query = "司马光礼制", scope = scope)
+            assertEquals(WikiTurnIntentMode.AUTO, nextTurn.intent.mode)
+            assertEquals(scope, nextTurn.scope)
+            assertEquals(scope, environment.conversationWikiRepository.snapshotEnabled(conversationId))
+        }
+    }
+
+    @Test
+    fun actualTwoWikiRetrievalMeetsWarmAndColdP95Budgets() = runBlocking {
+        val warmSamples = mutableListOf<Long>()
+        withEnvironment { environment ->
+            val assembler = environment.actualContextAssembler()
+            val scope = environment.titles.keys.sortedWith(compareBy<WikiRef> { it.wikiId }.thenBy { it.version })
+            repeat(5) {
+                assertEquals(WikiRetrievalStatus.HIT, assembler.assemble(COMPARISON_QUERY, scope).retrieval?.status)
+            }
+            repeat(WARM_SAMPLE_COUNT) {
+                warmSamples += measureElapsedMillis {
+                    assertEquals(WikiRetrievalStatus.HIT, assembler.assemble(COMPARISON_QUERY, scope).retrieval?.status)
+                }
+            }
+        }
+
+        val coldSamples = mutableListOf<Long>()
+        repeat(COLD_SAMPLE_COUNT) {
+            withEnvironment { environment ->
+                val assembler = environment.actualContextAssembler()
+                val scope = environment.titles.keys.sortedWith(compareBy<WikiRef> { it.wikiId }.thenBy { it.version })
+                coldSamples += measureElapsedMillis {
+                    assertEquals(WikiRetrievalStatus.HIT, assembler.assemble(COMPARISON_QUERY, scope).retrieval?.status)
+                }
+            }
+        }
+
+        assertTrue("热检索 P95 超过 1000ms: ${p95(warmSamples)}ms", p95(warmSamples) <= 1_000L)
+        assertTrue("冷检索 P95 超过 2000ms: ${p95(coldSamples)}ms", p95(coldSamples) <= 2_000L)
+    }
+
     private suspend fun comparisonRuntimeContext(
         environment: TestEnvironment,
         scope: List<WikiRef>,
@@ -193,6 +295,18 @@ class TwoWikiProjectMarkdownFlowTest {
         ).assemble(
             query = "比较史料测试库和纪事测试库中的司马光礼制",
             scope = scope,
+        )
+    }
+
+    private fun TestEnvironment.actualContextAssembler(): WikiContextAssembler {
+        val gateway = WikiQueryGateway(contentStore)
+        return WikiContextAssembler(
+            router = WikiRouter(gateway),
+            retriever = com.harnessapk.wiki.WikiRetriever(gateway),
+            aliasesProvider = { scope ->
+                scope.map { ref -> WikiTurnAlias(ref.wikiId, titles.getValue(ref)) }
+            },
+            titleProvider = titles::get,
         )
     }
 
@@ -334,10 +448,30 @@ class TwoWikiProjectMarkdownFlowTest {
         val titles: Map<WikiRef, String>,
     )
 
+    private fun WikiRetrievalResult?.orEmptyEvidenceTokens(): String = this
+        ?.evidence
+        ?.joinToString(separator = "\n") { evidence -> "可核对原文 ${evidence.token}" }
+        .orEmpty()
+
+    private suspend fun measureElapsedMillis(block: suspend () -> Unit): Long {
+        val started = SystemClock.elapsedRealtime()
+        block()
+        return SystemClock.elapsedRealtime() - started
+    }
+
+    private fun p95(samples: List<Long>): Long {
+        require(samples.isNotEmpty())
+        val rank = ((samples.size * 95 + 99) / 100).coerceIn(1, samples.size)
+        return samples.sorted()[rank - 1]
+    }
+
     private companion object {
         val FIXTURE_TIME = TimeProvider { 1L }
         const val FIRST_FIXTURE = "fixture.history-v1.hwiki"
         const val SECOND_FIXTURE = "fixture.annals-v1.hwiki"
+        const val WARM_SAMPLE_COUNT = 50
+        const val COLD_SAMPLE_COUNT = 10
+        const val COMPARISON_QUERY = "比较《史料测试库》和《纪事测试库》中的司马光礼制"
     }
 }
 
