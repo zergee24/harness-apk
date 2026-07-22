@@ -30,6 +30,9 @@ data class MarkdownUpdatePlan(
     val proposals: List<MarkdownUpdateProposal>,
 )
 
+class MarkdownUpdatePlanningException(message: String, cause: Throwable? = null) :
+    IllegalArgumentException(message, cause)
+
 enum class MarkdownDiffLineType {
     CONTEXT,
     ADDED,
@@ -69,6 +72,26 @@ fun parseMarkdownUpdatePlanResponse(response: String): MarkdownUpdatePlan {
                     title = update.stringValue("title").trim().ifBlank { path.substringAfterLast('/') },
                     reason = update.stringValue("reason").trim(),
                     markdown = markdown,
+                )
+            }
+        },
+    )
+}
+
+fun parseAndValidateMarkdownUpdatePlanResponse(
+    response: String,
+    wikiCitations: WikiMarkdownCitationSet = WikiMarkdownCitationSet.EMPTY,
+): MarkdownUpdatePlan {
+    val plan = parseMarkdownUpdatePlanResponse(response)
+    if (wikiCitations.citations.isEmpty()) return plan
+    return plan.copy(
+        proposals = plan.proposals.map { proposal ->
+            try {
+                WikiMarkdownProposalValidator.validate(proposal, wikiCitations)
+            } catch (error: WikiMarkdownValidationException) {
+                throw MarkdownUpdatePlanningException(
+                    "无法生成可审核的 Markdown 变更：${error.message}",
+                    error,
                 )
             }
         },

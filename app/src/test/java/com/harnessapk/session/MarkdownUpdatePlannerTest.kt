@@ -123,6 +123,64 @@ class MarkdownUpdatePlannerTest {
         assertTrue(messages.last().text.contains("现有 Markdown：\n- 无"))
     }
 
+    @Test
+    fun buildMarkdownUpdatePlanningMessagesPreservesNoWikiPayloadByteForByte() {
+        val messages = buildMarkdownUpdatePlanningMessages(
+            projectName = "Harness",
+            projectContext = "移动端长期项目",
+            markdowns = listOf(
+                MarkdownSnapshot(
+                    id = "markdown-1",
+                    title = "PRD",
+                    path = "requirements/prd.md",
+                    markdown = "# PRD\n\n已有内容",
+                ),
+            ),
+            assistantMarkdown = "补充验收标准",
+        )
+
+        assertEquals(
+            """
+                你是项目 Markdown 自动管理器。你只能输出 JSON，不要输出解释。
+                你需要根据助手输出，决定要创建或更新哪些 Markdown 文件。
+                支持多文件更新；禁止删除文件；禁止输出非 Markdown 内容。
+                JSON 格式：
+                {
+                  "updates": [
+                    {
+                      "operation": "create 或 update",
+                      "path": "项目内相对路径，必须以 .md 结尾",
+                      "title": "Markdown 标题",
+                      "reason": "为什么这样更新",
+                      "markdown": "完整 Markdown 内容"
+                    }
+                  ]
+                }
+            """.trimIndent(),
+            messages.first().text,
+        )
+        assertEquals(
+            """
+                项目：Harness
+
+                项目上下文：
+                移动端长期项目
+
+                现有 Markdown：
+                - requirements/prd.md｜PRD
+                ```markdown
+                # PRD
+
+                已有内容
+                ```
+
+                本轮助手输出：
+                补充验收标准
+            """.trimIndent() + "\n",
+            messages.last().text,
+        )
+    }
+
     private fun proposal(path: String): MarkdownUpdateProposal =
         MarkdownUpdateProposal(
             operation = MarkdownUpdateOperation.UPDATE,
