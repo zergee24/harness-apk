@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import com.harnessapk.ui.theme.HarnessApkTheme
 import com.harnessapk.ui.wiki.WikiRoutes
 import org.junit.Assert.assertEquals
@@ -43,7 +44,7 @@ class HarnessApkAppNavigationTest {
         }
         openSettings()
 
-        composeRule.onNodeWithText("Wiki 知识库").performClick()
+        composeRule.onNodeWithText("Wiki 知识库").performScrollTo().performClick()
         composeRule.onNodeWithText("Wiki 知识库").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
 

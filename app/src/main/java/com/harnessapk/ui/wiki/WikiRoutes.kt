@@ -3,7 +3,6 @@ package com.harnessapk.ui.wiki
 import com.harnessapk.wiki.WikiRef
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 object WikiRoutes {
@@ -49,11 +48,11 @@ object WikiRoutes {
         return "${encode(ref.wikiId)}/${ref.version}"
     }
 
-    private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
+    private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
         .replace("+", "%20")
 
     private fun decode(value: String): String = runCatching {
-        URLDecoder.decode(value, StandardCharsets.UTF_8)
+        URLDecoder.decode(value, Charsets.UTF_8.name())
     }.getOrDefault("")
 
     private fun isValidWikiId(value: String): Boolean = WIKI_ID.matches(value)
