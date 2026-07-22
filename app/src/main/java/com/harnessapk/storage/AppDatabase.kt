@@ -34,8 +34,12 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentMemoryEntity::class,
         WikiEntity::class,
         WikiVersionEntity::class,
+        ConversationWikiMountEntity::class,
+        WikiRetrievalRunEntity::class,
+        MessageWikiUsageEntity::class,
+        MessageWikiCitationEntity::class,
     ],
-    version = 17,
+    version = 19,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -51,6 +55,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun agentDao(): AgentDao
     abstract fun agentMemoryDao(): AgentMemoryDao
     abstract fun wikiDao(): WikiDao
+    abstract fun conversationWikiDao(): ConversationWikiDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -738,6 +743,179 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_wiki_versions_wikiId_enabledForNewConversations ON wiki_versions(wikiId, enabledForNewConversations)",
                 )
+            }
+        }
+
+        val MIGRATION_17_18: Migration = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS conversation_wiki_mounts (
+                        conversationId TEXT NOT NULL,
+                        wikiId TEXT NOT NULL,
+                        wikiVersion INTEGER NOT NULL,
+                        enabled INTEGER NOT NULL,
+                        mountedAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(conversationId, wikiId),
+                        FOREIGN KEY(conversationId) REFERENCES conversations(id) ON DELETE CASCADE,
+                        FOREIGN KEY(wikiId, wikiVersion) REFERENCES wiki_versions(wikiId, version) ON DELETE NO ACTION
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_conversation_wiki_mounts_wikiId_wikiVersion ON conversation_wiki_mounts(wikiId, wikiVersion)",
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS wiki_retrieval_runs (
+                        messageId TEXT NOT NULL,
+                        allowedScopeJson TEXT NOT NULL,
+                        explicitOverrideJson TEXT,
+                        routerVersion TEXT NOT NULL,
+                        retrieverVersion TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        candidateCount INTEGER NOT NULL,
+                        evidenceCount INTEGER NOT NULL,
+                        elapsedMillis INTEGER NOT NULL,
+                        errorCode TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(messageId),
+                        FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS message_wiki_usages (
+                        messageId TEXT NOT NULL,
+                        wikiId TEXT NOT NULL,
+                        wikiVersion INTEGER NOT NULL,
+                        scoutRank INTEGER,
+                        deepHitCount INTEGER NOT NULL,
+                        selectedEvidenceCount INTEGER NOT NULL,
+                        enteredContext INTEGER NOT NULL,
+                        PRIMARY KEY(messageId, wikiId, wikiVersion),
+                        FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_message_wiki_usages_wikiId_wikiVersion ON message_wiki_usages(wikiId, wikiVersion)",
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS message_wiki_citations (
+                        id TEXT NOT NULL,
+                        messageId TEXT NOT NULL,
+                        displayOrdinal INTEGER NOT NULL,
+                        wikiId TEXT NOT NULL,
+                        wikiVersion INTEGER NOT NULL,
+                        wikiTitle TEXT NOT NULL,
+                        documentId TEXT NOT NULL,
+                        sectionId TEXT NOT NULL,
+                        chunkId TEXT NOT NULL,
+                        sourceTitle TEXT NOT NULL,
+                        sectionPath TEXT NOT NULL,
+                        locatorLabel TEXT NOT NULL,
+                        originalTextSnapshot TEXT NOT NULL,
+                        originalTextSha256 TEXT NOT NULL,
+                        answerRangesJson TEXT NOT NULL,
+                        verificationState TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        PRIMARY KEY(id),
+                        FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE,
+                        FOREIGN KEY(wikiId, wikiVersion) REFERENCES wiki_versions(wikiId, version) ON DELETE NO ACTION
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_message_wiki_citations_messageId ON message_wiki_citations(messageId)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_message_wiki_citations_messageId_displayOrdinal ON message_wiki_citations(messageId, displayOrdinal)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_message_wiki_citations_wikiId_wikiVersion ON message_wiki_citations(wikiId, wikiVersion)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_message_wiki_citations_chunkId ON message_wiki_citations(chunkId)",
+                )
+                db.query("PRAGMA foreign_key_check").use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        throw IllegalStateException("foreign_key_check failed after Wiki conversation migration")
+                    }
+                }
+            }
+        }
+
+        /**
+         * Citation rows are immutable message snapshots. They must remain writable when the
+         * exact Wiki package disappears between retrieval and terminal-message persistence.
+         */
+        val MIGRATION_18_19: Migration = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS message_wiki_citations_new (
+                        id TEXT NOT NULL,
+                        messageId TEXT NOT NULL,
+                        displayOrdinal INTEGER NOT NULL,
+                        wikiId TEXT NOT NULL,
+                        wikiVersion INTEGER NOT NULL,
+                        wikiTitle TEXT NOT NULL,
+                        documentId TEXT NOT NULL,
+                        sectionId TEXT NOT NULL,
+                        chunkId TEXT NOT NULL,
+                        sourceTitle TEXT NOT NULL,
+                        sectionPath TEXT NOT NULL,
+                        locatorLabel TEXT NOT NULL,
+                        originalTextSnapshot TEXT NOT NULL,
+                        originalTextSha256 TEXT NOT NULL,
+                        answerRangesJson TEXT NOT NULL,
+                        verificationState TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        PRIMARY KEY(id),
+                        FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO message_wiki_citations_new (
+                        id, messageId, displayOrdinal, wikiId, wikiVersion, wikiTitle,
+                        documentId, sectionId, chunkId, sourceTitle, sectionPath, locatorLabel,
+                        originalTextSnapshot, originalTextSha256, answerRangesJson,
+                        verificationState, createdAt
+                    )
+                    SELECT
+                        id, messageId, displayOrdinal, wikiId, wikiVersion, wikiTitle,
+                        documentId, sectionId, chunkId, sourceTitle, sectionPath, locatorLabel,
+                        originalTextSnapshot, originalTextSha256, answerRangesJson,
+                        verificationState, createdAt
+                    FROM message_wiki_citations
+                    """.trimIndent(),
+                )
+                db.execSQL("DROP TABLE message_wiki_citations")
+                db.execSQL("ALTER TABLE message_wiki_citations_new RENAME TO message_wiki_citations")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_message_wiki_citations_messageId ON message_wiki_citations(messageId)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_message_wiki_citations_messageId_displayOrdinal ON message_wiki_citations(messageId, displayOrdinal)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_message_wiki_citations_wikiId_wikiVersion ON message_wiki_citations(wikiId, wikiVersion)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_message_wiki_citations_chunkId ON message_wiki_citations(chunkId)",
+                )
+                db.query("PRAGMA foreign_key_check").use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        throw IllegalStateException("foreign_key_check failed after immutable Wiki citation migration")
+                    }
+                }
             }
         }
     }

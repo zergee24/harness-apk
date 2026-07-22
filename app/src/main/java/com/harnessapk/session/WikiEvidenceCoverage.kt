@@ -15,6 +15,9 @@ data class WikiEvidenceCoverage(
     val missingComparisonRefs: Set<WikiRef>
         get() = missingRefs.intersect(requestedComparisonRefs)
 
+    val hasMissingComparisonEvidence: Boolean
+        get() = missingComparisonRefs.isNotEmpty()
+
     companion object {
         val NONE = WikiEvidenceCoverage()
     }

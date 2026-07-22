@@ -30,8 +30,17 @@ class WikiMarkdownCitationSet(citations: List<WikiMarkdownCitation>) {
         require(this.citations.map(WikiMarkdownCitation::citationId).distinct().size == this.citations.size) {
             "Wiki 引用不能包含重复标识"
         }
-        val labels = this.citations.associate { citation ->
+        val baseLabels = this.citations.associate { citation ->
             citation.citationId to citation.footnoteLabel()
+        }
+        val labels = this.citations.associate { citation ->
+            val baseLabel = baseLabels.getValue(citation.citationId)
+            val label = if (baseLabels.values.count { it == baseLabel } == 1) {
+                baseLabel
+            } else {
+                "$baseLabel-${sha256(citation.citationId).take(COLLISION_HASH_LENGTH)}"
+            }
+            citation.citationId to label
         }
         require(labels.values.distinct().size == labels.size) { "Wiki 脚注标签冲突" }
         citationsById = this.citations.associateBy(WikiMarkdownCitation::citationId)
@@ -91,5 +100,6 @@ private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
 
 private const val MAX_SOURCE_MESSAGE_ID_LENGTH = 256
 private const val MESSAGE_SHORT_ID_LENGTH = 8
+private const val COLLISION_HASH_LENGTH = 12
 private val WIKI_ID = Regex("[a-z0-9]+(?:[._-][a-z0-9]+)*")
 private val SHA_256 = Regex("[a-f0-9]{64}")

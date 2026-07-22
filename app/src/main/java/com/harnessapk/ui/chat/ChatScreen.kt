@@ -43,6 +43,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.outlined.Assignment
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Add
@@ -104,7 +105,10 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -127,9 +131,11 @@ import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.PendingImageAttachment
 import com.harnessapk.chat.ReasoningEffort
+import com.harnessapk.chat.StreamingMessageSnapshot
 import com.harnessapk.chat.UiMessagePartDraft
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.chat.defaultReasoningEffort
+import com.harnessapk.chat.hideWikiCitationTokensForDisplay
 import com.harnessapk.chat.identityLockedForPendingSend
 import com.harnessapk.chat.supportsReasoningEffort
 import com.harnessapk.agent.AgentVersionCoverage
@@ -144,8 +150,10 @@ import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.session.MarkdownBatchApplyResult
 import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownFileChangeController
+import com.harnessapk.session.MarkdownFileChangeConversationContext
 import com.harnessapk.session.MarkdownFileChangeFailure
 import com.harnessapk.session.MarkdownFileChangeItem
+import com.harnessapk.session.MarkdownFileChangePlanningException
 import com.harnessapk.session.MarkdownFileChangeState
 import com.harnessapk.session.MarkdownFileChangeStatus
 import com.harnessapk.session.MarkdownDeliverable
@@ -158,6 +166,7 @@ import com.harnessapk.session.MarkdownUpdateProposal
 import com.harnessapk.session.SessionRequestContext
 import com.harnessapk.session.SessionSummary
 import com.harnessapk.session.WorkspaceProject
+import com.harnessapk.session.WikiMarkdownSourceContext
 import com.harnessapk.session.buildMarkdownDiff
 import com.harnessapk.session.markdownReviewSummary
 import com.harnessapk.session.canWriteBackMarkdown
@@ -170,6 +179,9 @@ import com.harnessapk.ui.agent.canOperateAgentMemory
 import com.harnessapk.ui.agent.resolveAgentMemorySourceTarget
 import com.harnessapk.ui.agent.AgentMemorySourceTarget
 import com.harnessapk.ui.markdown.MarkdownMessage
+import com.harnessapk.ui.markdown.MarkdownLinkTarget
+import com.harnessapk.ui.markdown.markdownTextForCopy
+import com.harnessapk.ui.markdown.markdownLinkTarget
 import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.ui.theme.HarnessSpacing
 import com.harnessapk.websearch.WebSearchContext
@@ -178,6 +190,9 @@ import com.harnessapk.websearch.WebSearchSettings
 import com.harnessapk.websearch.nativeWebSearchModeForRequest
 import com.harnessapk.websearch.shouldUseExternalWebSearch
 import com.harnessapk.voice.VoiceSettings
+import com.harnessapk.wiki.WikiRef
+import com.harnessapk.wiki.WikiVersionState
+import com.harnessapk.wiki.MessageWikiCitation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -230,6 +245,7 @@ fun ChatScreen(
     onOpenProjectGit: (projectId: String) -> Unit = {},
     initialSourceMessageId: String? = null,
     onOpenConversationMessage: (conversationId: String, messageId: String) -> Unit = { _, _ -> },
+    onOpenWikiCitation: (String) -> Unit = {},
     contentPadding: PaddingValues,
 ) {
     val persistedMessages by remember(conversationId) {
@@ -239,6 +255,7 @@ fun ChatScreen(
     val messageState = persistedMessages
     val messages = messageState.messagesOrEmpty()
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
+    val installedWikis by container.wikiRepository.observeWikis().collectAsState(initial = emptyList())
     val executionEntries by container.chatExecutionRepository
         .observeForConversation(conversationId)
         .collectAsState(initial = emptyList())
@@ -276,9 +293,13 @@ fun ChatScreen(
     var conversation by remember(conversationId) { mutableStateOf<Conversation?>(null) }
     var isAgentConversation by remember(conversationId) { mutableStateOf(false) }
     var firstMessagePending by remember(conversationId) { mutableStateOf(false) }
+    var sendSnapshotInFlight by remember(conversationId) { mutableStateOf(false) }
     var identityMessageStateKnown by remember(conversationId) { mutableStateOf(false) }
     var persistedUserMessage by remember(conversationId) { mutableStateOf(false) }
     var showIdentityDetails by remember { mutableStateOf(false) }
+    var showWikiScopePicker by remember(conversationId) { mutableStateOf(false) }
+    var conversationWikiMounts by remember(conversationId) { mutableStateOf(emptyList<com.harnessapk.wiki.ConversationWikiMount>()) }
+    var conversationWikiCatalog by remember(conversationId) { mutableStateOf(emptyList<ConversationWikiCatalogEntry>()) }
     var fixedVersionCoverage by remember(conversationId) { mutableStateOf<AgentVersionCoverage?>(null) }
     var agentOpening by remember(conversationId) { mutableStateOf<String?>(null) }
     var showSessionConfig by remember { mutableStateOf(false) }
@@ -331,6 +352,21 @@ fun ChatScreen(
         )
     }
     val identityControllerState by identityController.state.collectAsState()
+    val wikiScopeController = remember(conversationId) {
+        ConversationWikiController(
+            scope = scope,
+            applyScope = { selections ->
+                container.conversationWikiRepository.replaceMountScope(conversationId, selections)
+            },
+            restoreDefaultsAction = {
+                container.conversationWikiRepository.restoreDefaults(conversationId)
+            },
+            reloadMounts = {
+                container.conversationWikiRepository.mounts(conversationId)
+            },
+        )
+    }
+    val wikiScopeControllerState by wikiScopeController.state.collectAsState()
     val sendRequestState by container.chatSendRecoveryStore
         .observe(conversationId)
         .collectAsState(initial = container.chatSendRecoveryStore.current(conversationId))
@@ -411,6 +447,9 @@ fun ChatScreen(
             messageStateKnown = identityMessageStateKnown,
             persistedUserMessage = persistedUserMessage,
         )
+    }
+    val wikiScopeState = remember(conversationWikiMounts, conversationWikiCatalog) {
+        conversationWikiUiState(conversationWikiMounts, conversationWikiCatalog)
     }
     val executionByUserMessageId = remember(executionEntries) {
         executionEntries.associateBy(ChatExecutionEntry::userMessageId)
@@ -497,6 +536,30 @@ fun ChatScreen(
             .onFailure { sessionStatus = it.toUserMessage() }
     }
 
+    LaunchedEffect(conversationId, installedWikis) {
+        runCatching {
+            val catalog = installedWikis.map { wiki ->
+                ConversationWikiCatalogEntry(
+                    wikiId = wiki.id,
+                    title = wiki.title,
+                    versions = container.wikiRepository.listVersions(wiki.id).map { version ->
+                        ConversationWikiCatalogVersion(
+                            ref = WikiRef(version.wikiId, version.version),
+                            ready = version.state == WikiVersionState.READY.name,
+                            active = wiki.activeVersion == version.version,
+                        )
+                    },
+                )
+            }
+            container.conversationWikiRepository.mounts(conversationId) to catalog
+        }.onSuccess { (mounts, catalog) ->
+            conversationWikiMounts = mounts
+            conversationWikiCatalog = catalog
+        }.onFailure { failure ->
+            errorText = failure.toUserMessage()
+        }
+    }
+
     LaunchedEffect(identityControllerState.settledGeneration) {
         identityControllerState.refreshedConversation?.let { refreshedConversation ->
             conversation = refreshedConversation
@@ -504,6 +567,13 @@ fun ChatScreen(
             if (isAgentConversation) webSearchEnabled = false
         }
         identityControllerState.failure?.let { errorText = it.toUserMessage() }
+    }
+
+    LaunchedEffect(wikiScopeControllerState.settledGeneration) {
+        wikiScopeControllerState.refreshedMounts?.let { mounts ->
+            conversationWikiMounts = mounts
+            showWikiScopePicker = false
+        }
     }
 
     LaunchedEffect(
@@ -820,6 +890,7 @@ fun ChatScreen(
         if (body.isEmpty() && selectedImage == null) return
         if (
             firstMessagePending ||
+            sendSnapshotInFlight ||
             !identityController.canSend() ||
             !canAcceptChatSend(identityMessageStateKnown, container.chatSendRecoveryStore.current(conversationId))
         ) return
@@ -842,29 +913,47 @@ fun ChatScreen(
             submittedMimeType = draftMimeType,
             isFirstUserMessage = isFirstUserMessage,
         )
-        val enqueueRequest = EnqueueChatRequest(
-            requestId = requestId,
-            conversationId = conversationId,
-            content = body.ifEmpty { "请看这张截图" },
-            attachments = draftImage?.let { image ->
-                listOf(PendingImageAttachment(image, draftMimeType))
-            }.orEmpty(),
-            providerId = selectedProviderId,
-            model = selectedModel,
-            reasoningEffort = selectedReasoningEffort,
-            requestContext = ChatExecutionRequestContext(
-                sessionContext = sessionRequestContext,
-                webSearchEnabled = webSearchEnabled,
-                webSearchSettings = webSearchSettings,
-            ),
-        )
-        if (container.chatSendRecoveryManager.start(conversationId, requestState, enqueueRequest) == null) return
-        firstMessagePending = reduceFirstMessagePending(
-            pending = firstMessagePending,
-            isFirstUserMessage = isFirstUserMessage,
-            event = FirstMessagePendingEvent.SEND_ACCEPTED,
-        )
-        errorText = null
+        sendSnapshotInFlight = true
+        scope.launch {
+            val wikiScope = try {
+                container.conversationWikiRepository.snapshotEnabled(conversationId)
+            } catch (cancelled: CancellationException) {
+                sendSnapshotInFlight = false
+                throw cancelled
+            } catch (error: Throwable) {
+                sendSnapshotInFlight = false
+                errorText = "读取本会话知识库失败：${error.toUserMessage()}"
+                return@launch
+            }
+            val enqueueRequest = EnqueueChatRequest(
+                requestId = requestId,
+                conversationId = conversationId,
+                content = body.ifEmpty { "请看这张截图" },
+                attachments = draftImage?.let { image ->
+                    listOf(PendingImageAttachment(image, draftMimeType))
+                }.orEmpty(),
+                providerId = selectedProviderId,
+                model = selectedModel,
+                reasoningEffort = selectedReasoningEffort,
+                requestContext = ChatExecutionRequestContext(
+                    sessionContext = sessionRequestContext,
+                    webSearchEnabled = webSearchEnabled,
+                    webSearchSettings = webSearchSettings,
+                    wikiScopeSnapshot = wikiScope,
+                ),
+            )
+            if (container.chatSendRecoveryManager.start(conversationId, requestState, enqueueRequest) == null) {
+                sendSnapshotInFlight = false
+                return@launch
+            }
+            firstMessagePending = reduceFirstMessagePending(
+                pending = firstMessagePending,
+                isFirstUserMessage = isFirstUserMessage,
+                event = FirstMessagePendingEvent.SEND_ACCEPTED,
+            )
+            errorText = null
+            sendSnapshotInFlight = false
+        }
     }
 
     LaunchedEffect(sendRequestState?.requestId, sendRequestState?.phase) {
@@ -1060,14 +1149,20 @@ fun ChatScreen(
             runCatching {
                 val project = projects.firstOrNull { it.id == planning.draft.projectId }
                 val snapshots = markdownSnapshots(planning.draft.projectId)
+                val conversationContext = markdownFileChangeConversationContext(messages)
+                val wikiContext = loadProjectMarkdownWikiContext(conversationContext.messageIds) { messageIds ->
+                    container.wikiMarkdownContextRepository.forMessageIds(messageIds)
+                }
                 val plan = markdownUpdatePlanner.planFromUserRequest(
                     projectName = project?.name.orEmpty(),
                     projectContext = projectContext,
                     markdowns = snapshots,
                     userRequest = userRequest,
-                    conversationContext = markdownFileChangeConversationContext(messages),
+                    conversationContext = conversationContext.text,
                     providerId = selectedProviderId,
                     modelOverride = selectedModel,
+                    wikiCitations = wikiContext.citations,
+                    wikiCoverage = wikiContext.coverage,
                 )
                 markdownFileChangeController.markReady(planning, plan, snapshots)
             }.onSuccess { ready ->
@@ -1166,6 +1261,13 @@ fun ChatScreen(
                         errorText = markdownWriteBackResultError(result)
                     },
                     afterFinalize = {
+                        persistMarkdownWriteBackLinks(result) { relativePath ->
+                            container.markdownNotebookRepository.linkMarkdown(
+                                conversationId = conversationId,
+                                projectId = state.draft.projectId,
+                                relativePath = relativePath,
+                            )
+                        }
                         persistMarkdownWriteBackResultEvent(result) { event ->
                             container.chatRepository.insertSystemEvent(conversationId, event)
                         }
@@ -1242,6 +1344,9 @@ fun ChatScreen(
                 val resolvedProjectId = projectId ?: error("请先选择项目")
                 val project = projects.firstOrNull { it.id == resolvedProjectId }
                 val snapshots = markdownSnapshots(resolvedProjectId)
+                val wikiContext = loadProjectMarkdownWikiContext(listOf(message.id)) { messageIds ->
+                    container.wikiMarkdownContextRepository.forMessageIds(messageIds)
+                }
                 val plan = markdownUpdatePlanner.plan(
                     projectName = project?.name.orEmpty(),
                     projectContext = projectContext,
@@ -1249,6 +1354,8 @@ fun ChatScreen(
                     assistantMarkdown = message.content,
                     providerId = selectedProviderId,
                     modelOverride = selectedModel,
+                    wikiCitations = wikiContext.citations,
+                    wikiCoverage = wikiContext.coverage,
                 )
                 val review = buildReviewState(plan.proposals, snapshots)
                 require(review.proposals.isNotEmpty()) { "LLM 没有生成可审核的 Markdown 更新" }
@@ -1355,6 +1462,13 @@ fun ChatScreen(
                         errorText = markdownWriteBackResultError(result)
                     },
                     afterFinalize = {
+                        persistMarkdownWriteBackLinks(result) { relativePath ->
+                            container.markdownNotebookRepository.linkMarkdown(
+                                conversationId = conversationId,
+                                projectId = projectId,
+                                relativePath = relativePath,
+                            )
+                        }
                         persistMarkdownWriteBackResultEvent(result) { event ->
                             container.chatRepository.insertSystemEvent(conversationId, event)
                         }
@@ -1511,6 +1625,16 @@ fun ChatScreen(
         }
     }
 
+    if (showWikiScopePicker) {
+        ConversationWikiPicker(
+            state = wikiScopeState,
+            controllerState = wikiScopeControllerState,
+            onApply = wikiScopeController::apply,
+            onRestoreDefaults = wikiScopeController::restoreDefaults,
+            onDismiss = { showWikiScopePicker = false },
+        )
+    }
+
     if (showSessionConfig) {
         SessionConfigDialog(
             projects = projects,
@@ -1629,6 +1753,9 @@ fun ChatScreen(
                     val persistedParts by container.chatRepository
                         .observeMessageParts(message.id)
                         .collectAsState(initial = emptyList())
+                    val wikiCitations by remember(message.id) {
+                        container.conversationWikiRepository.observeCitationsForMessage(message.id)
+                    }.collectAsState(initial = emptyList())
                     val attachments by remember(message.id, message.role) {
                         if (message.role == MessageRole.USER) {
                             container.chatRepository.observeAttachments(message.id)
@@ -1647,6 +1774,7 @@ fun ChatScreen(
                                 MessageBubble(
                                     message = message,
                                     parts = displayParts,
+                                    wikiCitations = wikiCitations,
                                     executionEntry = executionEntry,
                                     attachments = attachments,
                                     imageStore = container.chatImageStore,
@@ -1692,6 +1820,7 @@ fun ChatScreen(
                                     }?.let { entry ->
                                         { scope.launch { container.chatExecutionRepository.deleteQueued(entry.id) } }
                                     },
+                                    onOpenWikiCitation = onOpenWikiCitation,
                                 )
                             }
                             markdownFileChangeStates
@@ -1770,6 +1899,8 @@ fun ChatScreen(
                 onOpenModelPicker = { showModelPicker = true },
                 identityState = identityState,
                 onSelectIdentity = identityController::selectIdentity,
+                wikiScopeState = wikiScopeState,
+                onOpenWikiScopePicker = { showWikiScopePicker = true },
                 contextStatus = contextStatus,
                 isCompressingContext = isCompressingContext,
                 onCompressContext = ::compressContextNow,
@@ -1777,7 +1908,9 @@ fun ChatScreen(
                 canSend = selectedProvider != null &&
                     selectedModel.isNotBlank() &&
                     !firstMessagePending &&
+                    !sendSnapshotInFlight &&
                     identityController.canSend() &&
+                    wikiScopeController.canApply() &&
                     canAcceptChatSend(
                         identityMessageStateKnown,
                         container.chatSendRecoveryStore.current(conversationId),
@@ -1986,7 +2119,13 @@ internal fun messageDisplayParts(
     message: ChatMessage,
     persistedParts: List<UiMessagePartDraft>,
 ): List<UiMessagePartDraft> {
-    if (persistedParts.isNotEmpty()) return persistedParts
+    if (persistedParts.isNotEmpty()) {
+        return if (message.status == MessageStatus.PENDING || message.status == MessageStatus.STREAMING) {
+            StreamingMessageSnapshot(message.status, persistedParts).hideWikiCitationTokensForDisplay().parts
+        } else {
+            persistedParts
+        }
+    }
     val fallbackText = assistantMessageDisplayText(message).takeIf { it.isNotBlank() } ?: return emptyList()
     return listOf(
         UiMessagePartDraft(
@@ -2033,12 +2172,13 @@ internal fun messageSelectionCopyText(
     message: ChatMessage,
     parts: List<UiMessagePartDraft> = emptyList(),
     hideAgentCitationMarkers: Boolean = false,
-): String =
+): String = markdownTextForCopy(
     message.errorMessage?.let(::errorCopyText)
         ?: parts.visibleText()
             .let { text -> if (hideAgentCitationMarkers) stripAgentCitationMarkers(text) else text }
             .takeIf { it.isNotBlank() }
-        ?: assistantMessageDisplayText(message)
+        ?: assistantMessageDisplayText(message),
+)
 
 private fun List<UiMessagePartDraft>.visibleText(): String =
     filter { it.type == UiMessagePartType.TEXT }
@@ -2144,18 +2284,33 @@ internal fun shouldSuggestFileChangeMode(text: String): Boolean {
 internal fun shouldShowFileChangeModeEntry(text: String): Boolean =
     shouldSuggestFileChangeMode(text)
 
-internal fun markdownFileChangeConversationContext(messages: List<ChatMessage>): String =
-    messages
+internal fun markdownFileChangeConversationContext(messages: List<ChatMessage>): MarkdownFileChangeConversationContext {
+    val boundedMessages = messages
         .filter {
             it.content.isNotBlank() &&
                 it.status == MessageStatus.SUCCEEDED &&
                 (it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT)
         }
         .takeLast(MAX_FILE_CHANGE_CONTEXT_MESSAGES)
-        .joinToString(separator = "\n\n") { message ->
+    return MarkdownFileChangeConversationContext(
+        text = boundedMessages.joinToString(separator = "\n\n") { message ->
             val role = if (message.role == MessageRole.USER) "用户" else "助手"
             "$role：${message.content.trim().take(MAX_FILE_CHANGE_CONTEXT_MESSAGE_CHARS)}"
-        }
+        },
+        messageIds = boundedMessages.map(ChatMessage::id),
+    )
+}
+
+internal suspend fun loadProjectMarkdownWikiContext(
+    messageIds: List<String>,
+    loadContext: suspend (List<String>) -> WikiMarkdownSourceContext,
+): WikiMarkdownSourceContext = try {
+    loadContext(messageIds)
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (error: Throwable) {
+    throw MarkdownFileChangePlanningException("无法读取本轮引用，未生成文件变更", error)
+}
 
 internal fun markdownFileChangeCardTitle(
     status: MarkdownFileChangeStatus,
@@ -2570,7 +2725,7 @@ private const val MAX_MESSAGE_BUBBLE_WIDTH_DP = 700
 internal const val CHAT_SCROLL_TO_BOTTOM_OFFSET_PX = 1_000_000
 private const val STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 640
 private const val MAX_FILE_CHANGE_CARD_ITEMS = 6
-private const val MAX_FILE_CHANGE_CONTEXT_MESSAGES = 10
+private const val MAX_FILE_CHANGE_CONTEXT_MESSAGES = 12
 private const val MAX_FILE_CHANGE_CONTEXT_MESSAGE_CHARS = 2_000
 private val fileChangeSuggestionKeywords = listOf(
     "生成 md",
@@ -2609,6 +2764,26 @@ internal suspend fun persistMarkdownWriteBackResultEvent(
     } catch (_: Throwable) {
         // The file write result remains authoritative when optional event persistence fails.
     }
+}
+
+internal suspend fun persistMarkdownWriteBackLinks(
+    result: MarkdownBatchApplyResult,
+    linkMarkdown: suspend (String) -> Unit,
+) {
+    result.succeeded
+        .asSequence()
+        .filter { item -> item.proposal.operation == MarkdownUpdateOperation.CREATE }
+        .mapNotNull { item -> item.writtenDeliverable?.path?.trim()?.takeIf(String::isNotBlank) }
+        .distinct()
+        .forEach { path ->
+            try {
+                linkMarkdown(path)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                // 文件写入已完成；无法保存弱关联时不应把写入结果改成失败。
+            }
+        }
 }
 
 internal fun markdownWriteBackResultEvent(result: MarkdownBatchApplyResult): String? {
@@ -2998,20 +3173,37 @@ private fun ChatContentRail(
 @Composable
 private fun MessagePartsColumn(
     parts: List<UiMessagePartDraft>,
+    wikiCitations: List<MessageWikiCitation>,
     textColor: androidx.compose.ui.graphics.Color,
     imageStore: ChatImageStore,
     hideAgentCitationMarkers: Boolean,
+    onLinkClick: (String) -> Unit,
+    onOpenWikiCitation: (String) -> Unit,
 ) {
+    val sourceState = remember(parts, wikiCitations) {
+        messageSourcesUiState(parts = parts, citations = wikiCitations)
+    }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        parts.forEach { part ->
+        parts
+            .filterNot { part ->
+                part.type == UiMessagePartType.AGENT_SOURCES || part.type == UiMessagePartType.WIKI_SOURCES
+            }
+            .forEach { part ->
             key(part.index, part.type) {
                 MessagePartView(
                     part = part,
                     textColor = textColor,
                     imageStore = imageStore,
                     hideAgentCitationMarkers = hideAgentCitationMarkers,
+                    onLinkClick = onLinkClick,
                 )
             }
+        }
+        sourceState?.let { state ->
+            MessageSourcesPart(
+                state = state,
+                onOpenWikiCitation = onOpenWikiCitation,
+            )
         }
     }
 }
@@ -3022,11 +3214,13 @@ private fun MessagePartView(
     textColor: androidx.compose.ui.graphics.Color,
     imageStore: ChatImageStore,
     hideAgentCitationMarkers: Boolean,
+    onLinkClick: (String) -> Unit,
 ) {
     when (part.type) {
         UiMessagePartType.TEXT -> MarkdownMessage(
             markdown = if (hideAgentCitationMarkers) stripAgentCitationMarkers(part.content) else part.content,
             textColor = textColor,
+            onLinkClick = onLinkClick,
         )
         UiMessagePartType.REASONING -> ReasoningPart(part)
         UiMessagePartType.SEARCH_RESULT -> SearchResultPart(part)
@@ -3041,7 +3235,9 @@ private fun MessagePartView(
         )
         UiMessagePartType.DOCUMENT -> MetadataPart(label = "文档", content = part.content.ifBlank { "文档附件" })
         UiMessagePartType.SYSTEM_EVENT -> MetadataPart(label = "系统事件", content = part.content)
-        UiMessagePartType.AGENT_SOURCES -> AgentSourcesPart(part)
+        UiMessagePartType.AGENT_SOURCES,
+        UiMessagePartType.WIKI_SOURCES,
+        -> Unit
     }
 }
 
@@ -3197,56 +3393,6 @@ internal fun reasoningCollapsedPreviewText(content: String): String =
         .orEmpty()
 
 @Composable
-private fun AgentSourcesPart(part: UiMessagePartDraft) {
-    val sources = remember(part.content) { part.content.lineSequence().filter(String::isNotBlank).toList() }
-    var expanded by remember(part.index) { mutableStateOf(false) }
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { expanded = !expanded },
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "本轮参考资料 · ${sources.size} 条",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                IconButton(
-                    modifier = Modifier.size(40.dp),
-                    onClick = { expanded = !expanded },
-                ) {
-                    Icon(
-                        imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        contentDescription = if (expanded) "收起参考资料" else "展开参考资料",
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-            }
-            if (expanded) {
-                sources.forEach { source ->
-                    Text(
-                        text = source,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun SearchResultPart(part: UiMessagePartDraft) {
     val title = part.metadata["title"].orEmpty().ifBlank { "搜索结果" }
     val url = part.metadata["url"].orEmpty()
@@ -3293,6 +3439,7 @@ private fun MetadataPart(
 private fun MessageBubble(
     message: ChatMessage,
     parts: List<UiMessagePartDraft>,
+    wikiCitations: List<MessageWikiCitation>,
     executionEntry: ChatExecutionEntry?,
     attachments: List<ChatAttachment>,
     imageStore: ChatImageStore,
@@ -3307,10 +3454,12 @@ private fun MessageBubble(
     onSteer: (() -> Unit)?,
     onEditQueued: (() -> Unit)?,
     onDeleteQueued: (() -> Unit)?,
+    onOpenWikiCitation: (String) -> Unit,
 ) {
     val isUser = message.role == MessageRole.USER
     var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
     val presentation = chatBubblePresentation(message.role)
+    val uriHandler = LocalUriHandler.current
     val hideAgentCitationMarkers = isAgentConversation && parts.any { it.type == UiMessagePartType.AGENT_SOURCES }
     val selectionCopyText = messageSelectionCopyText(
         message = message,
@@ -3464,9 +3613,20 @@ private fun MessageBubble(
                     SelectionContainer {
                         MessagePartsColumn(
                             parts = parts,
+                            wikiCitations = wikiCitations,
                             textColor = contentColor,
                             imageStore = imageStore,
                             hideAgentCitationMarkers = hideAgentCitationMarkers,
+                            onLinkClick = { destination ->
+                                when (val target = markdownLinkTarget(destination)) {
+                                    is MarkdownLinkTarget.WikiCitation -> onOpenWikiCitation(target.citationId)
+                                    is MarkdownLinkTarget.ExternalUrl -> runCatching {
+                                        uriHandler.openUri(target.url)
+                                    }
+                                    MarkdownLinkTarget.Ignored -> Unit
+                                }
+                            },
+                            onOpenWikiCitation = onOpenWikiCitation,
                         )
                     }
                 }
@@ -3555,6 +3715,8 @@ private fun ChatInputBar(
     onOpenModelPicker: () -> Unit,
     identityState: ConversationIdentityUiState,
     onSelectIdentity: (String?) -> Unit,
+    wikiScopeState: ConversationWikiUiState,
+    onOpenWikiScopePicker: () -> Unit,
     contextStatus: ContextWindowStatus,
     isCompressingContext: Boolean,
     onCompressContext: () -> Unit,
@@ -3641,6 +3803,12 @@ private fun ChatInputBar(
                         onShowDetails = {},
                     )
                 }
+                key("conversation-wiki-scope-chip") {
+                    ConversationWikiScopeChip(
+                        state = wikiScopeState,
+                        onClick = onOpenWikiScopePicker,
+                    )
+                }
                 ContextStatusChip(
                     contextStatus = contextStatus,
                     expanded = showContextDetails,
@@ -3716,6 +3884,34 @@ private fun ChatInputBar(
             }
         }
     }
+}
+
+@Composable
+internal fun ConversationWikiScopeChip(
+    state: ConversationWikiUiState,
+    onClick: () -> Unit,
+) {
+    FilterChip(
+        modifier = Modifier
+            .heightIn(min = 48.dp)
+            .semantics { contentDescription = "调整本会话可用知识库" },
+        selected = state.options.any { it.enabled && !it.unavailable },
+        onClick = onClick,
+        leadingIcon = {
+            Icon(
+                imageVector = Icons.AutoMirrored.Outlined.MenuBook,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+        },
+        label = {
+            Text(
+                state.toolbarLabel,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

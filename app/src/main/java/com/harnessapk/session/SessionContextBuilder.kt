@@ -52,9 +52,11 @@ fun buildSessionOutgoingMessages(
     baseMessages: List<OutgoingChatMessage>,
     webSearchContext: WebSearchContext? = null,
     agentSystemContext: String? = null,
+    wikiSystemContext: String? = null,
 ): List<OutgoingChatMessage> {
     val systemMessages = buildList {
         agentSystemContext?.takeIf { it.isNotBlank() }?.let { add(it.trim()) }
+        wikiSystemContext?.takeIf { it.isNotBlank() }?.let { add(it.trim()) }
         if (context != null && !context.isBlank()) add(context.toSystemMessage())
         webSearchContext?.takeIf { it.results.results.isNotEmpty() }?.let { add(it.toSystemMessage()) }
     }

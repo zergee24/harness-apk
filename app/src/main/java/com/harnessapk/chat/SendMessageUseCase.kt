@@ -25,6 +25,8 @@ import com.harnessapk.session.SessionRequestContext
 import com.harnessapk.session.buildSessionOutgoingMessages
 import com.harnessapk.websearch.WebSearchContext
 import com.harnessapk.websearch.toVisibleSourcesMarkdown
+import com.harnessapk.wiki.WikiRef
+import com.harnessapk.wiki.WikiRuntimeContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -55,6 +57,9 @@ class SendMessageUseCase(
         StreamEventTransformerPipeline(listOf(ThinkTagStreamTransformer()))
     },
     private val agentSourcePartWriter: AgentSourcePartWriter? = null,
+    private val wikiContextProvider: suspend (conversationId: String, query: String, scope: List<WikiRef>) -> WikiRuntimeContext? =
+        { _, _, _ -> null },
+    private val wikiSourcePartWriter: WikiSourcePartWriter? = null,
     private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
 ) {
     suspend fun send(
@@ -147,6 +152,7 @@ class SendMessageUseCase(
         var accumulator: StreamingMessageAccumulator? = null
         var streamClock: TimeMark? = null
         var agentContext: AgentRuntimeContext? = null
+        var wikiContext: WikiRuntimeContext? = null
         var latestSnapshot: StreamingMessageSnapshot? = null
         var streamCompleted = false
         val traceId = UUID.randomUUID().toString()
@@ -185,6 +191,18 @@ class SendMessageUseCase(
                 ),
             )
             if (fixedAgentConversation && agentContext == null) throw AppError.AgentUnavailable()
+            val wikiScope = entry.requestContext.wikiScopeSnapshot.orEmpty()
+            wikiContext = if (wikiScope.isEmpty()) {
+                null
+            } else {
+                requireNotNull(wikiContextProvider(entry.conversationId, text, wikiScope)) {
+                    "Wiki 运行时上下文不可用"
+                }.also { context ->
+                    require(context.scope == com.harnessapk.wiki.canonicalWikiScope(wikiScope)) {
+                        "Wiki 运行时上下文范围不匹配"
+                    }
+                }
+            }
             val effectiveSearchContexts = effectiveAgentSearchContexts(
                 agentContext = agentContext,
                 webSearchContext = webSearchContext,
@@ -197,6 +215,7 @@ class SendMessageUseCase(
             )
             onAssistantCreated(nextAssistantId)
             assistantId = nextAssistantId
+            wikiContext?.let { context -> wikiSourcePartWriter?.persistInitial(nextAssistantId, context) }
             latestSnapshot = StreamingMessageSnapshot(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
@@ -210,6 +229,7 @@ class SendMessageUseCase(
                     baseMessages = requestBaseMessages(compressed, agentContext),
                     webSearchContext = effectiveSearchContexts.webSearchContext,
                     agentSystemContext = agentContext?.systemPrompt,
+                    wikiSystemContext = wikiContext?.systemContext,
                 ),
                 temperature = temperatureForModel(requestModel),
                 selectedReasoningEffort = entry.reasoningEffort,
@@ -274,6 +294,20 @@ class SendMessageUseCase(
                         }
                 }
             }
+            if (wikiContext != null) {
+                lifecycleCoordinator.serialized {
+                    val snapshot = requireNotNull(latestSnapshot)
+                    latestSnapshot = wikiSourcePartWriter?.persist(
+                        nextAssistantId,
+                        snapshot,
+                        wikiContext,
+                        onPrepared = { latestSnapshot = it },
+                    )
+                        ?: snapshot.removeWikiCitationTokensForTerminal().also {
+                            chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, it)
+                        }
+                }
+            }
             currentCoroutineContext().ensureActive()
             chatRepository.markAssistantSucceeded(nextAssistantId)
             ChatExecutionResult(
@@ -296,7 +330,11 @@ class SendMessageUseCase(
                         if (cancelledSnapshot == null) {
                             chatRepository.markAssistantCancelled(id)
                         } else {
-                            val sanitized = sanitizeAgentSnapshotIfNeeded(cancelledSnapshot, agentContext)
+                            val sanitized = sanitizeTerminalSnapshot(
+                                snapshot = cancelledSnapshot,
+                                agentContext = agentContext,
+                                wikiContext = wikiContext,
+                            )
                             if (agentContext != null && sanitized.hasAgentSources()) {
                                 agentSourcePartWriter?.persist(id, sanitized, agentContext)
                                     ?: chatRepository.replaceMessagePartsFromSnapshot(id, sanitized)
@@ -316,15 +354,19 @@ class SendMessageUseCase(
                 provider.profile.id,
                 requestModel,
             )
-            if (assistantId != null && agentContext != null) {
+            if (assistantId != null) {
                 val failedSnapshot = if (streamCompleted) {
                     latestSnapshot
                 } else {
                     accumulator?.snapshot() ?: latestSnapshot
                 }
                 failedSnapshot?.let {
-                    val sanitized = sanitizeAgentCitationMarkers(it)
-                    if (sanitized.hasAgentSources()) {
+                    val sanitized = sanitizeTerminalSnapshot(
+                        snapshot = it,
+                        agentContext = agentContext,
+                        wikiContext = wikiContext,
+                    )
+                    if (agentContext != null && sanitized.hasAgentSources()) {
                         agentSourcePartWriter?.persist(failedAssistantId, sanitized, agentContext)
                             ?: chatRepository.replaceMessagePartsFromSnapshot(failedAssistantId, sanitized)
                     } else {
@@ -486,6 +528,15 @@ internal fun sanitizeAgentSnapshotIfNeeded(
     snapshot: StreamingMessageSnapshot,
     agentContext: AgentRuntimeContext?,
 ): StreamingMessageSnapshot = if (agentContext == null) snapshot else sanitizeAgentCitationMarkers(snapshot)
+
+internal fun sanitizeTerminalSnapshot(
+    snapshot: StreamingMessageSnapshot,
+    agentContext: AgentRuntimeContext?,
+    wikiContext: WikiRuntimeContext?,
+): StreamingMessageSnapshot {
+    val agentSanitized = sanitizeAgentSnapshotIfNeeded(snapshot, agentContext)
+    return if (wikiContext == null) agentSanitized else agentSanitized.removeWikiCitationTokensForTerminal()
+}
 
 internal fun appendVisibleTextPart(
     snapshot: StreamingMessageSnapshot,

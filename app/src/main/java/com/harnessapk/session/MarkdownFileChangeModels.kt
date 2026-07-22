@@ -22,6 +22,14 @@ data class MarkdownFileChangeDraft(
     val updatedAt: Long,
 )
 
+data class MarkdownFileChangeConversationContext(
+    val text: String,
+    val messageIds: List<String>,
+)
+
+class MarkdownFileChangePlanningException(message: String, cause: Throwable? = null) :
+    IllegalStateException(message, cause)
+
 data class MarkdownFileChangeItem(
     val draftId: String,
     val operation: MarkdownUpdateOperation,

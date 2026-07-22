@@ -46,4 +46,9 @@ fun settingsDestinations(
         title = "智能体包",
         description = "安装、更新并查看人物身份与资料覆盖。",
     ),
+    SettingsDestination(
+        id = "wikis",
+        title = "Wiki 知识库",
+        description = "导入、管理并浏览离线原文资料。",
+    ),
 )

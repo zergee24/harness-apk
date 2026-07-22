@@ -111,6 +111,7 @@ class MarkdownUpdatePlannerUseCase(
         return parseAndValidateMarkdownUpdatePlanResponse(
             response = output.toString(),
             wikiCitations = wikiCitations,
+            wikiCoverage = wikiCoverage,
         )
     }
 }

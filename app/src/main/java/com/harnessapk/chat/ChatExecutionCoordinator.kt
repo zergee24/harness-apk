@@ -143,21 +143,21 @@ class ChatExecutionCoordinator(
         try {
             while (currentCoroutineContext().isActive) {
                 val next = executionRepository.nextQueued(conversationId) ?: return
-                executionRepository.markRunning(next.id, assistantMessageId = null)
+                val running = executionRepository.markRunning(next.id, assistantMessageId = null)
                 markActive(conversationId, true)
                 try {
-                    val history = executionRepository.requestHistory(next.id)
+                    val history = executionRepository.requestHistory(running.id)
                     val result = sendMessageUseCase.execute(
-                        entry = next,
+                        entry = running,
                         history = history,
-                        webSearchContext = webSearchContextFor(next),
-                        nativeWebSearchMode = nativeWebSearchModeFor(next),
+                        webSearchContext = webSearchContextFor(running),
+                        nativeWebSearchMode = nativeWebSearchModeFor(running),
                         onAssistantCreated = { assistantId ->
-                            executionRepository.markRunning(next.id, assistantId)
+                            executionRepository.markRunning(running.id, assistantId)
                         },
                     )
                     executionRepository.markTerminal(
-                        entryId = next.id,
+                        entryId = running.id,
                         status = result.status,
                         assistantMessageId = result.assistantMessageId,
                         errorMessage = result.errorMessage,

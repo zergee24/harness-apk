@@ -52,30 +52,207 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
     @Test
-    fun migration16To17CreatesWikiMetadataOnly() = runBlocking {
+    fun migration17To19CreatesConversationWikiHistoryTables() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val name = "migration-16-17-wiki-${System.nanoTime()}.db"
+        val name = "migration-17-18-wiki-${System.nanoTime()}.db"
         createVersion15Fixture(context, name)
         upgradeVersion15FixtureTo16(context, name)
 
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_16_17)
+            .addMigrations(
+                AppDatabase.MIGRATION_16_17,
+                AppDatabase.MIGRATION_17_18,
+                AppDatabase.MIGRATION_18_19,
+            )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(17, sqlite.version)
+        assertEquals(19, sqlite.version)
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wikis'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wiki_versions'"))
-        assertEquals(
-            0,
-            sqlite.scalarInt(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversation_wiki_mounts'",
-            ),
-        )
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversation_wiki_mounts'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wiki_retrieval_runs'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'message_wiki_usages'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'message_wiki_citations'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_foreign_key_list('message_wiki_citations')"))
         sqlite.assertNoForeignKeyViolations()
         migrated.close()
         context.deleteDatabase(name)
         Unit
+    }
+
+    @Test
+    fun changingConversationMountVersionDoesNotRewriteHistoricalCitation() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val refV1 = WikiVersionEntity(
+            wikiId = "history.zztj",
+            version = 1,
+            contentPath = "/private/history.zztj/1/content.sqlite",
+            schemaVersion = 1,
+            contentHash = "a".repeat(64),
+            packageHash = "b".repeat(64),
+            publisherKeyId = "key",
+            publisherFingerprint = "c".repeat(64),
+            manifestJson = "{}",
+            sizeBytes = 1L,
+            enabledForNewConversations = false,
+            state = "READY",
+            installedAt = 1L,
+        )
+        val refV2 = refV1.copy(version = 2, contentPath = "/private/history.zztj/2/content.sqlite")
+        db.conversationDao().insert(conversation("conversation-wiki", updatedAt = 1L))
+        db.wikiDao().insertWiki(
+            WikiEntity(
+                id = "history.zztj",
+                title = "资治通鉴",
+                description = "",
+                activeVersion = 2,
+                createdAt = 1L,
+                updatedAt = 1L,
+            ),
+        )
+        db.wikiDao().insertVersion(refV1)
+        db.wikiDao().insertVersion(refV2)
+        db.messageDao().insert(
+            MessageEntity(
+                id = "assistant-wiki",
+                conversationId = "conversation-wiki",
+                role = "ASSISTANT",
+                content = "回答",
+                status = "SUCCEEDED",
+                providerId = null,
+                model = null,
+                createdAt = 1L,
+                updatedAt = 1L,
+                errorCode = null,
+                errorMessage = null,
+            ),
+        )
+        val dao = db.conversationWikiDao()
+        dao.upsertMount(
+            ConversationWikiMountEntity(
+                conversationId = "conversation-wiki",
+                wikiId = "history.zztj",
+                wikiVersion = 1,
+                enabled = true,
+                mountedAt = 1L,
+                updatedAt = 1L,
+            ),
+        )
+        dao.insertCitation(
+            MessageWikiCitationEntity(
+                id = "citation-wiki",
+                messageId = "assistant-wiki",
+                displayOrdinal = 1,
+                wikiId = "history.zztj",
+                wikiVersion = 1,
+                wikiTitle = "资治通鉴",
+                documentId = "document-1",
+                sectionId = "section-1",
+                chunkId = "chunk-1",
+                sourceTitle = "卷一",
+                sectionPath = "卷一 / 起始",
+                locatorLabel = "第一段",
+                originalTextSnapshot = "原文",
+                originalTextSha256 = "d".repeat(64),
+                answerRangesJson = "[[0,2]]",
+                verificationState = "VERIFIED",
+                createdAt = 1L,
+            ),
+        )
+
+        dao.upsertMount(
+            ConversationWikiMountEntity(
+                conversationId = "conversation-wiki",
+                wikiId = "history.zztj",
+                wikiVersion = 2,
+                enabled = true,
+                mountedAt = 1L,
+                updatedAt = 2L,
+            ),
+        )
+
+        assertEquals(2, dao.findMount("conversation-wiki", "history.zztj")!!.wikiVersion)
+        assertEquals(1, dao.findCitation("citation-wiki")!!.wikiVersion)
+        db.openHelper.writableDatabase.assertNoForeignKeyViolations()
+        db.close()
+    }
+
+    @Test
+    fun immutableCitationSnapshotCanBeSavedAfterItsWikiVersionIsRemoved() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        db.conversationDao().insert(conversation("conversation-wiki-snapshot", updatedAt = 1L))
+        db.messageDao().insert(
+            MessageEntity(
+                id = "assistant-wiki-snapshot",
+                conversationId = "conversation-wiki-snapshot",
+                role = "ASSISTANT",
+                content = "回答",
+                status = "SUCCEEDED",
+                providerId = null,
+                model = null,
+                createdAt = 1L,
+                updatedAt = 1L,
+                errorCode = null,
+                errorMessage = null,
+            ),
+        )
+        db.wikiDao().insertWiki(
+            WikiEntity(
+                id = "history.snapshot",
+                title = "快照测试",
+                description = "",
+                activeVersion = null,
+                createdAt = 1L,
+                updatedAt = 1L,
+            ),
+        )
+        db.wikiDao().insertVersion(
+            WikiVersionEntity(
+                wikiId = "history.snapshot",
+                version = 1,
+                contentPath = "/private/history.snapshot/1/content.sqlite",
+                schemaVersion = 1,
+                contentHash = "a".repeat(64),
+                packageHash = "b".repeat(64),
+                publisherKeyId = "key",
+                publisherFingerprint = "c".repeat(64),
+                manifestJson = "{}",
+                sizeBytes = 1L,
+                enabledForNewConversations = false,
+                state = "READY",
+                installedAt = 1L,
+            ),
+        )
+
+        assertEquals(1, db.wikiDao().deleteVersion("history.snapshot", 1))
+        db.conversationWikiDao().insertCitation(
+            MessageWikiCitationEntity(
+                id = "citation-snapshot",
+                messageId = "assistant-wiki-snapshot",
+                displayOrdinal = 1,
+                wikiId = "history.snapshot",
+                wikiVersion = 1,
+                wikiTitle = "快照测试",
+                documentId = "document-1",
+                sectionId = "section-1",
+                chunkId = "chunk-1",
+                sourceTitle = "卷一",
+                sectionPath = "卷一 / 起始",
+                locatorLabel = "第一段",
+                originalTextSnapshot = "原文快照",
+                originalTextSha256 = "d".repeat(64),
+                answerRangesJson = "[[0,2]]",
+                verificationState = "PACKAGE_UNAVAILABLE",
+                createdAt = 2L,
+            ),
+        )
+
+        assertNotNull(db.conversationWikiDao().findCitation("citation-snapshot"))
+        db.openHelper.writableDatabase.assertNoForeignKeyViolations()
+        db.close()
     }
 
     @Test
@@ -651,17 +828,22 @@ class AppDatabaseTest {
     }
 
     @Test
-    fun migration15To17PreservesRealHistoricalSchemaAndV2Data() = runBlocking {
+    fun migration15To18PreservesRealHistoricalSchemaAndV2Data() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-15-16-real-${System.nanoTime()}.db"
         createVersion15Fixture(context, name)
 
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17)
+            .addMigrations(
+                AppDatabase.MIGRATION_15_16,
+                AppDatabase.MIGRATION_16_17,
+                AppDatabase.MIGRATION_17_18,
+                AppDatabase.MIGRATION_18_19,
+            )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(17, sqlite.version)
+        assertEquals(19, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "daily-conversation|USER|默认使用中文",
@@ -924,7 +1106,7 @@ class AppDatabaseTest {
         val migrated = version15
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(17, sqlite.version)
+        assertEquals(19, sqlite.version)
         assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals("默认使用中文", sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"))
         assertEquals("notes/project.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
@@ -976,11 +1158,13 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_14_15,
                 AppDatabase.MIGRATION_15_16,
                 AppDatabase.MIGRATION_16_17,
+                AppDatabase.MIGRATION_17_18,
+                AppDatabase.MIGRATION_18_19,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(17, sqlite.version)
+        assertEquals(19, sqlite.version)
         assertEquals(
             1,
             sqlite.scalarInt(
@@ -1159,6 +1343,8 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_14_15,
                 AppDatabase.MIGRATION_15_16,
                 AppDatabase.MIGRATION_16_17,
+                AppDatabase.MIGRATION_17_18,
+                AppDatabase.MIGRATION_18_19,
             )
             .build()
         db.openHelper.writableDatabase
@@ -1204,11 +1390,13 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_14_15,
                     AppDatabase.MIGRATION_15_16,
                     AppDatabase.MIGRATION_16_17,
+                    AppDatabase.MIGRATION_17_18,
+                    AppDatabase.MIGRATION_18_19,
                 )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(17, sqlite.version)
+            assertEquals(19, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -1245,13 +1433,15 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_12_13,
                     AppDatabase.MIGRATION_13_14,
                     AppDatabase.MIGRATION_14_15,
-                    AppDatabase.MIGRATION_15_16,
-                    AppDatabase.MIGRATION_16_17,
-                )
+                AppDatabase.MIGRATION_15_16,
+                AppDatabase.MIGRATION_16_17,
+                AppDatabase.MIGRATION_17_18,
+                AppDatabase.MIGRATION_18_19,
+            )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(17, sqlite.version)
+            assertEquals(19, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))

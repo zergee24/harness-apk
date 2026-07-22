@@ -105,6 +105,47 @@ class SessionContextBuilderTest {
     }
 
     @Test
+    fun wikiContextIsPlacedAfterAgentAndBeforeProjectAndWebContext() {
+        val requestMessages = buildSessionOutgoingMessages(
+            context = SessionRequestContext(
+                finalPrompt = "整理项目内容",
+                projectName = "Harness",
+                deliverableTitle = null,
+                projectContext = "项目上下文",
+                deliverableMarkdown = "",
+            ),
+            baseMessages = listOf(OutgoingChatMessage(role = "user", text = "查证")),
+            agentSystemContext = "人格资料",
+            wikiSystemContext = "Wiki 原文证据",
+            webSearchContext = WebSearchContext(
+                results = WebSearchResult(
+                    query = "查证",
+                    providerId = "jina",
+                    capability = WebSearchCapability.SEARCH_KEYWORDS,
+                    inputs = listOf("查证"),
+                    results = listOf(
+                        WebSearchSource(
+                            id = "1",
+                            title = "官方来源",
+                            url = "https://example.com/source",
+                            domain = "example.com",
+                            content = "内容",
+                            snippet = "摘要",
+                            accessedAt = 1L,
+                            sourceInput = "查证",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val system = requestMessages.first().text
+        assertTrue(system.indexOf("人格资料") < system.indexOf("Wiki 原文证据"))
+        assertTrue(system.indexOf("Wiki 原文证据") < system.indexOf("会话提示词"))
+        assertTrue(system.indexOf("会话提示词") < system.indexOf("联网搜索来源"))
+    }
+
+    @Test
     fun writeBackRequiresProjectAndAssistantMarkdownButNotExistingDeliverable() {
         assertTrue(canWriteBackMarkdown("project", "deliverable", "# 建议"))
         assertTrue(canWriteBackMarkdown("project", null, "# 新沉淀"))

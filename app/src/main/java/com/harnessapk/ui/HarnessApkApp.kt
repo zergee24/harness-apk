@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -30,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -46,6 +48,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.harnessapk.HarnessApkApplication
+import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.chat.Conversation
 import com.harnessapk.ui.agent.AgentPackagesScreen
 import com.harnessapk.ui.chat.ChatScreen
@@ -63,6 +66,13 @@ import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
 import com.harnessapk.ui.updater.startupUpdateAction
 import com.harnessapk.ui.voice.VoiceSettingsScreen
+import com.harnessapk.ui.wiki.WikiLibraryScreen
+import com.harnessapk.ui.wiki.WikiBrowserScreen
+import com.harnessapk.ui.wiki.WikiCitationSourceScreen
+import com.harnessapk.ui.wiki.WikiRecoveryState
+import com.harnessapk.ui.wiki.WikiRoutes
+import com.harnessapk.ui.wiki.WikiSearchScreen
+import com.harnessapk.ui.wiki.WikiSourceReaderScreen
 import com.harnessapk.updater.UpdateCheckResult
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -76,6 +86,7 @@ object Routes {
     const val Git = "git"
     const val Skills = "skills"
     const val AgentPackages = "agent-packages"
+    const val WikiLibrary = WikiRoutes.Library
     const val Updates = "updates"
     const val ChatPattern =
         "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}"
@@ -130,6 +141,8 @@ internal fun projectWorkbenchTarget(
 fun HarnessApkApp(
     incomingAgentBundleUri: Uri? = null,
     onIncomingAgentBundleUriConsumed: () -> Unit = {},
+    incomingWikiPackageUri: Uri? = null,
+    onIncomingWikiPackageUriConsumed: () -> Unit = {},
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -140,7 +153,11 @@ fun HarnessApkApp(
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
     var agentImportSourceProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var consumedExternalAgentBundleUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingWikiImportUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var wikiImportError by remember { mutableStateOf<String?>(null) }
+    var browserWikiTitle by remember { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
+    var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
     val isHomeRoute = route == Routes.Conversations || route == null
@@ -163,10 +180,29 @@ fun HarnessApkApp(
         if (transition.navigateToPackages) navController.navigate(Routes.AgentPackages)
     }
 
+    fun dispatchWikiPackageImport(event: WikiPackageImportEvent) {
+        val transition = reduceWikiPackageImport(
+            state = WikiPackageImportState(pendingUri = pendingWikiImportUri),
+            event = event,
+        )
+        pendingWikiImportUri = transition.state.pendingUri
+        wikiImportError = transition.errorMessage
+        if (transition.navigateToLibrary) {
+            navController.navigate(Routes.WikiLibrary) {
+                launchSingleTop = true
+            }
+        }
+    }
+
     LaunchedEffect(route) {
         dispatchAgentPackageImport(
             AgentPackageImportEvent.RouteChanged(route == Routes.AgentPackages),
         )
+        if (route != WikiRoutes.BrowserPattern) browserWikiTitle = null
+    }
+
+    LaunchedEffect(Unit) {
+        dispatchWikiPackageImport(WikiPackageImportEvent.RestorePendingImport)
     }
 
     LaunchedEffect(container) {
@@ -191,6 +227,11 @@ fun HarnessApkApp(
         Routes.Git -> "Git / Gitee"
         Routes.Skills -> "技能 / 插件"
         Routes.AgentPackages -> "智能体包"
+        Routes.WikiLibrary -> "Wiki 知识库"
+        WikiRoutes.BrowserPattern -> browserWikiTitle ?: "Wiki 知识库"
+        WikiRoutes.SearchPattern -> "搜索"
+        WikiRoutes.SourcePattern -> "原文"
+        WikiRoutes.CitationPattern -> "引用原文"
         Routes.Updates -> "更新"
         Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
@@ -208,6 +249,12 @@ fun HarnessApkApp(
                     currentProjectId = currentProjectId,
                 ),
             )
+        }
+    }
+    LaunchedEffect(incomingWikiPackageUri) {
+        incomingWikiPackageUri?.toString()?.let { uri ->
+            dispatchWikiPackageImport(WikiPackageImportEvent.ExternalPackageReceived(uri))
+            onIncomingWikiPackageUriConsumed()
         }
     }
     val onCreateConversation: () -> Unit = {
@@ -253,10 +300,15 @@ fun HarnessApkApp(
                         if (canGoBack) {
                             IconButton(
                                 onClick = {
-                                    if (route == Routes.AgentPackages) {
-                                        dispatchAgentPackageImport(
-                                            AgentPackageImportEvent.RouteChanged(isAgentPackagesRoute = false),
-                                        )
+                                    when (route) {
+                                        Routes.AgentPackages -> {
+                                            dispatchAgentPackageImport(
+                                                AgentPackageImportEvent.RouteChanged(isAgentPackagesRoute = false),
+                                            )
+                                        }
+                                        Routes.WikiLibrary -> {
+                                            dispatchWikiPackageImport(WikiPackageImportEvent.ImportCancelled)
+                                        }
                                     }
                                     navController.popBackStack()
                                 },
@@ -266,9 +318,24 @@ fun HarnessApkApp(
                         }
                     },
                     actions = {
-                        if (route == Routes.ChatPattern) {
-                            IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
-                                Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
+                        when (route) {
+                            Routes.ChatPattern -> {
+                                IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
+                                    Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
+                                }
+                            }
+                            Routes.WikiLibrary -> {
+                                IconButton(onClick = { wikiImportPickerRequestKey += 1 }) {
+                                    Icon(Icons.Filled.Add, contentDescription = "导入 Wiki 知识库")
+                                }
+                            }
+                            WikiRoutes.BrowserPattern -> {
+                                val wikiRef = wikiRouteRef(backStackEntry)
+                                if (wikiRef != null) {
+                                    IconButton(onClick = { navController.navigate(WikiRoutes.search(wikiRef)) }) {
+                                        Icon(Icons.Outlined.Search, contentDescription = "搜索原文")
+                                    }
+                                }
                             }
                         }
                     },
@@ -362,6 +429,9 @@ fun HarnessApkApp(
                             launchSingleTop = true
                         }
                     },
+                    onOpenWikiCitation = { citationId ->
+                        navController.navigate(WikiRoutes.citation(citationId))
+                    },
                     contentPadding = padding,
                 )
             }
@@ -380,6 +450,7 @@ fun HarnessApkApp(
                         dispatchAgentPackageImport(AgentPackageImportEvent.SettingsOpened)
                         navController.navigate(Routes.AgentPackages)
                     },
+                    onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                     onOpenUpdates = { navController.navigate(Routes.Updates) },
                     showUpdateBadge = showUpdateBadge,
                 )
@@ -419,6 +490,118 @@ fun HarnessApkApp(
                     },
                 )
             }
+            composable(Routes.WikiLibrary) {
+                WikiLibraryScreen(
+                    container = container,
+                    contentPadding = padding,
+                    pendingImportUri = pendingWikiImportUri,
+                    importError = wikiImportError,
+                    importRequestKey = wikiImportPickerRequestKey,
+                    onImportRequestConsumed = { wikiImportPickerRequestKey = 0 },
+                    onPickerPackageSelected = { uri ->
+                        dispatchWikiPackageImport(WikiPackageImportEvent.PickerPackageSelected(uri))
+                    },
+                    onImportCancelled = {
+                        dispatchWikiPackageImport(WikiPackageImportEvent.ImportCancelled)
+                    },
+                    onImportRejected = { message ->
+                        dispatchWikiPackageImport(WikiPackageImportEvent.ImportRejected(message))
+                    },
+                    onImportCompleted = {
+                        dispatchWikiPackageImport(WikiPackageImportEvent.ImportCompleted)
+                    },
+                    onOpenBrowser = { ref -> navController.navigate(WikiRoutes.browser(ref)) },
+                )
+            }
+            composable(
+                route = WikiRoutes.BrowserPattern,
+                arguments = wikiRefNavArguments(),
+            ) { entry ->
+                val wikiRef = wikiRouteRef(entry)
+                if (wikiRef == null) {
+                    WikiRecoveryState("Wiki 路由参数无效，请返回知识库重新选择。", Modifier.padding(padding))
+                } else {
+                    WikiBrowserScreen(
+                        container = container,
+                        ref = wikiRef,
+                        contentPadding = padding,
+                        onOpenSource = { chunkId -> navController.navigate(WikiRoutes.source(wikiRef, chunkId)) },
+                        onTitleLoaded = { title -> browserWikiTitle = title },
+                        onUseInNewConversation = {
+                            val projectId = currentProjectId
+                            val conversationId = container.newConversationUseCase.create(
+                                title = "新会话",
+                                projectId = projectId,
+                                identity = InitialConversationIdentity.Assistant,
+                                wikiScope = listOf(wikiRef),
+                            )
+                            navController.navigate(
+                                Routes.chat(
+                                    conversationId = conversationId,
+                                    projectId = projectId,
+                                    focusInput = true,
+                                ),
+                            )
+                        },
+                    )
+                }
+            }
+            composable(
+                route = WikiRoutes.SearchPattern,
+                arguments = wikiRefNavArguments(),
+            ) { entry ->
+                val wikiRef = wikiRouteRef(entry)
+                if (wikiRef == null) {
+                    WikiRecoveryState("Wiki 路由参数无效，请返回知识库重新选择。", Modifier.padding(padding))
+                } else {
+                    WikiSearchScreen(
+                        container = container,
+                        ref = wikiRef,
+                        contentPadding = padding,
+                        onOpenSource = { chunkId -> navController.navigate(WikiRoutes.source(wikiRef, chunkId)) },
+                    )
+                }
+            }
+            composable(
+                route = WikiRoutes.CitationPattern,
+                arguments = listOf(navArgument("citationId") { type = NavType.StringType }),
+            ) { entry ->
+                val citationId = WikiRoutes.decodeCitationId(entry.arguments?.getString("citationId"))
+                if (citationId == null) {
+                    WikiRecoveryState("引用路由参数无效，请返回会话重新打开。", Modifier.padding(padding))
+                } else {
+                    WikiCitationSourceScreen(
+                        container = container,
+                        citationId = citationId,
+                        contentPadding = padding,
+                        onOpenSource = { ref, chunkId ->
+                            navController.navigate(WikiRoutes.source(ref, chunkId))
+                        },
+                    )
+                }
+            }
+            composable(
+                route = WikiRoutes.SourcePattern,
+                arguments = wikiRefNavArguments() + navArgument("chunkId") { type = NavType.StringType },
+            ) { entry ->
+                val wikiRef = wikiRouteRef(entry)
+                val chunkId = WikiRoutes.decodeChunkId(entry.arguments?.getString("chunkId"))
+                if (wikiRef == null || chunkId == null) {
+                    WikiRecoveryState("原文路由参数无效，请返回知识库重新选择。", Modifier.padding(padding))
+                } else {
+                    WikiSourceReaderScreen(
+                        container = container,
+                        ref = wikiRef,
+                        chunkId = chunkId,
+                        contentPadding = padding,
+                        onOpenSource = { nextChunkId ->
+                            navController.navigate(WikiRoutes.source(wikiRef, nextChunkId)) {
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+                }
+            }
             composable(Routes.Updates) {
                 UpdateSettingsScreen(
                     container = container,
@@ -429,6 +612,17 @@ fun HarnessApkApp(
         }
     }
 }
+
+private fun wikiRefNavArguments() = listOf(
+    navArgument("wikiId") { type = NavType.StringType },
+    navArgument("version") { type = NavType.StringType },
+)
+
+private fun wikiRouteRef(entry: androidx.navigation.NavBackStackEntry?): com.harnessapk.wiki.WikiRef? =
+    WikiRoutes.decodeRef(
+        wikiId = entry?.arguments?.getString("wikiId"),
+        version = entry?.arguments?.getString("version"),
+    )
 
 internal fun chatTopBarTitle(
     conversations: List<Conversation>,

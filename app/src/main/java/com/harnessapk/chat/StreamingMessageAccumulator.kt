@@ -1,5 +1,7 @@
 package com.harnessapk.chat
 
+import com.harnessapk.wiki.hideWikiCitationTokensForDisplay
+import com.harnessapk.wiki.removeVisibleWikiCitationTokens
 sealed interface StreamEvent {
     data class TextDelta(val text: String) : StreamEvent
     data class ImageDelta(
@@ -32,6 +34,7 @@ enum class UiMessagePartType {
     ERROR_DETAIL,
     SYSTEM_EVENT,
     AGENT_SOURCES,
+    WIKI_SOURCES,
 }
 
 data class UiMessagePartDraft(
@@ -50,6 +53,12 @@ data class StreamingMessageSnapshot(
     val outputTokens: Int? = null,
     val totalTokens: Int? = null,
 )
+
+fun StreamingMessageSnapshot.hideWikiCitationTokensForDisplay(): StreamingMessageSnapshot =
+    hideWikiCitationTokensForDisplay(this)
+
+fun StreamingMessageSnapshot.removeWikiCitationTokensForTerminal(): StreamingMessageSnapshot =
+    removeVisibleWikiCitationTokens(this)
 
 fun StreamingMessageSnapshot.legacyVisibleText(): String =
     parts

@@ -6,7 +6,9 @@ object WikiMarkdownProposalValidator {
     fun validate(
         proposal: MarkdownUpdateProposal,
         citations: WikiMarkdownCitationSet,
+        wikiCoverage: WikiEvidenceCoverage = WikiEvidenceCoverage.NONE,
     ): MarkdownUpdateProposal {
+        WikiComparisonPolicyValidator.validate(proposal.markdown, wikiCoverage)
         if (citations.citations.isEmpty()) return proposal
         val markdown = proposal.markdown
         if (markdown.contains("harness-wiki://", ignoreCase = true)) {

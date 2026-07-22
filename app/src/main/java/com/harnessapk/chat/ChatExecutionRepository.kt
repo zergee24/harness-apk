@@ -8,6 +8,7 @@ import com.harnessapk.common.TimeProvider
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.storage.ChatExecutionEntryDao
 import com.harnessapk.storage.ChatExecutionEntryEntity
+import com.harnessapk.wiki.WikiRef
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
@@ -35,6 +36,7 @@ class ChatExecutionRepository(
     private val identityRepository: ConversationIdentityRepository,
     private val timeProvider: TimeProvider,
     private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
+    private val wikiScopeSnapshotProvider: suspend (conversationId: String) -> List<WikiRef> = { emptyList() },
 ) {
     fun observeForConversation(conversationId: String): Flow<List<ChatExecutionEntry>> =
         dao.observeForConversation(conversationId).map { rows -> rows.map(ChatExecutionEntryEntity::toDomain) }
@@ -122,10 +124,14 @@ class ChatExecutionRepository(
 
     suspend fun markRunning(entryId: String, assistantMessageId: String?): ChatExecutionEntry =
         updateEntry(entryId) { entry ->
+            val requestContext = captureLegacyWikiScopeSnapshot(entry.requestContext) {
+                wikiScopeSnapshotProvider(entry.conversationId)
+            }
             entry.copy(
                 status = ChatExecutionStatus.RUNNING,
                 assistantMessageId = assistantMessageId ?: entry.assistantMessageId,
                 errorMessage = null,
+                requestContext = requestContext,
             )
         }
 
@@ -232,7 +238,7 @@ class ChatExecutionRepository(
 
     private suspend fun updateEntry(
         entryId: String,
-        transform: (ChatExecutionEntry) -> ChatExecutionEntry,
+        transform: suspend (ChatExecutionEntry) -> ChatExecutionEntry,
     ): ChatExecutionEntry = database.withTransaction {
         val current = requireNotNull(dao.findById(entryId)) { "队列任务不存在" }.toDomain()
         val updated = transform(current).copy(updatedAt = timeProvider.nowMillis())

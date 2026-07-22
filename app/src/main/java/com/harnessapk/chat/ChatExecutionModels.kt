@@ -2,6 +2,9 @@ package com.harnessapk.chat
 
 import com.harnessapk.session.SessionRequestContext
 import com.harnessapk.websearch.WebSearchSettings
+import com.harnessapk.wiki.WikiRef
+import com.harnessapk.wiki.decodeWikiScopeSnapshot
+import com.harnessapk.wiki.encodeWikiScopeSnapshot
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -28,7 +31,17 @@ data class ChatExecutionRequestContext(
     val sessionContext: SessionRequestContext? = null,
     val webSearchEnabled: Boolean = false,
     val webSearchSettings: WebSearchSettings = WebSearchSettings(),
+    val wikiScopeSnapshot: List<WikiRef>? = null,
 )
+
+internal suspend fun captureLegacyWikiScopeSnapshot(
+    context: ChatExecutionRequestContext,
+    currentScope: suspend () -> List<WikiRef>,
+): ChatExecutionRequestContext {
+    if (context.wikiScopeSnapshot != null) return context
+    val canonicalScope = decodeWikiScopeSnapshot(encodeWikiScopeSnapshot(currentScope()))
+    return context.copy(wikiScopeSnapshot = canonicalScope)
+}
 
 data class ChatExecutionEntry(
     val id: String,
@@ -76,6 +89,9 @@ internal fun recoveredExecutionStatus(status: ChatExecutionStatus): ChatExecutio
 internal fun encodeExecutionRequestContext(context: ChatExecutionRequestContext): String = buildJsonObject {
     put("webSearchEnabled", JsonPrimitive(context.webSearchEnabled))
     put("webSearchMaxResults", JsonPrimitive(context.webSearchSettings.maxResults))
+    context.wikiScopeSnapshot?.let { scope ->
+        put("wikiScopeSnapshot", Json.parseToJsonElement(encodeWikiScopeSnapshot(scope)))
+    }
     context.sessionContext?.let { session ->
         put("finalPrompt", JsonPrimitive(session.finalPrompt))
         put("projectName", JsonPrimitive(session.projectName.orEmpty()))
@@ -97,12 +113,16 @@ internal fun decodeExecutionRequestContext(raw: String): ChatExecutionRequestCon
             deliverableMarkdown = root.string("deliverableMarkdown").orEmpty(),
         )
     }
+    val wikiScopeSnapshot = root["wikiScopeSnapshot"]?.let { encodedScope ->
+        decodeWikiScopeSnapshot(encodedScope.toString())
+    }
     return ChatExecutionRequestContext(
         sessionContext = sessionContext,
         webSearchEnabled = root.string("webSearchEnabled")?.toBoolean() ?: false,
         webSearchSettings = WebSearchSettings(
             maxResults = root.string("webSearchMaxResults")?.toIntOrNull() ?: WebSearchSettings().maxResults,
         ),
+        wikiScopeSnapshot = wikiScopeSnapshot,
     )
 }
 

@@ -35,6 +35,7 @@ val agentV2FixtureCompleteDist = rootProject.layout.buildDirectory.dir("agent-v2
 val agentV2FixtureSourceDist = rootProject.layout.buildDirectory.dir("agent-v2-source-dist")
 val generatedAgentV2Assets = layout.buildDirectory.dir("generated/agent-v2-fixture-assets")
 val wikiFixtureDist = rootProject.layout.buildDirectory.dir("generated/wikiFixture")
+val wikiComparisonFixtureDist = rootProject.layout.buildDirectory.dir("generated/wikiComparisonFixture")
 val generatedWikiFixtureAssets = layout.buildDirectory.dir("generated/assets/wikiDebugAndroidTest")
 
 val prepareAgentV2Fixture = tasks.register<Exec>("prepareAgentV2Fixture") {
@@ -159,9 +160,35 @@ val prepareWikiFixture = tasks.register<Exec>("prepareWikiFixture") {
     )
 }
 
+val prepareWikiComparisonFixture = tasks.register<Exec>("prepareWikiComparisonFixture") {
+    inputs.file(rootProject.file("app/src/test/resources/wiki/source.md"))
+    inputs.file(rootProject.file("scripts/wiki-builder.sh"))
+    inputs.files(
+        rootProject.fileTree("tools/wiki_builder") {
+            exclude("**/__pycache__/**")
+        },
+    )
+    outputs.dir(wikiComparisonFixtureDist)
+    outputs.cacheIf("Wiki comparison fixture generation is deterministic") { true }
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/wiki-builder.sh",
+        "-m",
+        "tools.wiki_builder.tests.comparison_fixture",
+        "--source",
+        "app/src/test/resources/wiki/source.md",
+        "--output",
+        wikiComparisonFixtureDist.get().asFile.absolutePath,
+        "--reset",
+    )
+}
+
 val syncWikiFixtureAssets = tasks.register<Sync>("syncWikiFixtureAssets") {
-    dependsOn(prepareWikiFixture)
+    dependsOn(prepareWikiFixture, prepareWikiComparisonFixture)
     from(wikiFixtureDist) {
+        include("*.hwiki")
+    }
+    from(wikiComparisonFixtureDist) {
         include("*.hwiki")
     }
     into(generatedWikiFixtureAssets)

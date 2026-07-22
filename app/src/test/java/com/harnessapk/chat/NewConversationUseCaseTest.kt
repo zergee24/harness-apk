@@ -27,10 +27,13 @@ import com.harnessapk.storage.MessageDao
 import com.harnessapk.storage.MessageEntity
 import com.harnessapk.storage.MessagePartDao
 import com.harnessapk.storage.MessagePartEntity
+import com.harnessapk.wiki.WikiTransactionRunner
+import com.harnessapk.wiki.WikiRef
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -114,6 +117,65 @@ class NewConversationUseCaseTest {
 
         assertTrue(failure is IllegalStateException)
         assertEquals(0, conversationDao.count)
+    }
+
+    @Test
+    fun newConversationCopiesWikiDefaultsInsideCreationTransaction() = runTest {
+        var transactionActive = false
+        val copiedConversationIds = mutableListOf<String>()
+        val transactionalUseCase = NewConversationUseCase(
+            chatRepository = chatRepository,
+            identityRepository = identityRepository,
+            wikiDefaultsCopier = ConversationWikiDefaultsCopier { conversationId ->
+                assertTrue(transactionActive)
+                copiedConversationIds += conversationId
+            },
+            transactionRunner = WikiTransactionRunner { block ->
+                transactionActive = true
+                try {
+                    block()
+                } finally {
+                    transactionActive = false
+                }
+            },
+        )
+
+        val createdId = transactionalUseCase.create(projectId = "project-1")
+
+        assertEquals(listOf(createdId), copiedConversationIds)
+        assertEquals("project-1", chatRepository.conversation(createdId)!!.projectId)
+    }
+
+    @Test
+    fun newConversationCanReplaceDefaultsWithOneExactWikiInsideCreationTransaction() = runTest {
+        var transactionActive = false
+        var defaultsCopied = false
+        var replaced: Pair<String, List<WikiRef>>? = null
+        val transactionalUseCase = NewConversationUseCase(
+            chatRepository = chatRepository,
+            identityRepository = identityRepository,
+            wikiDefaultsCopier = ConversationWikiDefaultsCopier { defaultsCopied = true },
+            wikiScopeReplacer = ConversationWikiScopeReplacer { conversationId, scope ->
+                assertTrue(transactionActive)
+                replaced = conversationId to scope
+            },
+            transactionRunner = WikiTransactionRunner { block ->
+                transactionActive = true
+                try {
+                    block()
+                } finally {
+                    transactionActive = false
+                }
+            },
+        )
+        val ref = WikiRef("history.zztj", 2)
+
+        val createdId = transactionalUseCase.create(projectId = "project-1", wikiScope = listOf(ref))
+
+        assertFalse(defaultsCopied)
+        assertEquals(createdId to listOf(ref), replaced)
+        assertEquals("project-1", chatRepository.conversation(createdId)!!.projectId)
+        assertEquals(null, chatRepository.conversation(createdId)!!.agentId)
     }
 }
 

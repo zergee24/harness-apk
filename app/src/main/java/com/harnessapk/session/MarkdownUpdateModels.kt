@@ -81,13 +81,14 @@ fun parseMarkdownUpdatePlanResponse(response: String): MarkdownUpdatePlan {
 fun parseAndValidateMarkdownUpdatePlanResponse(
     response: String,
     wikiCitations: WikiMarkdownCitationSet = WikiMarkdownCitationSet.EMPTY,
+    wikiCoverage: WikiEvidenceCoverage = WikiEvidenceCoverage.NONE,
 ): MarkdownUpdatePlan {
     val plan = parseMarkdownUpdatePlanResponse(response)
-    if (wikiCitations.citations.isEmpty()) return plan
+    if (wikiCitations.citations.isEmpty() && !wikiCoverage.hasMissingComparisonEvidence) return plan
     return plan.copy(
         proposals = plan.proposals.map { proposal ->
             try {
-                WikiMarkdownProposalValidator.validate(proposal, wikiCitations)
+                WikiMarkdownProposalValidator.validate(proposal, wikiCitations, wikiCoverage)
             } catch (error: WikiMarkdownValidationException) {
                 throw MarkdownUpdatePlanningException(
                     "无法生成可审核的 Markdown 变更：${error.message}",

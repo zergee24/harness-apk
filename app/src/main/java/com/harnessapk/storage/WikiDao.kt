@@ -20,6 +20,14 @@ interface WikiDao {
     @Query("SELECT * FROM wiki_versions WHERE wikiId = :wikiId ORDER BY version ASC")
     suspend fun listVersions(wikiId: String): List<WikiVersionEntity>
 
+    @Query("SELECT EXISTS(SELECT 1 FROM wiki_versions WHERE state = 'READY')")
+    suspend fun hasReadyVersion(): Boolean
+
+    @Query(
+        "SELECT EXISTS(SELECT 1 FROM wiki_versions WHERE publisherFingerprint = :fingerprint AND state = 'READY')",
+    )
+    suspend fun hasReadyVersionForPublisherFingerprint(fingerprint: String): Boolean
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertWiki(entity: WikiEntity)
 

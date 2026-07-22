@@ -7,6 +7,7 @@ import com.harnessapk.storage.WikiEntity
 import com.harnessapk.storage.WikiVersionEntity
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -118,6 +119,32 @@ class WikiRepository(
                 }
             }
         }
+    }
+
+    suspend fun hasReadyVersion(): Boolean = withContext(ioDispatcher) {
+        dao.hasReadyVersion()
+    }
+
+    fun observeWikis(): Flow<List<WikiEntity>> = dao.observeWikis()
+
+    suspend fun listVersions(wikiId: String): List<WikiVersionEntity> = withContext(ioDispatcher) {
+        validateWikiId(wikiId)
+        dao.listVersions(wikiId)
+    }
+
+    suspend fun manifestFor(ref: WikiRef): WikiManifest? = withContext(ioDispatcher) {
+        validateRef(ref)
+        val version = dao.findVersion(ref.wikiId, ref.version) ?: return@withContext null
+        try {
+            WikiManifestParser.parse(version.manifestJson.encodeToByteArray())
+        } catch (error: WikiPackageException) {
+            throw WikiInstallException("已安装 Wiki 元数据无效", error)
+        }
+    }
+
+    suspend fun isPublisherKnown(fingerprint: String): Boolean = withContext(ioDispatcher) {
+        require(SHA_256.matches(fingerprint)) { "发布者指纹无效" }
+        dao.hasReadyVersionForPublisherFingerprint(fingerprint)
     }
 
     suspend fun removeVersion(ref: WikiRef): WikiVersionRemovalResult = withContext(ioDispatcher) {
@@ -297,9 +324,14 @@ class WikiRepository(
     private fun versionsRoot(): Path = filesDir.toPath().resolve("wikis")
 
     private fun validateRef(ref: WikiRef) {
-        if (ref.version <= 0 || !WIKI_ID_PATTERN.matches(ref.wikiId)) {
+        if (ref.version <= 0) {
             throw WikiInstallException("Wiki 标识或版本无效")
         }
+        validateWikiId(ref.wikiId)
+    }
+
+    private fun validateWikiId(wikiId: String) {
+        if (!WIKI_ID_PATTERN.matches(wikiId)) throw WikiInstallException("Wiki 标识或版本无效")
     }
 
     private fun validateHash(value: String, label: String) {

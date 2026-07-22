@@ -913,9 +913,10 @@ class ChatUiStateTest {
             ),
         )
 
-        assertTrue(context.contains("用户：讨论移动端项目方向"))
-        assertTrue(context.contains("助手：建议做 Markdown 优先的项目工作台"))
-        assertFalse(context.contains("已沉淀到项目"))
+        assertTrue(context.text.contains("用户：讨论移动端项目方向"))
+        assertTrue(context.text.contains("助手：建议做 Markdown 优先的项目工作台"))
+        assertFalse(context.text.contains("已沉淀到项目"))
+        assertEquals(listOf("user", "assistant-SUCCEEDED"), context.messageIds)
     }
 
     @Test

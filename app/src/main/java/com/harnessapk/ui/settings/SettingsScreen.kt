@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Mic
@@ -41,6 +42,7 @@ fun SettingsScreen(
     onOpenGit: () -> Unit,
     onOpenSkills: () -> Unit,
     onOpenAgentPackages: () -> Unit,
+    onOpenWikiLibrary: () -> Unit,
     onOpenUpdates: () -> Unit,
     showUpdateBadge: Boolean = false,
 ) {
@@ -63,6 +65,7 @@ fun SettingsScreen(
                     "git" -> onOpenGit
                     "skills" -> onOpenSkills
                     "agents" -> onOpenAgentPackages
+                    "wikis" -> onOpenWikiLibrary
                     "updates" -> onOpenUpdates
                     else -> ({})
                 },
@@ -119,6 +122,7 @@ private fun iconFor(id: String): ImageVector = when (id) {
     "git" -> Icons.Outlined.AccountTree
     "skills" -> Icons.Outlined.Extension
     "agents" -> Icons.Outlined.Extension
+    "wikis" -> Icons.AutoMirrored.Outlined.MenuBook
     "updates" -> Icons.Outlined.SystemUpdate
     else -> Icons.Outlined.Settings
 }

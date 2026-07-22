@@ -321,6 +321,14 @@ private class FakeWikiDao : WikiDao {
     override suspend fun listVersions(wikiId: String): List<WikiVersionEntity> =
         versions.values.filter { it.wikiId == wikiId }.sortedBy(WikiVersionEntity::version)
 
+    override suspend fun hasReadyVersion(): Boolean =
+        versions.values.any { it.state == WikiVersionState.READY.name }
+
+    override suspend fun hasReadyVersionForPublisherFingerprint(fingerprint: String): Boolean =
+        versions.values.any {
+            it.publisherFingerprint == fingerprint && it.state == WikiVersionState.READY.name
+        }
+
     override suspend fun insertWiki(entity: WikiEntity) {
         check(wikis.putIfAbsent(entity.id, entity) == null)
     }

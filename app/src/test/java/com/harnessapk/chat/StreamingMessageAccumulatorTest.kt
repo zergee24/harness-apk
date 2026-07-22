@@ -8,6 +8,21 @@ import org.junit.Test
 
 class StreamingMessageAccumulatorTest {
     @Test
+    fun displaySnapshotHidesCompleteAndTrailingPartialWikiTokensWithoutChangingPersistedSnapshot() {
+        val accumulator = StreamingMessageAccumulator()
+        accumulator.onEvent(StreamEvent.TextDelta("正文⟦W1"), nowMillis = 0L)
+
+        val partial = accumulator.snapshot()
+        assertEquals("正文⟦W1", partial.parts.single().content)
+        assertEquals("正文", partial.hideWikiCitationTokensForDisplay().parts.single().content)
+
+        accumulator.onEvent(StreamEvent.TextDelta("⟧继续"), nowMillis = 10L)
+        val complete = accumulator.snapshot()
+        assertEquals("正文⟦W1⟧继续", complete.parts.single().content)
+        assertEquals("正文继续", complete.hideWikiCitationTokensForDisplay().parts.single().content)
+    }
+
+    @Test
     fun firstTextDeltaFlushesImmediatelySoUserSeesProgress() {
         val accumulator = StreamingMessageAccumulator(
             flushIntervalMillis = 300L,

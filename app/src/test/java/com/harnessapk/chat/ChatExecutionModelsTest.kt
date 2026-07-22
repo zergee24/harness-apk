@@ -1,7 +1,11 @@
 package com.harnessapk.chat
 
+import com.harnessapk.wiki.ConversationWikiException
+import com.harnessapk.wiki.WikiRef
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -69,6 +73,52 @@ class ChatExecutionModelsTest {
         )
 
         assertEquals(context, decodeExecutionRequestContext(encodeExecutionRequestContext(context)))
+    }
+
+    @Test
+    fun executionContextRoundTripsExplicitEmptyWikiScope() {
+        val context = ChatExecutionRequestContext(wikiScopeSnapshot = emptyList())
+
+        assertEquals(
+            emptyList<WikiRef>(),
+            decodeExecutionRequestContext(encodeExecutionRequestContext(context)).wikiScopeSnapshot,
+        )
+    }
+
+    @Test
+    fun executionContextWithoutWikiScopeRemainsLegacyNull() {
+        assertNull(decodeExecutionRequestContext("{}").wikiScopeSnapshot)
+    }
+
+    @Test
+    fun executionContextRejectsDuplicateWikiScopeEntries() {
+        val raw = """{"wikiScopeSnapshot":[{"wikiId":"history.zztj","version":1},{"wikiId":"history.zztj","version":1}]}"""
+
+        assertTrue(
+            runCatching { decodeExecutionRequestContext(raw) }.exceptionOrNull() is ConversationWikiException,
+        )
+    }
+
+    @Test
+    fun legacyScopeCapturesOnceWhileExplicitEmptyScopeNeverFallsBack() = runTest {
+        var snapshotCalls = 0
+        val snapshot: suspend () -> List<WikiRef> = {
+            snapshotCalls += 1
+            listOf(WikiRef("history.zztj", 1))
+        }
+
+        val capturedLegacy = captureLegacyWikiScopeSnapshot(
+            context = ChatExecutionRequestContext(),
+            currentScope = snapshot,
+        )
+        val retainedEmpty = captureLegacyWikiScopeSnapshot(
+            context = ChatExecutionRequestContext(wikiScopeSnapshot = emptyList()),
+            currentScope = snapshot,
+        )
+
+        assertEquals(listOf(WikiRef("history.zztj", 1)), capturedLegacy.wikiScopeSnapshot)
+        assertEquals(emptyList<WikiRef>(), retainedEmpty.wikiScopeSnapshot)
+        assertEquals(1, snapshotCalls)
     }
 
     @Test

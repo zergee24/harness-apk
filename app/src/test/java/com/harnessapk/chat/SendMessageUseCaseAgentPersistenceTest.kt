@@ -56,6 +56,68 @@ import java.nio.file.Files
 
 class SendMessageUseCaseAgentPersistenceTest {
     @Test
+    fun executeBuildsProviderRequestFromOneStableWikiRuntimeContext() = runTest {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("data: {\"choices\":[{\"delta\":{\"content\":\"有据回答⟦W1⟧\"}}]}\n\ndata: [DONE]"))
+        server.start()
+        try {
+            val store = inMemoryChatStore()
+            val conversationId = store.repository.createConversation()
+            val userMessageId = store.repository.insertUserMessage(conversationId, "项羽如何失败", emptyList())
+            val ref = com.harnessapk.wiki.WikiRef("history.24", 1)
+            var contextCalls = 0
+            val runtimeContext = com.harnessapk.wiki.WikiRuntimeContext(
+                scope = listOf(ref),
+                intent = com.harnessapk.wiki.WikiTurnIntent(
+                    mode = com.harnessapk.wiki.WikiTurnIntentMode.AUTO,
+                    namedWikiIds = emptySet(),
+                    compareRequested = false,
+                ),
+                retrieval = null,
+                systemContext = "Wiki 原文证据：⟦W1⟧ 二十四史 · 史记 / 卷六",
+            )
+            val useCase = SendMessageUseCase(
+                context = ContextWrapper(null),
+                chatRepository = store.repository,
+                providerRepository = providerRepository(server),
+                client = OpenAiCompatibleClient(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+                dispatchers = AppDispatchers(Dispatchers.Unconfined, Dispatchers.Unconfined, Dispatchers.Unconfined),
+                wikiContextProvider = { _, query, scope ->
+                    contextCalls += 1
+                    assertEquals("项羽如何失败", query)
+                    assertEquals(listOf(ref), scope)
+                    runtimeContext
+                },
+            )
+            val entry = ChatExecutionEntry(
+                id = "entry-wiki-context",
+                conversationId = conversationId,
+                userMessageId = userMessageId,
+                assistantMessageId = null,
+                targetAssistantMessageId = null,
+                sequence = 1L,
+                type = ChatExecutionType.NORMAL,
+                status = ChatExecutionStatus.RUNNING,
+                providerId = null,
+                model = null,
+                reasoningEffort = defaultReasoningEffort(),
+                requestContext = ChatExecutionRequestContext(wikiScopeSnapshot = listOf(ref)),
+                errorMessage = null,
+                createdAt = 1L,
+                updatedAt = 1L,
+            )
+
+            val result = useCase.execute(entry, store.repository.listMessages(conversationId))
+
+            assertEquals(ChatExecutionStatus.SUCCEEDED, result.status)
+            assertEquals(1, contextCalls)
+            assertTrue(server.takeRequest().body.readUtf8().contains(requireNotNull(runtimeContext.systemContext)))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun executeCompressedAgentConversationBuildsOneRequestFromTheSavedMemory() = runTest {
         val server = MockWebServer()
         server.enqueue(MockResponse().setBody("data: {\"choices\":[{\"delta\":{\"content\":\"收到\"}}]}\n\ndata: [DONE]"))

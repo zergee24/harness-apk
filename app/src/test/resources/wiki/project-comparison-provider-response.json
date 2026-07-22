@@ -1,0 +1,11 @@
+{
+  "updates": [
+    {
+      "operation": "create",
+      "path": "notes/history-comparison.md",
+      "title": "史料对比",
+      "reason": "沉淀本轮双 Wiki 对比",
+      "markdown": "# 史料对比\n\n两部资料均有可核对原文。"
+    }
+  ]
+}

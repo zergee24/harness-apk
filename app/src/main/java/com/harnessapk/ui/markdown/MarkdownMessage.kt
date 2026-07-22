@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.HorizontalDivider
@@ -38,12 +39,70 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.net.URI
+import java.util.Locale
+import java.util.UUID
+
+internal sealed interface MarkdownLinkTarget {
+    data class WikiCitation(val citationId: String) : MarkdownLinkTarget
+
+    data class ExternalUrl(val url: String) : MarkdownLinkTarget
+
+    data object Ignored : MarkdownLinkTarget
+}
+
+internal fun markdownLinkTarget(destination: String): MarkdownLinkTarget {
+    val uri = runCatching { URI(destination) }.getOrNull() ?: return MarkdownLinkTarget.Ignored
+    return when (uri.scheme?.lowercase(Locale.ROOT)) {
+        "harness-wiki" -> citationIdFromUri(uri)
+            ?.let(MarkdownLinkTarget::WikiCitation)
+            ?: MarkdownLinkTarget.Ignored
+        "http", "https" -> destination
+            .takeIf { uri.host?.isNotBlank() == true }
+            ?.let(MarkdownLinkTarget::ExternalUrl)
+            ?: MarkdownLinkTarget.Ignored
+        else -> MarkdownLinkTarget.Ignored
+    }
+}
+
+private fun citationIdFromUri(uri: URI): String? {
+    if (
+        uri.host != "citation" ||
+        uri.port != -1 ||
+        uri.userInfo != null ||
+        uri.query != null ||
+        uri.fragment != null
+    ) {
+        return null
+    }
+    val rawId = uri.rawPath?.removePrefix("/")
+        ?.takeIf { uri.rawPath == "/$it" }
+        ?: return null
+    val uuid = runCatching { UUID.fromString(rawId) }.getOrNull() ?: return null
+    return uuid.toString().takeIf { it.equals(rawId, ignoreCase = true) }
+}
+
+private const val MARKDOWN_LINK_ANNOTATION = "markdown-link"
+private val INTERNAL_WIKI_CITATION_MARKDOWN_LINK = Regex(
+    """\[([^\[\]\n]*)]\(harness-wiki://citation/([0-9A-Fa-f-]{36})\)""",
+)
+
+internal fun markdownTextForCopy(markdown: String): String =
+    INTERNAL_WIKI_CITATION_MARKDOWN_LINK.replace(markdown) { match ->
+        val destination = "harness-wiki://citation/${match.groupValues[2]}"
+        if (markdownLinkTarget(destination) is MarkdownLinkTarget.WikiCitation) {
+            match.groupValues[1]
+        } else {
+            match.value
+        }
+    }
 
 @Composable
 fun MarkdownMessage(
     markdown: String,
     modifier: Modifier = Modifier,
     textColor: Color = MaterialTheme.colorScheme.onSurface,
+    onLinkClick: (String) -> Unit = {},
 ) {
     val blockCache = remember { IncrementalMarkdownBlockCache() }
     val chunks = remember(markdown) { blockCache.chunksFor(markdown) }
@@ -53,25 +112,41 @@ fun MarkdownMessage(
     ) {
         chunks.forEach { chunk ->
             key(chunk.id) {
-                MarkdownChunkView(chunk = chunk, textColor = textColor)
+                MarkdownChunkView(
+                    chunk = chunk,
+                    textColor = textColor,
+                    onLinkClick = onLinkClick,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun MarkdownChunkView(chunk: ParsedMarkdownChunk, textColor: Color) {
+private fun MarkdownChunkView(
+    chunk: ParsedMarkdownChunk,
+    textColor: Color,
+    onLinkClick: (String) -> Unit,
+) {
     chunk.blocks.forEach { block ->
-        MarkdownBlockView(block = block, textColor = textColor)
+        MarkdownBlockView(
+            block = block,
+            textColor = textColor,
+            onLinkClick = onLinkClick,
+        )
     }
 }
 
 @Composable
-private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
+private fun MarkdownBlockView(
+    block: MarkdownBlock,
+    textColor: Color,
+    onLinkClick: (String) -> Unit,
+) {
     when (block) {
-        is MarkdownBlock.Heading -> Text(
-            text = block.text.toAnnotatedString(textColor),
-            color = textColor,
+        is MarkdownBlock.Heading -> MarkdownInlineText(
+            inlines = block.text,
+            textColor = textColor,
             style = MaterialTheme.typography.titleMedium.copy(
                 fontSize = when (block.level) {
                     1 -> markdownHeadingFontSizeSp(level = 1).sp
@@ -81,22 +156,26 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
                 lineHeight = markdownHeadingLineHeightSp(block.level).sp,
                 fontWeight = FontWeight.SemiBold,
             ),
+            onLinkClick = onLinkClick,
         )
-        is MarkdownBlock.Paragraph -> Text(
-            text = block.text.toAnnotatedString(textColor),
-            color = textColor,
+        is MarkdownBlock.Paragraph -> MarkdownInlineText(
+            inlines = block.text,
+            textColor = textColor,
             style = MaterialTheme.typography.bodyMedium,
             lineHeight = markdownBodyLineHeightSp().sp,
+            onLinkClick = onLinkClick,
         )
         is MarkdownBlock.BulletList -> MarkdownList(
             items = block.items,
             textColor = textColor,
             markerForIndex = { "•" },
+            onLinkClick = onLinkClick,
         )
         is MarkdownBlock.OrderedList -> MarkdownList(
             items = block.items,
             textColor = textColor,
             markerForIndex = { index -> "${block.startNumber + index}." },
+            onLinkClick = onLinkClick,
         )
         is MarkdownBlock.Quote -> Row(
             modifier = Modifier.fillMaxWidth(),
@@ -114,13 +193,23 @@ private fun MarkdownBlockView(block: MarkdownBlock, textColor: Color) {
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                block.blocks.forEach { MarkdownBlockView(it, textColor.copy(alpha = 0.82f)) }
+                block.blocks.forEach {
+                    MarkdownBlockView(
+                        block = it,
+                        textColor = textColor.copy(alpha = 0.82f),
+                        onLinkClick = onLinkClick,
+                    )
+                }
             }
         }
         is MarkdownBlock.Code -> MarkdownCodeBlock(block)
         is MarkdownBlock.Math -> MarkdownMathBlock(block)
         is MarkdownBlock.Mermaid -> MarkdownMermaidBlock(block)
-        is MarkdownBlock.Table -> MarkdownTable(table = block, textColor = textColor)
+        is MarkdownBlock.Table -> MarkdownTable(
+            table = block,
+            textColor = textColor,
+            onLinkClick = onLinkClick,
+        )
         MarkdownBlock.Divider -> HorizontalDivider(color = textColor.copy(alpha = 0.18f))
     }
 }
@@ -287,6 +376,7 @@ private fun MarkdownList(
     items: List<MarkdownListItem>,
     textColor: Color,
     markerForIndex: (Int) -> String,
+    onLinkClick: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         items.forEachIndexed { index, item ->
@@ -294,6 +384,7 @@ private fun MarkdownList(
                 marker = item.taskChecked?.let { if (it) "[x]" else "[ ]" } ?: markerForIndex(index),
                 item = item,
                 textColor = textColor,
+                onLinkClick = onLinkClick,
             )
         }
     }
@@ -304,6 +395,7 @@ private fun MarkdownListRow(
     marker: String,
     item: MarkdownListItem,
     textColor: Color,
+    onLinkClick: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -313,12 +405,13 @@ private fun MarkdownListRow(
                 color = textColor.copy(alpha = 0.72f),
                 style = MaterialTheme.typography.bodyMedium,
             )
-            Text(
+            MarkdownInlineText(
                 modifier = Modifier.weight(1f),
-                text = item.text.toAnnotatedString(textColor),
-                color = textColor,
+                inlines = item.text,
+                textColor = textColor,
                 style = MaterialTheme.typography.bodyMedium,
                 lineHeight = markdownBodyLineHeightSp().sp,
+                onLinkClick = onLinkClick,
             )
         }
         if (item.children.isNotEmpty()) {
@@ -327,7 +420,11 @@ private fun MarkdownListRow(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 item.children.forEach { child ->
-                    MarkdownBlockView(block = child, textColor = textColor)
+                    MarkdownBlockView(
+                        block = child,
+                        textColor = textColor,
+                        onLinkClick = onLinkClick,
+                    )
                 }
             }
         }
@@ -335,7 +432,11 @@ private fun MarkdownListRow(
 }
 
 @Composable
-private fun MarkdownTable(table: MarkdownBlock.Table, textColor: Color) {
+private fun MarkdownTable(
+    table: MarkdownBlock.Table,
+    textColor: Color,
+    onLinkClick: (String) -> Unit,
+) {
     val scrollState = rememberScrollState()
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -344,11 +445,21 @@ private fun MarkdownTable(table: MarkdownBlock.Table, textColor: Color) {
     ) {
         Column(modifier = Modifier.horizontalScroll(scrollState)) {
             if (table.headers.isNotEmpty()) {
-                MarkdownTableRow(cells = table.headers, textColor = textColor, isHeader = true)
+                MarkdownTableRow(
+                    cells = table.headers,
+                    textColor = textColor,
+                    isHeader = true,
+                    onLinkClick = onLinkClick,
+                )
                 HorizontalDivider(color = textColor.copy(alpha = 0.14f))
             }
             table.rows.forEachIndexed { index, row ->
-                MarkdownTableRow(cells = row, textColor = textColor, isHeader = false)
+                MarkdownTableRow(
+                    cells = row,
+                    textColor = textColor,
+                    isHeader = false,
+                    onLinkClick = onLinkClick,
+                )
                 if (index != table.rows.lastIndex) {
                     HorizontalDivider(color = textColor.copy(alpha = 0.10f))
                 }
@@ -362,28 +473,61 @@ private fun MarkdownTableRow(
     cells: List<List<MarkdownInline>>,
     textColor: Color,
     isHeader: Boolean,
+    onLinkClick: (String) -> Unit,
 ) {
     Row {
         cells.forEach { cell ->
-            Text(
+            MarkdownInlineText(
                 modifier = Modifier
                     .widthIn(min = 104.dp, max = 220.dp)
                     .padding(horizontal = 10.dp, vertical = 9.dp),
-                text = cell.toAnnotatedString(textColor),
-                color = textColor,
+                inlines = cell,
+                textColor = textColor,
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontWeight = if (isHeader) FontWeight.SemiBold else FontWeight.Normal,
                     lineHeight = 18.sp,
                 ),
+                onLinkClick = onLinkClick,
             )
         }
     }
 }
 
-@Composable
-private fun List<MarkdownInline>.toAnnotatedString(textColor: Color): AnnotatedString = buildAnnotatedString {
-    appendInlineList(this@toAnnotatedString, textColor)
+private fun List<MarkdownInline>.toMarkdownAnnotatedString(textColor: Color): AnnotatedString = buildAnnotatedString {
+    appendInlineList(this@toMarkdownAnnotatedString, textColor)
 }
+
+@Composable
+private fun MarkdownInlineText(
+    inlines: List<MarkdownInline>,
+    textColor: Color,
+    style: TextStyle,
+    onLinkClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    lineHeight: androidx.compose.ui.unit.TextUnit = style.lineHeight,
+) {
+    val text = remember(inlines, textColor) { inlines.toMarkdownAnnotatedString(textColor) }
+    val resolvedStyle = style.copy(color = textColor, lineHeight = lineHeight)
+    val hasLinks = remember(text) { text.hasMarkdownLinkAnnotations() }
+    if (!hasLinks) {
+        Text(modifier = modifier, text = text, style = resolvedStyle)
+    } else {
+        ClickableText(
+            modifier = modifier,
+            text = text,
+            style = resolvedStyle,
+            onClick = { offset ->
+                val position = offset.coerceIn(0, text.length - 1)
+                text.getStringAnnotations(MARKDOWN_LINK_ANNOTATION, position, position + 1)
+                    .lastOrNull()
+                    ?.let { annotation -> onLinkClick(annotation.item) }
+            },
+        )
+    }
+}
+
+private fun AnnotatedString.hasMarkdownLinkAnnotations(): Boolean =
+    isNotEmpty() && getStringAnnotations(MARKDOWN_LINK_ANNOTATION, 0, length).isNotEmpty()
 
 private fun AnnotatedString.Builder.appendInlineList(
     inlines: List<MarkdownInline>,
@@ -416,14 +560,20 @@ private fun AnnotatedString.Builder.appendInlineList(
             ) {
                 append(inline.literal)
             }
-            is MarkdownInline.Link -> withStyle(
-                SpanStyle(
-                    color = textColor,
-                    textDecoration = TextDecoration.Underline,
-                    fontWeight = FontWeight.Medium,
-                ),
-            ) {
-                appendInlineList(inline.children, textColor)
+            is MarkdownInline.Link -> {
+                val start = length
+                withStyle(
+                    SpanStyle(
+                        color = textColor,
+                        textDecoration = TextDecoration.Underline,
+                        fontWeight = FontWeight.Medium,
+                    ),
+                ) {
+                    appendInlineList(inline.children, textColor)
+                }
+                if (length > start) {
+                    addStringAnnotation(MARKDOWN_LINK_ANNOTATION, inline.destination, start, length)
+                }
             }
             MarkdownInline.LineBreak -> append('\n')
         }

@@ -1,6 +1,8 @@
 package com.harnessapk.ui.chat
 
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
@@ -8,9 +10,11 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
 import com.harnessapk.ui.markdown.MarkdownMessage
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 
@@ -114,5 +118,27 @@ class MarkdownMessageTest {
         composeRule.onNodeWithText("text一级标题").assertDoesNotExist()
         composeRule.onNodeWithText("kotlin").assertIsDisplayed()
         composeRule.onAllNodesWithContentDescription("复制代码").assertCountEquals(1)
+    }
+
+    @Test
+    fun inlineWikiCitationInvokesTheMarkdownLinkCallback() {
+        val citationId = "2f17f6dc-4fe9-4d3a-beb2-9ef46c4379ca"
+        val clicked = mutableStateOf<String?>(null)
+        composeRule.setContent {
+            MaterialTheme {
+                SelectionContainer {
+                    MarkdownMessage(
+                        markdown = "[¹](harness-wiki://citation/$citationId)",
+                        onLinkClick = { clicked.value = it },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("¹").performClick()
+
+        composeRule.runOnIdle {
+            assertEquals("harness-wiki://citation/$citationId", clicked.value)
+        }
     }
 }

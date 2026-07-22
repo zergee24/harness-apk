@@ -151,7 +151,7 @@ class WikiPackageReader(
     private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte) }
 }
 
-private object AndroidWikiDatabaseInspector : WikiDatabaseInspector {
+internal object AndroidWikiDatabaseInspector : WikiDatabaseInspector {
     override fun inspect(stagedDatabase: Path) {
         val database = try {
             SQLiteDatabase.openDatabase(

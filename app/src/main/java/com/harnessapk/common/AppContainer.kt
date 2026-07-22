@@ -35,8 +35,11 @@ import com.harnessapk.chat.ChatSendRecoveryStore
 import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.chat.ManualContextCompressionUseCase
 import com.harnessapk.chat.NewConversationUseCase
+import com.harnessapk.chat.ConversationWikiDefaultsCopier
+import com.harnessapk.chat.ConversationWikiScopeReplacer
 import com.harnessapk.chat.QueuedAttachmentStore
 import com.harnessapk.chat.SendMessageUseCase
+import com.harnessapk.chat.WikiSourcePartWriter
 import com.harnessapk.chat.assembleAgentContextForConversation
 import com.harnessapk.chat.webSearchAllowedForAgentConversation
 import com.harnessapk.git.GitCredentialStore
@@ -51,10 +54,23 @@ import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.security.ApiKeyCipher
 import com.harnessapk.session.PromptOptimizerUseCase
 import com.harnessapk.session.MarkdownNotebookRepository
+import com.harnessapk.session.WikiMarkdownContextRepository
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.AppSettingsStore
+import com.harnessapk.wiki.InstalledWikiContentStore
+import com.harnessapk.wiki.ConversationWikiRepository
+import com.harnessapk.wiki.ConversationWikiTransactionRunner
+import com.harnessapk.wiki.WikiPackageImportCoordinator
+import com.harnessapk.wiki.WikiPackageReader
+import com.harnessapk.wiki.WikiContextAssembler
+import com.harnessapk.wiki.WikiQueryGateway
+import com.harnessapk.wiki.WikiRetriever
+import com.harnessapk.wiki.WikiRouter
 import com.harnessapk.wiki.WikiRepository
 import com.harnessapk.wiki.WikiTransactionRunner
+import com.harnessapk.wiki.WikiTurnAlias
+import com.harnessapk.wiki.WikiVersionReferenceChecker
+import com.harnessapk.wiki.WikiVersionHealthReporter
 import com.harnessapk.updater.ApkInstaller
 import com.harnessapk.updater.UpdateRepository
 import com.harnessapk.updater.UpdateDownloadCoordinator
@@ -93,6 +109,8 @@ class AppContainer(
         AppDatabase.MIGRATION_14_15,
         AppDatabase.MIGRATION_15_16,
         AppDatabase.MIGRATION_16_17,
+        AppDatabase.MIGRATION_17_18,
+        AppDatabase.MIGRATION_18_19,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -141,6 +159,14 @@ class AppContainer(
         },
         timeProvider = SystemTimeProvider,
     )
+    val conversationWikiRepository = ConversationWikiRepository(
+        dao = database.conversationWikiDao(),
+        transactionRunner = ConversationWikiTransactionRunner { block ->
+            database.withTransaction { block() }
+        },
+        timeProvider = SystemTimeProvider,
+    )
+    val wikiMarkdownContextRepository = WikiMarkdownContextRepository(database.conversationWikiDao())
     val wikiRepository = WikiRepository(
         filesDir = appContext.filesDir,
         dao = database.wikiDao(),
@@ -150,6 +176,42 @@ class AppContainer(
         timeProvider = SystemTimeProvider,
         ioDispatcher = dispatchers.io,
         privateInstallAvailableBytes = { StatFs(appContext.filesDir.absolutePath).availableBytes },
+        referenceChecker = WikiVersionReferenceChecker(conversationWikiRepository::countReferences),
+    )
+    val wikiContentStore = InstalledWikiContentStore(
+        filesDir = appContext.filesDir,
+        wikiDao = database.wikiDao(),
+        healthReporter = WikiVersionHealthReporter(wikiRepository::markInvalid),
+        ioDispatcher = dispatchers.io,
+    )
+    val wikiQueryGateway = WikiQueryGateway(wikiContentStore)
+    val wikiRouter = WikiRouter(wikiQueryGateway)
+    val wikiRetriever = WikiRetriever(wikiQueryGateway)
+    private val wikiContextAssembler = WikiContextAssembler(
+        router = wikiRouter,
+        retriever = wikiRetriever,
+        aliasesProvider = {
+            wikiRepository.observeWikis().first().map { wiki ->
+                WikiTurnAlias(
+                    wikiId = wiki.id,
+                    title = wiki.title,
+                )
+            }
+        },
+        titleProvider = { ref -> wikiRepository.manifestFor(ref)?.title },
+    )
+    private val wikiSourcePartWriter = WikiSourcePartWriter(
+        conversationWikiRepository = conversationWikiRepository,
+        chatRepository = chatRepository,
+        contentStore = wikiContentStore,
+    )
+    val wikiPackageImportCoordinator = WikiPackageImportCoordinator(
+        cacheDir = appContext.cacheDir,
+        inspectPackage = { archive, stagingDirectory -> WikiPackageReader(stagingDirectory).inspect(archive) },
+        install = wikiRepository::install,
+        isKnownPublisher = wikiRepository::isPublisherKnown,
+        hasReadyVersion = wikiRepository::hasReadyVersion,
+        ioDispatcher = dispatchers.io,
     )
     val conversationIdentityRepository = ConversationIdentityRepository(
         conversationDao = database.conversationDao(),
@@ -166,6 +228,15 @@ class AppContainer(
         chatRepository = chatRepository,
         identityRepository = conversationIdentityRepository,
         lifecycleCoordinator = agentLifecycleCoordinator,
+        wikiDefaultsCopier = ConversationWikiDefaultsCopier(
+            conversationWikiRepository::copyDefaultsToConversationInTransaction,
+        ),
+        wikiScopeReplacer = ConversationWikiScopeReplacer(
+            conversationWikiRepository::replaceEnabledScopeInTransaction,
+        ),
+        transactionRunner = WikiTransactionRunner { block ->
+            database.withTransaction { block() }
+        },
     )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
     val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
@@ -237,6 +308,8 @@ class AppContainer(
             transactionRunner = AgentTransactionRunner { block -> database.withTransaction { block() } },
             lifecycleCoordinator = agentLifecycleCoordinator,
         ),
+        wikiContextProvider = { _, query, scope -> wikiContextAssembler.assemble(query, scope) },
+        wikiSourcePartWriter = wikiSourcePartWriter,
         lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val chatExecutionRepository = ChatExecutionRepository(
@@ -246,6 +319,7 @@ class AppContainer(
         identityRepository = conversationIdentityRepository,
         timeProvider = SystemTimeProvider,
         lifecycleCoordinator = agentLifecycleCoordinator,
+        wikiScopeSnapshotProvider = conversationWikiRepository::snapshotEnabled,
     )
     val chatSendRecoveryStore = ChatSendRecoveryStore()
     val chatExecutionCoordinator = ChatExecutionCoordinator(
