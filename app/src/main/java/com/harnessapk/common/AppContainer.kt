@@ -53,6 +53,8 @@ import com.harnessapk.session.PromptOptimizerUseCase
 import com.harnessapk.session.MarkdownNotebookRepository
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.AppSettingsStore
+import com.harnessapk.wiki.WikiRepository
+import com.harnessapk.wiki.WikiTransactionRunner
 import com.harnessapk.updater.ApkInstaller
 import com.harnessapk.updater.UpdateRepository
 import com.harnessapk.updater.UpdateDownloadCoordinator
@@ -90,6 +92,7 @@ class AppContainer(
         AppDatabase.MIGRATION_13_14,
         AppDatabase.MIGRATION_14_15,
         AppDatabase.MIGRATION_15_16,
+        AppDatabase.MIGRATION_16_17,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -137,6 +140,16 @@ class AppContainer(
             database.withTransaction { block() }
         },
         timeProvider = SystemTimeProvider,
+    )
+    val wikiRepository = WikiRepository(
+        filesDir = appContext.filesDir,
+        dao = database.wikiDao(),
+        transactionRunner = WikiTransactionRunner { block ->
+            database.withTransaction { block() }
+        },
+        timeProvider = SystemTimeProvider,
+        ioDispatcher = dispatchers.io,
+        privateInstallAvailableBytes = { StatFs(appContext.filesDir.absolutePath).availableBytes },
     )
     val conversationIdentityRepository = ConversationIdentityRepository(
         conversationDao = database.conversationDao(),

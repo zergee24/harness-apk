@@ -32,8 +32,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentSourceFileEntity::class,
         AgentVersionSourceCrossRef::class,
         AgentMemoryEntity::class,
+        WikiEntity::class,
+        WikiVersionEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -48,6 +50,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun markdownChangeDraftDao(): MarkdownChangeDraftDao
     abstract fun agentDao(): AgentDao
     abstract fun agentMemoryDao(): AgentMemoryDao
+    abstract fun wikiDao(): WikiDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -684,6 +687,56 @@ abstract class AppDatabase : RoomDatabase() {
                     CREATE INDEX IF NOT EXISTS index_agent_memories_agentId_updatedAt
                     ON agent_memories(agentId, updatedAt)
                     """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_16_17: Migration = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS wikis (
+                        id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        activeVersion INTEGER,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wikis_activeVersion ON wikis(activeVersion)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS wiki_versions (
+                        wikiId TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        contentPath TEXT NOT NULL,
+                        schemaVersion INTEGER NOT NULL,
+                        contentHash TEXT NOT NULL,
+                        packageHash TEXT NOT NULL,
+                        publisherKeyId TEXT NOT NULL,
+                        publisherFingerprint TEXT NOT NULL,
+                        manifestJson TEXT NOT NULL,
+                        sizeBytes INTEGER NOT NULL,
+                        enabledForNewConversations INTEGER NOT NULL,
+                        state TEXT NOT NULL,
+                        installedAt INTEGER NOT NULL,
+                        invalidReason TEXT,
+                        PRIMARY KEY(wikiId, version),
+                        FOREIGN KEY(wikiId) REFERENCES wikis(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_wiki_versions_wikiId_version ON wiki_versions(wikiId, version)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_wiki_versions_publisherFingerprint ON wiki_versions(publisherFingerprint)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_wiki_versions_wikiId_enabledForNewConversations ON wiki_versions(wikiId, enabledForNewConversations)",
                 )
             }
         }

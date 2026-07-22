@@ -1,6 +1,7 @@
 package com.harnessapk.wiki
 
 import android.database.sqlite.SQLiteDatabase
+import android.os.StatFs
 import com.harnessapk.packageformat.PublisherFingerprint
 import com.harnessapk.packageformat.SignedPackageException
 import com.harnessapk.packageformat.SignedPackagePolicy
@@ -19,6 +20,7 @@ class WikiPackageReader(
     private val stagingDirectory: Path,
     private val signedPackageVerifier: SignedPackageVerifier = SignedPackageVerifier(),
     private val databaseInspector: WikiDatabaseInspector = AndroidWikiDatabaseInspector,
+    private val preExtractionAvailableBytes: (Path) -> Long = { path -> StatFs(path.toString()).availableBytes },
 ) {
     fun inspect(stagedArchive: Path): WikiImportInspection {
         val verified = try {
@@ -29,17 +31,15 @@ class WikiPackageReader(
         val manifest = WikiManifestParser.parse(verified.manifestBytes)
         val publisherFingerprint = verified.publisherFingerprint.withKeyId(manifest.publisherKeyId)
         validatePublisherKeyId(manifest.publisherKeyId, publisherFingerprint)
+        val content = verified.payloads[CONTENT_DATABASE_PATH]
+            ?: throw WikiPackageException("知识库包缺少 $CONTENT_DATABASE_PATH")
 
-        val privateStaging = try {
-            Files.createDirectories(stagingDirectory)
-            Files.createTempDirectory(stagingDirectory, ".hwiki-inspect-")
-        } catch (error: IOException) {
-            throw WikiPackageException("无法创建知识库检查目录", error)
-        }
+        val privateStaging = createInspectionStaging(
+            archiveSizeBytes = verified.archiveSizeBytes,
+            contentSizeBytes = content.uncompressedSizeBytes,
+        )
         val stagedDatabase = privateStaging.resolve(CONTENT_DATABASE_PATH)
         try {
-            val content = verified.payloads[CONTENT_DATABASE_PATH]
-                ?: throw WikiPackageException("知识库包缺少 $CONTENT_DATABASE_PATH")
             val extracted = extractContentDatabase(stagedArchive, content, stagedDatabase)
             if (extracted.sha256 != content.sha256) {
                 throw WikiPackageException("$CONTENT_DATABASE_PATH 在验证后发生变化")
@@ -54,6 +54,7 @@ class WikiPackageReader(
                 archiveSizeBytes = verified.archiveSizeBytes,
                 contentSizeBytes = extracted.bytes,
                 stagedDatabase = stagedDatabase,
+                manifestJson = verified.manifestBytes.decodeToString(),
             )
         } catch (error: WikiPackageException) {
             privateStaging.toFile().deleteRecursively()
@@ -61,6 +62,22 @@ class WikiPackageReader(
         } catch (error: Exception) {
             privateStaging.toFile().deleteRecursively()
             throw WikiPackageException("知识库包检查失败：${error.message.orEmpty()}", error)
+        }
+    }
+
+    private fun createInspectionStaging(archiveSizeBytes: Long, contentSizeBytes: Long): Path {
+        try {
+            Files.createDirectories(stagingDirectory)
+            val requiredBytes = WikiInstallSpace.requiredBytes(archiveSizeBytes, contentSizeBytes)
+            val availableBytes = preExtractionAvailableBytes(stagingDirectory)
+            if (availableBytes < 0L || availableBytes < requiredBytes) {
+                throw WikiInsufficientStorageException(requiredBytes, availableBytes)
+            }
+            return Files.createTempDirectory(stagingDirectory, ".hwiki-inspect-")
+        } catch (error: WikiInstallException) {
+            throw error
+        } catch (error: IOException) {
+            throw WikiPackageException("无法创建知识库检查目录", error)
         }
     }
 

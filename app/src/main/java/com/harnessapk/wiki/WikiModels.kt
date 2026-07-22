@@ -56,6 +56,7 @@ data class WikiImportInspection(
     val archiveSizeBytes: Long,
     val contentSizeBytes: Long,
     val stagedDatabase: Path,
+    val manifestJson: String,
 )
 
 open class WikiPackageException(message: String, cause: Throwable? = null) :

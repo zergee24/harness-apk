@@ -22,6 +22,7 @@ class WikiPackageReaderTest {
         val reader = WikiPackageReader(
             stagingDirectory = stagingDirectory,
             databaseInspector = WikiDatabaseInspector { path -> inspected.add(path) },
+            preExtractionAvailableBytes = { Long.MAX_VALUE },
         )
 
         val inspection = reader.inspect(fixture.archive.toPath())
@@ -41,6 +42,7 @@ class WikiPackageReaderTest {
         val reader = WikiPackageReader(
             stagingDirectory = Files.createTempDirectory("wiki-package-mismatch"),
             databaseInspector = WikiDatabaseInspector { path -> inspected.add(path) },
+            preExtractionAvailableBytes = { Long.MAX_VALUE },
         )
 
         try {
@@ -59,6 +61,7 @@ class WikiPackageReaderTest {
         val reader = WikiPackageReader(
             stagingDirectory = Files.createTempDirectory("wiki-package-publisher-key"),
             databaseInspector = WikiDatabaseInspector { path -> inspected.add(path) },
+            preExtractionAvailableBytes = { Long.MAX_VALUE },
         )
 
         try {
@@ -77,6 +80,7 @@ class WikiPackageReaderTest {
         val reader = WikiPackageReader(
             stagingDirectory = Files.createTempDirectory("wiki-package-compression-ratio"),
             databaseInspector = WikiDatabaseInspector { path -> inspected.add(path) },
+            preExtractionAvailableBytes = { Long.MAX_VALUE },
         )
 
         try {
@@ -86,6 +90,24 @@ class WikiPackageReaderTest {
             assertTrue(error.message.orEmpty().contains("压缩比"))
         }
         assertTrue(inspected.isEmpty())
+    }
+
+    @Test
+    fun `insufficient space rejects the package before extracting content`() {
+        val fixture = signedWikiPackage()
+        val stagingDirectory = Files.createTempDirectory("wiki-package-insufficient-space")
+        val inspected = mutableListOf<java.nio.file.Path>()
+        val reader = WikiPackageReader(
+            stagingDirectory = stagingDirectory,
+            databaseInspector = WikiDatabaseInspector { path -> inspected.add(path) },
+            preExtractionAvailableBytes = { 0L },
+        )
+
+        val failure = runCatching { reader.inspect(fixture.archive.toPath()) }.exceptionOrNull()
+
+        assertTrue(failure is WikiInsufficientStorageException)
+        assertTrue(inspected.isEmpty())
+        assertTrue(stagingDirectory.toFile().walkTopDown().none { it.name == "content.sqlite" })
     }
 
     private fun signedWikiPackage(

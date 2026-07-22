@@ -52,6 +52,33 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
     @Test
+    fun migration16To17CreatesWikiMetadataOnly() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-16-17-wiki-${System.nanoTime()}.db"
+        createVersion15Fixture(context, name)
+        upgradeVersion15FixtureTo16(context, name)
+
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(AppDatabase.MIGRATION_16_17)
+            .build()
+        val sqlite = migrated.openHelper.writableDatabase
+
+        assertEquals(17, sqlite.version)
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wikis'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wiki_versions'"))
+        assertEquals(
+            0,
+            sqlite.scalarInt(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversation_wiki_mounts'",
+            ),
+        )
+        sqlite.assertNoForeignKeyViolations()
+        migrated.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
     fun agentMemoryRoomTransactionPreservesCompletedUserEdit() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
@@ -624,17 +651,17 @@ class AppDatabaseTest {
     }
 
     @Test
-    fun migration15To16PreservesRealHistoricalSchemaAndV2Data() = runBlocking {
+    fun migration15To17PreservesRealHistoricalSchemaAndV2Data() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-15-16-real-${System.nanoTime()}.db"
         createVersion15Fixture(context, name)
 
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_15_16)
+            .addMigrations(AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17)
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(16, sqlite.version)
+        assertEquals(17, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "daily-conversation|USER|默认使用中文",
@@ -897,7 +924,7 @@ class AppDatabaseTest {
         val migrated = version15
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(16, sqlite.version)
+        assertEquals(17, sqlite.version)
         assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals("默认使用中文", sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"))
         assertEquals("notes/project.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
@@ -948,11 +975,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_13_14,
                 AppDatabase.MIGRATION_14_15,
                 AppDatabase.MIGRATION_15_16,
+                AppDatabase.MIGRATION_16_17,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(16, sqlite.version)
+        assertEquals(17, sqlite.version)
         assertEquals(
             1,
             sqlite.scalarInt(
@@ -1130,6 +1158,7 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_13_14,
                 AppDatabase.MIGRATION_14_15,
                 AppDatabase.MIGRATION_15_16,
+                AppDatabase.MIGRATION_16_17,
             )
             .build()
         db.openHelper.writableDatabase
@@ -1174,11 +1203,12 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_13_14,
                     AppDatabase.MIGRATION_14_15,
                     AppDatabase.MIGRATION_15_16,
+                    AppDatabase.MIGRATION_16_17,
                 )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(16, sqlite.version)
+            assertEquals(17, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -1216,11 +1246,12 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_13_14,
                     AppDatabase.MIGRATION_14_15,
                     AppDatabase.MIGRATION_15_16,
+                    AppDatabase.MIGRATION_16_17,
                 )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(16, sqlite.version)
+            assertEquals(17, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -1745,6 +1776,37 @@ class AppDatabaseTest {
         db.query("PRAGMA foreign_key_check").use { cursor ->
             check(!cursor.moveToFirst())
         }
+        helper.close()
+    }
+
+    private fun upgradeVersion15FixtureTo16(context: Context, name: String) {
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(
+                    object : SupportSQLiteOpenHelper.Callback(16) {
+                        override fun onConfigure(db: SupportSQLiteDatabase) {
+                            db.setForeignKeyConstraintsEnabled(true)
+                        }
+
+                        override fun onCreate(db: SupportSQLiteDatabase) {
+                            error("version 15 fixture must already exist")
+                        }
+
+                        override fun onUpgrade(
+                            db: SupportSQLiteDatabase,
+                            oldVersion: Int,
+                            newVersion: Int,
+                        ) {
+                            check(oldVersion == 15 && newVersion == 16)
+                            AppDatabase.MIGRATION_15_16.migrate(db)
+                        }
+                    },
+                )
+                .build(),
+        )
+        val db = helper.writableDatabase
+        check(db.version == 16)
         helper.close()
     }
 
