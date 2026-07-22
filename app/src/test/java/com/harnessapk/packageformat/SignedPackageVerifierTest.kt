@@ -59,14 +59,79 @@ class SignedPackageVerifierTest {
         }
     }
 
-    private fun assertVerifierFailure(archive: File) {
+    @Test
+    fun `rejects signed Unix symlink and executable entries`() {
+        val root = Files.createTempDirectory("signed-package-unix-mode").toFile().apply { deleteOnExit() }
+        val symlink = signedFixture(
+            target = File(root, "symlink.hwiki"),
+            payloads = standardPayloads(),
+        )
+        markZipEntryUnixMode(symlink, "manifest.json", 0xA1FF0000.toInt())
+        val executable = signedFixture(
+            target = File(root, "executable.hwiki"),
+            payloads = standardPayloads(),
+        )
+        markZipEntryUnixMode(executable, "content.sqlite", 0x81ED0000.toInt())
+
+        assertVerifierFailure(symlink, "符号链接")
+        assertVerifierFailure(executable, "可执行文件")
+    }
+
+    @Test
+    fun `rejects manifest above its declared read bound before payload verification`() {
+        val root = Files.createTempDirectory("signed-package-manifest-bound").toFile().apply { deleteOnExit() }
+        val archive = signedFixture(
+            target = File(root, "manifest-too-large.hwiki"),
+            payloads = linkedMapOf(
+                "manifest.json" to "x".repeat(17).encodeToByteArray(),
+                "content.sqlite" to byteArrayOf(1, 2, 3),
+            ),
+        )
+
+        assertVerifierFailure(
+            archive = archive,
+            expectedMessage = "manifest超过大小上限",
+            policy = WIKI_FIXTURE_POLICY.copy(maxManifestBytes = 16),
+        )
+    }
+
+    @Test
+    fun `accepts a valid Zip64 signed archive`() {
+        val root = Files.createTempDirectory("signed-package-zip64").toFile().apply { deleteOnExit() }
+        val archive = signedFixture(
+            target = File(root, "zip64.hwiki"),
+            payloads = standardPayloads(),
+        )
+        rewriteAsZip64(archive)
+
+        val verified = SignedPackageVerifier().verify(archive.toPath(), WIKI_FIXTURE_POLICY)
+
+        assertEquals(setOf("manifest.json", "content.sqlite"), verified.payloads.keys)
+    }
+
+    private fun assertVerifierFailure(
+        archive: File,
+        expectedMessage: String? = null,
+        policy: SignedPackagePolicy = WIKI_FIXTURE_POLICY,
+    ) {
         try {
-            SignedPackageVerifier().verify(archive.toPath(), WIKI_FIXTURE_POLICY)
+            SignedPackageVerifier().verify(archive.toPath(), policy)
             fail("Expected SignedPackageException for ${archive.name}")
-        } catch (_: SignedPackageException) {
+        } catch (error: SignedPackageException) {
+            if (expectedMessage != null) {
+                assertTrue(
+                    "${error.message} should contain $expectedMessage",
+                    error.message.orEmpty().contains(expectedMessage),
+                )
+            }
             // Expected.
         }
     }
+
+    private fun standardPayloads() = linkedMapOf(
+        "manifest.json" to "{\"schemaVersion\":1}".encodeToByteArray(),
+        "content.sqlite" to byteArrayOf(1, 2, 3),
+    )
 
     private fun desktopFixturePath() = generateSequence(File(System.getProperty("user.dir") ?: ".")) { it.parentFile }
         .map { File(it, "build/wiki-fixture/fixture.history-v1.hwiki") }
@@ -161,6 +226,66 @@ class SignedPackageVerifierTest {
         target.writeBytes(output.toByteArray())
     }
 
+    private fun markZipEntryUnixMode(file: File, targetName: String, externalAttributes: Int) {
+        val bytes = file.readBytes()
+        var offset = 0
+        while (offset <= bytes.size - CENTRAL_DIRECTORY_HEADER_SIZE) {
+            if (bytes.readIntLe(offset) != CENTRAL_DIRECTORY_SIGNATURE.toInt()) {
+                offset += 1
+                continue
+            }
+            val nameLength = bytes.readShortLe(offset + 28)
+            val extraLength = bytes.readShortLe(offset + 30)
+            val commentLength = bytes.readShortLe(offset + 32)
+            val name = bytes.copyOfRange(offset + CENTRAL_DIRECTORY_HEADER_SIZE, offset + CENTRAL_DIRECTORY_HEADER_SIZE + nameLength)
+                .decodeToString()
+            if (name == targetName) {
+                bytes[offset + 5] = UNIX_HOST_SYSTEM.toByte()
+                bytes.writeIntLe(offset + 38, externalAttributes)
+                file.writeBytes(bytes)
+                return
+            }
+            offset += CENTRAL_DIRECTORY_HEADER_SIZE + nameLength + extraLength + commentLength
+        }
+        fail("Central directory entry not found: $targetName")
+    }
+
+    private fun rewriteAsZip64(file: File) {
+        val original = file.readBytes()
+        val eocdOffset = original.size - END_OF_CENTRAL_DIRECTORY_SIZE
+        require(original.readIntLe(eocdOffset) == END_OF_CENTRAL_DIRECTORY_SIGNATURE.toInt())
+        val entryCount = original.readShortLe(eocdOffset + 10).toLong()
+        val centralDirectorySize = original.readUnsignedIntLe(eocdOffset + 12)
+        val centralDirectoryOffset = original.readUnsignedIntLe(eocdOffset + 16)
+        val output = ByteArrayOutputStream().apply {
+            write(original, 0, eocdOffset)
+            val zip64EocdOffset = size().toLong()
+            writeIntLe(ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE)
+            writeLongLe(ZIP64_END_OF_CENTRAL_DIRECTORY_RECORD_SIZE)
+            writeShortLe(45)
+            writeShortLe(45)
+            writeIntLe(0)
+            writeIntLe(0)
+            writeLongLe(entryCount)
+            writeLongLe(entryCount)
+            writeLongLe(centralDirectorySize)
+            writeLongLe(centralDirectoryOffset)
+            writeIntLe(ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE)
+            writeIntLe(0)
+            writeLongLe(zip64EocdOffset)
+            writeIntLe(1)
+            writeIntLe(END_OF_CENTRAL_DIRECTORY_SIGNATURE)
+            writeShortLe(0)
+            writeShortLe(0)
+            writeShortLe(ZIP64_ENTRY_SENTINEL)
+            writeShortLe(ZIP64_ENTRY_SENTINEL)
+            writeIntLe(ZIP64_OFFSET_SENTINEL)
+            writeIntLe(ZIP64_OFFSET_SENTINEL)
+            writeShortLe(0)
+        }
+        file.writeBytes(output.toByteArray())
+    }
+
     private fun ByteArrayOutputStream.writeShortLe(value: Int) {
         write(value and 0xff)
         write((value ushr 8) and 0xff)
@@ -173,8 +298,30 @@ class SignedPackageVerifierTest {
         write(((value ushr 24) and 0xff).toInt())
     }
 
+    private fun ByteArrayOutputStream.writeLongLe(value: Long) {
+        repeat(Long.SIZE_BYTES) { index ->
+            write(((value ushr (index * Byte.SIZE_BITS)) and 0xff).toInt())
+        }
+    }
+
     private fun ByteArray.sha256(): String =
         MessageDigest.getInstance("SHA-256").digest(this).joinToString("") { "%02x".format(it) }
+
+    private fun ByteArray.readShortLe(offset: Int): Int =
+        (this[offset].toInt() and 0xff) or ((this[offset + 1].toInt() and 0xff) shl 8)
+
+    private fun ByteArray.readIntLe(offset: Int): Int =
+        readShortLe(offset) or (readShortLe(offset + 2) shl 16)
+
+    private fun ByteArray.readUnsignedIntLe(offset: Int): Long =
+        readShortLe(offset).toLong() or (readShortLe(offset + 2).toLong() shl 16)
+
+    private fun ByteArray.writeIntLe(offset: Int, value: Int) {
+        this[offset] = value.toByte()
+        this[offset + 1] = (value ushr 8).toByte()
+        this[offset + 2] = (value ushr 16).toByte()
+        this[offset + 3] = (value ushr 24).toByte()
+    }
 
     private data class RawZipEntry(val name: String, val bytes: ByteArray)
 
@@ -196,5 +343,13 @@ class SignedPackageVerifierTest {
         const val LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50L
         const val CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50L
         const val END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50L
+        const val ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06064b50L
+        const val ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50L
+        const val CENTRAL_DIRECTORY_HEADER_SIZE = 46
+        const val END_OF_CENTRAL_DIRECTORY_SIZE = 22
+        const val ZIP64_END_OF_CENTRAL_DIRECTORY_RECORD_SIZE = 44L
+        const val ZIP64_ENTRY_SENTINEL = 0xffff
+        const val ZIP64_OFFSET_SENTINEL = 0xffffffffL
+        const val UNIX_HOST_SYSTEM = 3
     }
 }

@@ -34,6 +34,8 @@ val agentV2FixtureDist = rootProject.layout.buildDirectory.dir("agent-v2-dist")
 val agentV2FixtureCompleteDist = rootProject.layout.buildDirectory.dir("agent-v2-complete-dist")
 val agentV2FixtureSourceDist = rootProject.layout.buildDirectory.dir("agent-v2-source-dist")
 val generatedAgentV2Assets = layout.buildDirectory.dir("generated/agent-v2-fixture-assets")
+val wikiFixtureDist = rootProject.layout.buildDirectory.dir("generated/wikiFixture")
+val generatedWikiFixtureAssets = layout.buildDirectory.dir("generated/assets/wikiDebugAndroidTest")
 
 val prepareAgentV2Fixture = tasks.register<Exec>("prepareAgentV2Fixture") {
     doFirst {
@@ -132,6 +134,37 @@ val syncAgentV2FixtureAssets = tasks.register<Sync>("syncAgentV2FixtureAssets") 
         include("*-source.hbundle", "*.hsource")
     }
     into(generatedAgentV2Assets)
+}
+
+val prepareWikiFixture = tasks.register<Exec>("prepareWikiFixture") {
+    inputs.file(rootProject.file("app/src/test/resources/wiki/source.md"))
+    inputs.file(rootProject.file("scripts/wiki-builder.sh"))
+    inputs.files(
+        rootProject.fileTree("tools/wiki_builder") {
+            exclude("**/__pycache__/**")
+        },
+    )
+    outputs.dir(wikiFixtureDist)
+    outputs.cacheIf("Wiki fixture generation is deterministic") { true }
+    workingDir(rootProject.projectDir)
+    commandLine(
+        "scripts/wiki-builder.sh",
+        "-m",
+        "tools.wiki_builder.tests.fixture",
+        "--source",
+        "app/src/test/resources/wiki/source.md",
+        "--output",
+        wikiFixtureDist.get().asFile.absolutePath,
+        "--reset",
+    )
+}
+
+val syncWikiFixtureAssets = tasks.register<Sync>("syncWikiFixtureAssets") {
+    dependsOn(prepareWikiFixture)
+    from(wikiFixtureDist) {
+        include("*.hwiki")
+    }
+    into(generatedWikiFixtureAssets)
 }
 
 val appVersionCode = providers.gradleProperty("versionCodeOverride")
@@ -238,6 +271,9 @@ android {
     sourceSets.getByName("androidTest").assets.directories.add(
         generatedAgentV2Assets.get().asFile.absolutePath,
     )
+    sourceSets.getByName("androidTest").assets.directories.add(
+        generatedWikiFixtureAssets.get().asFile.absolutePath,
+    )
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -252,7 +288,7 @@ android {
 }
 
 tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
-    dependsOn(syncAgentV2FixtureAssets)
+    dependsOn(syncAgentV2FixtureAssets, syncWikiFixtureAssets)
 }
 
 dependencies {
