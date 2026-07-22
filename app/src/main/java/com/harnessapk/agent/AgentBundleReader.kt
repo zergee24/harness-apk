@@ -1,5 +1,13 @@
 package com.harnessapk.agent
 
+import com.harnessapk.packageformat.Ed25519SignatureVerifier
+import com.harnessapk.packageformat.PortableEd25519SignatureVerifier
+import com.harnessapk.packageformat.SignedPackageException
+import com.harnessapk.packageformat.SignedPackagePayloadSizeLimit
+import com.harnessapk.packageformat.SignedPackagePolicy
+import com.harnessapk.packageformat.SignedPackageVerifier
+import com.harnessapk.packageformat.VerifiedPackage as SharedVerifiedPackage
+import com.harnessapk.packageformat.canonicalPackagePath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
@@ -19,8 +27,6 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
-import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
-import org.bouncycastle.crypto.signers.Ed25519Signer
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FilterInputStream
@@ -33,7 +39,6 @@ import java.nio.file.LinkOption
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
-import java.util.Base64
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
@@ -393,39 +398,44 @@ class AgentBundleReader(
     ): ParsedAgentPackage {
         if (nestingDepth > MAX_PACKAGE_NESTING) throw AgentBundleException("人格包嵌套层级超过上限")
         rejectUnsafeCentralDirectory(stagedFile)
-        return ZipFile(stagedFile).use { archive ->
-            val entries = validateBasicEntries(archive)
+        val preflight = ZipFile(stagedFile).use { archive ->
+            val entries = archive.entries().asSequence().toList()
             val hasBundleManifest = entries.any { it.name == BUNDLE_MANIFEST_PATH }
             val hasPackageManifest = entries.any { it.name == PACKAGE_MANIFEST_PATH }
             if (hasBundleManifest == hasPackageManifest) {
                 throw AgentBundleException("人格包必须且只能包含一个顶层 manifest")
             }
             val manifestPath = if (hasBundleManifest) BUNDLE_MANIFEST_PATH else PACKAGE_MANIFEST_PATH
-            val runtimeAssetPaths = validateDeclaredV2AgentRuntimeAssets(archive, manifestPath)
-            val checksumsBytes = archive.readRequired(CHECKSUMS_PATH, MAX_CHECKSUMS_BYTES)
-            val signatureBytes = archive.readRequired(SIGNATURE_PATH, MAX_SIGNATURE_BYTES)
-            val checksumMap = parseCanonicalChecksums(checksumsBytes)
-            val signature = parseSignature(signatureBytes)
-            verifySignature(signature, checksumsBytes)
-            verifyChecksums(archive, entries, checksumMap, runtimeAssetPaths)
-
-            val manifestBytes = archive.readRequired(manifestPath, MAX_MANIFEST_BYTES)
+            validateDeclaredV2AgentRuntimeAssets(archive, manifestPath)
+            AgentPackagePreflight(
+                hasBundleManifest = hasBundleManifest,
+                manifestPath = manifestPath,
+                payloadPaths = entries.map(ZipEntry::getName)
+                    .filterNot { it in COMMON_PACKAGE_FILES }
+                    .toSet(),
+            )
+        }
+        val shared = verifySignedPackage(stagedFile, preflight)
+        return ZipFile(stagedFile).use { archive ->
+            val entries = archive.entries().asSequence().toList()
+            val manifestBytes = shared.manifestBytes
+            val manifestPath = preflight.manifestPath
             val manifestObject = parseObject(manifestBytes.decodeToString(), manifestPath)
             val schemaVersion = manifestObject.requiredPositiveInt("schemaVersion", manifestPath)
             val type = manifestObject.optionalString("type", manifestPath)
             val verified = VerifiedPackage(
                 file = displayFile,
                 packageSha256 = stagedFile.sha256(),
-                publicKey = signature.publicKey,
-                fingerprint = signature.publicKey.sha256(),
+                publicKey = shared.publisherPublicKey,
+                fingerprint = shared.publisherFingerprint.hex,
                 manifestJson = manifestBytes.decodeToString(),
-                compressedSize = stagedFile.length(),
-                uncompressedSize = entries.sumOf(ZipEntry::getSize),
+                compressedSize = shared.archiveSizeBytes,
+                uncompressedSize = shared.expandedSizeBytes,
             )
 
             val parsed = when (schemaVersion) {
                 1 -> {
-                    if (!hasBundleManifest || type.isNotEmpty()) {
+                    if (!preflight.hasBundleManifest || type.isNotEmpty()) {
                         throw AgentBundleException("V1 包顶层 manifest 契约无效")
                     }
                     validateAllowedEntries(entries, PackageKind.V1_BUNDLE)
@@ -434,7 +444,7 @@ class AgentBundleReader(
                 2 -> {
                     val kind = PackageKind.fromWireName(type)
                         ?: throw AgentBundleException("不支持的 V2 type：$type")
-                    if ((kind == PackageKind.V2_BUNDLE) != hasBundleManifest) {
+                    if ((kind == PackageKind.V2_BUNDLE) != preflight.hasBundleManifest) {
                         throw AgentBundleException("V2 type 与顶层 manifest 文件不一致")
                     }
                     validateAllowedEntries(entries, kind)
@@ -465,6 +475,49 @@ class AgentBundleReader(
             parsed
         }
     }
+
+    private fun verifySignedPackage(
+        stagedFile: File,
+        preflight: AgentPackagePreflight,
+    ): SharedVerifiedPackage =
+        try {
+            SignedPackageVerifier(
+                signatureVerifier = Ed25519SignatureVerifier { publicKey, payload, signature ->
+                    this@AgentBundleReader.signatureVerifier.verify(publicKey, payload, signature)
+                },
+            ).verify(
+                stagedArchive = stagedFile.toPath(),
+                policy = SignedPackagePolicy(
+                    allowedPayloads = preflight.payloadPaths,
+                    maxArchiveBytes = MAX_COMPRESSED_BYTES,
+                    maxExpandedBytes = MAX_UNCOMPRESSED_BYTES,
+                    maxEntryCount = MAX_ENTRY_COUNT,
+                    maxEntryBytes = MAX_ENTRY_UNCOMPRESSED_BYTES,
+                    maxCompressionRatio = MAX_COMPRESSION_RATIO,
+                    minCompressionRatioCheckBytes = MIN_RATIO_CHECK_BYTES.toLong(),
+                    maxPathDepth = MAX_PATH_DEPTH,
+                    maxManifestBytes = MAX_MANIFEST_BYTES,
+                    maxChecksumsBytes = MAX_CHECKSUMS_BYTES,
+                    maxSignatureBytes = MAX_SIGNATURE_BYTES,
+                    payloadSizeLimits = listOf(
+                        SignedPackagePayloadSizeLimit(
+                            paths = V2_AGENT_RUNTIME_ASSET_FILES,
+                            maxBytes = MAX_AGENT_RUNTIME_ASSET_BYTES.toLong(),
+                            label = "运行时资产",
+                        ),
+                        SignedPackagePayloadSizeLimit(
+                            paths = setOf(V2_INSTALL_PLAN_PATH),
+                            maxBytes = MAX_INSTALL_PLAN_BYTES.toLong(),
+                            label = "安装计划",
+                        ),
+                    ),
+                    manifestPath = preflight.manifestPath,
+                    packageLabel = "人格包",
+                ),
+            )
+        } catch (error: SignedPackageException) {
+            throw AgentBundleException(error.message.orEmpty(), error)
+        }
 
     private fun parseV1Bundle(
         archive: ZipFile,
@@ -1023,38 +1076,6 @@ class AgentBundleReader(
         )
     }
 
-    private fun validateBasicEntries(archive: ZipFile): List<ZipEntry> {
-        val entries = archive.entries().asSequence().toList()
-        if (entries.isEmpty()) throw AgentBundleException("人格包为空")
-        if (entries.size > MAX_ENTRY_COUNT) throw AgentBundleException("包内条目超过 $MAX_ENTRY_COUNT 个")
-        val names = mutableSetOf<String>()
-        var total = 0L
-        entries.forEach { entry ->
-            val name = safePath(entry.name)
-            if (entry.isDirectory || name.endsWith('/')) throw AgentBundleException("人格包不允许目录条目：$name")
-            if (!names.add(name)) throw AgentBundleException("包内存在重复条目：$name")
-            if (name.count { it == '/' } + 1 > MAX_PATH_DEPTH) {
-                throw AgentBundleException("包内路径嵌套层级超过上限：$name")
-            }
-            if (entry.size < 0 || entry.compressedSize < 0) throw AgentBundleException("ZIP 条目大小无效：$name")
-            if (entry.size > MAX_ENTRY_UNCOMPRESSED_BYTES) {
-                throw AgentBundleException("包内文件超过大小上限：$name")
-            }
-            total = Math.addExact(total, entry.size)
-            if (total > MAX_UNCOMPRESSED_BYTES) throw AgentBundleException("声明的解压总量超过 4 GiB")
-            if (entry.size > MIN_RATIO_CHECK_BYTES) {
-                val compressed = entry.compressedSize.coerceAtLeast(1L)
-                if (entry.size / compressed > MAX_COMPRESSION_RATIO) {
-                    throw AgentBundleException("ZIP 条目压缩比超过上限：$name")
-                }
-            }
-        }
-        setOf(CHECKSUMS_PATH, SIGNATURE_PATH).forEach { required ->
-            if (required !in names) throw AgentBundleException("缺少包内文件：$required")
-        }
-        return entries
-    }
-
     private fun validateAllowedEntries(entries: List<ZipEntry>, kind: PackageKind) {
         val names = entries.map(ZipEntry::getName).toSet()
         val valid = when (kind) {
@@ -1330,94 +1351,6 @@ class AgentBundleReader(
         }
         if (mode and UNIX_EXECUTABLE_MASK != 0) {
             throw AgentBundleException("人格包不允许可执行文件：$fileName")
-        }
-    }
-
-    private fun verifyChecksums(
-        archive: ZipFile,
-        entries: List<ZipEntry>,
-        checksums: Map<String, String>,
-        runtimeAssetPaths: Set<String>,
-    ) {
-        val contentEntries = entries.filterNot { it.name in COMMON_PACKAGE_FILES }
-        val contentNames = contentEntries.mapTo(mutableSetOf(), ZipEntry::getName)
-        val undeclared = contentNames - checksums.keys
-        val missing = checksums.keys - contentNames
-        if (undeclared.isNotEmpty()) throw AgentBundleException("存在未声明 SHA-256 的文件：${undeclared.first()}")
-        if (missing.isNotEmpty()) throw AgentBundleException("checksums.json 引用了不存在的文件：${missing.first()}")
-        var remainingRuntimeAssetBytes = MAX_AGENT_RUNTIME_ASSET_BYTES.toLong()
-        contentEntries.forEach { entry ->
-            val actual = if (entry.name in runtimeAssetPaths) {
-                val maxBytes = if (entry.name == V2_INSTALL_PLAN_PATH) {
-                    MAX_INSTALL_PLAN_BYTES.toLong()
-                } else {
-                    remainingRuntimeAssetBytes
-                }
-                val hashed = archive.getInputStream(entry).use { input ->
-                    input.sha256Limited(maxBytes, entry.name)
-                }
-                if (entry.name != V2_INSTALL_PLAN_PATH) {
-                    remainingRuntimeAssetBytes -= hashed.bytes
-                }
-                hashed.sha256
-            } else {
-                archive.getInputStream(entry).use(InputStream::sha256)
-            }
-            if (actual != checksums.getValue(entry.name)) {
-                throw AgentBundleException("SHA-256 校验失败：${entry.name}")
-            }
-        }
-    }
-
-    private fun parseCanonicalChecksums(payload: ByteArray): Map<String, String> {
-        val root = parseObject(payload.decodeToString(), CHECKSUMS_PATH)
-        if (root.keys != setOf("files")) throw AgentBundleException("checksums.json 顶层契约无效")
-        val files = root.requiredObject("files", CHECKSUMS_PATH)
-        if (files.isEmpty()) throw AgentBundleException("checksums.json files 不能为空")
-        val result = sortedMapOf<String, String>()
-        files.forEach { (rawPath, value) ->
-            val path = safePath(rawPath)
-            val digest = value.asString("checksums.json files.$path")
-            result[path] = hash(digest)
-        }
-        if (result.size != files.size) throw AgentBundleException("checksums.json 包含重复规范化路径")
-        val canonical = JsonObject(
-            mapOf(
-                "files" to JsonObject(result.mapValues { JsonPrimitive(it.value) }),
-            ),
-        ).toString().encodeToByteArray()
-        if (!canonical.contentEquals(payload)) throw AgentBundleException("checksums.json 不是规范 JSON")
-        return result
-    }
-
-    private fun parseSignature(payload: ByteArray): SignatureRecord {
-        val root = parseObject(payload.decodeToString(), SIGNATURE_PATH)
-        if (root.keys != setOf("algorithm", "publicKey", "signature", "signedFile")) {
-            throw AgentBundleException("signature.json 顶层契约无效")
-        }
-        return try {
-            SignatureRecord(
-                algorithm = root.requiredString("algorithm", SIGNATURE_PATH),
-                publicKey = Base64.getDecoder().decode(root.requiredString("publicKey", SIGNATURE_PATH)),
-                signature = Base64.getDecoder().decode(root.requiredString("signature", SIGNATURE_PATH)),
-                signedFile = root.requiredString("signedFile", SIGNATURE_PATH),
-            )
-        } catch (error: IllegalArgumentException) {
-            throw AgentBundleException("signature.json 格式无效", error)
-        }
-    }
-
-    private fun verifySignature(record: SignatureRecord, payload: ByteArray) {
-        if (
-            record.algorithm != "Ed25519" ||
-            record.signedFile != CHECKSUMS_PATH ||
-            record.publicKey.size != 32 ||
-            record.signature.size != 64
-        ) {
-            throw AgentBundleException("不支持的签名声明")
-        }
-        if (!signatureVerifier.verify(record.publicKey, payload, record.signature)) {
-            throw AgentBundleException("人格包签名校验失败")
         }
     }
 
@@ -2085,6 +2018,12 @@ private data class StagedPackage(
     }
 }
 
+private data class AgentPackagePreflight(
+    val hasBundleManifest: Boolean,
+    val manifestPath: String,
+    val payloadPaths: Set<String>,
+)
+
 private data class CentralDirectoryEntry(
     val name: String,
     val flags: Int,
@@ -2163,18 +2102,12 @@ fun interface AgentSignatureVerifier {
 }
 
 object PortableEd25519Verifier : AgentSignatureVerifier {
-    override fun verify(publicKey: ByteArray, payload: ByteArray, signature: ByteArray): Boolean {
-        if (publicKey.size != 32 || signature.size != 64) return false
-        return try {
-            Ed25519Signer().run {
-                init(false, Ed25519PublicKeyParameters(publicKey, 0))
-                update(payload, 0, payload.size)
-                verifySignature(signature)
-            }
-        } catch (error: Throwable) {
-            throw AgentBundleException("当前设备不支持 Ed25519 签名校验", error)
+    override fun verify(publicKey: ByteArray, payload: ByteArray, signature: ByteArray): Boolean =
+        try {
+            PortableEd25519SignatureVerifier.verify(publicKey, payload, signature)
+        } catch (error: SignedPackageException) {
+            throw AgentBundleException(error.message.orEmpty(), error)
         }
-    }
 }
 
 private enum class PackageKind {
@@ -2205,29 +2138,15 @@ private data class VerifiedPackage(
     val uncompressedSize: Long,
 )
 
-private data class SignatureRecord(
-    val algorithm: String,
-    val publicKey: ByteArray,
-    val signature: ByteArray,
-    val signedFile: String,
-)
-
 private val IDENTIFIER = Regex("[A-Za-z0-9][A-Za-z0-9._-]{1,127}")
 private val HASH = Regex("[0-9a-f]{64}")
 
-private fun safePath(value: String): String {
-    if ('\\' in value) throw AgentBundleException("包内路径不允许反斜杠：$value")
-    val parts = value.split('/')
-    if (
-        value.isBlank() ||
-        value.startsWith('/') ||
-        Regex("^[A-Za-z]:/").containsMatchIn(value) ||
-        parts.any { it.isBlank() || it == "." || it == ".." }
-    ) {
-        throw AgentBundleException("不安全的包内路径：$value")
+private fun safePath(value: String): String =
+    try {
+        canonicalPackagePath(value)
+    } catch (error: SignedPackageException) {
+        throw AgentBundleException(error.message.orEmpty(), error)
     }
-    return value
-}
 
 private fun identifier(value: String): String =
     value.trim().takeIf(IDENTIFIER::matches) ?: throw AgentBundleException("标识符无效：$value")
@@ -2524,26 +2443,6 @@ private fun InputStream.sha256(): String {
     }
     return digest.digest().toHex()
 }
-
-private fun InputStream.sha256Limited(maxBytes: Long, name: String): HashedBytes {
-    val digest = MessageDigest.getInstance("SHA-256")
-    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-    var total = 0L
-    while (true) {
-        AgentReaderCancellation.checkpoint()
-        val read = read(buffer)
-        if (read < 0) break
-        total += read
-        if (total > maxBytes) throw AgentBundleException("运行时资产超过大小上限：$name")
-        digest.update(buffer, 0, read)
-    }
-    return HashedBytes(digest.digest().toHex(), total)
-}
-
-private data class HashedBytes(
-    val sha256: String,
-    val bytes: Long,
-)
 
 private fun File.sha256(): String = inputStream().buffered().use(InputStream::sha256)
 

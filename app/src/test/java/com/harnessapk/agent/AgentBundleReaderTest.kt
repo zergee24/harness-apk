@@ -34,6 +34,8 @@ class AgentBundleReaderTest {
         assertEquals("chunk-investigation", chunks.single().id)
         assertEquals(listOf("调查", "事实"), chunks.single().keywords)
         assertTrue(parsed.publisherFingerprint.matches(Regex("[0-9a-f]{64}")))
+        assertEquals(bundle.length(), parsed.compressedSizeBytes)
+        assertTrue(parsed.uncompressedSizeBytes > 0)
     }
 
     @Test
@@ -166,6 +168,18 @@ class AgentBundleReaderTest {
 
         assertBundleFailure("签名") {
             AgentBundleReader().read(bundle)
+        }
+    }
+
+    @Test
+    fun preservesInjectedSignatureVerifierFailureMapping() {
+        val bundle = signedBundle()
+        val reader = AgentBundleReader(
+            signatureVerifier = AgentSignatureVerifier { _, _, _ -> error("signature verifier failed") },
+        )
+
+        assertBundleFailure("人格包读取失败：signature verifier failed") {
+            reader.read(bundle)
         }
     }
 
