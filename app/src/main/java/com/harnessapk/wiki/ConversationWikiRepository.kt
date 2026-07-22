@@ -135,11 +135,15 @@ class ConversationWikiRepository(
         }
     }
 
-    suspend fun countReferences(ref: WikiRef): Int {
+    suspend fun referenceCounts(ref: WikiRef): WikiVersionReferenceCounts {
         validateWikiRef(ref)
-        return dao.countMountReferences(ref.wikiId, ref.version) +
-            dao.countCitationReferences(ref.wikiId, ref.version)
+        return WikiVersionReferenceCounts(
+            mountCount = dao.countMountReferences(ref.wikiId, ref.version),
+            citationCount = dao.countCitationReferences(ref.wikiId, ref.version),
+        )
     }
+
+    suspend fun countReferences(ref: WikiRef): Int = referenceCounts(ref).totalCount
 
     suspend fun canRemove(ref: WikiRef): Boolean = countReferences(ref) == 0
 

@@ -176,7 +176,7 @@ class AppContainer(
         timeProvider = SystemTimeProvider,
         ioDispatcher = dispatchers.io,
         privateInstallAvailableBytes = { StatFs(appContext.filesDir.absolutePath).availableBytes },
-        referenceChecker = WikiVersionReferenceChecker(conversationWikiRepository::countReferences),
+        referenceChecker = WikiVersionReferenceChecker(conversationWikiRepository::referenceCounts),
     )
     val wikiContentStore = InstalledWikiContentStore(
         filesDir = appContext.filesDir,

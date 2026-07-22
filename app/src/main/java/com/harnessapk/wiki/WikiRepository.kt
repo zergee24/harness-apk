@@ -20,7 +20,27 @@ fun interface WikiTransactionRunner {
 }
 
 fun interface WikiVersionReferenceChecker {
-    suspend fun countReferences(ref: WikiRef): Int
+    suspend fun referenceCounts(ref: WikiRef): WikiVersionReferenceCounts
+}
+
+data class WikiVersionReferenceCounts(
+    val mountCount: Int,
+    val citationCount: Int,
+) {
+    init {
+        require(mountCount >= 0) { "Wiki 会话挂载计数不能为负数" }
+        require(citationCount >= 0) { "Wiki 历史引用计数不能为负数" }
+    }
+
+    val totalCount: Int
+        get() = Math.addExact(mountCount, citationCount)
+
+    fun removalBlockedMessage(): String =
+        "该 Wiki 版本仍被 $mountCount 个会话挂载、$citationCount 条历史引用使用，无法删除"
+
+    companion object {
+        val EMPTY = WikiVersionReferenceCounts(mountCount = 0, citationCount = 0)
+    }
 }
 
 enum class WikiVersionState {
@@ -80,7 +100,7 @@ class WikiRepository(
     private val timeProvider: TimeProvider = SystemTimeProvider,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val privateInstallAvailableBytes: () -> Long = { Long.MAX_VALUE },
-    private val referenceChecker: WikiVersionReferenceChecker = WikiVersionReferenceChecker { 0 },
+    private val referenceChecker: WikiVersionReferenceChecker = WikiVersionReferenceChecker { WikiVersionReferenceCounts.EMPTY },
 ) {
     private val mutationMutex = Mutex()
 
@@ -283,8 +303,9 @@ class WikiRepository(
     private suspend fun removeVersionUnlocked(ref: WikiRef): WikiVersionRemovalResult {
         validateRef(ref)
         val existing = dao.findVersion(ref.wikiId, ref.version) ?: return WikiVersionRemovalResult(ref, removed = false)
-        if (referenceChecker.countReferences(ref) > 0) {
-            throw WikiInstallException("该 Wiki 版本仍被会话引用，无法删除")
+        val referenceCounts = referenceChecker.referenceCounts(ref)
+        if (referenceCounts.totalCount > 0) {
+            throw WikiInstallException(referenceCounts.removalBlockedMessage())
         }
         val finalDirectory = versionDirectory(ref)
         val trashDirectory = versionsRoot().resolve(".trash").resolve(

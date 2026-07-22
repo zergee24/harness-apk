@@ -89,7 +89,7 @@ class WikiPackageInstallInstrumentedTest {
                 val repository = repository(
                     root = root,
                     database = database,
-                    referenceChecker = WikiVersionReferenceChecker(conversationWikis::countReferences),
+                    referenceChecker = WikiVersionReferenceChecker(conversationWikis::referenceCounts),
                 )
                 val chatRepository = ChatRepository(
                     conversationDao = database.conversationDao(),
@@ -110,6 +110,31 @@ class WikiPackageInstallInstrumentedTest {
                 )
                 val existingConversationId = chatRepository.createConversation(title = "v1 会话")
                 conversationWikis.copyDefaultsToConversation(existingConversationId)
+                val historicalMessageId = chatRepository.insertAssistantPending(
+                    conversationId = existingConversationId,
+                    providerId = "fixture-provider",
+                    model = "fixture-model",
+                )
+                conversationWikis.persistCitation(
+                    MessageWikiCitation(
+                        id = "fixture-v1-citation",
+                        messageId = historicalMessageId,
+                        displayOrdinal = 1,
+                        ref = v1,
+                        wikiTitle = "史料测试库",
+                        documentId = "fixture-document",
+                        sectionId = "fixture-section",
+                        chunkId = "fixture-chunk",
+                        sourceTitle = "测试原文",
+                        sectionPath = "测试原文 / 第一段",
+                        locatorLabel = "第一段",
+                        originalTextSnapshot = "司马光论礼制。",
+                        originalTextSha256 = "a".repeat(64),
+                        answerRangesJson = "[[0,6]]",
+                        verificationState = WikiCitationVerificationState.VERIFIED,
+                        createdAt = 1L,
+                    ),
+                )
 
                 val v2 = WikiRef(v1.wikiId, 2)
                 repository.install(
@@ -127,7 +152,10 @@ class WikiPackageInstallInstrumentedTest {
                 assertEquals(listOf(v2), conversationWikis.snapshotEnabled(newConversationId))
                 assertFalse(checkNotNull(database.wikiDao().findVersion(v1.wikiId, v1.version)).enabledForNewConversations)
                 assertTrue(checkNotNull(database.wikiDao().findVersion(v2.wikiId, v2.version)).enabledForNewConversations)
-                assertTrue(runCatching { repository.removeVersion(v1) }.exceptionOrNull() is WikiInstallException)
+                val deletionError = requireNotNull(
+                    runCatching { repository.removeVersion(v1) }.exceptionOrNull() as? WikiInstallException,
+                )
+                assertEquals("该 Wiki 版本仍被 1 个会话挂载、1 条历史引用使用，无法删除", deletionError.message)
                 assertTrue(repository.versionDirectory(v1).toFile().isDirectory)
             } finally {
                 database.close()
@@ -147,7 +175,7 @@ class WikiPackageInstallInstrumentedTest {
         root: File,
         database: AppDatabase,
         fileOps: WikiFileOps = DefaultWikiFileOps(),
-        referenceChecker: WikiVersionReferenceChecker = WikiVersionReferenceChecker { 0 },
+        referenceChecker: WikiVersionReferenceChecker = WikiVersionReferenceChecker { WikiVersionReferenceCounts.EMPTY },
     ): WikiRepository = WikiRepository(
         filesDir = root.resolve("files"),
         dao = database.wikiDao(),

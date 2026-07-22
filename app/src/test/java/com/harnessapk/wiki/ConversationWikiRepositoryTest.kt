@@ -91,8 +91,13 @@ class ConversationWikiRepositoryTest {
             ),
         )
 
+        assertEquals(
+            WikiVersionReferenceCounts(mountCount = 1, citationCount = 0),
+            repository.referenceCounts(ref),
+        )
         assertEquals(1, repository.countReferences(ref))
         repository.removeMount("conversation-1", ref.wikiId)
+        assertEquals(WikiVersionReferenceCounts.EMPTY, repository.referenceCounts(ref))
         assertEquals(0, repository.countReferences(ref))
 
         repository.persistCitation(
@@ -114,6 +119,10 @@ class ConversationWikiRepositoryTest {
                 verificationState = WikiCitationVerificationState.VERIFIED,
                 createdAt = 1L,
             ),
+        )
+        assertEquals(
+            WikiVersionReferenceCounts(mountCount = 0, citationCount = 1),
+            repository.referenceCounts(ref),
         )
         assertEquals(1, repository.countReferences(ref))
         assertFalse(repository.canRemove(ref))
