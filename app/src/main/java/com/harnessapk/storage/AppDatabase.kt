@@ -379,6 +379,28 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     """
+                    CREATE TABLE agent_chunk_fts_v11_entries (
+                        chunkKey TEXT NOT NULL,
+                        searchableText TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO agent_chunk_fts_v11_entries (chunkKey, searchableText)
+                    SELECT chunkKey, searchableText
+                    FROM agent_chunk_fts
+                    ORDER BY rowid
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX index_agent_chunk_fts_v11_entries_chunkKey
+                    ON agent_chunk_fts_v11_entries(chunkKey)
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
                     INSERT INTO agent_chunk_fts_v11_physical (chunkKey, searchableText)
                     SELECT physicalKey, GROUP_CONCAT(searchableText, ' ')
                     FROM (
@@ -386,13 +408,20 @@ abstract class AppDatabase : RoomDatabase() {
                             COALESCE(fts.searchableText, chunks.keywordsText || ' ' || chunks.text)
                                 AS searchableText
                         FROM agent_chunks AS chunks
-                        LEFT JOIN agent_chunk_fts AS fts ON fts.chunkKey = chunks.chunkKey
+                        LEFT JOIN agent_chunk_fts_v11_entries AS fts ON fts.chunkKey = chunks.chunkKey
                         ORDER BY physicalKey, chunks.chunkKey, fts.rowid
                     )
                     GROUP BY physicalKey
                     """.trimIndent(),
                 )
+                db.execSQL("DROP TABLE agent_chunk_fts_v11_entries")
                 db.execSQL("ALTER TABLE agent_chunks RENAME TO agent_chunks_v11")
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_agent_chunks_v11_sourceHash_chunkId_chunkKey
+                    ON agent_chunks_v11(sourceHash, chunkId, chunkKey)
+                    """.trimIndent(),
+                )
                 db.execSQL("DROP TABLE agent_chunk_fts")
                 db.execSQL(
                     """
@@ -426,12 +455,11 @@ abstract class AppDatabase : RoomDatabase() {
                         legacy.sourceTitle, '', 'unknown', 'unknown', legacy.location, '',
                         '', legacy.text, legacy.keywordsText, ''
                     FROM agent_chunks_v11 AS legacy
-                    WHERE legacy.chunkKey = (
-                        SELECT MIN(candidate.chunkKey)
-                        FROM agent_chunks_v11 AS candidate
-                        WHERE candidate.sourceHash = legacy.sourceHash
-                          AND candidate.chunkId = legacy.chunkId
-                    )
+                    INNER JOIN (
+                        SELECT sourceHash, chunkId, MIN(chunkKey) AS canonicalChunkKey
+                        FROM agent_chunks_v11
+                        GROUP BY sourceHash, chunkId
+                    ) AS canonical ON canonical.canonicalChunkKey = legacy.chunkKey
                     """.trimIndent(),
                 )
                 db.execSQL(

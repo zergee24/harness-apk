@@ -1331,6 +1331,41 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun migrationFromLargeVersion11CorpusCompletesWithoutBlockingStartup() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-11-12-large-${System.nanoTime()}.db"
+        createVersion11Fixture(context, name, conflictingChunk = false)
+        appendVersion11Chunks(context, name, chunkCount = 12_000)
+
+        val startedAt = System.nanoTime()
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(
+                AppDatabase.MIGRATION_11_12,
+                AppDatabase.MIGRATION_12_13,
+                AppDatabase.MIGRATION_13_14,
+                AppDatabase.MIGRATION_14_15,
+                AppDatabase.MIGRATION_15_16,
+                AppDatabase.MIGRATION_16_17,
+                AppDatabase.MIGRATION_17_18,
+                AppDatabase.MIGRATION_18_19,
+            )
+            .build()
+        val sqlite = db.openHelper.writableDatabase
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+
+        assertTrue("迁移耗时 ${elapsedMillis}ms，阻塞了会话页启动", elapsedMillis < 5_000)
+        assertEquals(19, sqlite.version)
+        assertEquals(12_001, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
+        assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+        db.conversationDao().insert(conversation("post-large-upgrade", updatedAt = 32L))
+        assertEquals("post-large-upgrade", db.conversationDao().findById("post-large-upgrade")?.id)
+        sqlite.assertNoForeignKeyViolations()
+        db.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
     fun migratedV1PhysicalChunkIsReusedByNormalInstallTransaction() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-11-12-reinstall-${System.nanoTime()}.db"
@@ -2208,6 +2243,40 @@ class AppDatabaseTest {
         )
         db.version = 11
         db.close()
+    }
+
+    private fun appendVersion11Chunks(
+        context: Context,
+        name: String,
+        chunkCount: Int,
+    ) {
+        val db = context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null)
+        db.beginTransaction()
+        try {
+            repeat(chunkCount) { index ->
+                val chunkId = "bulk-$index"
+                val chunkKey = "corpus-core:source-hash:$chunkId"
+                db.execSQL(
+                    """
+                    INSERT INTO agent_chunks (
+                        chunkKey, corpusId, sourceHash, chunkId, sourceTitle, location, text, keywordsText
+                    ) VALUES (?, 'corpus-core', 'source-hash', ?, '批量资料', '第${index + 1}章', ?, '批量 测试')
+                    """.trimIndent(),
+                    arrayOf(chunkKey, chunkId, "批量迁移文本 $index"),
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO agent_chunk_fts (chunkKey, corpusKey, searchableText)
+                    VALUES (?, 'corpus-core:source-hash', ?)
+                    """.trimIndent(),
+                    arrayOf(chunkKey, "批量迁移文本 $index"),
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+            db.close()
+        }
     }
 
     private fun conversation(
