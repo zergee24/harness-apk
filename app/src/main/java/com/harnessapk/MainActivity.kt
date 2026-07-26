@@ -11,6 +11,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
+import androidx.lifecycle.lifecycleScope
+import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
 import com.harnessapk.agent.externalAgentBundleUri
 import com.harnessapk.ui.HarnessApkApp
@@ -19,6 +21,7 @@ import com.harnessapk.wiki.H_WIKI_MIME_TYPE
 import com.harnessapk.wiki.isGenericWikiPackageMimeType
 import com.harnessapk.wiki.wikiPackageUri
 import com.harnessapk.wiki.wikiPersistableReadPermissionFlags
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private var incomingAgentBundleUri by mutableStateOf<String?>(null)
@@ -43,6 +46,16 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         acceptIncomingIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val container = (application as HarnessApkApplication).container
+        lifecycleScope.launch {
+            if (container.chatExecutionRepository.hasOpenWork()) {
+                ChatExecutionService.start(this@MainActivity)
+            }
+        }
     }
 
     private fun acceptIncomingIntent(intent: Intent) {

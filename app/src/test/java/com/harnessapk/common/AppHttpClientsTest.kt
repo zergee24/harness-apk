@@ -6,12 +6,12 @@ import java.util.concurrent.TimeUnit
 
 class AppHttpClientsTest {
     @Test
-    fun chatClientTimesOutAfterThreeMinutes() {
+    fun chatClientLimitsIdleReadsWithoutLimitingWholeStream() {
         val client = AppHttpClients.chat()
 
         assertEquals(TimeUnit.SECONDS.toMillis(30).toInt(), client.connectTimeoutMillis)
         assertEquals(TimeUnit.MINUTES.toMillis(3).toInt(), client.readTimeoutMillis)
-        assertEquals(TimeUnit.MINUTES.toMillis(3).toInt(), client.callTimeoutMillis)
+        assertEquals(0, client.callTimeoutMillis)
     }
 
     @Test

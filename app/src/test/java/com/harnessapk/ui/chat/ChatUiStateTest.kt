@@ -517,6 +517,21 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun executionActivityLabelShowsPersistedPhaseAndRetryCount() {
+        val running = chatExecutionEntry(
+            status = com.harnessapk.chat.ChatExecutionStatus.RUNNING,
+            phase = com.harnessapk.chat.ChatExecutionPhase.RETRIEVING_KNOWLEDGE,
+        )
+        val retrying = chatExecutionEntry(
+            status = com.harnessapk.chat.ChatExecutionStatus.QUEUED,
+            automaticRetryCount = 2,
+        )
+
+        assertEquals("正在检索知识库", executionActivityLabel(running))
+        assertEquals("连接中断，准备重试 2/2", executionActivityLabel(retrying))
+    }
+
+    @Test
     fun chatContentWidthUsesAvailableWidthOnPhone() {
         assertEquals(390, chatContentMaxWidthDp(availableWidthDp = 390))
         assertEquals(358, messageBubbleMaxWidthDp(contentWidthDp = 390))
@@ -1050,6 +1065,30 @@ class ChatUiStateTest {
         title = path.substringAfterLast('/').substringBeforeLast('.'),
         reason = "测试结果反馈",
         markdown = "# Test",
+    )
+
+    private fun chatExecutionEntry(
+        status: com.harnessapk.chat.ChatExecutionStatus,
+        phase: com.harnessapk.chat.ChatExecutionPhase? = null,
+        automaticRetryCount: Int = 0,
+    ) = com.harnessapk.chat.ChatExecutionEntry(
+        id = "execution",
+        conversationId = "conversation",
+        userMessageId = "user",
+        assistantMessageId = "assistant",
+        targetAssistantMessageId = null,
+        sequence = 1L,
+        type = com.harnessapk.chat.ChatExecutionType.NORMAL,
+        status = status,
+        providerId = "provider",
+        model = "model",
+        reasoningEffort = com.harnessapk.chat.ReasoningEffort.MEDIUM,
+        requestContext = com.harnessapk.chat.ChatExecutionRequestContext(),
+        phase = phase,
+        automaticRetryCount = automaticRetryCount,
+        errorMessage = null,
+        createdAt = 1L,
+        updatedAt = 1L,
     )
 
     private fun providerProfile(

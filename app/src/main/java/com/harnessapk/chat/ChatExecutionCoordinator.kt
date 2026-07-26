@@ -13,9 +13,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 class ChatExecutionCoordinator(
     private val executionRepository: ChatExecutionRepository,
@@ -33,6 +36,7 @@ class ChatExecutionCoordinator(
     private val webSearchClient: JinaWebSearchClient,
     private val attachmentStore: QueuedAttachmentStore,
     private val dispatchers: AppDispatchers,
+    private val powerGuard: ChatExecutionPowerGuard? = null,
     private val webSearchAllowed: suspend (conversationId: String) -> Boolean = { true },
     private val onWorkScheduled: () -> Unit = {},
     private val onReplyCompleted: (conversationId: String) -> Unit = {},
@@ -119,6 +123,24 @@ class ChatExecutionCoordinator(
         }
     }
 
+    fun handleServiceTimeout() {
+        scope.launch {
+            executionRepository.recoverAfterProcessDeath(reason = ChatInterruptionReason.SERVICE_TIMEOUT)
+            val activeRunners = runnersMutex.withLock { runners.values.toList() }
+            activeRunners.forEach { it.cancel() }
+            activeRunners.forEach { it.join() }
+        }
+    }
+
+    fun retryFailed(entryId: String) {
+        scope.launch {
+            val entry = executionRepository.entry(entryId) ?: return@launch
+            if (!executionRepository.retryFailed(entryId)) return@launch
+            ensureRunnerForEnqueue(entry.conversationId)
+            onWorkScheduled()
+        }
+    }
+
     suspend fun close() {
         scope.coroutineContext[Job]?.cancelAndJoin()
     }
@@ -146,16 +168,34 @@ class ChatExecutionCoordinator(
                 val running = executionRepository.markRunning(next.id, assistantMessageId = null)
                 markActive(conversationId, true)
                 try {
-                    val history = executionRepository.requestHistory(running.id)
-                    val result = sendMessageUseCase.execute(
-                        entry = running,
-                        history = history,
-                        webSearchContext = webSearchContextFor(running),
-                        nativeWebSearchMode = nativeWebSearchModeFor(running),
-                        onAssistantCreated = { assistantId ->
-                            executionRepository.markRunning(running.id, assistantId)
-                        },
-                    )
+                    val executeAttempt: suspend () -> ChatExecutionResult = {
+                        withTimeout(GENERATION_ATTEMPT_TIMEOUT_MILLIS) {
+                            val history = executionRepository.requestHistory(running.id)
+                            if (running.requestContext.webSearchEnabled) {
+                                executionRepository.updatePhase(running.id, ChatExecutionPhase.SEARCHING_WEB)
+                            }
+                            sendMessageUseCase.execute(
+                                entry = running,
+                                history = history,
+                                webSearchContext = webSearchContextFor(running),
+                                nativeWebSearchMode = nativeWebSearchModeFor(running),
+                                onAssistantCreated = { assistantId ->
+                                    executionRepository.markRunning(running.id, assistantId)
+                                },
+                                onPhaseChanged = { phase ->
+                                    executionRepository.updatePhase(running.id, phase)
+                                },
+                            )
+                        }
+                    }
+                    val result = powerGuard?.whileRunning(executeAttempt) ?: executeAttempt()
+                    if (
+                        result.retryableInterruption &&
+                        executionRepository.retryInterrupted(running.id, ChatInterruptionReason.NETWORK)
+                    ) {
+                        delay(automaticRetryDelayMillis(running.automaticRetryCount + 1))
+                        continue
+                    }
                     executionRepository.markTerminal(
                         entryId = running.id,
                         status = result.status,
@@ -167,6 +207,10 @@ class ChatExecutionCoordinator(
                         status = result.status,
                         onReplyCompleted = onReplyCompleted,
                     )
+                } catch (timeout: TimeoutCancellationException) {
+                    withContext(NonCancellable) {
+                        executionRepository.markFailedAfterRunnerFailure(next.id, timeout)
+                    }
                 } catch (cancelled: CancellationException) {
                     val entry = executionRepository.entry(next.id)
                     if (entry?.status == ChatExecutionStatus.RUNNING) {
@@ -250,3 +294,10 @@ internal fun notifyAgentMemoryAfterTerminalPersistence(
     } catch (_: Exception) {
     }
 }
+
+internal fun automaticRetryDelayMillis(retryCount: Int): Long = when (retryCount) {
+    1 -> 1_000L
+    else -> 2_500L
+}
+
+private const val GENERATION_ATTEMPT_TIMEOUT_MILLIS = 15 * 60 * 1_000L

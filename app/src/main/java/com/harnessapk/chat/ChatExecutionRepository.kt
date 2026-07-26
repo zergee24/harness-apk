@@ -69,6 +69,9 @@ class ChatExecutionRepository(
             model = request.model,
             reasoningEffort = request.reasoningEffort.name,
             requestContextJson = encodeExecutionRequestContext(request.requestContext),
+            phase = null,
+            automaticRetryCount = 0,
+            interruptionReason = null,
             errorMessage = null,
             createdAt = now,
             updatedAt = now,
@@ -130,6 +133,7 @@ class ChatExecutionRepository(
             entry.copy(
                 status = ChatExecutionStatus.RUNNING,
                 assistantMessageId = assistantMessageId ?: entry.assistantMessageId,
+                phase = entry.phase ?: ChatExecutionPhase.PREPARING_CONTEXT,
                 errorMessage = null,
                 requestContext = requestContext,
             )
@@ -148,9 +152,38 @@ class ChatExecutionRepository(
             entry.copy(
                 status = status,
                 assistantMessageId = assistantMessageId ?: entry.assistantMessageId,
+                phase = if (status == ChatExecutionStatus.SUCCEEDED) ChatExecutionPhase.FINALIZING else entry.phase,
                 errorMessage = errorMessage,
             )
         }
+    }
+
+    suspend fun updatePhase(entryId: String, phase: ChatExecutionPhase): ChatExecutionEntry =
+        updateEntry(entryId) { entry ->
+            if (entry.status == ChatExecutionStatus.RUNNING) entry.copy(phase = phase) else entry
+        }
+
+    suspend fun retryInterrupted(
+        entryId: String,
+        reason: ChatInterruptionReason,
+    ): Boolean = database.withTransaction {
+        val entity = dao.findById(entryId) ?: return@withTransaction false
+        if (entity.status != ChatExecutionStatus.RUNNING.name || entity.automaticRetryCount >= MAX_AUTOMATIC_RETRIES) {
+            return@withTransaction false
+        }
+        entity.assistantMessageId?.let { chatRepository.deleteMessage(it) }
+        dao.update(
+            entity.copy(
+                assistantMessageId = null,
+                status = ChatExecutionStatus.QUEUED.name,
+                phase = null,
+                automaticRetryCount = entity.automaticRetryCount + 1,
+                interruptionReason = reason.name,
+                errorMessage = null,
+                updatedAt = timeProvider.nowMillis(),
+            ),
+        )
+        true
     }
 
     suspend fun markFailedAfterRunnerFailure(entryId: String, failure: Throwable): ChatExecutionEntry = database.withTransaction {
@@ -174,20 +207,42 @@ class ChatExecutionRepository(
         updated.toDomain()
     }
 
-    suspend fun recoverAfterProcessDeath(conversationId: String? = null) = database.withTransaction {
+    suspend fun recoverAfterProcessDeath(
+        conversationId: String? = null,
+        reason: ChatInterruptionReason = ChatInterruptionReason.PROCESS_RESTART,
+    ) = database.withTransaction {
         dao.listByStatus(ChatExecutionStatus.RUNNING.name).forEach { entity ->
             if (conversationId != null && entity.conversationId != conversationId) return@forEach
             val now = timeProvider.nowMillis()
-            dao.update(
-                entity.copy(
-                    status = ChatExecutionStatus.QUEUED.name,
-                    assistantMessageId = null,
-                    errorMessage = null,
-                    updatedAt = now,
-                ),
-            )
-            entity.assistantMessageId?.let { assistantMessageId ->
-                chatRepository.markAssistantCancelled(assistantMessageId)
+            if (entity.automaticRetryCount < MAX_AUTOMATIC_RETRIES) {
+                entity.assistantMessageId?.let { chatRepository.deleteMessage(it) }
+                dao.update(
+                    entity.copy(
+                        status = ChatExecutionStatus.QUEUED.name,
+                        assistantMessageId = null,
+                        phase = null,
+                        automaticRetryCount = entity.automaticRetryCount + 1,
+                        interruptionReason = reason.name,
+                        errorMessage = null,
+                        updatedAt = now,
+                    ),
+                )
+            } else {
+                val assistantMessageId = entity.assistantMessageId ?: chatRepository.insertAssistantPending(
+                    conversationId = entity.conversationId,
+                    providerId = entity.providerId,
+                    model = entity.model,
+                )
+                chatRepository.markAssistantFailed(assistantMessageId, BACKGROUND_INTERRUPTED_MESSAGE)
+                dao.update(
+                    entity.copy(
+                        status = ChatExecutionStatus.FAILED.name,
+                        assistantMessageId = assistantMessageId,
+                        interruptionReason = reason.name,
+                        errorMessage = BACKGROUND_INTERRUPTED_MESSAGE,
+                        updatedAt = now,
+                    ),
+                )
             }
         }
     }
@@ -236,6 +291,26 @@ class ChatExecutionRepository(
         true
     }
 
+    suspend fun retryFailed(entryId: String): Boolean = database.withTransaction {
+        val entry = dao.findById(entryId) ?: return@withTransaction false
+        if (entry.status != ChatExecutionStatus.FAILED.name) return@withTransaction false
+        val latest = dao.listForConversation(entry.conversationId).maxByOrNull(ChatExecutionEntryEntity::sequence)
+        if (latest?.id != entry.id) return@withTransaction false
+        entry.assistantMessageId?.let { chatRepository.deleteMessage(it) }
+        dao.update(
+            entry.copy(
+                assistantMessageId = null,
+                status = ChatExecutionStatus.QUEUED.name,
+                phase = null,
+                automaticRetryCount = 0,
+                interruptionReason = null,
+                errorMessage = null,
+                updatedAt = timeProvider.nowMillis(),
+            ),
+        )
+        true
+    }
+
     private suspend fun updateEntry(
         entryId: String,
         transform: suspend (ChatExecutionEntry) -> ChatExecutionEntry,
@@ -265,6 +340,9 @@ private fun ChatExecutionEntryEntity.toDomain(): ChatExecutionEntry = ChatExecut
     model = model,
     reasoningEffort = runCatching { ReasoningEffort.valueOf(reasoningEffort) }.getOrDefault(defaultReasoningEffort()),
     requestContext = decodeExecutionRequestContext(requestContextJson),
+    phase = phase?.let { runCatching { ChatExecutionPhase.valueOf(it) }.getOrNull() },
+    automaticRetryCount = automaticRetryCount,
+    interruptionReason = interruptionReason?.let { runCatching { ChatInterruptionReason.valueOf(it) }.getOrNull() },
     errorMessage = errorMessage,
     createdAt = createdAt,
     updatedAt = updatedAt,
@@ -283,7 +361,13 @@ private fun ChatExecutionEntry.toEntity(): ChatExecutionEntryEntity = ChatExecut
     model = model,
     reasoningEffort = reasoningEffort.name,
     requestContextJson = encodeExecutionRequestContext(requestContext),
+    phase = phase?.name,
+    automaticRetryCount = automaticRetryCount,
+    interruptionReason = interruptionReason?.name,
     errorMessage = errorMessage,
     createdAt = createdAt,
     updatedAt = updatedAt,
 )
+
+internal const val MAX_AUTOMATIC_RETRIES = 2
+internal const val BACKGROUND_INTERRUPTED_MESSAGE = "后台生成多次中断，请重试或检查系统电池限制。"

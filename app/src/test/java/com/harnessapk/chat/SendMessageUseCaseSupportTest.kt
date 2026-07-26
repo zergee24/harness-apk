@@ -226,12 +226,11 @@ class SendMessageUseCaseSupportTest {
     }
 
     @Test
-    fun backgroundSocketAbortGetsOneControlledStreamRetry() {
+    fun backgroundSocketAbortIsClassifiedForPersistentRetry() {
         val abort = SocketException("Software caused connection abort")
 
-        assertTrue(shouldRetryStreamAfterTransportFailure(abort, retriesUsed = 0))
-        assertFalse(shouldRetryStreamAfterTransportFailure(abort, retriesUsed = 1))
-        assertFalse(shouldRetryStreamAfterTransportFailure(IllegalStateException("HTTP 401"), retriesUsed = 0))
+        assertTrue(isRetryableTransportFailure(abort))
+        assertFalse(isRetryableTransportFailure(IllegalStateException("HTTP 401")))
     }
 
 }

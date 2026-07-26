@@ -1,6 +1,7 @@
 package com.harnessapk.ui.chat
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Handler
@@ -9,6 +10,7 @@ import android.os.Build
 import android.net.Uri
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,6 +40,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -54,6 +57,7 @@ import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
@@ -79,6 +83,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -119,6 +124,7 @@ import androidx.core.content.ContextCompat
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.ChatExecutionEntry
+import com.harnessapk.chat.ChatExecutionPhase
 import com.harnessapk.chat.ChatExecutionRequestContext
 import com.harnessapk.chat.ChatExecutionStatus
 import com.harnessapk.chat.ChatSendRequestPhase
@@ -243,6 +249,8 @@ fun ChatScreen(
     onSessionConfigRequestConsumed: () -> Unit = {},
     wikiScopeRequestKey: Int = 0,
     onWikiScopeRequestConsumed: () -> Unit = {},
+    searchRequestKey: Int = 0,
+    onSearchRequestConsumed: () -> Unit = {},
     onOpenProjectFiles: (projectId: String, selectedPath: String?) -> Unit = { _, _ -> },
     onOpenProjectGit: (projectId: String) -> Unit = {},
     initialSourceMessageId: String? = null,
@@ -300,6 +308,11 @@ fun ChatScreen(
     var persistedUserMessage by remember(conversationId) { mutableStateOf(false) }
     var showIdentityDetails by remember { mutableStateOf(false) }
     var showWikiScopePicker by remember(conversationId) { mutableStateOf(false) }
+    var showMessageSearch by remember(conversationId) { mutableStateOf(false) }
+    var messageSearchQuery by remember(conversationId) { mutableStateOf("") }
+    var messageSearchCursor by remember(conversationId) { mutableStateOf(0) }
+    var messageSearchOriginIndex by remember(conversationId) { mutableStateOf(0) }
+    var messageSearchOriginOffset by remember(conversationId) { mutableStateOf(0) }
     var conversationWikiMounts by remember(conversationId) { mutableStateOf(emptyList<com.harnessapk.wiki.ConversationWikiMount>()) }
     var conversationWikiCatalog by remember(conversationId) { mutableStateOf(emptyList<ConversationWikiCatalogEntry>()) }
     var fixedVersionCoverage by remember(conversationId) { mutableStateOf<AgentVersionCoverage?>(null) }
@@ -461,6 +474,7 @@ fun ChatScreen(
             entry.assistantMessageId?.let { assistantMessageId -> assistantMessageId to entry }
         }.toMap()
     }
+    val latestExecutionId = executionEntries.maxByOrNull(ChatExecutionEntry::sequence)?.id
     val dismissKeyboard = {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
@@ -733,6 +747,17 @@ fun ChatScreen(
         if (wikiScopeRequestKey > 0) {
             showWikiScopePicker = true
             onWikiScopeRequestConsumed()
+        }
+    }
+
+    LaunchedEffect(searchRequestKey) {
+        if (searchRequestKey > 0) {
+            messageSearchOriginIndex = listState.firstVisibleItemIndex
+            messageSearchOriginOffset = listState.firstVisibleItemScrollOffset
+            messageSearchQuery = ""
+            messageSearchCursor = 0
+            showMessageSearch = true
+            onSearchRequestConsumed()
         }
     }
 
@@ -1634,6 +1659,65 @@ fun ChatScreen(
         }
     }
 
+    if (showMessageSearch) {
+        val matches = remember(messages, messageSearchQuery) {
+            val query = messageSearchQuery.trim()
+            if (query.isBlank()) emptyList() else messages.mapIndexedNotNull { index, message ->
+                index.takeIf { message.content.contains(query, ignoreCase = true) }
+            }
+        }
+        fun jumpToSearchResult(cursor: Int) {
+            if (matches.isEmpty()) return
+            messageSearchCursor = cursor.mod(matches.size)
+            scope.launch { listState.animateScrollToItem(matches[messageSearchCursor]) }
+        }
+        AlertDialog(
+            onDismissRequest = {
+                showMessageSearch = false
+                scope.launch { listState.scrollToItem(messageSearchOriginIndex, messageSearchOriginOffset) }
+            },
+            title = { Text("查找消息") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        modifier = Modifier.fillMaxWidth(),
+                        value = messageSearchQuery,
+                        onValueChange = {
+                            messageSearchQuery = it
+                            messageSearchCursor = 0
+                        },
+                        singleLine = true,
+                        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                        label = { Text("关键词") },
+                    )
+                    Text(
+                        text = if (matches.isEmpty()) "没有匹配消息" else "${messageSearchCursor + 1} / ${matches.size}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = matches.isNotEmpty(), onClick = { jumpToSearchResult(messageSearchCursor + 1) }) {
+                    Text("下一条")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(enabled = matches.isNotEmpty(), onClick = { jumpToSearchResult(messageSearchCursor - 1) }) {
+                        Text("上一条")
+                    }
+                    TextButton(onClick = {
+                        showMessageSearch = false
+                        scope.launch { listState.scrollToItem(messageSearchOriginIndex, messageSearchOriginOffset) }
+                    }) {
+                        Text("关闭")
+                    }
+                }
+            },
+        )
+    }
+
     if (showWikiScopePicker) {
         ConversationWikiPicker(
             state = wikiScopeState,
@@ -1746,6 +1830,11 @@ fun ChatScreen(
         ) {
             val contentMaxWidth = chatContentMaxWidthDp(maxWidth.value.toInt()).dp
             val bubbleMaxWidth = messageBubbleMaxWidthDp(contentMaxWidth.value.toInt()).dp
+            val showJumpToBottom by remember(messages.lastIndex) {
+                derivedStateOf {
+                    messages.isNotEmpty() && !listState.canFollowStreaming(messages.lastIndex)
+                }
+            }
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
                 state = listState,
@@ -1829,6 +1918,22 @@ fun ChatScreen(
                                     }?.let { entry ->
                                         { scope.launch { container.chatExecutionRepository.deleteQueued(entry.id) } }
                                     },
+                                    onRetryFailed = executionEntry?.takeIf {
+                                        message.role == MessageRole.ASSISTANT &&
+                                            it.status == ChatExecutionStatus.FAILED &&
+                                            it.id == latestExecutionId
+                                    }?.let { entry ->
+                                        { container.chatExecutionCoordinator.retryFailed(entry.id) }
+                                    },
+                                    onOpenBatterySettings = executionEntry?.takeIf {
+                                        message.role == MessageRole.ASSISTANT && it.interruptionReason != null
+                                    }?.let {
+                                        {
+                                            context.startActivity(
+                                                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                                            )
+                                        }
+                                    },
                                     onOpenWikiCitation = onOpenWikiCitation,
                                     reasoningStreaming = message.status == MessageStatus.STREAMING,
                                 )
@@ -1868,8 +1973,40 @@ fun ChatScreen(
                     }
                 }
             }
+            if (showJumpToBottom) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp)
+                        .size(44.dp),
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shadowElevation = 3.dp,
+                    onClick = {
+                        scope.launch {
+                            streamingAutoScrollEnabled = true
+                            listState.animateScrollToItem(messages.lastIndex)
+                        }
+                    },
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Outlined.KeyboardArrowDown,
+                            contentDescription = "回到底部",
+                        )
+                    }
+                }
+            }
         }
 
+        val openExecutions = executionEntries.filter {
+            it.status == ChatExecutionStatus.QUEUED || it.status == ChatExecutionStatus.RUNNING
+        }
+        if (openExecutions.isNotEmpty()) {
+            ResponsiveChatContentRail {
+                ChatQueueStrip(openExecutions)
+            }
+        }
         ResponsiveChatContentRail {
             ChatInputBar(
                 text = text,
@@ -2260,6 +2397,26 @@ internal fun executionStatusLabel(status: ChatExecutionStatus): String? = when (
     ChatExecutionStatus.RUNNING,
     ChatExecutionStatus.SUCCEEDED,
     -> null
+}
+
+internal fun executionActivityLabel(entry: ChatExecutionEntry): String? = when (entry.status) {
+    ChatExecutionStatus.QUEUED -> if (entry.automaticRetryCount > 0) {
+        "连接中断，准备重试 ${entry.automaticRetryCount}/2"
+    } else {
+        executionStatusLabel(entry.status)
+    }
+    ChatExecutionStatus.RUNNING -> when (entry.phase) {
+        ChatExecutionPhase.PREPARING_CONTEXT, null -> "正在准备上下文"
+        ChatExecutionPhase.SEARCHING_WEB -> "正在联网搜索"
+        ChatExecutionPhase.RETRIEVING_KNOWLEDGE -> "正在检索知识库"
+        ChatExecutionPhase.GENERATING -> if (entry.automaticRetryCount > 0) {
+            "正在重新生成 ${entry.automaticRetryCount}/2"
+        } else {
+            "正在生成回答"
+        }
+        ChatExecutionPhase.FINALIZING -> "正在整理结果"
+    }
+    else -> executionStatusLabel(entry.status)
 }
 
 internal enum class FileChangeSendDecision {
@@ -3474,11 +3631,14 @@ private fun MessageBubble(
     onSteer: (() -> Unit)?,
     onEditQueued: (() -> Unit)?,
     onDeleteQueued: (() -> Unit)?,
+    onRetryFailed: (() -> Unit)?,
+    onOpenBatterySettings: (() -> Unit)?,
     onOpenWikiCitation: (String) -> Unit,
     reasoningStreaming: Boolean,
 ) {
     val isUser = message.role == MessageRole.USER
     var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
+    var actionMenuExpanded by remember(message.id) { mutableStateOf(false) }
     val presentation = chatBubblePresentation(message.role)
     val uriHandler = LocalUriHandler.current
     val hideAgentCitationMarkers = isAgentConversation && parts.any { it.type == UiMessagePartType.AGENT_SOURCES }
@@ -3582,47 +3742,9 @@ private fun MessageBubble(
                             }
                         }
                     }
-                    if (selectionCopyText.isNotBlank()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank()) {
-                                IconButton(
-                                    modifier = Modifier.size(48.dp),
-                                    onClick = onSpeak,
-                                ) {
-                                    Icon(
-                                        imageVector = if (isSpeaking) Icons.Filled.Stop else Icons.AutoMirrored.Outlined.VolumeUp,
-                                        contentDescription = if (isSpeaking) "停止朗读" else "朗读回复",
-                                        modifier = Modifier.size(20.dp),
-                                    )
-                                }
-                            }
-                            IconButton(
-                                modifier = Modifier.size(48.dp),
-                                onClick = onSelectCopy,
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Outlined.TextFields,
-                                    contentDescription = "选择复制",
-                                    modifier = Modifier.size(20.dp),
-                                )
-                            }
-                            if (message.role == MessageRole.ASSISTANT && (selectionCopyText.isNotBlank() || message.errorMessage != null)) {
-                                IconButton(
-                                    modifier = Modifier.size(48.dp),
-                                    onClick = onCopy,
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Outlined.ContentCopy,
-                                        contentDescription = "复制",
-                                        modifier = Modifier.size(20.dp),
-                                    )
-                                }
-                            }
-                        }
-                    }
                 }
                 executionEntry?.let { entry ->
-                    executionStatusLabel(entry.status)?.let { label ->
+                    executionActivityLabel(entry)?.let { label ->
                         Text(
                             text = label,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -3674,12 +3796,123 @@ private fun MessageBubble(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.labelSmall,
                     )
-                }
-                if (canWriteBack) {
-                    TextButton(onClick = onWriteBack) {
-                        Text("生成文件变更")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        onRetryFailed?.let { retry ->
+                            TextButton(onClick = retry) {
+                                Icon(Icons.Outlined.Refresh, contentDescription = null)
+                                Text("重试")
+                            }
+                        }
+                        onOpenBatterySettings?.let { openSettings ->
+                            TextButton(onClick = openSettings) {
+                                Text("检查电池限制")
+                            }
+                        }
                     }
                 }
+                if (selectionCopyText.isNotBlank() || canWriteBack) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (selectionCopyText.isNotBlank()) {
+                            IconButton(
+                                modifier = Modifier.size(40.dp),
+                                onClick = onCopy,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.ContentCopy,
+                                    contentDescription = "复制",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                        Box {
+                            IconButton(
+                                modifier = Modifier.size(40.dp),
+                                onClick = { actionMenuExpanded = true },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.MoreVert,
+                                    contentDescription = "更多消息操作",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = actionMenuExpanded,
+                                onDismissRequest = { actionMenuExpanded = false },
+                            ) {
+                                if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank()) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (isSpeaking) "停止朗读" else "朗读回复") },
+                                        leadingIcon = {
+                                            Icon(
+                                                if (isSpeaking) Icons.Filled.Stop else Icons.AutoMirrored.Outlined.VolumeUp,
+                                                contentDescription = null,
+                                            )
+                                        },
+                                        onClick = {
+                                            actionMenuExpanded = false
+                                            onSpeak()
+                                        },
+                                    )
+                                }
+                                if (selectionCopyText.isNotBlank()) {
+                                    DropdownMenuItem(
+                                        text = { Text("选择复制") },
+                                        leadingIcon = { Icon(Icons.Outlined.TextFields, contentDescription = null) },
+                                        onClick = {
+                                            actionMenuExpanded = false
+                                            onSelectCopy()
+                                        },
+                                    )
+                                }
+                                if (canWriteBack) {
+                                    DropdownMenuItem(
+                                        text = { Text("生成文件变更") },
+                                        onClick = {
+                                            actionMenuExpanded = false
+                                            onWriteBack()
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatQueueStrip(entries: List<ChatExecutionEntry>) {
+    val running = entries.firstOrNull { it.status == ChatExecutionStatus.RUNNING }
+    val queuedCount = entries.count { it.status == ChatExecutionStatus.QUEUED }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                modifier = Modifier.weight(1f),
+                text = running?.let(::executionActivityLabel) ?: "等待处理",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (queuedCount > 0) {
+                Text(
+                    text = "等待 $queuedCount",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
         }
     }

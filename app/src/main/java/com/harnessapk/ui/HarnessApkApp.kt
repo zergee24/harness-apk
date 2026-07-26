@@ -159,6 +159,7 @@ fun HarnessApkApp(
     var browserWikiTitle by remember { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
     var chatWikiScopeRequestKey by remember { mutableStateOf(0) }
+    var chatSearchRequestKey by remember { mutableStateOf(0) }
     var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
@@ -322,6 +323,9 @@ fun HarnessApkApp(
                     actions = {
                         when (route) {
                             Routes.ChatPattern -> {
+                                IconButton(onClick = { chatSearchRequestKey += 1 }) {
+                                    Icon(Icons.Outlined.Search, contentDescription = "查找消息")
+                                }
                                 ConversationWikiTopBarAction(
                                     onClick = { chatWikiScopeRequestKey += 1 },
                                 )
@@ -419,6 +423,8 @@ fun HarnessApkApp(
                     onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
                     wikiScopeRequestKey = chatWikiScopeRequestKey,
                     onWikiScopeRequestConsumed = { chatWikiScopeRequestKey = 0 },
+                    searchRequestKey = chatSearchRequestKey,
+                    onSearchRequestConsumed = { chatSearchRequestKey = 0 },
                     onOpenProjectFiles = { projectId, path ->
                         openWorkbench(projectId, ProjectWorkbenchDestination.FILES, path)
                     },

@@ -8,7 +8,6 @@ object AppHttpClients {
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(2, TimeUnit.MINUTES)
         .readTimeout(3, TimeUnit.MINUTES)
-        .callTimeout(3, TimeUnit.MINUTES)
         .build()
 
     fun updates(): OkHttpClient = OkHttpClient.Builder()

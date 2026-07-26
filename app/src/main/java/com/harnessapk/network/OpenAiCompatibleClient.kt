@@ -339,7 +339,6 @@ private fun OkHttpClient.forRequest(request: ChatRequest): OkHttpClient {
     val readTimeoutMillis = request.readTimeoutMillis?.takeIf { it > 0 } ?: return this
     return newBuilder()
         .readTimeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
-        .callTimeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
         .build()
 }
 

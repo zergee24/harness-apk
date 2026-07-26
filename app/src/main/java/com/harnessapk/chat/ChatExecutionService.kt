@@ -6,6 +6,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.harnessapk.HarnessApkApplication
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +43,12 @@ class ChatExecutionService : Service() {
     override fun onDestroy() {
         scope.cancel()
         super.onDestroy()
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        container.chatExecutionCoordinator.handleServiceTimeout()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
     }
 
     private suspend fun stopWhenIdle() {
@@ -82,7 +89,11 @@ class ChatExecutionService : Service() {
 
         fun start(context: Context) {
             val intent = Intent(context, ChatExecutionService::class.java)
-            androidx.core.content.ContextCompat.startForegroundService(context, intent)
+            runCatching {
+                androidx.core.content.ContextCompat.startForegroundService(context, intent)
+            }.onFailure { error ->
+                Log.w("ChatExecutionService", "Unable to start foreground chat service", error)
+            }
         }
     }
 }
