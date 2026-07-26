@@ -247,6 +247,10 @@ private class FakeConversationWikiDao : ConversationWikiDao {
             .sortedBy(MessageWikiCitationEntity::displayOrdinal),
     )
 
+    override fun observeCitationsForConversation(conversationId: String) = flowOf(
+        citations.values.sortedBy(MessageWikiCitationEntity::displayOrdinal),
+    )
+
     override suspend fun listCitationsForMessage(messageId: String): List<MessageWikiCitationEntity> = citations.values
         .filter { it.messageId == messageId }
         .sortedBy(MessageWikiCitationEntity::displayOrdinal)

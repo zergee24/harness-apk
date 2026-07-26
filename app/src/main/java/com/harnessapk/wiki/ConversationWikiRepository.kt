@@ -222,6 +222,15 @@ class ConversationWikiRepository(
         return dao.observeCitationsForMessage(messageId).map { rows -> rows.map { it.toDomain() } }
     }
 
+    fun observeCitationsForConversation(conversationId: String): Flow<Map<String, List<MessageWikiCitation>>> {
+        requireIdentifier(conversationId, "会话标识")
+        return dao.observeCitationsForConversation(conversationId).map { rows ->
+            rows.groupBy(MessageWikiCitationEntity::messageId).mapValues { (_, citations) ->
+                citations.map { it.toDomain() }
+            }
+        }
+    }
+
     private suspend fun requireReadyVersion(ref: WikiRef) {
         if (dao.findReadyVersion(ref.wikiId, ref.version) == null) {
             throw ConversationWikiException("目标 Wiki 版本不存在或不可用")

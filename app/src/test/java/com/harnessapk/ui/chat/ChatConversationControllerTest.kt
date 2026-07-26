@@ -439,6 +439,19 @@ class ChatConversationControllerTest {
     }
 
     @Test
+    fun landedDraftReducerClearsSubmittedAttachmentPrefixAndKeepsFollowUpImages() {
+        assertEquals(
+            listOf("next-1", "next-2"),
+            landedDraftAttachments(
+                submitted = listOf("sent-1", "sent-2"),
+                current = listOf("sent-1", "sent-2", "next-1", "next-2"),
+            ),
+        )
+        assertEquals(emptyList<String>(), landedDraftAttachments(listOf("sent"), listOf("sent")))
+        assertEquals(listOf("replacement"), landedDraftAttachments(listOf("sent"), listOf("replacement")))
+    }
+
+    @Test
     fun consumedTerminalDraftDoesNotOverwriteLaterLocalEdit() {
         var localText = terminalDraft(
             phase = ChatSendRequestPhase.LANDED,

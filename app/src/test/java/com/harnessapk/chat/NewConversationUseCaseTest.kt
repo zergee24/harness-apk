@@ -369,6 +369,7 @@ private class NewConversationFakeAgentDao : AgentDao {
 
 private class NewConversationFakeMessagePartDao : MessagePartDao {
     override fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>> = MutableStateFlow(emptyList())
+    override fun observeForConversation(conversationId: String): Flow<List<MessagePartEntity>> = MutableStateFlow(emptyList())
     override suspend fun listForMessage(messageId: String): List<MessagePartEntity> = emptyList()
     override suspend fun insertAll(parts: List<MessagePartEntity>) = Unit
     override suspend fun replaceForMessage(messageId: String, parts: List<MessagePartEntity>) = Unit
@@ -378,6 +379,7 @@ private class NewConversationFakeMessagePartDao : MessagePartDao {
 
 private class NewConversationFakeMessageAttachmentDao : MessageAttachmentDao {
     override fun observeForMessage(messageId: String): Flow<List<MessageAttachmentEntity>> = MutableStateFlow(emptyList())
+    override fun observeForConversation(conversationId: String): Flow<List<MessageAttachmentEntity>> = MutableStateFlow(emptyList())
     override suspend fun listForMessage(messageId: String): List<MessageAttachmentEntity> = emptyList()
     override suspend fun insert(entity: MessageAttachmentEntity) = Unit
 }

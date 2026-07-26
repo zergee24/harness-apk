@@ -12,6 +12,16 @@ interface MessagePartDao {
     @Query("SELECT * FROM message_parts WHERE messageId = :messageId ORDER BY partIndex ASC")
     fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>>
 
+    @Query(
+        """
+        SELECT message_parts.* FROM message_parts
+        INNER JOIN messages ON messages.id = message_parts.messageId
+        WHERE messages.conversationId = :conversationId
+        ORDER BY messages.createdAt ASC, message_parts.partIndex ASC
+        """,
+    )
+    fun observeForConversation(conversationId: String): Flow<List<MessagePartEntity>>
+
     @Query("SELECT * FROM message_parts WHERE messageId = :messageId ORDER BY partIndex ASC")
     suspend fun listForMessage(messageId: String): List<MessagePartEntity>
 

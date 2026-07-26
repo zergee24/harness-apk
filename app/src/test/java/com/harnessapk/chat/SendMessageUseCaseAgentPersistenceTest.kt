@@ -877,6 +877,7 @@ private class ExecuteMessagePartDao(
 ) : MessagePartDao {
     private val rows = linkedMapOf<String, MessagePartEntity>()
     override fun observeForMessage(messageId: String): Flow<List<MessagePartEntity>> = MutableStateFlow(rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex })
+    override fun observeForConversation(conversationId: String): Flow<List<MessagePartEntity>> = MutableStateFlow(rows.values.sortedBy { it.partIndex })
     override suspend fun listForMessage(messageId: String) = rows.values.filter { it.messageId == messageId }.sortedBy { it.partIndex }
     override suspend fun insertAll(parts: List<MessagePartEntity>) { parts.forEach { rows[it.id] = it } }
     override suspend fun deleteForMessage(messageId: String) { rows.entries.removeIf { it.value.messageId == messageId } }
@@ -904,6 +905,7 @@ private class ExecuteMessagePartDao(
 
 private class ExecuteMessageAttachmentDao : MessageAttachmentDao {
     override fun observeForMessage(messageId: String): Flow<List<MessageAttachmentEntity>> = MutableStateFlow(emptyList())
+    override fun observeForConversation(conversationId: String): Flow<List<MessageAttachmentEntity>> = MutableStateFlow(emptyList())
     override suspend fun listForMessage(messageId: String): List<MessageAttachmentEntity> = emptyList()
     override suspend fun insert(entity: MessageAttachmentEntity) = Unit
 }

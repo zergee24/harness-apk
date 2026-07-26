@@ -9,17 +9,44 @@ import kotlinx.coroutines.flow.map
 data class ChatSendRequestState(
     val requestId: String,
     val submittedText: String,
-    val submittedImage: Uri?,
-    val submittedMimeType: String,
+    val submittedAttachments: List<PendingImageAttachment>,
     val isFirstUserMessage: Boolean,
     val currentDraftText: String = submittedText,
-    val currentDraftImage: Uri? = submittedImage,
-    val currentDraftMimeType: String = submittedMimeType,
+    val currentDraftAttachments: List<PendingImageAttachment> = submittedAttachments,
     val phase: ChatSendRequestPhase = ChatSendRequestPhase.IN_FLIGHT,
     val originalFailure: Throwable? = null,
     val cancellation: CancellationException? = null,
     val lookupFailure: Throwable? = null,
-)
+) {
+    @Deprecated("Use submittedAttachments")
+    constructor(
+        requestId: String,
+        submittedText: String,
+        submittedImage: Uri?,
+        submittedMimeType: String,
+        isFirstUserMessage: Boolean,
+        currentDraftText: String = submittedText,
+        currentDraftImage: Uri? = submittedImage,
+        currentDraftMimeType: String = submittedMimeType,
+        phase: ChatSendRequestPhase = ChatSendRequestPhase.IN_FLIGHT,
+        originalFailure: Throwable? = null,
+        cancellation: CancellationException? = null,
+        lookupFailure: Throwable? = null,
+    ) : this(
+        requestId = requestId,
+        submittedText = submittedText,
+        submittedAttachments = submittedImage?.let { listOf(PendingImageAttachment(it, submittedMimeType)) }.orEmpty(),
+        isFirstUserMessage = isFirstUserMessage,
+        currentDraftText = currentDraftText,
+        currentDraftAttachments = currentDraftImage?.let {
+            listOf(PendingImageAttachment(it, currentDraftMimeType))
+        }.orEmpty(),
+        phase = phase,
+        originalFailure = originalFailure,
+        cancellation = cancellation,
+        lookupFailure = lookupFailure,
+    )
+}
 
 enum class ChatSendRequestPhase {
     IN_FLIGHT,
@@ -102,8 +129,7 @@ class ChatSendRecoveryStore {
         conversationId: String,
         expectedRequestId: String,
         text: String,
-        image: Uri?,
-        mimeType: String,
+        attachments: List<PendingImageAttachment>,
     ): Boolean = transitionIfRequest(
         conversationId = conversationId,
         expectedRequestId = expectedRequestId,
@@ -111,10 +137,23 @@ class ChatSendRecoveryStore {
     ) { current ->
         current.copy(
             currentDraftText = text,
-            currentDraftImage = image,
-            currentDraftMimeType = mimeType,
+            currentDraftAttachments = attachments.toList(),
         )
     }
+
+    @Deprecated("Use the attachment-list overload")
+    fun updateCurrentDraft(
+        conversationId: String,
+        expectedRequestId: String,
+        text: String,
+        image: Uri?,
+        mimeType: String,
+    ): Boolean = updateCurrentDraft(
+        conversationId = conversationId,
+        expectedRequestId = expectedRequestId,
+        text = text,
+        attachments = image?.let { listOf(PendingImageAttachment(it, mimeType)) }.orEmpty(),
+    )
 
     fun consumeTerminal(conversationId: String, expectedRequestId: String): ChatSendRequestState? = synchronized(lock) {
         val current = states.value[conversationId] ?: return@synchronized null

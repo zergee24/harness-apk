@@ -99,6 +99,16 @@ interface ConversationWikiDao {
     @Query("SELECT * FROM message_wiki_citations WHERE messageId = :messageId ORDER BY displayOrdinal ASC")
     fun observeCitationsForMessage(messageId: String): Flow<List<MessageWikiCitationEntity>>
 
+    @Query(
+        """
+        SELECT message_wiki_citations.* FROM message_wiki_citations
+        INNER JOIN messages ON messages.id = message_wiki_citations.messageId
+        WHERE messages.conversationId = :conversationId
+        ORDER BY messages.createdAt ASC, message_wiki_citations.displayOrdinal ASC
+        """,
+    )
+    fun observeCitationsForConversation(conversationId: String): Flow<List<MessageWikiCitationEntity>>
+
     @Query("SELECT * FROM message_wiki_citations WHERE messageId = :messageId ORDER BY displayOrdinal ASC")
     suspend fun listCitationsForMessage(messageId: String): List<MessageWikiCitationEntity>
 }
