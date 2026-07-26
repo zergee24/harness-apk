@@ -241,6 +241,8 @@ fun ChatScreen(
     autoFocusInput: Boolean = false,
     sessionConfigRequestKey: Int = 0,
     onSessionConfigRequestConsumed: () -> Unit = {},
+    wikiScopeRequestKey: Int = 0,
+    onWikiScopeRequestConsumed: () -> Unit = {},
     onOpenProjectFiles: (projectId: String, selectedPath: String?) -> Unit = { _, _ -> },
     onOpenProjectGit: (projectId: String) -> Unit = {},
     initialSourceMessageId: String? = null,
@@ -724,6 +726,13 @@ fun ChatScreen(
         if (sessionConfigRequestKey > 0) {
             showSessionConfig = true
             onSessionConfigRequestConsumed()
+        }
+    }
+
+    LaunchedEffect(wikiScopeRequestKey) {
+        if (wikiScopeRequestKey > 0) {
+            showWikiScopePicker = true
+            onWikiScopeRequestConsumed()
         }
     }
 
@@ -1821,6 +1830,7 @@ fun ChatScreen(
                                         { scope.launch { container.chatExecutionRepository.deleteQueued(entry.id) } }
                                     },
                                     onOpenWikiCitation = onOpenWikiCitation,
+                                    reasoningStreaming = message.status == MessageStatus.STREAMING,
                                 )
                             }
                             markdownFileChangeStates
@@ -1899,8 +1909,6 @@ fun ChatScreen(
                 onOpenModelPicker = { showModelPicker = true },
                 identityState = identityState,
                 onSelectIdentity = identityController::selectIdentity,
-                wikiScopeState = wikiScopeState,
-                onOpenWikiScopePicker = { showWikiScopePicker = true },
                 contextStatus = contextStatus,
                 isCompressingContext = isCompressingContext,
                 onCompressContext = ::compressContextNow,
@@ -3179,6 +3187,7 @@ private fun MessagePartsColumn(
     hideAgentCitationMarkers: Boolean,
     onLinkClick: (String) -> Unit,
     onOpenWikiCitation: (String) -> Unit,
+    reasoningStreaming: Boolean,
 ) {
     val sourceState = remember(parts, wikiCitations) {
         messageSourcesUiState(parts = parts, citations = wikiCitations)
@@ -3196,6 +3205,11 @@ private fun MessagePartsColumn(
                     imageStore = imageStore,
                     hideAgentCitationMarkers = hideAgentCitationMarkers,
                     onLinkClick = onLinkClick,
+                    autoExpandReasoning = shouldAutoExpandReasoningPart(
+                        part = part,
+                        parts = parts,
+                        reasoningStreaming = reasoningStreaming,
+                    ),
                 )
             }
         }
@@ -3215,6 +3229,7 @@ private fun MessagePartView(
     imageStore: ChatImageStore,
     hideAgentCitationMarkers: Boolean,
     onLinkClick: (String) -> Unit,
+    autoExpandReasoning: Boolean,
 ) {
     when (part.type) {
         UiMessagePartType.TEXT -> MarkdownMessage(
@@ -3222,7 +3237,7 @@ private fun MessagePartView(
             textColor = textColor,
             onLinkClick = onLinkClick,
         )
-        UiMessagePartType.REASONING -> ReasoningPart(part)
+        UiMessagePartType.REASONING -> ReasoningPart(part, autoExpand = autoExpandReasoning)
         UiMessagePartType.SEARCH_RESULT -> SearchResultPart(part)
         UiMessagePartType.TOOL_CALL -> MetadataPart(label = "工具调用", content = part.content)
         UiMessagePartType.TOOL_RESULT -> MetadataPart(label = "工具结果", content = part.content)
@@ -3329,13 +3344,18 @@ private fun ChatMessageImage(
 }
 
 @Composable
-private fun ReasoningPart(part: UiMessagePartDraft) {
-    var expanded by remember(part.index) { mutableStateOf(false) }
+internal fun ReasoningPart(
+    part: UiMessagePartDraft,
+    autoExpand: Boolean,
+) {
+    var userExpanded by remember(part.index) { mutableStateOf<Boolean?>(null) }
+    val expanded = userExpanded ?: autoExpand
+    val toggleExpanded = { userExpanded = !expanded }
     val preview = reasoningCollapsedPreviewText(part.content)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { expanded = !expanded },
+            .clickable(onClick = toggleExpanded),
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
     ) {
@@ -3356,7 +3376,7 @@ private fun ReasoningPart(part: UiMessagePartDraft) {
                 )
                 IconButton(
                     modifier = Modifier.size(40.dp),
-                    onClick = { expanded = !expanded },
+                    onClick = toggleExpanded,
                 ) {
                     Icon(
                         imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
@@ -3455,6 +3475,7 @@ private fun MessageBubble(
     onEditQueued: (() -> Unit)?,
     onDeleteQueued: (() -> Unit)?,
     onOpenWikiCitation: (String) -> Unit,
+    reasoningStreaming: Boolean,
 ) {
     val isUser = message.role == MessageRole.USER
     var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
@@ -3627,6 +3648,7 @@ private fun MessageBubble(
                                 }
                             },
                             onOpenWikiCitation = onOpenWikiCitation,
+                            reasoningStreaming = reasoningStreaming,
                         )
                     }
                 }
@@ -3715,8 +3737,6 @@ private fun ChatInputBar(
     onOpenModelPicker: () -> Unit,
     identityState: ConversationIdentityUiState,
     onSelectIdentity: (String?) -> Unit,
-    wikiScopeState: ConversationWikiUiState,
-    onOpenWikiScopePicker: () -> Unit,
     contextStatus: ContextWindowStatus,
     isCompressingContext: Boolean,
     onCompressContext: () -> Unit,
@@ -3803,12 +3823,6 @@ private fun ChatInputBar(
                         onShowDetails = {},
                     )
                 }
-                key("conversation-wiki-scope-chip") {
-                    ConversationWikiScopeChip(
-                        state = wikiScopeState,
-                        onClick = onOpenWikiScopePicker,
-                    )
-                }
                 ContextStatusChip(
                     contextStatus = contextStatus,
                     expanded = showContextDetails,
@@ -3887,32 +3901,27 @@ private fun ChatInputBar(
 }
 
 @Composable
-internal fun ConversationWikiScopeChip(
-    state: ConversationWikiUiState,
+internal fun ConversationWikiTopBarAction(
     onClick: () -> Unit,
 ) {
-    FilterChip(
-        modifier = Modifier
-            .heightIn(min = 48.dp)
-            .semantics { contentDescription = "调整本会话可用知识库" },
-        selected = state.options.any { it.enabled && !it.unavailable },
+    IconButton(
         onClick = onClick,
-        leadingIcon = {
-            Icon(
-                imageVector = Icons.AutoMirrored.Outlined.MenuBook,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-            )
-        },
-        label = {
-            Text(
-                state.toolbarLabel,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-    )
+    ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Outlined.MenuBook,
+            contentDescription = "调整本会话可用知识库",
+        )
+    }
 }
+
+internal fun shouldAutoExpandReasoningPart(
+    part: UiMessagePartDraft,
+    parts: List<UiMessagePartDraft>,
+    reasoningStreaming: Boolean,
+): Boolean = reasoningStreaming &&
+    part.type == UiMessagePartType.REASONING &&
+    !part.stable &&
+    parts.lastOrNull { it.type == UiMessagePartType.REASONING }?.index == part.index
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

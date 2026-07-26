@@ -218,6 +218,7 @@ private fun MarkdownBlockView(
 private fun MarkdownCodeBlock(block: MarkdownBlock.Code) {
     val clipboard = LocalClipboardManager.current
     val language = block.info.orEmpty().trim().substringBefore(' ').ifBlank { "text" }
+    val wrapsLines = plainTextCodeBlockWrapsLines(block.info)
     val codeTextColor = MaterialTheme.colorScheme.onSurfaceVariant
     val highlighted = remember(block.literal, language, codeTextColor) {
         tokenizeCode(block.literal, language).toAnnotatedString(codeTextColor)
@@ -252,24 +253,49 @@ private fun MarkdownCodeBlock(block: MarkdownBlock.Code) {
                     )
                 }
             }
-            Box(
-                modifier = Modifier
-                    .horizontalScroll(rememberScrollState())
-                    .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-            ) {
+            if (wrapsLines) {
                 Text(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
                     text = highlighted,
                     color = codeTextColor,
+                    softWrap = true,
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontSize = markdownCodeFontSizeSp().sp,
                         lineHeight = markdownCodeLineHeightSp().sp,
                     ),
                 )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                ) {
+                    Text(
+                        text = highlighted,
+                        color = codeTextColor,
+                        softWrap = false,
+                        style = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = markdownCodeFontSizeSp().sp,
+                            lineHeight = markdownCodeLineHeightSp().sp,
+                        ),
+                    )
+                }
             }
         }
     }
 }
+
+internal fun plainTextCodeBlockWrapsLines(info: String?): Boolean =
+    info.orEmpty()
+        .trim()
+        .substringBefore(' ')
+        .lowercase(Locale.ROOT) in plainTextCodeLanguages
+
+private val plainTextCodeLanguages = setOf("text", "txt", "plaintext", "plain")
 
 @Composable
 private fun MarkdownMathBlock(block: MarkdownBlock.Math) {

@@ -52,6 +52,7 @@ import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.chat.Conversation
 import com.harnessapk.ui.agent.AgentPackagesScreen
 import com.harnessapk.ui.chat.ChatScreen
+import com.harnessapk.ui.chat.ConversationWikiTopBarAction
 import com.harnessapk.ui.components.WarmSegmentedControl
 import com.harnessapk.ui.conversation.ConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
@@ -157,6 +158,7 @@ fun HarnessApkApp(
     var wikiImportError by remember { mutableStateOf<String?>(null) }
     var browserWikiTitle by remember { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
+    var chatWikiScopeRequestKey by remember { mutableStateOf(0) }
     var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
@@ -320,6 +322,9 @@ fun HarnessApkApp(
                     actions = {
                         when (route) {
                             Routes.ChatPattern -> {
+                                ConversationWikiTopBarAction(
+                                    onClick = { chatWikiScopeRequestKey += 1 },
+                                )
                                 IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
                                     Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
                                 }
@@ -412,6 +417,8 @@ fun HarnessApkApp(
                     autoFocusInput = entry.arguments?.getBoolean("focusInput") == true,
                     sessionConfigRequestKey = chatSessionConfigRequestKey,
                     onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
+                    wikiScopeRequestKey = chatWikiScopeRequestKey,
+                    onWikiScopeRequestConsumed = { chatWikiScopeRequestKey = 0 },
                     onOpenProjectFiles = { projectId, path ->
                         openWorkbench(projectId, ProjectWorkbenchDestination.FILES, path)
                     },

@@ -31,6 +31,27 @@ import org.junit.Test
 
 class ChatUiStateTest {
     @Test
+    fun onlyLatestReasoningPartAutoExpandsWhileStreaming() {
+        val older = UiMessagePartDraft(
+            index = 3,
+            type = UiMessagePartType.REASONING,
+            content = "旧思考",
+            stable = true,
+        )
+        val latest = UiMessagePartDraft(
+            index = 7,
+            type = UiMessagePartType.REASONING,
+            content = "最新思考",
+            stable = false,
+        )
+        val parts = listOf(older, latest)
+
+        assertFalse(shouldAutoExpandReasoningPart(older, parts, reasoningStreaming = true))
+        assertTrue(shouldAutoExpandReasoningPart(latest, parts, reasoningStreaming = true))
+        assertFalse(shouldAutoExpandReasoningPart(latest, parts, reasoningStreaming = false))
+    }
+
+    @Test
     fun persistedMessagesStateOnlyTreatsLoadedEmptyHistoryAsEmptyChat() {
         val message = ChatMessage(
             id = "historical-message",

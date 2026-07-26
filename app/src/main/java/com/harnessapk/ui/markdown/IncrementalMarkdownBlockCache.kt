@@ -79,7 +79,7 @@ internal class IncrementalMarkdownBlockCache(
 
     private fun latestSafeBoundary(source: String, maxLength: Int): Int? {
         val window = source.take(maxLength)
-        val paragraphBreaks = window.boundaryIndexes("\n\n").map { it + 2 }
+        val paragraphBreaks = paragraphBoundary.findAll(window).map { it.range.last + 1 }
         val headingBreaks = headingBoundary.findAll(window).map { it.range.first }
         val listBreaks = listBoundary.findAll(window).map { it.range.first }
         return (paragraphBreaks + headingBreaks + listBreaks)
@@ -95,14 +95,7 @@ internal class IncrementalMarkdownBlockCache(
         const val TAIL_CHUNK_ID = -1
         val headingBoundary = Regex("\n(?=#{1,6}\\s)")
         val listBoundary = Regex("\n(?=(?:[-*+]\\s|\\d+[.)]\\s))")
-    }
-}
-
-private fun String.boundaryIndexes(token: String): Sequence<Int> = sequence {
-    var start = indexOf(token)
-    while (start >= 0) {
-        yield(start)
-        start = indexOf(token, startIndex = start + token.length)
+        val paragraphBoundary = Regex("\\r?\\n\\r?\\n")
     }
 }
 

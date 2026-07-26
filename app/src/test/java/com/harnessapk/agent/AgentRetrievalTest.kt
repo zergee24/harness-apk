@@ -1648,7 +1648,11 @@ class AgentRetrievalTest {
         assertEquals(1, dao.versionCorpora.size)
         assertEquals(1, dao.chunks.size)
         assertEquals(1, dao.searchRows.size)
-        assertTrue(dao.version!!.bundlePath.endsWith("agents/agent-1/1/bundle.hbundle"))
+        assertTrue(
+            File(dao.version!!.bundlePath)
+                .invariantSeparatorsPath
+                .endsWith("agents/agent-1/1/bundle.hbundle"),
+        )
         assertTrue(File(dao.version!!.bundlePath).isFile)
         assertFalse(session.stagedFile.exists())
     }
