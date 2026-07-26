@@ -112,10 +112,40 @@ internal fun canAcceptChatSend(
 
 data class ChatDraftUiState<T>(
     val text: String,
-    val image: T?,
-    val mimeType: String,
-)
+    val attachments: List<T>,
+) {
+    @Deprecated("Use attachments")
+    constructor(text: String, image: T?, mimeType: String) : this(text, listOfNotNull(image))
+}
 
+internal fun <T> reduceTerminalDraft(
+    phase: ChatSendRequestPhase,
+    submittedText: String,
+    submittedAttachments: List<T>,
+    currentText: String,
+    currentAttachments: List<T>,
+): ChatDraftUiState<T> = when (phase) {
+    ChatSendRequestPhase.LANDED -> ChatDraftUiState(
+        text = if (currentText == submittedText) "" else currentText,
+        attachments = landedDraftAttachments(submittedAttachments, currentAttachments),
+    )
+    ChatSendRequestPhase.NOT_LANDED -> ChatDraftUiState(
+        text = currentText,
+        attachments = currentAttachments,
+    )
+    ChatSendRequestPhase.IN_FLIGHT,
+    ChatSendRequestPhase.UNKNOWN,
+    -> error("仅能结算终态发送请求")
+}
+
+internal fun <T> landedDraftAttachments(submitted: List<T>, current: List<T>): List<T> = when {
+    submitted.isEmpty() -> current
+    current == submitted -> emptyList()
+    current.size >= submitted.size && current.take(submitted.size) == submitted -> current.drop(submitted.size)
+    else -> current
+}
+
+@Deprecated("Use the attachment-list overload")
 internal fun <T> reduceTerminalDraft(
     phase: ChatSendRequestPhase,
     submittedText: String,
@@ -124,22 +154,10 @@ internal fun <T> reduceTerminalDraft(
     currentText: String,
     currentImage: T?,
     currentMimeType: String,
-): ChatDraftUiState<T> = when (phase) {
-    ChatSendRequestPhase.LANDED -> ChatDraftUiState(
-        text = if (currentText == submittedText) "" else currentText,
-        image = if (
-            currentImage == submittedImage && currentMimeType == submittedMimeType
-        ) null else currentImage,
-        mimeType = if (
-            currentImage == submittedImage && currentMimeType == submittedMimeType
-        ) "image/png" else currentMimeType,
-    )
-    ChatSendRequestPhase.NOT_LANDED -> ChatDraftUiState(
-        text = currentText,
-        image = currentImage,
-        mimeType = currentMimeType,
-    )
-    ChatSendRequestPhase.IN_FLIGHT,
-    ChatSendRequestPhase.UNKNOWN,
-    -> error("仅能结算终态发送请求")
-}
+): ChatDraftUiState<T> = reduceTerminalDraft(
+    phase = phase,
+    submittedText = submittedText,
+    submittedAttachments = listOfNotNull(submittedImage),
+    currentText = currentText,
+    currentAttachments = listOfNotNull(currentImage),
+)

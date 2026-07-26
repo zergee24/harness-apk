@@ -38,8 +38,20 @@ class ChatRepository(
     fun observeMessageParts(messageId: String): Flow<List<UiMessagePartDraft>> =
         messagePartDao.observeForMessage(messageId).map { rows -> rows.map { it.toPartDraft() } }
 
+    fun observeMessagePartsForConversation(conversationId: String): Flow<Map<String, List<UiMessagePartDraft>>> =
+        messagePartDao.observeForConversation(conversationId).map { rows ->
+            rows.groupBy(MessagePartEntity::messageId).mapValues { (_, parts) -> parts.map { it.toPartDraft() } }
+        }
+
     fun observeAttachments(messageId: String): Flow<List<ChatAttachment>> =
         attachmentDao.observeForMessage(messageId).map { rows -> rows.map { it.toDomain() } }
+
+    fun observeAttachmentsForConversation(conversationId: String): Flow<Map<String, List<ChatAttachment>>> =
+        attachmentDao.observeForConversation(conversationId).map { rows ->
+            rows.groupBy(MessageAttachmentEntity::messageId).mapValues { (_, attachments) ->
+                attachments.map { it.toDomain() }
+            }
+        }
 
     fun observeMemory(conversationId: String): Flow<ConversationMemory?> =
         memoryDao.observeForConversation(conversationId).map { it?.toDomain() }

@@ -11,12 +11,14 @@ import android.net.Uri
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.provider.Settings
+import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -264,6 +266,15 @@ fun ChatScreen(
     }.collectAsState(initial = PersistedMessagesState.Loading)
     val messageState = persistedMessages
     val messages = messageState.messagesOrEmpty()
+    val messagePartsById by remember(conversationId) {
+        container.chatRepository.observeMessagePartsForConversation(conversationId)
+    }.collectAsState(initial = emptyMap())
+    val attachmentsByMessageId by remember(conversationId) {
+        container.chatRepository.observeAttachmentsForConversation(conversationId)
+    }.collectAsState(initial = emptyMap())
+    val wikiCitationsByMessageId by remember(conversationId) {
+        container.conversationWikiRepository.observeCitationsForConversation(conversationId)
+    }.collectAsState(initial = emptyMap())
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
     val installedWikis by container.wikiRepository.observeWikis().collectAsState(initial = emptyList())
     val executionEntries by container.chatExecutionRepository
@@ -291,8 +302,7 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val inputFocusRequester = remember { FocusRequester() }
     var text by remember { mutableStateOf("") }
-    var selectedImage by remember { mutableStateOf<Uri?>(null) }
-    var selectedMimeType by remember { mutableStateOf("image/png") }
+    var selectedImages by remember { mutableStateOf<List<PendingImageAttachment>>(emptyList()) }
     var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
     var showModelPicker by remember { mutableStateOf(false) }
@@ -310,7 +320,10 @@ fun ChatScreen(
     var showWikiScopePicker by remember(conversationId) { mutableStateOf(false) }
     var showMessageSearch by remember(conversationId) { mutableStateOf(false) }
     var messageSearchQuery by remember(conversationId) { mutableStateOf("") }
+    var debouncedMessageSearchQuery by remember(conversationId) { mutableStateOf("") }
+    var messageSearchFilter by remember(conversationId) { mutableStateOf(ConversationSearchFilter.ALL) }
     var messageSearchCursor by remember(conversationId) { mutableStateOf(0) }
+    var highlightedMessageId by remember(conversationId) { mutableStateOf<String?>(null) }
     var messageSearchOriginIndex by remember(conversationId) { mutableStateOf(0) }
     var messageSearchOriginOffset by remember(conversationId) { mutableStateOf(0) }
     var conversationWikiMounts by remember(conversationId) { mutableStateOf(emptyList<com.harnessapk.wiki.ConversationWikiMount>()) }
@@ -393,14 +406,12 @@ fun ChatScreen(
         sendRequestState?.requestId,
         sendRequestState?.phase,
         sendRequestState?.currentDraftText,
-        sendRequestState?.currentDraftImage,
-        sendRequestState?.currentDraftMimeType,
+        sendRequestState?.currentDraftAttachments,
     ) {
         val request = sendRequestState ?: return@LaunchedEffect
         if (request.phase == ChatSendRequestPhase.IN_FLIGHT || request.phase == ChatSendRequestPhase.UNKNOWN) {
             text = request.currentDraftText
-            selectedImage = request.currentDraftImage
-            selectedMimeType = request.currentDraftMimeType
+            selectedImages = request.currentDraftAttachments
         }
     }
     val remoteProviderCatalog = remember(providerCatalogSnapshot.rawJson) {
@@ -440,8 +451,7 @@ fun ChatScreen(
         memory = memory,
         modelConfig = selectedModelConfig,
     )
-    val assistantActivityText = assistantActivityLabel(messages)
-    val isAssistantBusy = assistantActivityText != null
+    val isAssistantBusy = hasRunningChatExecution(executionEntries)
     val identityState = remember(
         conversation,
         messages,
@@ -475,6 +485,9 @@ fun ChatScreen(
         }.toMap()
     }
     val latestExecutionId = executionEntries.maxByOrNull(ChatExecutionEntry::sequence)?.id
+    val searchDocuments = remember(messages, messagePartsById, wikiCitationsByMessageId) {
+        buildConversationSearchDocuments(messages, messagePartsById, wikiCitationsByMessageId)
+    }
     val dismissKeyboard = {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
@@ -713,14 +726,14 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(conversationId, autoFocusInput, messages.size, text, selectedImage) {
+    LaunchedEffect(conversationId, autoFocusInput, messages.size, text, selectedImages) {
         if (
             shouldAutoFocusChatInput(
                 autoFocusRequested = autoFocusInput,
                 autoFocusAlreadyRequested = autoFocusInputRequested,
                 hasMessages = messages.isNotEmpty(),
                 text = text,
-                hasSelectedImage = selectedImage != null,
+                hasSelectedImage = selectedImages.isNotEmpty(),
             )
         ) {
             autoFocusInputRequested = true
@@ -758,6 +771,13 @@ fun ChatScreen(
             messageSearchCursor = 0
             showMessageSearch = true
             onSearchRequestConsumed()
+        }
+    }
+
+    LaunchedEffect(highlightedMessageId) {
+        if (highlightedMessageId != null) {
+            delay(1_500)
+            highlightedMessageId = null
         }
     }
 
@@ -800,39 +820,46 @@ fun ChatScreen(
         }
     }
 
-    fun updateActiveDraftSnapshot(nextText: String, nextImage: Uri?, nextMimeType: String) {
+    fun updateActiveDraftSnapshot(nextText: String, nextAttachments: List<PendingImageAttachment>) {
         val request = container.chatSendRecoveryStore.current(conversationId) ?: return
         container.chatSendRecoveryStore.updateCurrentDraft(
             conversationId = conversationId,
             expectedRequestId = request.requestId,
             text = nextText,
-            image = nextImage,
-            mimeType = nextMimeType,
+            attachments = nextAttachments,
         )
     }
 
-    fun syncActiveDraftSnapshot() = updateActiveDraftSnapshot(text, selectedImage, selectedMimeType)
+    fun syncActiveDraftSnapshot() = updateActiveDraftSnapshot(text, selectedImages)
 
     fun deleteReplacedImageIfNoLongerSubmitted(uri: Uri) {
-        if (container.chatSendRecoveryStore.current(conversationId)?.submittedImage == uri) return
+        if (container.chatSendRecoveryStore.current(conversationId)?.submittedAttachments?.any { it.uri == uri } == true) return
         scope.launch {
             container.chatImageStore.deleteIfManaged(uri)
         }
     }
 
-    fun replaceSelectedImage(uri: Uri, mimeType: String) {
-        val previousUri = selectedImage
-        updateActiveDraftSnapshot(text, uri, mimeType)
-        selectedImage = uri
-        selectedMimeType = mimeType
-        previousUri?.let(::deleteReplacedImageIfNoLongerSubmitted)
+    fun appendSelectedImages(images: List<PendingImageAttachment>) {
+        val withinLimit = images.filter { image ->
+            val size = chatImageSizeBytes(context, image.uri)
+            size == null || size <= MAX_CHAT_IMAGE_BYTES
+        }
+        if (withinLimit.size < images.size) errorText = "图片超过 8 MB，请选择更小的截图或图片"
+        val distinct = withinLimit.filterNot { candidate -> selectedImages.any { it.uri == candidate.uri } }
+        val available = (MAX_CHAT_IMAGE_ATTACHMENTS - selectedImages.size).coerceAtLeast(0)
+        val accepted = distinct.take(available)
+        if (accepted.size < distinct.size) errorText = "每条消息最多添加 $MAX_CHAT_IMAGE_ATTACHMENTS 张图片"
+        if (accepted.isEmpty()) return
+        val next = selectedImages + accepted
+        updateActiveDraftSnapshot(text, next)
+        selectedImages = next
     }
 
-    fun removeSelectedImage() {
-        val uri = selectedImage ?: return
-        updateActiveDraftSnapshot(text, null, "image/png")
-        selectedImage = null
-        selectedMimeType = "image/png"
+    fun removeSelectedImage(uri: Uri) {
+        if (selectedImages.none { it.uri == uri }) return
+        val next = selectedImages.filterNot { it.uri == uri }
+        updateActiveDraftSnapshot(text, next)
+        selectedImages = next
         deleteReplacedImageIfNoLongerSubmitted(uri)
     }
 
@@ -841,7 +868,7 @@ fun ChatScreen(
         val uri = pendingState.savedUri?.let(Uri::parse)
         pendingCameraUriString = pendingState.clear().savedUri
         if (success && uri != null) {
-            replaceSelectedImage(uri, "image/jpeg")
+            appendSelectedImages(listOf(PendingImageAttachment(uri, "image/jpeg")))
         } else {
             uri?.let { cancelledUri ->
                 scope.launch {
@@ -849,7 +876,7 @@ fun ChatScreen(
                 }
             }
             val feedback = cameraCancelledFeedback(text, errorText)
-            updateActiveDraftSnapshot(feedback.text, selectedImage, selectedMimeType)
+            updateActiveDraftSnapshot(feedback.text, selectedImages)
             text = feedback.text
             errorText = feedback.errorText
         }
@@ -870,13 +897,15 @@ fun ChatScreen(
         }
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            replaceSelectedImage(uri, context.contentResolver.getType(uri) ?: "image/png")
-        }
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_CHAT_IMAGE_ATTACHMENTS),
+    ) { uris ->
+        appendSelectedImages(uris.map { uri ->
+            PendingImageAttachment(uri, context.contentResolver.getType(uri) ?: "image/png")
+        })
     }
 
-    suspend fun settlePersistedSend(submittedImage: Uri?): List<String> {
+    suspend fun settlePersistedSend(submittedAttachments: List<PendingImageAttachment>): List<String> {
         val problems = mutableListOf<String>()
         try {
             conversation = container.chatRepository.conversation(conversationId)
@@ -887,9 +916,9 @@ fun ChatScreen(
         } catch (error: Throwable) {
             problems += "会话状态刷新失败：${error.toUserMessage()}"
         }
-        submittedImage?.let { sentUri ->
+        submittedAttachments.forEach { attachment ->
             try {
-                container.chatImageStore.deleteIfManaged(sentUri)
+                container.chatImageStore.deleteIfManaged(attachment.uri)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -921,7 +950,7 @@ fun ChatScreen(
     fun sendNow() {
         val submittedText = text
         val body = submittedText.trim()
-        if (body.isEmpty() && selectedImage == null) return
+        if (body.isEmpty() && selectedImages.isEmpty()) return
         if (
             firstMessagePending ||
             sendSnapshotInFlight ||
@@ -937,14 +966,12 @@ fun ChatScreen(
             projectContext = projectContext,
             markdowns = deliverables,
         )
-        val draftImage = selectedImage
-        val draftMimeType = selectedMimeType
+        val draftAttachments = selectedImages
         val requestId = UUID.randomUUID().toString()
         val requestState = ChatSendRequestState(
             requestId = requestId,
             submittedText = submittedText,
-            submittedImage = draftImage,
-            submittedMimeType = draftMimeType,
+            submittedAttachments = draftAttachments,
             isFirstUserMessage = isFirstUserMessage,
         )
         sendSnapshotInFlight = true
@@ -963,9 +990,7 @@ fun ChatScreen(
                 requestId = requestId,
                 conversationId = conversationId,
                 content = body.ifEmpty { "请看这张截图" },
-                attachments = draftImage?.let { image ->
-                    listOf(PendingImageAttachment(image, draftMimeType))
-                }.orEmpty(),
+                attachments = draftAttachments,
                 providerId = selectedProviderId,
                 model = selectedModel,
                 reasoningEffort = selectedReasoningEffort,
@@ -1001,15 +1026,12 @@ fun ChatScreen(
                 val terminalDraft = reduceTerminalDraft(
                     phase = consumed.phase,
                     submittedText = consumed.submittedText,
-                    submittedImage = consumed.submittedImage,
-                    submittedMimeType = consumed.submittedMimeType,
+                    submittedAttachments = consumed.submittedAttachments,
                     currentText = consumed.currentDraftText,
-                    currentImage = consumed.currentDraftImage,
-                    currentMimeType = consumed.currentDraftMimeType,
+                    currentAttachments = consumed.currentDraftAttachments,
                 )
                 text = terminalDraft.text
-                selectedImage = terminalDraft.image
-                selectedMimeType = terminalDraft.mimeType
+                selectedImages = terminalDraft.attachments
                 persistedUserMessage = true
                 firstMessagePending = reduceFirstMessagePending(
                     pending = firstMessagePending,
@@ -1017,7 +1039,7 @@ fun ChatScreen(
                     event = FirstMessagePendingEvent.USER_OBSERVED,
                 )
                 sessionStatus = null
-                val problems = settlePersistedSend(consumed.submittedImage)
+                val problems = settlePersistedSend(consumed.submittedAttachments)
                 reportPostPersistProblems(
                     prefix = if (consumed.originalFailure == null) "消息已发送"
                     else "消息已入队，后台调度或执行启动失败，将由恢复机制继续处理",
@@ -1031,17 +1053,15 @@ fun ChatScreen(
                 val terminalDraft = reduceTerminalDraft(
                     phase = consumed.phase,
                     submittedText = consumed.submittedText,
-                    submittedImage = consumed.submittedImage,
-                    submittedMimeType = consumed.submittedMimeType,
+                    submittedAttachments = consumed.submittedAttachments,
                     currentText = consumed.currentDraftText,
-                    currentImage = consumed.currentDraftImage,
-                    currentMimeType = consumed.currentDraftMimeType,
+                    currentAttachments = consumed.currentDraftAttachments,
                 )
                 text = terminalDraft.text
-                selectedImage = terminalDraft.image
-                selectedMimeType = terminalDraft.mimeType
-                if (consumed.submittedImage != null && consumed.currentDraftImage != consumed.submittedImage) {
-                    scope.launch { container.chatImageStore.deleteIfManaged(consumed.submittedImage) }
+                selectedImages = terminalDraft.attachments
+                val retainedUris = consumed.currentDraftAttachments.mapTo(hashSetOf()) { it.uri }
+                consumed.submittedAttachments.filterNot { it.uri in retainedUris }.forEach { attachment ->
+                    scope.launch { container.chatImageStore.deleteIfManaged(attachment.uri) }
                 }
                 firstMessagePending = reduceFirstMessagePending(
                     pending = firstMessagePending,
@@ -1211,7 +1231,7 @@ fun ChatScreen(
 
     fun sendFileChangeNow() {
         val body = text.trim()
-        when (decideFileChangeSend(selectedProjectId, body, selectedImage != null, isAssistantBusy)) {
+        when (decideFileChangeSend(selectedProjectId, body, selectedImages.isNotEmpty(), isAssistantBusy)) {
             FileChangeSendDecision.BLOCKED_NEEDS_PROJECT -> {
                 errorText = "请先选择项目"
                 return
@@ -1660,16 +1680,19 @@ fun ChatScreen(
     }
 
     if (showMessageSearch) {
-        val matches = remember(messages, messageSearchQuery) {
-            val query = messageSearchQuery.trim()
-            if (query.isBlank()) emptyList() else messages.mapIndexedNotNull { index, message ->
-                index.takeIf { message.content.contains(query, ignoreCase = true) }
-            }
+        LaunchedEffect(messageSearchQuery) {
+            delay(150)
+            debouncedMessageSearchQuery = messageSearchQuery
+        }
+        val matches = remember(searchDocuments, debouncedMessageSearchQuery, messageSearchFilter) {
+            searchConversationDocuments(searchDocuments, debouncedMessageSearchQuery, messageSearchFilter)
         }
         fun jumpToSearchResult(cursor: Int) {
             if (matches.isEmpty()) return
             messageSearchCursor = cursor.mod(matches.size)
-            scope.launch { listState.animateScrollToItem(matches[messageSearchCursor]) }
+            val match = matches[messageSearchCursor]
+            highlightedMessageId = match.messageId
+            scope.launch { listState.animateScrollToItem(match.messageIndex) }
         }
         AlertDialog(
             onDismissRequest = {
@@ -1690,6 +1713,24 @@ fun ChatScreen(
                         leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
                         label = { Text("关键词") },
                     )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        ConversationSearchFilter.entries.forEach { filter ->
+                            FilterChip(
+                                modifier = Modifier.heightIn(min = 48.dp),
+                                selected = messageSearchFilter == filter,
+                                onClick = {
+                                    messageSearchFilter = filter
+                                    messageSearchCursor = 0
+                                },
+                                label = { Text(filter.label) },
+                            )
+                        }
+                    }
                     Text(
                         text = if (matches.isEmpty()) "没有匹配消息" else "${messageSearchCursor + 1} / ${matches.size}",
                         style = MaterialTheme.typography.labelMedium,
@@ -1848,19 +1889,13 @@ fun ChatScreen(
                     agentOpening = agentOpening,
                 )
                 items(messages, key = { it.id }) { message ->
-                    val persistedParts by container.chatRepository
-                        .observeMessageParts(message.id)
-                        .collectAsState(initial = emptyList())
-                    val wikiCitations by remember(message.id) {
-                        container.conversationWikiRepository.observeCitationsForMessage(message.id)
-                    }.collectAsState(initial = emptyList())
-                    val attachments by remember(message.id, message.role) {
-                        if (message.role == MessageRole.USER) {
-                            container.chatRepository.observeAttachments(message.id)
-                        } else {
-                            flowOf<List<ChatAttachment>>(emptyList())
-                        }
-                    }.collectAsState(initial = emptyList())
+                    val persistedParts = messagePartsById[message.id].orEmpty()
+                    val wikiCitations = wikiCitationsByMessageId[message.id].orEmpty()
+                    val attachments = if (message.role == MessageRole.USER) {
+                        attachmentsByMessageId[message.id].orEmpty()
+                    } else {
+                        emptyList()
+                    }
                     ChatContentRail(contentMaxWidth = contentMaxWidth) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             if (message.role == MessageRole.SYSTEM) {
@@ -1905,10 +1940,9 @@ fun ChatScreen(
                                                 val attachments = container.chatRepository.listAttachments(message.id)
                                                 if (!container.chatExecutionRepository.deleteQueued(entry.id)) return@launch
                                                 text = message.content
-                                                attachments.firstOrNull()?.let { attachment ->
-                                                    selectedImage = Uri.parse(attachment.uri)
-                                                    selectedMimeType = attachment.mimeType
-                                                }
+                                                selectedImages = attachments.map { attachment ->
+                                                    PendingImageAttachment(Uri.parse(attachment.uri), attachment.mimeType)
+                                                }.take(MAX_CHAT_IMAGE_ATTACHMENTS)
                                                 syncActiveDraftSnapshot()
                                             }
                                         }
@@ -1935,8 +1969,24 @@ fun ChatScreen(
                                         }
                                     },
                                     onOpenWikiCitation = onOpenWikiCitation,
-                                    reasoningStreaming = message.status == MessageStatus.STREAMING,
+                                    reasoningStreaming = message.status == MessageStatus.PENDING ||
+                                        message.status == MessageStatus.STREAMING,
+                                    highlighted = highlightedMessageId == message.id,
                                 )
+                                executionEntry?.takeIf { entry ->
+                                    message.role == MessageRole.USER &&
+                                        entry.automaticRetryCount > 0 &&
+                                        entry.assistantMessageId == null
+                                }?.let { entry ->
+                                    RecoveryAnswerPlaceholder(
+                                        entry = entry,
+                                        onRetry = if (entry.status == ChatExecutionStatus.FAILED) {
+                                            { container.chatExecutionCoordinator.retryFailed(entry.id) }
+                                        } else {
+                                            null
+                                        },
+                                    )
+                                }
                             }
                             markdownFileChangeStates
                                 .filter { it.draft.sourceUserMessageId == message.id }
@@ -2011,10 +2061,10 @@ fun ChatScreen(
             ChatInputBar(
                 text = text,
                 onTextChange = {
-                    updateActiveDraftSnapshot(it, selectedImage, selectedMimeType)
+                    updateActiveDraftSnapshot(it, selectedImages)
                     text = it
                 },
-                selectedImage = selectedImage,
+                selectedImages = selectedImages,
                 onTakePhoto = {
                     when (cameraAction(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)) {
                         ChatImageSourceAction.REQUEST_CAMERA_PERMISSION -> cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
@@ -2060,11 +2110,11 @@ fun ChatScreen(
                         identityMessageStateKnown,
                         container.chatSendRecoveryStore.current(conversationId),
                     ) &&
-                    (text.isNotBlank() || selectedImage != null),
+                    (text.isNotBlank() || selectedImages.isNotEmpty()),
                 isBusy = isAssistantBusy,
                 onSend = {
                     handleSendIntent(
-                        hasSelectedImage = selectedImage != null,
+                        hasSelectedImage = selectedImages.isNotEmpty(),
                         dismissKeyboard = dismissKeyboard,
                         sendNow = ::sendNow,
                     )
@@ -2398,6 +2448,9 @@ internal fun executionStatusLabel(status: ChatExecutionStatus): String? = when (
     ChatExecutionStatus.SUCCEEDED,
     -> null
 }
+
+internal fun hasRunningChatExecution(entries: List<ChatExecutionEntry>): Boolean =
+    entries.any { it.status == ChatExecutionStatus.RUNNING }
 
 internal fun executionActivityLabel(entry: ChatExecutionEntry): String? = when (entry.status) {
     ChatExecutionStatus.QUEUED -> if (entry.automaticRetryCount > 0) {
@@ -2885,6 +2938,8 @@ private fun SessionConfigDialog(
 private const val MAX_REVIEW_DIFF_LINES = 120
 private const val MAX_WRITE_BACK_EVENT_PATHS = 3
 private const val MAX_TTS_TEXT_LENGTH = 4_000
+internal const val MAX_CHAT_IMAGE_ATTACHMENTS = 4
+internal const val MAX_CHAT_IMAGE_BYTES = 8L * 1024L * 1024L
 private const val MAX_CHAT_CONTENT_WIDTH_DP = 760
 private const val MAX_MESSAGE_BUBBLE_WIDTH_DP = 700
 internal const val CHAT_SCROLL_TO_BOTTOM_OFFSET_PX = 1_000_000
@@ -3345,16 +3400,20 @@ private fun MessagePartsColumn(
     onLinkClick: (String) -> Unit,
     onOpenWikiCitation: (String) -> Unit,
     reasoningStreaming: Boolean,
+    forceExpandProcess: Boolean,
+    executionEntry: ChatExecutionEntry?,
 ) {
     val sourceState = remember(parts, wikiCitations) {
         messageSourcesUiState(parts = parts, citations = wikiCitations)
     }
+    val contentParts = parts.filter { it.type in messageContentPartTypes }
+    val processParts = parts.filter { it.type in messageProcessPartTypes }
+    var processExpanded by remember { mutableStateOf(reasoningStreaming) }
+    LaunchedEffect(reasoningStreaming, forceExpandProcess) {
+        processExpanded = reasoningStreaming || forceExpandProcess
+    }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        parts
-            .filterNot { part ->
-                part.type == UiMessagePartType.AGENT_SOURCES || part.type == UiMessagePartType.WIKI_SOURCES
-            }
-            .forEach { part ->
+        contentParts.forEach { part ->
             key(part.index, part.type) {
                 MessagePartView(
                     part = part,
@@ -3370,14 +3429,126 @@ private fun MessagePartsColumn(
                 )
             }
         }
-        sourceState?.let { state ->
-            MessageSourcesPart(
-                state = state,
-                onOpenWikiCitation = onOpenWikiCitation,
-            )
+        if (reasoningStreaming) {
+            processParts.forEach { part ->
+                key(part.index, part.type) {
+                    MessagePartView(
+                        part = part,
+                        textColor = textColor,
+                        imageStore = imageStore,
+                        hideAgentCitationMarkers = hideAgentCitationMarkers,
+                        onLinkClick = onLinkClick,
+                        autoExpandReasoning = true,
+                    )
+                }
+            }
+            sourceState?.let { state ->
+                MessageSourcesPart(state = state, onOpenWikiCitation = onOpenWikiCitation)
+            }
+        } else if (processParts.isNotEmpty() || sourceState != null) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clickable { processExpanded = !processExpanded },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            modifier = Modifier.weight(1f),
+                            text = completedProcessSummary(processParts, sourceState, executionEntry),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Icon(
+                            imageVector = if (processExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                            contentDescription = if (processExpanded) "收起过程与来源" else "展开过程与来源",
+                        )
+                    }
+                    if (processExpanded) {
+                        processParts.forEach { part ->
+                            key(part.index, part.type) {
+                                MessagePartView(
+                                    part = part,
+                                    textColor = textColor,
+                                    imageStore = imageStore,
+                                    hideAgentCitationMarkers = hideAgentCitationMarkers,
+                                    onLinkClick = onLinkClick,
+                                    autoExpandReasoning = true,
+                                )
+                            }
+                        }
+                        sourceState?.let { state ->
+                            MessageSourcesPart(
+                                state = state,
+                                onOpenWikiCitation = onOpenWikiCitation,
+                                embedded = true,
+                                expandedOverride = true,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
+
+internal fun completedProcessSummary(
+    processParts: List<UiMessagePartDraft>,
+    sourceState: MessageSourcesUiState?,
+    executionEntry: ChatExecutionEntry? = null,
+): String = buildList {
+    executionEntry?.let { entry ->
+        executionStatusLabel(entry.status)?.let(::add)
+        val elapsedMillis = (entry.updatedAt - entry.createdAt).coerceAtLeast(0L)
+        if (entry.status !in setOf(ChatExecutionStatus.QUEUED, ChatExecutionStatus.RUNNING) && elapsedMillis > 0L) {
+            add(if (elapsedMillis < 1_000L) "${elapsedMillis}ms" else "${elapsedMillis / 1_000L}s")
+        }
+    }
+    val reasoningCount = processParts.count { it.type == UiMessagePartType.REASONING }
+    val toolCount = processParts.count {
+        it.type == UiMessagePartType.TOOL_CALL || it.type == UiMessagePartType.TOOL_RESULT
+    }
+    val searchCount = processParts.count { it.type == UiMessagePartType.SEARCH_RESULT }
+    if (reasoningCount > 0) add("思考 $reasoningCount")
+    if (toolCount > 0) add("工具 $toolCount")
+    if (searchCount > 0) add("搜索 $searchCount")
+    sourceState?.collapsedSummary?.takeIf(String::isNotBlank)?.let(::add)
+    if (isEmpty()) add("过程与来源")
+}.joinToString(" · ")
+
+private val messageContentPartTypes = setOf(
+    UiMessagePartType.TEXT,
+    UiMessagePartType.IMAGE,
+    UiMessagePartType.DOCUMENT,
+    UiMessagePartType.SYSTEM_EVENT,
+)
+
+private val messageProcessPartTypes = setOf(
+    UiMessagePartType.REASONING,
+    UiMessagePartType.SEARCH_RESULT,
+    UiMessagePartType.TOOL_CALL,
+    UiMessagePartType.TOOL_RESULT,
+    UiMessagePartType.ERROR_DETAIL,
+    UiMessagePartType.FILE_CHANGE,
+)
+
+internal fun chatImageSizeBytes(context: android.content.Context, uri: Uri): Long? = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+    } ?: context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+        descriptor.length.takeIf { it >= 0L }
+    }
+}.getOrNull()
 
 @Composable
 private fun MessagePartView(
@@ -3635,6 +3806,7 @@ private fun MessageBubble(
     onOpenBatterySettings: (() -> Unit)?,
     onOpenWikiCitation: (String) -> Unit,
     reasoningStreaming: Boolean,
+    highlighted: Boolean,
 ) {
     val isUser = message.role == MessageRole.USER
     var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
@@ -3665,14 +3837,23 @@ private fun MessageBubble(
             ChatBubbleSide.END -> Arrangement.End
         },
     ) {
-        Surface(
-            modifier = Modifier.widthIn(max = maxBubbleWidth),
-            shape = RoundedCornerShape(
+        val bubbleShape = RoundedCornerShape(
                 topStart = 18.dp,
                 topEnd = 18.dp,
                 bottomStart = if (isUser) 18.dp else 6.dp,
                 bottomEnd = if (isUser) 6.dp else 18.dp,
-            ),
+            )
+        Surface(
+            modifier = Modifier
+                .widthIn(max = maxBubbleWidth)
+                .then(
+                    if (highlighted) {
+                        Modifier.border(2.dp, MaterialTheme.colorScheme.primary, bubbleShape)
+                    } else {
+                        Modifier
+                    },
+                ),
+            shape = bubbleShape,
             color = containerColor,
             contentColor = contentColor,
             tonalElevation = 0.dp,
@@ -3771,6 +3952,8 @@ private fun MessageBubble(
                             },
                             onOpenWikiCitation = onOpenWikiCitation,
                             reasoningStreaming = reasoningStreaming,
+                            forceExpandProcess = highlighted,
+                            executionEntry = executionEntry,
                         )
                     }
                 }
@@ -3919,6 +4102,48 @@ private fun ChatQueueStrip(entries: List<ChatExecutionEntry>) {
 }
 
 @Composable
+private fun RecoveryAnswerPlaceholder(
+    entry: ChatExecutionEntry,
+    onRetry: (() -> Unit)?,
+) {
+    val label = when (entry.status) {
+        ChatExecutionStatus.QUEUED -> "正在排队恢复回答"
+        ChatExecutionStatus.RUNNING -> "正在恢复回答"
+        ChatExecutionStatus.FAILED -> entry.errorMessage ?: "回答恢复失败"
+        ChatExecutionStatus.CANCELLED -> "回答恢复已取消"
+        ChatExecutionStatus.INTERRUPTED -> "回答恢复已中断"
+        ChatExecutionStatus.SUCCEEDED -> "回答已恢复"
+        ChatExecutionStatus.STEERED -> "恢复任务已调整"
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (entry.status == ChatExecutionStatus.QUEUED || entry.status == ChatExecutionStatus.RUNNING) {
+                LinearProgressIndicator(modifier = Modifier.weight(1f))
+            }
+            Text(
+                modifier = Modifier.weight(2f),
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            onRetry?.let { retry ->
+                IconButton(modifier = Modifier.size(48.dp), onClick = retry) {
+                    Icon(Icons.Outlined.Refresh, contentDescription = "重试恢复回答")
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun MessageSelectionCopyDialog(
     text: String,
     onCopyAll: () -> Unit,
@@ -3954,10 +4179,10 @@ private fun MessageSelectionCopyDialog(
 private fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
-    selectedImage: Uri?,
+    selectedImages: List<PendingImageAttachment>,
     onTakePhoto: () -> Unit,
     onPickFromAlbum: () -> Unit,
-    onRemoveImage: () -> Unit,
+    onRemoveImage: (Uri) -> Unit,
     showWebSearch: Boolean,
     webSearchEnabled: Boolean,
     onToggleWebSearch: (Boolean) -> Unit,
@@ -3985,7 +4210,7 @@ private fun ChatInputBar(
     var showContextDetails by remember { mutableStateOf(false) }
     val trailingAction = chatInputTrailingAction(
         text = text,
-        hasSelectedImage = selectedImage != null,
+        hasSelectedImage = selectedImages.isNotEmpty(),
         isBusy = isBusy,
     )
 
@@ -4002,8 +4227,13 @@ private fun ChatInputBar(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            selectedImage?.let {
-                SelectedImagePreview(uri = it, onRemove = onRemoveImage)
+            if (selectedImages.isNotEmpty()) {
+                SelectedImagesPreview(
+                    images = selectedImages,
+                    onRemove = onRemoveImage,
+                    onTakePhoto = onTakePhoto,
+                    onPickFromAlbum = onPickFromAlbum,
+                )
             }
             Row(
                 modifier = Modifier
@@ -4028,19 +4258,16 @@ private fun ChatInputBar(
                     )
                 }
                 if (showVoiceInput) {
-                    FilterChip(
-                        modifier = Modifier.heightIn(min = 48.dp),
-                        selected = false,
+                    IconButton(
+                        modifier = Modifier.size(48.dp),
                         onClick = onStartVoiceTranscription,
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Outlined.Mic,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        },
-                        label = { Text("语音") },
-                    )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Mic,
+                            contentDescription = "语音输入",
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
                 }
                 ModelStatusChip(
                     providers = providers,
@@ -4338,7 +4565,35 @@ private fun ContextUsageRing(
 }
 
 @Composable
-private fun SelectedImagePreview(uri: Uri, onRemove: () -> Unit) {
+private fun SelectedImagesPreview(
+    images: List<PendingImageAttachment>,
+    onRemove: (Uri) -> Unit,
+    onTakePhoto: () -> Unit,
+    onPickFromAlbum: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        images.forEachIndexed { index, image ->
+            SelectedImageThumbnail(
+                uri = image.uri,
+                position = index + 1,
+                total = images.size,
+                onRemove = { onRemove(image.uri) },
+            )
+        }
+        if (images.size < MAX_CHAT_IMAGE_ATTACHMENTS) {
+            ChatImageSourceEntryMenu(onTakePhoto = onTakePhoto, onPickFromAlbum = onPickFromAlbum)
+        }
+    }
+}
+
+@Composable
+private fun SelectedImageThumbnail(uri: Uri, position: Int, total: Int, onRemove: () -> Unit) {
     val context = LocalContext.current
     val bitmap = remember(uri) {
         runCatching {
@@ -4348,8 +4603,8 @@ private fun SelectedImagePreview(uri: Uri, onRemove: () -> Unit) {
         }.getOrNull()
     }
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.widthIn(min = 120.dp, max = 160.dp),
+        shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
         Row(
@@ -4360,7 +4615,7 @@ private fun SelectedImagePreview(uri: Uri, onRemove: () -> Unit) {
             if (bitmap != null) {
                 Image(
                     bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "已选择图片",
+                    contentDescription = "已选择图片 $position，共 $total 张",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .size(72.dp)
@@ -4377,11 +4632,8 @@ private fun SelectedImagePreview(uri: Uri, onRemove: () -> Unit) {
                     Icon(Icons.Outlined.Image, contentDescription = null)
                 }
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text("图片已选择", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            }
             IconButton(onClick = onRemove) {
-                Icon(Icons.Outlined.Close, contentDescription = "移除图片")
+                Icon(Icons.Outlined.Close, contentDescription = "移除第 $position 张图片")
             }
         }
     }

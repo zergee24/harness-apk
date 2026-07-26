@@ -82,15 +82,14 @@ internal fun messageSourcesUiState(
 internal fun MessageSourcesPart(
     state: MessageSourcesUiState,
     onOpenWikiCitation: (String) -> Unit,
+    embedded: Boolean = false,
+    expandedOverride: Boolean? = null,
 ) {
     var expanded by remember(state) { mutableStateOf(false) }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
-    ) {
+    val effectiveExpanded = expandedOverride ?: expanded
+    val content: @Composable () -> Unit = {
         Column(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            modifier = if (embedded) Modifier.fillMaxWidth() else Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(
@@ -104,18 +103,20 @@ internal fun MessageSourcesPart(
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
-                IconButton(
-                    modifier = Modifier.size(48.dp),
-                    onClick = { expanded = !expanded },
-                ) {
-                    Icon(
-                        imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        contentDescription = if (expanded) "收起参考资料" else "展开参考资料",
-                        modifier = Modifier.size(20.dp),
-                    )
+                if (expandedOverride == null) {
+                    IconButton(
+                        modifier = Modifier.size(48.dp),
+                        onClick = { expanded = !expanded },
+                    ) {
+                        Icon(
+                            imageVector = if (effectiveExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                            contentDescription = if (effectiveExpanded) "收起参考资料" else "展开参考资料",
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
             }
-            if (expanded) {
+            if (effectiveExpanded) {
                 state.wikiGroups.forEachIndexed { groupIndex, group ->
                     if (groupIndex > 0) HorizontalDivider()
                     Text(
@@ -179,5 +180,15 @@ internal fun MessageSourcesPart(
                 }
             }
         }
+    }
+    if (embedded) {
+        content()
+    } else {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.56f),
+            content = content,
+        )
     }
 }

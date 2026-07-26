@@ -507,6 +507,10 @@ class ChatUiStateTest {
         assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = true, isBusy = false))
         assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true))
         assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "下一轮", hasSelectedImage = false, isBusy = true))
+
+        assertFalse(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.QUEUED))))
+        assertFalse(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.SUCCEEDED))))
+        assertTrue(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.RUNNING))))
     }
 
     @Test
@@ -529,6 +533,18 @@ class ChatUiStateTest {
 
         assertEquals("正在检索知识库", executionActivityLabel(running))
         assertEquals("连接中断，准备重试 2/2", executionActivityLabel(retrying))
+    }
+
+    @Test
+    fun completedProcessSummaryGroupsReasoningToolsAndSearch() {
+        val parts = listOf(
+            UiMessagePartDraft(0, UiMessagePartType.REASONING, "thinking", stable = true),
+            UiMessagePartDraft(1, UiMessagePartType.TOOL_CALL, "call", stable = true),
+            UiMessagePartDraft(2, UiMessagePartType.TOOL_RESULT, "result", stable = true),
+            UiMessagePartDraft(3, UiMessagePartType.SEARCH_RESULT, "search", stable = true),
+        )
+
+        assertEquals("思考 1 · 工具 2 · 搜索 1", completedProcessSummary(parts, sourceState = null))
     }
 
     @Test
