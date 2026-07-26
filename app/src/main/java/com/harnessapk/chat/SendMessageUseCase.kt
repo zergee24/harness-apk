@@ -107,6 +107,7 @@ class SendMessageUseCase(
         webSearchContext: WebSearchContext? = null,
         nativeWebSearchMode: NativeWebSearchMode? = null,
         onAssistantCreated: suspend (String) -> Unit = {},
+        onPhaseChanged: suspend (ChatExecutionPhase) -> Unit = {},
     ): ChatExecutionResult = withContext(dispatchers.io) {
         val conversation = requireNotNull(chatRepository.conversation(entry.conversationId)) {
             "待执行的会话不存在"
@@ -192,6 +193,7 @@ class SendMessageUseCase(
             )
             if (fixedAgentConversation && agentContext == null) throw AppError.AgentUnavailable()
             val wikiScope = entry.requestContext.wikiScopeSnapshot.orEmpty()
+            if (wikiScope.isNotEmpty()) onPhaseChanged(ChatExecutionPhase.RETRIEVING_KNOWLEDGE)
             wikiContext = if (wikiScope.isEmpty()) {
                 null
             } else {
@@ -236,46 +238,28 @@ class SendMessageUseCase(
                 webSearchRequested = effectiveSearchContexts.nativeWebSearchMode != null,
             )
             requestDiagnostics = modelAwareRequest.diagnostics
-
-            var retriesUsed = 0
-            while (true) {
-                streamCompleted = false
-                val activeStreamClock = TimeSource.Monotonic.markNow()
-                val activeAccumulator = StreamingMessageAccumulator()
-                streamClock = activeStreamClock
-                accumulator = activeAccumulator
-                val outputTransformerPipeline = outputTransformerPipelineFactory()
-                try {
-                    client.streamChatEvents(modelAwareRequest.request).collect { event ->
-                        outputTransformerPipeline.transform(event).forEach { transformedEvent ->
-                            receivedChars += transformedEvent.visiblePayloadLength()
-                            activeAccumulator.onEvent(
-                                transformedEvent,
-                                activeStreamClock.elapsedNow().inWholeMilliseconds,
-                            )?.let { flush ->
-                                flushCount += 1
-                                latestSnapshot = flush.snapshot
-                                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, flush.snapshot)
-                            }
-                        }
+            onPhaseChanged(ChatExecutionPhase.GENERATING)
+            streamCompleted = false
+            val activeStreamClock = TimeSource.Monotonic.markNow()
+            val activeAccumulator = StreamingMessageAccumulator()
+            streamClock = activeStreamClock
+            accumulator = activeAccumulator
+            val outputTransformerPipeline = outputTransformerPipelineFactory()
+            client.streamChatEvents(modelAwareRequest.request).collect { event ->
+                outputTransformerPipeline.transform(event).forEach { transformedEvent ->
+                    receivedChars += transformedEvent.visiblePayloadLength()
+                    activeAccumulator.onEvent(
+                        transformedEvent,
+                        activeStreamClock.elapsedNow().inWholeMilliseconds,
+                    )?.let { flush ->
+                        flushCount += 1
+                        latestSnapshot = flush.snapshot
+                        chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, flush.snapshot)
                     }
-                    streamCompleted = true
-                    break
-                } catch (error: Throwable) {
-                    if (!currentCoroutineContext().isActive ||
-                        !shouldRetryStreamAfterTransportFailure(error, retriesUsed)
-                    ) {
-                        throw error
-                    }
-                    retriesUsed += 1
-                    latestSnapshot = StreamingMessageSnapshot(
-                        status = MessageStatus.PENDING,
-                        parts = emptyList(),
-                    )
-                    chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
-                    delay(STREAM_TRANSPORT_RETRY_DELAY_MILLIS)
                 }
             }
+            streamCompleted = true
+            onPhaseChanged(ChatExecutionPhase.FINALIZING)
             effectiveSearchContexts.webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
                 latestSnapshot = appendVisibleTextPart(requireNotNull(latestSnapshot), it)
                 chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, requireNotNull(latestSnapshot))
@@ -397,6 +381,7 @@ class SendMessageUseCase(
                 status = ChatExecutionStatus.FAILED,
                 assistantMessageId = failedAssistantId,
                 errorMessage = error.toUserMessage(),
+                retryableInterruption = isRetryableTransportFailure(error),
             )
         }
     }
@@ -684,12 +669,8 @@ private fun String.asLlmFailureMessage(): String {
     }
 }
 
-private const val MAX_STREAM_TRANSPORT_RETRIES = 1
-private const val STREAM_TRANSPORT_RETRY_DELAY_MILLIS = 1_000L
-
-internal fun shouldRetryStreamAfterTransportFailure(error: Throwable, retriesUsed: Int): Boolean =
-    retriesUsed < MAX_STREAM_TRANSPORT_RETRIES &&
-        generateSequence(error) { it.cause }.any { cause -> cause is IOException }
+internal fun isRetryableTransportFailure(error: Throwable): Boolean =
+    generateSequence(error) { it.cause }.any { cause -> cause is IOException }
 
 private data class ImagePayload(
     val bytes: ByteArray,
@@ -700,4 +681,5 @@ data class ChatExecutionResult(
     val status: ChatExecutionStatus,
     val assistantMessageId: String?,
     val errorMessage: String?,
+    val retryableInterruption: Boolean = false,
 )

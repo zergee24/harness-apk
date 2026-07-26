@@ -150,6 +150,13 @@ class ChatExecutionModelsTest {
     }
 
     @Test
+    fun automaticRetryBackoffIsBoundedAndIncreases() {
+        assertEquals(1_000L, automaticRetryDelayMillis(1))
+        assertEquals(2_500L, automaticRetryDelayMillis(2))
+        assertEquals(2_500L, automaticRetryDelayMillis(3))
+    }
+
+    @Test
     fun persistedReplyCompletionNotifiesMemoryOnlyForSuccessAndIsolatesCallbackFailure() {
         val notified = mutableListOf<String>()
 

@@ -33,6 +33,7 @@ import com.harnessapk.chat.ChatSendController
 import com.harnessapk.chat.ChatSendRecoveryManager
 import com.harnessapk.chat.ChatSendRecoveryStore
 import com.harnessapk.chat.ChatExecutionService
+import com.harnessapk.chat.ChatExecutionPowerGuard
 import com.harnessapk.chat.ManualContextCompressionUseCase
 import com.harnessapk.chat.NewConversationUseCase
 import com.harnessapk.chat.ConversationWikiDefaultsCopier
@@ -111,6 +112,7 @@ class AppContainer(
         AppDatabase.MIGRATION_16_17,
         AppDatabase.MIGRATION_17_18,
         AppDatabase.MIGRATION_18_19,
+        AppDatabase.MIGRATION_19_20,
     ).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -329,6 +331,7 @@ class AppContainer(
         webSearchClient = webSearchClient,
         attachmentStore = queuedAttachmentStore,
         dispatchers = dispatchers,
+        powerGuard = ChatExecutionPowerGuard(appContext),
         webSearchAllowed = { conversationId ->
             webSearchAllowedForAgentConversation(chatRepository.conversation(conversationId)?.agentId)
         },

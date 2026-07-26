@@ -27,6 +27,20 @@ enum class ChatExecutionStatus {
     STEERED,
 }
 
+enum class ChatExecutionPhase {
+    PREPARING_CONTEXT,
+    SEARCHING_WEB,
+    RETRIEVING_KNOWLEDGE,
+    GENERATING,
+    FINALIZING,
+}
+
+enum class ChatInterruptionReason {
+    NETWORK,
+    PROCESS_RESTART,
+    SERVICE_TIMEOUT,
+}
+
 data class ChatExecutionRequestContext(
     val sessionContext: SessionRequestContext? = null,
     val webSearchEnabled: Boolean = false,
@@ -56,6 +70,9 @@ data class ChatExecutionEntry(
     val model: String?,
     val reasoningEffort: ReasoningEffort,
     val requestContext: ChatExecutionRequestContext,
+    val phase: ChatExecutionPhase? = null,
+    val automaticRetryCount: Int = 0,
+    val interruptionReason: ChatInterruptionReason? = null,
     val errorMessage: String?,
     val createdAt: Long,
     val updatedAt: Long,

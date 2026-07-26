@@ -39,7 +39,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageWikiUsageEntity::class,
         MessageWikiCitationEntity::class,
     ],
-    version = 19,
+    version = 20,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -944,6 +944,14 @@ abstract class AppDatabase : RoomDatabase() {
                         throw IllegalStateException("foreign_key_check failed after immutable Wiki citation migration")
                     }
                 }
+            }
+        }
+
+        val MIGRATION_19_20: Migration = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chat_execution_entries ADD COLUMN phase TEXT")
+                db.execSQL("ALTER TABLE chat_execution_entries ADD COLUMN automaticRetryCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE chat_execution_entries ADD COLUMN interruptionReason TEXT")
             }
         }
     }

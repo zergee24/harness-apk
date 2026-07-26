@@ -63,11 +63,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_16_17,
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
+                AppDatabase.MIGRATION_19_20,
             )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(19, sqlite.version)
+        assertEquals(20, sqlite.version)
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wikis'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wiki_versions'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversation_wiki_mounts'"))
@@ -839,11 +840,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_16_17,
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
+                AppDatabase.MIGRATION_19_20,
             )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(19, sqlite.version)
+        assertEquals(20, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "daily-conversation|USER|默认使用中文",
@@ -1106,7 +1108,7 @@ class AppDatabaseTest {
         val migrated = version15
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(19, sqlite.version)
+        assertEquals(20, sqlite.version)
         assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals("默认使用中文", sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"))
         assertEquals("notes/project.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
@@ -1160,11 +1162,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_16_17,
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
+                AppDatabase.MIGRATION_19_20,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(19, sqlite.version)
+        assertEquals(20, sqlite.version)
         assertEquals(
             1,
             sqlite.scalarInt(
@@ -1348,13 +1351,14 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_16_17,
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
+                AppDatabase.MIGRATION_19_20,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
         val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
 
         assertTrue("迁移耗时 ${elapsedMillis}ms，阻塞了会话页启动", elapsedMillis < 5_000)
-        assertEquals(19, sqlite.version)
+        assertEquals(20, sqlite.version)
         assertEquals(12_001, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
         assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         db.conversationDao().insert(conversation("post-large-upgrade", updatedAt = 32L))
@@ -1380,6 +1384,7 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_16_17,
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
+                AppDatabase.MIGRATION_19_20,
             )
             .build()
         db.openHelper.writableDatabase
@@ -1427,11 +1432,12 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_16_17,
                     AppDatabase.MIGRATION_17_18,
                     AppDatabase.MIGRATION_18_19,
+                    AppDatabase.MIGRATION_19_20,
                 )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(19, sqlite.version)
+            assertEquals(20, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -1472,11 +1478,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_16_17,
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
+                AppDatabase.MIGRATION_19_20,
             )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(19, sqlite.version)
+            assertEquals(20, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))

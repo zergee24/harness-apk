@@ -1,6 +1,7 @@
 package com.harnessapk.storage
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -40,6 +41,9 @@ data class ChatExecutionEntryEntity(
     val model: String?,
     val reasoningEffort: String,
     val requestContextJson: String,
+    val phase: String? = null,
+    @ColumnInfo(defaultValue = "0") val automaticRetryCount: Int = 0,
+    val interruptionReason: String? = null,
     val errorMessage: String?,
     val createdAt: Long,
     val updatedAt: Long,
