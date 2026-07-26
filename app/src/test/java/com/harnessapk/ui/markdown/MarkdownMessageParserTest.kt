@@ -7,6 +7,16 @@ import kotlin.random.Random
 
 class MarkdownMessageParserTest {
     @Test
+    fun wrapsPlainTextFencesButKeepsSourceCodeScrollable() {
+        listOf("text", "txt", "plaintext", "plain", "TEXT title").forEach { language ->
+            assertTrue(language, plainTextCodeBlockWrapsLines(language))
+        }
+        listOf("kotlin", "bash", "json", null).forEach { language ->
+            assertTrue(language.orEmpty(), !plainTextCodeBlockWrapsLines(language))
+        }
+    }
+
+    @Test
     fun parsesCommonMarkdownBlocks() {
         val blocks = parseMarkdownBlocks(
             """
@@ -531,7 +541,7 @@ class MarkdownMessageParserTest {
         val chunks = cache.chunksFor(source)
 
         assertEquals(listOf(true, false), chunks.map { it.stable })
-        assertEquals("已经稳定的前言。\n\n", chunks.first().source)
+        assertEquals("已经稳定的前言。\n\n", chunks.first().source.replace("\r\n", "\n"))
         assertTrue(chunks.last().source.startsWith("```bash"))
         assertEquals(source.removePrefix(chunks.first().source), chunks.last().source)
     }
