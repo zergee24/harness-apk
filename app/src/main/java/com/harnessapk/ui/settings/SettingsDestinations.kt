@@ -11,6 +11,11 @@ fun settingsDestinations(
     showUpdateBadge: Boolean = false,
 ): List<SettingsDestination> = listOf(
     SettingsDestination(
+        id = "remote",
+        title = "Codex 远程节点",
+        description = "扫描 Mac Bridge 配对二维码并管理私有中继。",
+    ),
+    SettingsDestination(
         id = "updates",
         title = "检查更新",
         description = "查看新版本并安装 APK 更新。",

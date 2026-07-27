@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SystemUpdate
+import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +45,7 @@ fun SettingsScreen(
     onOpenAgentPackages: () -> Unit,
     onOpenWikiLibrary: () -> Unit,
     onOpenUpdates: () -> Unit,
+    onOpenRemote: () -> Unit = {},
     showUpdateBadge: Boolean = false,
 ) {
     Column(
@@ -59,6 +61,7 @@ fun SettingsScreen(
                 destination = destination,
                 icon = iconFor(destination.id),
                 onClick = when (destination.id) {
+                    "remote" -> onOpenRemote
                     "models" -> onOpenProviders
                     "search" -> onOpenSearch
                     "voice" -> onOpenVoice
@@ -116,6 +119,7 @@ private fun SettingsRow(
 }
 
 private fun iconFor(id: String): ImageVector = when (id) {
+    "remote" -> Icons.Outlined.Devices
     "models" -> Icons.Outlined.Settings
     "search" -> Icons.Outlined.Search
     "voice" -> Icons.Outlined.Mic

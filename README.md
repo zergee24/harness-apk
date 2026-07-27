@@ -21,6 +21,8 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 
 Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 
+私有控制 macOS Codex 的中继、Bridge、配对及阿里云推送部署说明见 [remote/README.md](remote/README.md)。
+
 本地打包：
 
 ```bash

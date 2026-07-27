@@ -5,9 +5,9 @@ import org.junit.Test
 
 class HomeModeUiStateTest {
     @Test
-    fun homeOnlyContainsConversationAndProject() {
+    fun homeContainsLocalProjectAndRemoteModes() {
         assertEquals(
-            listOf(MainMode.SESSION, MainMode.PROJECT),
+            listOf(MainMode.SESSION, MainMode.PROJECT, MainMode.REMOTE),
             MainMode.entries.toList(),
         )
     }
@@ -44,6 +44,7 @@ class HomeModeUiStateTest {
     fun homePrimaryActionMatchesCurrentMode() {
         assertEquals(HomePrimaryAction.CREATE_CONVERSATION, homePrimaryAction(MainMode.SESSION))
         assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.PROJECT))
+        assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.REMOTE))
     }
 
     @Test

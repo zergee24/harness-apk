@@ -23,11 +23,11 @@ class SettingsDestinationsTest {
     @Test
     fun settingsPageUsesTopLevelDestinationsInsteadOfOverflowMenuItems() {
         assertEquals(
-            listOf("updates", "models", "search", "voice", "git", "skills", "agents", "wikis"),
+            listOf("remote", "updates", "models", "search", "voice", "git", "skills", "agents", "wikis"),
             settingsDestinations().map { it.id },
         )
         assertEquals(
-            listOf("检查更新", "模型配置", "搜索能力", "语音能力", "Git / Gitee", "技能 / 插件", "智能体包", "Wiki 知识库"),
+            listOf("Codex 远程节点", "检查更新", "模型配置", "搜索能力", "语音能力", "Git / Gitee", "技能 / 插件", "智能体包", "Wiki 知识库"),
             settingsDestinations().map { it.title },
         )
     }

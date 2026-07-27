@@ -29,6 +29,9 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { it.isPresent }
 
+val aliyunPushAppKey = providers.gradleProperty("aliyunPushAppKey").orElse("")
+val aliyunPushAppSecret = providers.gradleProperty("aliyunPushAppSecret").orElse("")
+
 val agentV2FixtureWorkspace = rootProject.layout.buildDirectory.dir("agent-v2-fixture")
 val agentV2FixtureDist = rootProject.layout.buildDirectory.dir("agent-v2-dist")
 val agentV2FixtureCompleteDist = rootProject.layout.buildDirectory.dir("agent-v2-complete-dist")
@@ -214,6 +217,8 @@ android {
         versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "ALIYUN_PUSH_APP_KEY", aliyunPushAppKey.get().asBuildConfigString())
+        buildConfigField("String", "ALIYUN_PUSH_APP_SECRET", aliyunPushAppSecret.get().asBuildConfigString())
         vectorDrawables {
             useSupportLibrary = true
         }
@@ -342,6 +347,8 @@ dependencies {
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.25.1")
     implementation("org.bouncycastle:bcprov-jdk18on:1.84")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
+    implementation("com.google.zxing:core:3.5.4")
+    implementation("com.aliyun.ams:alicloud-android-push:4.0.0")
     implementation("org.eclipse.jgit:org.eclipse.jgit:7.7.0.202606012155-r")
     implementation("org.slf4j:slf4j-nop:2.0.17")
 
