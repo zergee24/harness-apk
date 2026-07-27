@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,10 +22,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
@@ -54,6 +57,7 @@ import com.harnessapk.agent.AgentPackageClassCount
 import com.harnessapk.agent.AgentPackageDetail
 import com.harnessapk.agent.AgentPackageImportSession
 import com.harnessapk.agent.AgentPackageLoadProgress
+import com.harnessapk.agent.AgentVersionRemovalOutcome
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
 import com.harnessapk.agent.V2Bundle
 import com.harnessapk.agent.V2Corpus
@@ -62,6 +66,7 @@ import com.harnessapk.agent.V2SourceRecord
 import com.harnessapk.common.AppContainer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -102,6 +107,8 @@ fun AgentPackagesScreen(
     var previewAvailableBytes by remember { mutableStateOf(Long.MAX_VALUE) }
     var previewInstallFailure by remember { mutableStateOf<AgentPackageInstallAttempt.Failure?>(null) }
     var isWorking by remember { mutableStateOf(false) }
+    var isDeletingAgent by remember { mutableStateOf(false) }
+    var agentToDelete by remember { mutableStateOf<Agent?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
     val importLoadProgress = remember { MutableStateFlow<AgentPackageLoadProgress?>(null) }
     val loadProgress by importLoadProgress.collectAsState()
@@ -148,6 +155,38 @@ fun AgentPackagesScreen(
                 "application/octet-stream",
             ),
         )
+    }
+
+    fun deleteAgent(agent: Agent) {
+        scope.launch {
+            isDeletingAgent = true
+            errorText = null
+            try {
+                when (container.agentRepository.removeVersion(agent.id, agent.activeVersion).outcome) {
+                    AgentVersionRemovalOutcome.REMOVED -> Unit
+                    AgentVersionRemovalOutcome.REMOVED_CLEANUP_PENDING -> {
+                        errorText = "智能体已删除，部分本地文件将在下次启动时清理。"
+                    }
+                    AgentVersionRemovalOutcome.REFERENCED -> {
+                        container.agentRepository.setAgentEnabled(agent.id, enabled = false)
+                        errorText = "该智能体已被历史话题使用，已停用。删除相关话题后可彻底删除。"
+                    }
+                    AgentVersionRemovalOutcome.ACTIVE -> {
+                        container.agentRepository.setAgentEnabled(agent.id, enabled = false)
+                        errorText = "该智能体还有其他已安装版本，已停用。清理旧版本后可彻底删除。"
+                    }
+                    AgentVersionRemovalOutcome.NOT_FOUND -> Unit
+                }
+                detailsRevision += 1
+                agentToDelete = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                errorText = error.message ?: "删除智能体失败"
+            } finally {
+                isDeletingAgent = false
+            }
+        }
     }
 
     LaunchedEffect(externalImportUri) {
@@ -199,6 +238,7 @@ fun AgentPackagesScreen(
                             expandedAgentId = if (expandedAgentId == agent.id) null else agent.id
                         },
                         onStartConversation = { onStartConversation(agent, sourceProjectId) },
+                        onRequestDelete = { agentToDelete = agent },
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
@@ -212,6 +252,15 @@ fun AgentPackagesScreen(
                 )
             }
         }
+    }
+
+    agentToDelete?.let { agent ->
+        AgentPackageDeleteDialog(
+            agent = agent,
+            isDeleting = isDeletingAgent,
+            onDismiss = { agentToDelete = null },
+            onConfirm = { deleteAgent(agent) },
+        )
     }
 
     importSession?.let { session ->
@@ -390,6 +439,7 @@ internal fun AgentPackageRow(
     expanded: Boolean,
     onToggleDetail: () -> Unit,
     onStartConversation: () -> Unit,
+    onRequestDelete: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -397,7 +447,24 @@ internal fun AgentPackageRow(
             .padding(vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(agent.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = agent.name,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onRequestDelete) {
+                Icon(
+                    imageVector = Icons.Outlined.Delete,
+                    contentDescription = "删除智能体：${agent.name}",
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
         Text("基于资料模拟 · v${agent.activeVersion}", style = MaterialTheme.typography.bodySmall)
         Text(
             text = "${agentStatusLabel(agent.status)} · ${agentCorpusCoverage(agent)}",
@@ -409,6 +476,31 @@ internal fun AgentPackageRow(
             AgentPackageDetail(agent, detail, onStartConversation)
         }
     }
+}
+
+@Composable
+private fun AgentPackageDeleteDialog(
+    agent: Agent,
+    isDeleting: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { if (!isDeleting) onDismiss() },
+        title = { Text("删除“${agent.name}”？") },
+        text = {
+            Text(
+                "删除后将无法在新会话中使用。若已有历史话题引用该版本，系统会改为停用，" +
+                    "保留历史话题；待引用清理后才会释放本地资料。",
+            )
+        },
+        confirmButton = {
+            TextButton(enabled = !isDeleting, onClick = onConfirm) { Text("删除") }
+        },
+        dismissButton = {
+            TextButton(enabled = !isDeleting, onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable

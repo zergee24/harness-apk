@@ -20,6 +20,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -71,6 +72,37 @@ class AgentPackagesScreenComposeTest {
         composeRule.onNodeWithText("还没有智能体包").assertIsDisplayed()
         composeRule.onNodeWithText("导入智能体包").assertIsDisplayed().assertHasClickAction().performClick()
         composeRule.runOnIdle { assertEquals(1, importRequests) }
+    }
+
+    @Test
+    fun agentRowExposesDeleteActionForItsAgent() {
+        var deleteRequests = 0
+        composeRule.setContent {
+            HarnessApkTheme {
+                AgentPackageRow(
+                    agent = Agent(
+                        id = "fixture.researcher",
+                        name = "资料研究者",
+                        summary = "",
+                        activeVersion = 2,
+                        publisherFingerprint = "fixture-publisher",
+                        status = AgentStatus.READY,
+                        requiredCorpusCount = 1,
+                        installedCorpusCount = 1,
+                    ),
+                    detail = null,
+                    expanded = false,
+                    onToggleDetail = {},
+                    onStartConversation = {},
+                    onRequestDelete = { deleteRequests += 1 },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("删除智能体：资料研究者")
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.runOnIdle { assertEquals(1, deleteRequests) }
     }
 
     @Test
@@ -461,6 +493,7 @@ class AgentPackagesScreenComposeTest {
                         expanded = true,
                         onToggleDetail = {},
                         onStartConversation = {},
+                        onRequestDelete = {},
                     )
                 }
             }
@@ -536,6 +569,7 @@ class AgentPackagesScreenComposeTest {
                             expanded = true,
                             onToggleDetail = {},
                             onStartConversation = {},
+                            onRequestDelete = {},
                         )
                     }
                 }
