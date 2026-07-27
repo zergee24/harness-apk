@@ -289,14 +289,28 @@ def evaluate_workspace(workspace: Path) -> EvaluationReport:
 
 
 def validate_declared_corpus_question_coverage(
-    report: EvaluationReport, declared_corpora: Mapping[str, str]
+    report: EvaluationReport,
+    declared_corpora: Mapping[str, str],
+    corpus_id_aliases: Mapping[str, str] | None = None,
 ) -> list[str]:
     """B4 hook for required/recommended package question coverage."""
+    aliases = corpus_id_aliases or {}
+    metrics: dict[str, CategoryMetric] = {}
+    for corpus_id, metric in report.by_corpus.items():
+        canonical_id = aliases.get(corpus_id, corpus_id)
+        previous = metrics.get(canonical_id, CategoryMetric(0, 0, 0.0))
+        total = previous.total + metric.total
+        passed = previous.passed + metric.passed
+        metrics[canonical_id] = CategoryMetric(
+            total,
+            passed,
+            round(passed / total, 6) if total else 0.0,
+        )
     errors: list[str] = []
     for corpus_id, install_class in sorted(declared_corpora.items()):
         if install_class not in {"required", "recommended"}:
             continue
-        metric = report.by_corpus.get(corpus_id, CategoryMetric(0, 0, 0.0))
+        metric = metrics.get(corpus_id, CategoryMetric(0, 0, 0.0))
         if metric.total < 2:
             errors.append(f"{install_class} corpus {corpus_id} 至少需要 2 道可归因评估题，实际 {metric.total}")
     return errors

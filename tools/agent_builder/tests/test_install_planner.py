@@ -138,35 +138,31 @@ class InstallPlannerTest(unittest.TestCase):
 
         self.assertIn("source-alias", core.source_ids)
 
-    def test_non_core_shards_follow_source_period_and_top_level_boundaries(self):
+    def test_non_core_shards_group_all_top_level_sections_by_source_and_period(self):
         first = plan_corpus_shards(self.workspace)
         second = plan_corpus_shards(self.workspace)
         non_core = [shard for shard in first if shard.package_id != "core-evidence"]
 
         self.assertEqual(first, second)
-        self.assertEqual(4, len(non_core))
+        self.assertEqual(3, len(non_core))
         self.assertEqual(
             {
-                ("source-direct", "1926", "node-direct-root", "node-direct-top", ("chunk-core",)),
                 (
                     "source-direct",
                     "1926",
-                    "node-direct-root",
-                    "node-direct-background",
-                    ("chunk-background",),
+                    ("node-direct-root",),
+                    ("chunk-background", "chunk-core"),
                 ),
                 (
                     "source-dialogue",
                     "1930",
-                    "node-dialogue-root",
-                    "node-dialogue-top",
+                    ("node-dialogue-root",),
                     ("chunk-dialogue",),
                 ),
                 (
                     "source-secondary",
                     "1926",
-                    "node-secondary-root",
-                    "node-secondary-top",
+                    ("node-secondary-root",),
                     ("chunk-secondary",),
                 ),
             },
@@ -174,8 +170,7 @@ class InstallPlannerTest(unittest.TestCase):
                 (
                     shard.source_ids[0],
                     shard.periods[0],
-                    shard.top_level_ids[0],
-                    shard.selection_top_id,
+                    shard.top_level_ids,
                     shard.chunk_ids,
                 )
                 for shard in non_core
@@ -211,16 +206,9 @@ class InstallPlannerTest(unittest.TestCase):
             for shard in shards
             if shard.chunk_ids == ("chunk-dialogue",)
         )
-        background = next(
-            shard.package_id
-            for shard in shards
-            if shard.chunk_ids == ("chunk-background",)
-        )
-
         self.assertEqual(("core-evidence",), lite)
         self.assertIn(dialogue, balanced)
         self.assertEqual("core-evidence", balanced[0])
-        self.assertNotIn(background, balanced)
         self.assertEqual(
             {"core-evidence", *(shard.package_id for shard in shards if shard.package_id != "core-evidence")},
             set(complete),
@@ -444,7 +432,7 @@ class InstallPlannerTest(unittest.TestCase):
 
         workspace = self._workspace("wrong-corpus")
         rows = self._jsonl_rows("eval.jsonl", workspace)
-        dialogue_id = install_planner._shard_id("source-dialogue", "1930", "node-dialogue-top")
+        dialogue_id = install_planner._shard_id("source-dialogue", "1930")
         rows[0]["corpusId"] = dialogue_id
         self._write_jsonl(workspace / "agent" / "eval.jsonl", rows)
         with self.assertRaisesRegex(BuildError, "不属于声明 corpus"):
@@ -452,13 +440,9 @@ class InstallPlannerTest(unittest.TestCase):
 
     def test_pack_rejects_question_with_any_cross_shard_expected_evidence(self):
         rows = self._jsonl_rows("eval.jsonl")
-        direct_id = install_planner._shard_id(
-            "source-direct",
-            "1926",
-            "node-direct-top",
-        )
+        direct_id = install_planner._shard_id("source-direct", "1926")
         row = next(item for item in rows if item["corpusId"] == direct_id)
-        row["expectedEvidence"].append("chunk-background")
+        row["expectedEvidence"].append("chunk-dialogue")
         self._write_jsonl(self.workspace / "agent" / "eval.jsonl", rows)
 
         with self.assertRaisesRegex(BuildError, "不属于声明 corpus"):
@@ -468,12 +452,15 @@ class InstallPlannerTest(unittest.TestCase):
                 self.private_key_path,
             )
 
-    def test_pack_requires_two_true_questions_for_required_and_recommended_corpora(self):
+    def test_pack_requires_two_true_questions_for_required_corpus(self):
         rows = self._jsonl_rows("eval.jsonl")
-        dialogue_id = install_planner._shard_id("source-dialogue", "1930", "node-dialogue-top")
+        retained = False
         for row in rows:
-            if row["corpusId"] == dialogue_id:
-                row["corpusId"] = "core-evidence"
+            if row["corpusId"] != "core-evidence":
+                continue
+            if retained:
+                row["corpusId"] = "unassigned"
+            retained = True
         self._write_jsonl(self.workspace / "agent" / "eval.jsonl", rows)
 
         with self.assertRaisesRegex(BuildError, "至少需要 2 道"):
@@ -510,6 +497,64 @@ class InstallPlannerTest(unittest.TestCase):
         self.assertEqual("balanced", report["profile"])
         self.assertFalse(report["sourcesEmitted"])
         self.assertGreater(report["bundleSizeBytes"], 0)
+
+    def test_pack_migrates_legacy_top_level_eval_corpus_ids_without_editing_workspace(self):
+        legacy_id = "corpus-source-direct-28c3ba923272"
+        canonical_id = "corpus-source-direct-86dd59ffd90d"
+        rows = self._jsonl_rows("eval.jsonl")
+        for row in rows:
+            if row["corpusId"] == canonical_id:
+                row["corpusId"] = legacy_id
+        self._write_jsonl(self.workspace / "agent" / "eval.jsonl", rows)
+
+        result = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-legacy-eval-corpus",
+            self.private_key_path,
+        )
+
+        with zipfile.ZipFile(result.agent_package) as archive:
+            packaged_rows = [
+                json.loads(line)
+                for line in archive.read("agent/eval.jsonl").decode("utf-8").splitlines()
+            ]
+        self.assertEqual(
+            {canonical_id},
+            {
+                row["corpusId"]
+                for row in packaged_rows
+                if row["id"].startswith("corpus-source-direct-")
+            },
+        )
+        self.assertEqual(
+            {legacy_id},
+            {
+                row["corpusId"]
+                for row in self._jsonl_rows("eval.jsonl")
+                if row["id"].startswith("corpus-source-direct-")
+            },
+        )
+
+    def test_pack_keeps_corpus_without_two_attributed_questions_out_of_balanced_profile(self):
+        direct_id = "corpus-source-direct-86dd59ffd90d"
+        rows = self._jsonl_rows("eval.jsonl")
+        for row in rows:
+            if row["corpusId"] == direct_id:
+                row["corpusId"] = "unassigned"
+        self._write_jsonl(self.workspace / "agent" / "eval.jsonl", rows)
+
+        result = pack_workspace_v2(
+            self.workspace,
+            self.root / "dist-without-direct-eval",
+            self.private_key_path,
+        )
+
+        with zipfile.ZipFile(result.agent_package) as archive:
+            plan = json.loads(archive.read("install-plan.json"))
+        package = next(row for row in plan["packages"] if row["id"] == direct_id)
+        balanced = next(row for row in plan["profiles"] if row["id"] == "balanced")
+        self.assertEqual("optional", package["installClass"])
+        self.assertNotIn(direct_id, balanced["packageIds"])
 
     def test_recommended_install_class_matches_corpus_manifest(self):
         result = pack_workspace_v2(
@@ -2100,12 +2145,12 @@ class InstallPlannerTest(unittest.TestCase):
                         "corpusId": "core-evidence",
                     }
                 )
-        for source_id, period, top_id, chunk_id, question in (
-            ("source-direct", "1926", "node-direct-top", "chunk-core", "coreterm"),
-            ("source-secondary", "1926", "node-secondary-top", "chunk-secondary", "secondaryterm"),
-            ("source-dialogue", "1930", "node-dialogue-top", "chunk-dialogue", "dialogueterm"),
+        for source_id, period, chunk_id, question in (
+            ("source-direct", "1926", "chunk-core", "coreterm"),
+            ("source-secondary", "1926", "chunk-secondary", "secondaryterm"),
+            ("source-dialogue", "1930", "chunk-dialogue", "dialogueterm"),
         ):
-            corpus_id = install_planner._shard_id(source_id, period, top_id)
+            corpus_id = install_planner._shard_id(source_id, period)
             for index in range(2):
                 eval_rows.append(
                     {

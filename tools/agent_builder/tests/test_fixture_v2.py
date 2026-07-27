@@ -8,7 +8,7 @@ from tools.agent_builder.tests.fixture_v2 import build_complete_v2_fixture
 
 
 class CompleteV2FixtureTest(unittest.TestCase):
-    def test_builds_publishable_nine_asset_fixture_with_all_profiles_and_optional_corpus(self):
+    def test_builds_publishable_nine_asset_fixture_with_all_profiles(self):
         source = Path("app/src/test/resources/agent/source.md").resolve()
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
@@ -31,7 +31,7 @@ class CompleteV2FixtureTest(unittest.TestCase):
             self.assertTrue(all((workspace / "agent" / name).read_text("utf-8").strip() for name in assets))
             plan = choose_install_profiles(plan_corpus_shards(workspace))
             self.assertEqual(["lite", "balanced", "complete", "source"], [profile.profile_id for profile in plan.profiles])
-            self.assertTrue(any(package.install_class == "optional" for package in plan.packages))
+            self.assertTrue(any(package.install_class == "recommended" for package in plan.packages))
 
 
 if __name__ == "__main__":

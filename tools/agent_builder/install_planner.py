@@ -37,7 +37,11 @@ def plan_corpus_shards(workspace: Path) -> list[CorpusShard]:
         return index.shards(materialize_ids=index.chunk_count <= SMALL_FIXTURE_ID_LIMIT)
 
 
-def choose_install_profiles(shards: Iterable[CorpusShard]) -> InstallPlan:
+def choose_install_profiles(
+    shards: Iterable[CorpusShard],
+    *,
+    recommendable_corpus_ids: Iterable[str] | None = None,
+) -> InstallPlan:
     values = tuple(sorted(shards, key=lambda shard: shard.package_id))
     if not values:
         raise BuildError("安装计划至少需要一个语料分片")
@@ -63,9 +67,14 @@ def choose_install_profiles(shards: Iterable[CorpusShard]) -> InstallPlan:
     for package_id in required:
         covered.update(by_id[package_id].coverage)
     selected: list[str] = list(required)
+    eligible_ids = (
+        set(recommendable_corpus_ids)
+        if recommendable_corpus_ids is not None
+        else {shard.package_id for shard in corpora}
+    )
     remaining = [
         shard for shard in corpora
-        if shard.package_id not in required
+        if shard.package_id not in required and shard.package_id in eligible_ids
     ]
     while True:
         ranked = sorted(
@@ -238,15 +247,15 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
         ]
         selectors = connection.execute(
             """
-            SELECT source_id, source_hash, period, top_id, COUNT(*) AS chunk_count
+            SELECT source_id, source_hash, period, COUNT(*) AS chunk_count
             FROM chunks
-            GROUP BY source_id, source_hash, period, top_id
-            ORDER BY source_id, period, top_id
+            GROUP BY source_id, source_hash, period
+            ORDER BY source_id, period
             """
         )
         for row in selectors:
-            selector = self.selector(row["source_id"], row["period"], row["top_id"])
-            shard_id = _shard_id(row["source_id"], row["period"], row["top_id"])
+            selector = self.selector(row["source_id"], row["period"])
+            shard_id = _shard_id(row["source_id"], row["period"])
             source_root_ids = tuple(
                 item["id"]
                 for item in connection.execute(
@@ -263,10 +272,10 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                 for item in connection.execute(
                     """
                     SELECT id FROM chunks
-                    WHERE source_id = ? AND period = ? AND top_id = ?
+                    WHERE source_id = ? AND period = ?
                     ORDER BY id
                     """,
-                    (row["source_id"], row["period"], row["top_id"]),
+                    (row["source_id"], row["period"]),
                 )
             ) if materialize_ids else ()
             node_ids = tuple(
@@ -276,10 +285,10 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                     SELECT DISTINCT chunk_nodes.node_id
                     FROM chunk_nodes
                     JOIN chunks ON chunks.id = chunk_nodes.chunk_id
-                    WHERE chunks.source_id = ? AND chunks.period = ? AND chunks.top_id = ?
+                    WHERE chunks.source_id = ? AND chunks.period = ?
                     ORDER BY chunk_nodes.node_id
                     """,
-                    (row["source_id"], row["period"], row["top_id"]),
+                    (row["source_id"], row["period"]),
                 )
             ) if materialize_ids else ()
             shards.append(
@@ -292,7 +301,6 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                     source_hashes=(row["source_hash"],),
                     periods=(row["period"],),
                     top_level_ids=source_root_ids,
-                    selection_top_id=row["top_id"],
                     chunk_ids=chunk_ids,
                     node_ids=node_ids,
                     coverage=self.coverage_for("selector", selector),
@@ -301,8 +309,8 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
             )
         return shards
 
-    def selector(self, source_id: str, period: str, top_id: str) -> str:
-        return "\u001f".join((source_id, period, top_id))
+    def selector(self, source_id: str, period: str) -> str:
+        return "\u001f".join((source_id, period))
 
     def iter_sources(self, shard: CorpusShard):
         query, params = self._selection_query(shard)
@@ -403,24 +411,24 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
             )
             return frozenset(row["feature"] for row in rows)
         else:
-            source_id, period, top_id = selector.split("\u001f")
+            source_id, period = selector.split("\u001f")
             rows = connection.execute(
                 """
                 SELECT DISTINCT coverage.feature
                 FROM coverage JOIN chunks ON chunks.id = coverage.chunk_id
-                WHERE chunks.source_id = ? AND chunks.period = ? AND chunks.top_id = ?
+                WHERE chunks.source_id = ? AND chunks.period = ?
                 ORDER BY coverage.feature
                 """,
-                (source_id, period, top_id),
+                (source_id, period),
             )
             features = {row["feature"] for row in rows}
             metadata = connection.execute(
                 """
                 SELECT DISTINCT period, genre, authorship
                 FROM chunks
-                WHERE source_id = ? AND period = ? AND top_id = ?
+                WHERE source_id = ? AND period = ?
                 """,
-                (source_id, period, top_id),
+                (source_id, period),
             )
             metadata_rows = tuple(metadata)
             if not metadata_rows:
@@ -445,8 +453,8 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                 (),
             )
         return (
-            "WHERE chunks.source_id = ? AND chunks.period = ? AND chunks.top_id = ?",
-            (shard.source_ids[0], shard.periods[0], shard.selection_top_id),
+            "WHERE chunks.source_id = ? AND chunks.period = ?",
+            (shard.source_ids[0], shard.periods[0]),
         )
 
     def _create_schema(self) -> None:
@@ -685,7 +693,7 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
         known = {shard.package_id: shard for shard in self.shards(materialize_ids=False)}
         errors: list[str] = []
         attributed = {package_id: 0 for package_id in known}
-        rows = _jsonl_asset(self.workspace, self.manifest.assets.eval)
+        rows, _ = self._normalized_evaluation_rows(known)
         for line_number, row in enumerate(rows, start=1):
             corpus_id = row.get("corpusId", "unassigned")
             evidence = row.get("expectedEvidence")
@@ -716,6 +724,92 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
                 )
         return errors
 
+    def normalized_evaluation_asset(self) -> tuple[bytes, dict[str, str]]:
+        """Return eval bytes whose legacy top-level corpus IDs target current shards."""
+        known = {shard.package_id: shard for shard in self.shards(materialize_ids=False)}
+        rows, aliases = self._normalized_evaluation_rows(known)
+        original = read_v2_asset_bytes(self.workspace, self.manifest.assets.eval)
+        if not aliases:
+            return original, aliases
+        payload = "".join(
+            f"{_canonical_json_text(row)}\n" for row in rows
+        ).encode("utf-8")
+        return payload, aliases
+
+    def recommendable_corpus_ids(self) -> frozenset[str]:
+        """Return corpus IDs backed by at least two valid attributed evaluations."""
+        known = {shard.package_id: shard for shard in self.shards(materialize_ids=False)}
+        attributed = {package_id: 0 for package_id in known}
+        rows, _ = self._normalized_evaluation_rows(known)
+        for row in rows:
+            corpus_id = row.get("corpusId", "unassigned")
+            evidence = row.get("expectedEvidence")
+            shard = known.get(corpus_id) if isinstance(corpus_id, str) else None
+            if (
+                shard is not None
+                and isinstance(evidence, list)
+                and evidence
+                and all(
+                    isinstance(chunk_id, str) and self._chunk_in_shard(chunk_id, shard)
+                    for chunk_id in evidence
+                )
+            ):
+                attributed[corpus_id] += 1
+        return frozenset(
+            package_id for package_id, count in attributed.items() if count >= 2
+        )
+
+    def _normalized_evaluation_rows(
+        self, known: dict[str, CorpusShard]
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        rows = _jsonl_asset(self.workspace, self.manifest.assets.eval)
+        normalized: list[dict[str, Any]] = []
+        aliases: dict[str, str] = {}
+        for row in rows:
+            corpus_id = row.get("corpusId", "unassigned")
+            canonical_id = self._canonical_legacy_corpus_id(corpus_id, row.get("expectedEvidence"), known)
+            if canonical_id != corpus_id:
+                updated = dict(row)
+                updated["corpusId"] = canonical_id
+                normalized.append(updated)
+                aliases[corpus_id] = canonical_id
+            else:
+                normalized.append(row)
+        return normalized, aliases
+
+    def _canonical_legacy_corpus_id(
+        self,
+        corpus_id: Any,
+        evidence: Any,
+        known: dict[str, CorpusShard],
+    ) -> Any:
+        if (
+            not isinstance(corpus_id, str)
+            or corpus_id in known
+            or not isinstance(evidence, list)
+            or not evidence
+            or not all(isinstance(chunk_id, str) for chunk_id in evidence)
+        ):
+            return corpus_id
+        canonical_ids: set[str] = set()
+        for chunk_id in evidence:
+            row = self._connection().execute(
+                "SELECT source_id, period, top_id FROM chunks WHERE id = ?",
+                (chunk_id,),
+            ).fetchone()
+            if row is None or corpus_id != _legacy_shard_id(
+                row["source_id"], row["period"], row["top_id"]
+            ):
+                return corpus_id
+            canonical_ids.add(_shard_id(row["source_id"], row["period"]))
+        if len(canonical_ids) != 1:
+            return corpus_id
+        canonical_id = canonical_ids.pop()
+        shard = known.get(canonical_id)
+        if shard is None or not all(self._chunk_in_shard(chunk_id, shard) for chunk_id in evidence):
+            return corpus_id
+        return canonical_id
+
     def _chunk_in_shard(self, chunk_id: str, shard: CorpusShard) -> bool:
         connection = self._connection()
         if shard.package_id == "core-evidence":
@@ -725,9 +819,9 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
         return connection.execute(
             """
             SELECT 1 FROM chunks
-            WHERE id = ? AND source_id = ? AND period = ? AND top_id = ?
+            WHERE id = ? AND source_id = ? AND period = ?
             """,
-            (chunk_id, shard.source_ids[0], shard.periods[0], shard.selection_top_id),
+            (chunk_id, shard.source_ids[0], shard.periods[0]),
         ).fetchone() is not None
 
     def _source(self, source_id: str) -> dict[str, Any]:
@@ -742,7 +836,18 @@ class CorpusPlanIndex(AbstractContextManager["CorpusPlanIndex"]):
         return self.connection
 
 
-def _shard_id(source_id: str, period: str, top_id: str) -> str:
+def _shard_id(source_id: str, period: str) -> str:
+    suffix = hashlib.sha256(
+        f"{source_id}\n{period}".encode("utf-8")
+    ).hexdigest()[:12]
+    safe_source = "".join(
+        character if character.isalnum() or character in "._-" else "-"
+        for character in source_id
+    ).strip(".-") or "source"
+    return f"corpus-{safe_source}-{suffix}"
+
+
+def _legacy_shard_id(source_id: str, period: str, top_id: str) -> str:
     suffix = hashlib.sha256(
         f"{source_id}\n{period}\n{top_id}".encode("utf-8")
     ).hexdigest()[:12]

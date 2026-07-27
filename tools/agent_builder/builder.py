@@ -1053,15 +1053,21 @@ def pack_workspace_v2(
                 )
                 for source in sorted(manifest.sources, key=lambda item: item.source_id)
             ]
-            logical_plan = choose_install_profiles([*logical_shards, *logical_sources])
+            recommendable_corpus_ids = planner.recommendable_corpus_ids()
+            logical_plan = choose_install_profiles(
+                [*logical_shards, *logical_sources],
+                recommendable_corpus_ids=recommendable_corpus_ids,
+            )
             install_classes = {
                 package.package_id: package.install_class
                 for package in logical_plan.packages
             }
+            normalized_evaluation_asset, corpus_id_aliases = planner.normalized_evaluation_asset()
             evaluation = evaluate_workspace(workspace)
             coverage_errors = validate_declared_corpus_question_coverage(
                 evaluation,
                 install_classes,
+                corpus_id_aliases,
             )
             coverage_errors.extend(planner.validate_declared_corpus_questions(install_classes))
             if coverage_errors:
@@ -1144,7 +1150,10 @@ def pack_workspace_v2(
                 )
                 source_artifacts.append(artifact)
 
-            install_plan = choose_install_profiles([*corpus_artifacts, *source_artifacts])
+            install_plan = choose_install_profiles(
+                [*corpus_artifacts, *source_artifacts],
+                recommendable_corpus_ids=recommendable_corpus_ids,
+            )
             install_plan_bytes = _canonical_json_bytes(
                 install_plan.to_dict(require_artifacts=True)
             )
@@ -1155,6 +1164,7 @@ def pack_workspace_v2(
                 install_plan_bytes,
                 agent_target,
                 private_key,
+                normalized_evaluation_asset,
             )
             agent_sha256, agent_size = _hash_regular_file(agent_target)
 
@@ -1757,6 +1767,7 @@ def _pack_agent_v2(
     install_plan: bytes,
     target: Path,
     private_key: Ed25519PrivateKey,
+    evaluation_asset: bytes | None = None,
 ) -> None:
     asset_entries = {
         "agent/persona.md": manifest.assets.persona,
@@ -1773,6 +1784,8 @@ def _pack_agent_v2(
         path: read_v2_asset_bytes(workspace, source)
         for path, source in asset_entries.items()
     }
+    if evaluation_asset is not None:
+        entries["agent/eval.jsonl"] = evaluation_asset
     entries["install-plan.json"] = install_plan
     entries["manifest.json"] = _canonical_json_bytes(
         {
