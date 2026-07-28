@@ -58,6 +58,7 @@ import com.harnessapk.agent.AgentPackageDetail
 import com.harnessapk.agent.AgentPackageImportSession
 import com.harnessapk.agent.AgentPackageLoadProgress
 import com.harnessapk.agent.AgentVersionRemovalOutcome
+import com.harnessapk.agent.AgentVersionRemovalResult
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
 import com.harnessapk.agent.V2Bundle
 import com.harnessapk.agent.V2Corpus
@@ -162,7 +163,15 @@ fun AgentPackagesScreen(
             isDeletingAgent = true
             errorText = null
             try {
-                when (container.agentRepository.removeVersion(agent.id, agent.activeVersion).outcome) {
+                val installedVersions = container.agentRepository.installedVersions(agent.id)
+                val removal = removeInstalledAgentVersions(
+                    activeVersion = agent.activeVersion,
+                    installedVersions = installedVersions,
+                    removeVersion = { version ->
+                        container.agentRepository.removeVersion(agent.id, version)
+                    },
+                )
+                when (removal.outcome) {
                     AgentVersionRemovalOutcome.REMOVED -> Unit
                     AgentVersionRemovalOutcome.REMOVED_CLEANUP_PENDING -> {
                         errorText = "智能体已删除，部分本地文件将在下次启动时清理。"
@@ -173,7 +182,7 @@ fun AgentPackagesScreen(
                     }
                     AgentVersionRemovalOutcome.ACTIVE -> {
                         container.agentRepository.setAgentEnabled(agent.id, enabled = false)
-                        errorText = "该智能体还有其他已安装版本，已停用。清理旧版本后可彻底删除。"
+                        errorText = "智能体版本正在变化，已停用，请稍后重试删除。"
                     }
                     AgentVersionRemovalOutcome.NOT_FOUND -> Unit
                 }
@@ -369,6 +378,37 @@ fun AgentPackagesScreen(
             )
         }
     }
+}
+
+internal suspend fun removeInstalledAgentVersions(
+    activeVersion: Int,
+    installedVersions: List<Int>,
+    removeVersion: suspend (Int) -> AgentVersionRemovalResult,
+): AgentVersionRemovalResult {
+    if (installedVersions.isEmpty()) {
+        return AgentVersionRemovalResult(AgentVersionRemovalOutcome.NOT_FOUND)
+    }
+    var cleanupPending = false
+    val orderedVersions = installedVersions.distinct().sorted().filterNot { it == activeVersion } +
+        installedVersions.filter { it == activeVersion }.take(1)
+    for (version in orderedVersions) {
+        val result = removeVersion(version)
+        when (result.outcome) {
+            AgentVersionRemovalOutcome.REMOVED -> Unit
+            AgentVersionRemovalOutcome.REMOVED_CLEANUP_PENDING -> cleanupPending = true
+            AgentVersionRemovalOutcome.NOT_FOUND -> Unit
+            AgentVersionRemovalOutcome.REFERENCED,
+            AgentVersionRemovalOutcome.ACTIVE,
+            -> return result
+        }
+    }
+    return AgentVersionRemovalResult(
+        if (cleanupPending) {
+            AgentVersionRemovalOutcome.REMOVED_CLEANUP_PENDING
+        } else {
+            AgentVersionRemovalOutcome.REMOVED
+        },
+    )
 }
 
 @Composable

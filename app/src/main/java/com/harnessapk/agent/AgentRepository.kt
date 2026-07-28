@@ -1295,6 +1295,10 @@ class AgentRepository(
             )
         }
 
+    suspend fun installedVersions(agentId: String): List<Int> = withContext(ioDispatcher) {
+        dao.listVersions(agentId).map(AgentVersionEntity::version).sorted()
+    }
+
     suspend fun removeVersion(agentId: String, version: Int): AgentVersionRemovalResult =
         withContext(ioDispatcher) {
             lifecycleCoordinator.serialized {
