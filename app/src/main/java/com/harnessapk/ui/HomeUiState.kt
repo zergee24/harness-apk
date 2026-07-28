@@ -5,6 +5,7 @@ import com.harnessapk.updater.UpdateCheckResult
 enum class MainMode(val label: String) {
     SESSION("会话"),
     PROJECT("项目"),
+    REMOTE("远程"),
 }
 
 enum class HomePrimaryAction {
@@ -15,6 +16,7 @@ enum class HomePrimaryAction {
 internal fun homePrimaryAction(mode: MainMode): HomePrimaryAction = when (mode) {
     MainMode.SESSION -> HomePrimaryAction.CREATE_CONVERSATION
     MainMode.PROJECT -> HomePrimaryAction.NONE
+    MainMode.REMOTE -> HomePrimaryAction.NONE
 }
 
 internal fun shouldShowUpdateBadge(result: UpdateCheckResult?): Boolean =

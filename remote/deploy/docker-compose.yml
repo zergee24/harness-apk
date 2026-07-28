@@ -1,0 +1,18 @@
+services:
+  relay:
+    build: ..
+    restart: unless-stopped
+    environment:
+      HARNESS_RELAY_LISTEN: ":8080"
+      HARNESS_RELAY_STATE: "/data/relay.json"
+      HARNESS_RELAY_BOOTSTRAP_TOKEN: "${HARNESS_RELAY_BOOTSTRAP_TOKEN:?required}"
+      ALIYUN_ACCESS_KEY_ID: "${ALIYUN_ACCESS_KEY_ID:-}"
+      ALIYUN_ACCESS_KEY_SECRET: "${ALIYUN_ACCESS_KEY_SECRET:-}"
+      ALIYUN_PUSH_APP_KEY: "${ALIYUN_PUSH_APP_KEY:-}"
+    volumes:
+      - relay-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  relay-data:

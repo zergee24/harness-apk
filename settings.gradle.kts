@@ -11,7 +11,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-    }
+        maven("https://maven.aliyun.com/nexus/content/repositories/releases/")
+        }
 }
 
 rootProject.name = "HarnessApk"

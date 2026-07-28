@@ -29,4 +29,11 @@ object AppHttpClients {
         .readTimeout(3, TimeUnit.SECONDS)
         .callTimeout(3, TimeUnit.SECONDS)
         .build()
+
+    fun remote(): OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS)
+        .pingInterval(25, TimeUnit.SECONDS)
+        .build()
 }

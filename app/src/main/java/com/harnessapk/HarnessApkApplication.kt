@@ -17,6 +17,7 @@ class HarnessApkApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        container.aliyunPushManager.initialize()
         launchApplicationRecoveryJobs(
             scope = applicationScope,
             recoverAgentFiles = { container.agentRepository.recoverFileLifecycle() },

@@ -80,6 +80,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
+import com.harnessapk.remote.AliyunPushManager
+import com.harnessapk.remote.RemoteEnrollmentClient
+import com.harnessapk.remote.RemoteProfileStore
+import com.harnessapk.remote.RemoteRepository
 
 class AppContainer(
     context: Context,
@@ -125,6 +129,11 @@ class AppContainer(
     val updateHttpClient = AppHttpClients.updates()
     val webSearchHttpClient = AppHttpClients.webSearch()
     val providerCatalogHttpClient = AppHttpClients.providerCatalog()
+    val remoteHttpClient = AppHttpClients.remote()
+    val remoteProfileStore = RemoteProfileStore(appContext, ApiKeyCipher("harness_apk_remote_keys"))
+    val remoteEnrollmentClient = RemoteEnrollmentClient(remoteHttpClient)
+    val aliyunPushManager = AliyunPushManager(appContext)
+    val remoteRepository = RemoteRepository(remoteProfileStore, remoteHttpClient, applicationScope)
     val gitEngine = JGitEngine()
     val providerRepository = ProviderRepository(
         dao = database.providerProfileDao(),
