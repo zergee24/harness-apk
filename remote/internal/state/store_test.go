@@ -60,6 +60,47 @@ func TestOfflineMessagesAreBoundedAndExpire(t *testing.T) {
 	}
 }
 
+func TestOfflineHostMessagesAreQueuedAndExpire(t *testing.T) {
+	store, _ := Open(filepath.Join(t.TempDir(), "relay.json"))
+	_, _, _ = store.RegisterHost("mac", "Mac")
+	_ = store.EnqueueHost("mac", protocol.WireMessage{
+		MessageID: "expired",
+		ExpiresAt: time.Now().Add(-time.Second).UnixMilli(),
+	})
+	_ = store.EnqueueHost("mac", protocol.WireMessage{
+		MessageID: "pending",
+		ExpiresAt: time.Now().Add(time.Minute).UnixMilli(),
+	})
+
+	pending := store.DrainHost("mac")
+
+	if len(pending) != 1 || pending[0].MessageID != "pending" {
+		t.Fatalf("pending host messages = %#v", pending)
+	}
+	if len(store.DrainHost("mac")) != 0 {
+		t.Fatal("host messages were delivered twice")
+	}
+}
+
+func TestDeviceCanRefreshPushTarget(t *testing.T) {
+	store, _ := Open(filepath.Join(t.TempDir(), "relay.json"))
+	_, _, _ = store.RegisterHost("mac", "Mac")
+	pairing, _ := store.CreatePairing("mac", time.Minute)
+	device, deviceToken, _ := store.Enroll(pairing.Ticket, "phone", "")
+
+	if err := store.UpdatePushTarget(device.ID, deviceToken, "push-ready"); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, ok := store.Device(device.ID)
+	if !ok || updated.PushTarget != "push-ready" {
+		t.Fatalf("updated device = %#v", updated)
+	}
+	if err := store.UpdatePushTarget(device.ID, "wrong-token", "attacker"); err == nil {
+		t.Fatal("invalid device token updated push target")
+	}
+}
+
 func randomID(value int) string { return time.UnixMilli(int64(value)).Format(time.RFC3339Nano) }
 
 func TestBootstrapCanOnlyBeUsedOnceAndRecoveryRotatesCredentials(t *testing.T) {

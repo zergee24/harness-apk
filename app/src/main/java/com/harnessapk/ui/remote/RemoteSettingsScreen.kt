@@ -2,6 +2,7 @@ package com.harnessapk.ui.remote
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -40,7 +42,9 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.harnessapk.common.AppContainer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues) {
@@ -51,6 +55,16 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
     var pairingText by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var syncedPushTarget by remember(profile?.deviceId) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(profile?.deviceId, pushTarget) {
+        val currentProfile = profile ?: return@LaunchedEffect
+        val target = pushTarget?.takeIf(String::isNotBlank) ?: return@LaunchedEffect
+        if (syncedPushTarget == target) return@LaunchedEffect
+        runCatching { container.remoteEnrollmentClient.updatePushTarget(currentProfile, target) }
+            .onSuccess { syncedPushTarget = target }
+            .onFailure { error = it.message ?: "推送设备同步失败" }
+    }
 
     fun enroll(raw: String) {
         if (raw.isBlank() || busy) return
@@ -73,9 +87,10 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
     }
     val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { selected ->
-            runCatching { context.contentResolver.openInputStream(selected)?.use(BitmapFactory::decodeStream) ?: error("无法读取图片") }
-                .mapCatching(::decodeQrText)
-                .fold(onSuccess = { pairingText = it; enroll(it) }, onFailure = { error = it.message })
+            scope.launch {
+                runCatching { decodeQrImage(context, selected) }
+                    .fold(onSuccess = { pairingText = it; enroll(it) }, onFailure = { error = it.message })
+            }
         }
     }
 
@@ -90,7 +105,14 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
                     Text(profile!!.hostName, style = MaterialTheme.typography.titleMedium)
                     Text(profile!!.relayUrl, style = MaterialTheme.typography.bodyMedium)
                     Text("设备 ${profile!!.deviceId.take(10)}…", style = MaterialTheme.typography.bodySmall)
-                    Text(if (pushTarget == null) "阿里云推送未配置，前台通知仍可用" else "阿里云推送已连接", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        when {
+                            pushTarget == null -> "阿里云推送未配置，前台通知仍可用"
+                            syncedPushTarget == pushTarget -> "阿里云推送已连接"
+                            else -> "正在同步阿里云推送"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     OutlinedButton(onClick = { container.remoteRepository.disconnect(); container.remoteProfileStore.clear() }) {
                         Icon(Icons.Outlined.Delete, contentDescription = null); Text("移除节点")
                     }
@@ -120,6 +142,30 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
 }
 
 private fun decodeQr(bitmap: Bitmap): Result<String> = runCatching { decodeQrText(bitmap) }
+
+private suspend fun decodeQrImage(context: android.content.Context, uri: Uri): String =
+    withContext(Dispatchers.IO) {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            ?: error("无法读取图片")
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = qrDecodeSampleSize(bounds.outWidth, bounds.outHeight)
+        }
+        val bitmap = context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, options)
+        } ?: error("无法读取图片")
+        try {
+            decodeQrText(bitmap)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+internal fun qrDecodeSampleSize(width: Int, height: Int, maxDimension: Int = 2048): Int {
+    var sample = 1
+    while (maxOf(width, height) / sample > maxDimension) sample *= 2
+    return sample
+}
 
 private fun decodeQrText(bitmap: Bitmap): String {
     val pixels = IntArray(bitmap.width * bitmap.height)

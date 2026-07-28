@@ -452,6 +452,17 @@ class ChatConversationControllerTest {
     }
 
     @Test
+    fun landedDraftReducerRemovesSubmittedImagesAfterPartialDraftEdits() {
+        assertEquals(
+            listOf("next"),
+            landedDraftAttachments(
+                submitted = listOf("sent-1", "sent-2"),
+                current = listOf("sent-2", "next"),
+            ),
+        )
+    }
+
+    @Test
     fun consumedTerminalDraftDoesNotOverwriteLaterLocalEdit() {
         var localText = terminalDraft(
             phase = ChatSendRequestPhase.LANDED,

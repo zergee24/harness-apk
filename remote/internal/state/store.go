@@ -44,10 +44,11 @@ type Pairing struct {
 }
 
 type Data struct {
-	Hosts    map[string]*Host                  `json:"hosts"`
-	Devices  map[string]*Device                `json:"devices"`
-	Pairings map[string]*Pairing               `json:"pairings"`
-	Pending  map[string][]protocol.WireMessage `json:"pending,omitempty"`
+	Hosts        map[string]*Host                  `json:"hosts"`
+	Devices      map[string]*Device                `json:"devices"`
+	Pairings     map[string]*Pairing               `json:"pairings"`
+	Pending      map[string][]protocol.WireMessage `json:"pending,omitempty"`
+	PendingHosts map[string][]protocol.WireMessage `json:"pendingHosts,omitempty"`
 }
 
 type Store struct {
@@ -57,7 +58,11 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, data: Data{Hosts: map[string]*Host{}, Devices: map[string]*Device{}, Pairings: map[string]*Pairing{}, Pending: map[string][]protocol.WireMessage{}}}
+	s := &Store{path: path, data: Data{
+		Hosts: map[string]*Host{}, Devices: map[string]*Device{},
+		Pairings: map[string]*Pairing{}, Pending: map[string][]protocol.WireMessage{},
+		PendingHosts: map[string][]protocol.WireMessage{},
+	}}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -79,6 +84,9 @@ func Open(path string) (*Store, error) {
 	}
 	if s.data.Pending == nil {
 		s.data.Pending = map[string][]protocol.WireMessage{}
+	}
+	if s.data.PendingHosts == nil {
+		s.data.PendingHosts = map[string][]protocol.WireMessage{}
 	}
 	return s, nil
 }
@@ -133,6 +141,7 @@ func (s *Store) RecoverHost(id, recovery string) (token, nextRecovery string, er
 			delete(s.data.Pairings, ticket)
 		}
 	}
+	delete(s.data.PendingHosts, id)
 	err = s.saveLocked()
 	return
 }
@@ -215,6 +224,17 @@ func (s *Store) Device(id string) (*Device, bool) {
 	return &copy, true
 }
 
+func (s *Store) UpdatePushTarget(id, token, pushTarget string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	device := s.data.Devices[id]
+	if device == nil || device.RevokedAt != 0 || device.TokenHash != hash(token) {
+		return errors.New("invalid device credentials")
+	}
+	device.PushTarget = pushTarget
+	return s.saveLocked()
+}
+
 func (s *Store) RevokeDevice(hostID, deviceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,6 +281,45 @@ func (s *Store) Drain(deviceID string) []protocol.WireMessage {
 	}
 	delete(s.data.Pending, deviceID)
 	_ = s.saveLocked()
+	return result
+}
+
+func (s *Store) EnqueueHost(hostID string, message protocol.WireMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.Hosts[hostID] == nil {
+		return errors.New("host not found")
+	}
+	s.data.PendingHosts[hostID] = appendPending(s.data.PendingHosts[hostID], message)
+	return s.saveLocked()
+}
+
+func (s *Store) DrainHost(hostID string) []protocol.WireMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := liveMessages(s.data.PendingHosts[hostID])
+	delete(s.data.PendingHosts, hostID)
+	_ = s.saveLocked()
+	return result
+}
+
+func appendPending(messages []protocol.WireMessage, message protocol.WireMessage) []protocol.WireMessage {
+	pending := liveMessages(messages)
+	pending = append(pending, message)
+	if len(pending) > 100 {
+		pending = pending[len(pending)-100:]
+	}
+	return pending
+}
+
+func liveMessages(messages []protocol.WireMessage) []protocol.WireMessage {
+	now := time.Now().UnixMilli()
+	result := make([]protocol.WireMessage, 0, len(messages))
+	for _, message := range messages {
+		if message.ExpiresAt > now {
+			result = append(result, message)
+		}
+	}
 	return result
 }
 

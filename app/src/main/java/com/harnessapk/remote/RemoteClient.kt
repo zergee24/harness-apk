@@ -27,7 +27,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 class RemoteRepository(
-    private val profileStore: RemoteProfileStore,
+    private val profileStore: RemoteProfileProvider,
     private val httpClient: OkHttpClient,
     private val scope: CoroutineScope,
 ) {
@@ -71,8 +71,12 @@ class RemoteRepository(
     fun createThread(cwd: String) = send(RemoteCommand(type = "thread.start", requestId = requestId("thread.start"), cwd = cwd.trim()))
     fun startTurn(text: String) {
         val threadId = _state.value.selectedThreadId ?: return
-        _state.value = _state.value.copy(isWorking = true, timeline = _state.value.timeline + RemoteTimelineItem(UUID.randomUUID().toString(), "userMessage", text))
-        send(RemoteCommand(type = "turn.start", requestId = requestId("turn.start"), threadId = threadId, text = text))
+        if (send(RemoteCommand(type = "turn.start", requestId = requestId("turn.start"), threadId = threadId, text = text))) {
+            _state.value = _state.value.copy(
+                isWorking = true,
+                timeline = _state.value.timeline + RemoteTimelineItem(UUID.randomUUID().toString(), "userMessage", text),
+            )
+        }
     }
     fun steer(text: String) {
         val current = _state.value
@@ -84,14 +88,25 @@ class RemoteRepository(
         send(RemoteCommand(type = "turn.interrupt", requestId = requestId("turn.interrupt"), threadId = current.selectedThreadId, turnId = current.activeTurnId))
     }
     fun respondToApproval(approval: RemoteApproval, decision: String) {
-        send(RemoteCommand(type = "approval.respond", requestId = requestId("approval.respond"), serverRequestId = approval.requestId, decision = decision, threadId = approval.threadId, turnId = approval.turnId))
-        _state.value = _state.value.copy(approvals = _state.value.approvals - approval)
+        if (send(RemoteCommand(type = "approval.respond", requestId = requestId("approval.respond"), serverRequestId = approval.requestId, decision = decision, threadId = approval.threadId, turnId = approval.turnId))) {
+            _state.value = _state.value.copy(approvals = _state.value.approvals - approval)
+        }
     }
 
     private fun requestId(kind: String): String = "$kind:${UUID.randomUUID()}".also { pendingCommands[it] = kind }
 
-    private fun send(command: RemoteCommand) {
-        val profile = profileStore.profile.value ?: return
+    private fun send(command: RemoteCommand): Boolean {
+        val profile = profileStore.profile.value
+        if (profile == null) {
+            pendingCommands.remove(command.requestId)
+            return false
+        }
+        val activeSocket = socket
+        if (activeSocket == null) {
+            pendingCommands.remove(command.requestId)
+            _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
+            return false
+        }
         val now = System.currentTimeMillis()
         val wire = RemoteWireMessage(
             messageId = UUID.randomUUID().toString(), hostId = profile.hostId, deviceId = profile.deviceId,
@@ -99,26 +114,35 @@ class RemoteRepository(
             expiresAt = now + 5 * 60_000L, nonce = "", ciphertext = "",
         )
         val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, command.toJson())
-        if (socket?.send(encrypted.toJson().toString()) != true) {
+        if (!activeSocket.send(encrypted.toJson().toString())) {
+            pendingCommands.remove(command.requestId)
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
+            return false
         }
+        return true
     }
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            if (socket !== webSocket) return
             _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED, errorMessage = null)
             send(RemoteCommand(type = "host.status", requestId = requestId("host.status")))
             refreshThreads()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (socket !== webSocket) return
             runCatching { handleWire(text) }.onFailure { error ->
                 _state.value = _state.value.copy(errorMessage = error.message ?: "远程消息解析失败")
             }
         }
 
-        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = scheduleReconnect(reason)
-        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = scheduleReconnect(t.message ?: "连接失败")
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            if (socket === webSocket) scheduleReconnect(reason)
+        }
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (socket === webSocket) scheduleReconnect(t.message ?: "连接失败")
+        }
     }
 
     private fun scheduleReconnect(reason: String) {
@@ -141,7 +165,7 @@ class RemoteRepository(
         handleEvent(event)
     }
 
-    private fun handleEvent(event: RemoteEvent) {
+    internal fun handleEvent(event: RemoteEvent) {
         when (event.type) {
             "host.status" -> _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED)
             "error" -> {
@@ -189,6 +213,7 @@ class RemoteRepository(
         val raw = event.payload?.jsonObject ?: return
         val method = raw.string("method") ?: event.method.orEmpty()
         val params = raw["params"]?.jsonObject ?: JsonObject(emptyMap())
+        if (!matchesSelectedThread(params.string("threadId"))) return
         when (method) {
             "turn/started" -> _state.value = _state.value.copy(activeTurnId = params["turn"]?.jsonObject?.string("id"), isWorking = true)
             "turn/completed" -> {
@@ -207,6 +232,7 @@ class RemoteRepository(
         val raw = event.payload?.jsonObject ?: return
         val params = raw["params"]?.jsonObject ?: return
         val id = raw["id"] ?: return
+        if (!matchesSelectedThread(params.string("threadId"))) return
         val command = params["command"]?.let { value ->
             if (value is JsonPrimitive) value.contentOrNull else value.toString()
         }
@@ -215,6 +241,11 @@ class RemoteRepository(
             turnId = params.string("turnId"), reason = params.string("reason") ?: "Codex 请求执行受保护操作", command = command,
         ))
         _notifications.tryEmit(RemoteNotification("Codex 等待审批", "Mac 上的任务需要你的确认"))
+    }
+
+    private fun matchesSelectedThread(eventThreadId: String?): Boolean {
+        val selected = _state.value.selectedThreadId
+        return selected == null || eventThreadId == null || eventThreadId == selected
     }
 
     private fun timelineItem(element: JsonElement): RemoteTimelineItem? {

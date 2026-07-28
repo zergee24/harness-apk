@@ -140,9 +140,9 @@ internal fun <T> reduceTerminalDraft(
 
 internal fun <T> landedDraftAttachments(submitted: List<T>, current: List<T>): List<T> = when {
     submitted.isEmpty() -> current
-    current == submitted -> emptyList()
-    current.size >= submitted.size && current.take(submitted.size) == submitted -> current.drop(submitted.size)
-    else -> current
+    else -> current.toMutableList().also { remaining ->
+        submitted.forEach { sent -> remaining.remove(sent) }
+    }
 }
 
 @Deprecated("Use the attachment-list overload")

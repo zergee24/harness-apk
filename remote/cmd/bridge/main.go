@@ -35,13 +35,14 @@ type bridgeState struct {
 }
 
 type bridge struct {
-	mu      sync.Mutex
-	writeMu sync.Mutex
-	state   bridgeState
-	path    string
-	conn    *websocket.Conn
-	app     *appServer
-	seen    map[string]time.Time
+	mu           sync.Mutex
+	writeMu      sync.Mutex
+	state        bridgeState
+	path         string
+	conn         *websocket.Conn
+	app          *appServer
+	seen         map[string]time.Time
+	threadOwners map[string]string
 }
 
 type appServer struct {
@@ -178,7 +179,10 @@ func runServe(defaultPath string, args []string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		b := &bridge{state: state, path: *statePath, app: app, seen: map[string]time.Time{}}
+		b := &bridge{
+			state: state, path: *statePath, app: app,
+			seen: map[string]time.Time{}, threadOwners: map[string]string{},
+		}
 		if err := b.run(context.Background()); err != nil {
 			log.Printf("bridge disconnected: %v", err)
 		}
@@ -284,8 +288,10 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	case "thread.start":
 		return b.app.request(deviceID, command.RequestID, "thread/start", mustJSON(map[string]any{"cwd": command.CWD}))
 	case "turn.start":
+		b.claimThread(command.ThreadID, deviceID)
 		return b.app.request(deviceID, command.RequestID, "turn/start", mustJSON(map[string]any{"threadId": command.ThreadID, "input": []map[string]string{{"type": "text", "text": command.Text}}}))
 	case "turn.steer":
+		b.claimThread(command.ThreadID, deviceID)
 		return b.app.request(deviceID, command.RequestID, "turn/steer", mustJSON(map[string]any{"threadId": command.ThreadID, "expectedTurnId": command.ExpectedTurnID, "input": []map[string]string{{"type": "text", "text": command.Text}}}))
 	case "turn.interrupt":
 		return b.app.request(deviceID, command.RequestID, "turn/interrupt", mustJSON(map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID}))
@@ -332,9 +338,44 @@ func (b *bridge) handleAppServer(ctx context.Context, raw []byte) {
 	if message.Method == "turn/completed" {
 		pushKind = "completion"
 	}
-	for deviceID := range b.deviceSecrets() {
+	for _, deviceID := range b.eventTargets(message.Params) {
 		_ = b.sendEvent(ctx, deviceID, protocol.Event{Type: eventType, Method: message.Method, Payload: raw, CreatedAt: time.Now().UnixMilli()}, pushKind)
 	}
+}
+
+func (b *bridge) claimThread(threadID, deviceID string) {
+	if threadID == "" || deviceID == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.threadOwners == nil {
+		b.threadOwners = map[string]string{}
+	}
+	b.threadOwners[threadID] = deviceID
+}
+
+func (b *bridge) eventTargets(params json.RawMessage) []string {
+	var envelope struct {
+		ThreadID string `json:"threadId"`
+		Thread   struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+	}
+	if json.Unmarshal(params, &envelope) != nil {
+		return nil
+	}
+	threadID := envelope.ThreadID
+	if threadID == "" {
+		threadID = envelope.Thread.ID
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	deviceID := b.threadOwners[threadID]
+	if deviceID == "" {
+		return nil
+	}
+	return []string{deviceID}
 }
 
 func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.Event, pushKind string) error {

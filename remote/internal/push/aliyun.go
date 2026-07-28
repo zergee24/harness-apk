@@ -57,8 +57,7 @@ func (a *Aliyun) Notify(ctx context.Context, target, _ string) error {
 		"SignatureVersion": "1.0", "Timestamp": time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		"Version": "2016-08-01", "AppKey": strconv.FormatInt(a.AppKey, 10),
 		"Target": "DEVICE", "TargetValue": target, "DeviceType": "ANDROID",
-		"PushType": "NOTICE", "Title": "Codex update", "Body": "Open Harness to view details",
-		"AndroidNotifyType": "BOTH", "AndroidOpenType": "APPLICATION",
+		"PushType": "MESSAGE", "Body": "wake",
 		"StoreOffline": "true",
 	}
 	params["Signature"] = sign(a.AccessKeySecret, params)

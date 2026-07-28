@@ -58,6 +58,7 @@ func main() {
 	mux.HandleFunc("POST /v1/hosts/recover", s.recoverHost)
 	mux.HandleFunc("POST /v1/pairings", s.createPairing)
 	mux.HandleFunc("POST /v1/enroll", s.enroll)
+	mux.HandleFunc("PATCH /v1/devices/{deviceID}", s.updateDevice)
 	mux.HandleFunc("DELETE /v1/devices/{deviceID}", s.revokeDevice)
 	mux.HandleFunc("GET /v1/ws", s.websocket)
 	handler := rateLimit(limits(corsDenied(mux)))
@@ -152,6 +153,18 @@ func (s *server) revokeDevice(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
+	var request struct{ PushTarget string }
+	if !decode(w, r, &request) {
+		return
+	}
+	if err := s.store.UpdatePushTarget(r.PathValue("deviceID"), bearer(r), request.PushTarget); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 	role, id := r.URL.Query().Get("role"), r.URL.Query().Get("id")
 	var hostID string
@@ -180,7 +193,17 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(1 << 20)
 	c := &client{conn: conn}
 	s.setClient(role, id, c)
-	if role == "device" {
+	if role == "host" {
+		pendingMessages := s.store.DrainHost(id)
+		for index, pending := range pendingMessages {
+			if err := c.write(r.Context(), pending); err != nil {
+				for _, remaining := range pendingMessages[index:] {
+					_ = s.store.EnqueueHost(id, remaining)
+				}
+				break
+			}
+		}
+	} else {
 		pendingMessages := s.store.Drain(id)
 		for index, pending := range pendingMessages {
 			if err := c.write(r.Context(), pending); err != nil {
@@ -222,8 +245,11 @@ func (s *server) forwardHost(ctx context.Context, hostID string, message protoco
 	target := s.hosts[hostID]
 	s.mu.RUnlock()
 	if target != nil {
-		_ = target.write(ctx, message)
+		if target.write(ctx, message) == nil {
+			return
+		}
 	}
+	_ = s.store.EnqueueHost(hostID, message)
 }
 
 func (s *server) forwardDevice(ctx context.Context, deviceID string, message protocol.WireMessage) {

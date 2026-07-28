@@ -2,12 +2,14 @@ package com.harnessapk.remote
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.harnessapk.HarnessApkApplication
+import com.harnessapk.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -55,6 +57,14 @@ class RemoteConnectionService : Service() {
         .setContentTitle(alert.title)
         .setContentText(alert.message)
         .setAutoCancel(true)
+        .setContentIntent(
+            PendingIntent.getActivity(
+                this,
+                0,
+                Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            ),
+        )
         .setPriority(NotificationCompat.PRIORITY_HIGH)
         .build()
 

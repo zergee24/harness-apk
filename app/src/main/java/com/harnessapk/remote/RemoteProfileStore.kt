@@ -21,13 +21,17 @@ import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+interface RemoteProfileProvider {
+    val profile: StateFlow<RemoteProfile?>
+}
+
 class RemoteProfileStore(
     context: Context,
     private val cipher: StringCipher,
-) {
+) : RemoteProfileProvider {
     private val preferences = context.getSharedPreferences("remote_profiles", Context.MODE_PRIVATE)
     private val _profile = MutableStateFlow(load())
-    val profile: StateFlow<RemoteProfile?> = _profile.asStateFlow()
+    override val profile: StateFlow<RemoteProfile?> = _profile.asStateFlow()
 
     fun save(profile: RemoteProfile) {
         val encryptedToken = cipher.encrypt(profile.deviceToken)
@@ -86,6 +90,18 @@ class RemoteEnrollmentClient(private val httpClient: OkHttpClient) {
             pairingTicket = pairing.pairingTicket,
             pairingSecret = pairing.pairingSecret,
         )
+    }
+
+    suspend fun updatePushTarget(profile: RemoteProfile, pushTarget: String) {
+        val body = buildJsonObject {
+            put("PushTarget", JsonPrimitive(pushTarget))
+        }.toString().toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url(profile.relayUrl.trimEnd('/') + "/v1/devices/${profile.deviceId}")
+            .header("Authorization", "Bearer ${profile.deviceToken}")
+            .patch(body)
+            .build()
+        httpClient.await(request)
     }
 }
 
