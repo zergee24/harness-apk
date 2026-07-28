@@ -7,6 +7,8 @@ from pathlib import Path
 
 from tools.package_format import canonical_json_bytes
 from tools.wiki_builder.cli import main
+from tools.wiki_builder.extractors import stable_id
+from tools.wiki_builder.history import enrichment_jobs
 from tools.wiki_builder.history.enrichment_jobs import (
     JOBS_DIRECTORY_NAME,
     create_jobs,
@@ -194,6 +196,191 @@ class EnrichmentJobsTest(unittest.TestCase):
                 database.execute("SELECT metadata_json FROM links").fetchone()[0]
             )
         self.assertEqual(link["metadata"], metadata)
+
+    def test_cross_job_links_aggregate_direct_evidence_in_canonical_chunk_order(self):
+        self.workspace = build_history_workspace(
+            self.root / "relation-aggregate",
+            leaf_texts=(("甲史1。",), ("乙史1。",)),
+        )
+        plan = create_jobs(self.workspace, profile=PROFILE_ID)
+        source_key = "cn-history-v1:person:sima-guang"
+        target_namespace = "cn-history-v1"
+        target_key = "cn-history-v1:work:chun-qiu"
+        relation_kind = "authored"
+        chunk_ids = []
+        for index, job_id in enumerate(plan.job_ids):
+            chunk_id = self._input(self.workspace, job_id)["chunks"][0]["chunkId"]
+            chunk_ids.append(chunk_id)
+            output = self._valid_output(job_id, concept_key=source_key)
+            output["links"] = [
+                {
+                    "sourceConceptKey": source_key,
+                    "targetNamespace": target_namespace,
+                    "targetConceptKey": target_key,
+                    "kind": relation_kind,
+                    "confidence": (0.4, 0.82)[index],
+                    "routingMode": "weak-only",
+                    "extractorVersion": PROMPT_VERSION,
+                    "evidence": [chunk_id],
+                }
+            ]
+            self._write_output(job_id, output)
+            validate_job(self.workspace, job_id)
+
+        self.assertGreater(chunk_ids[0], chunk_ids[1])
+        stats = merge_jobs(self.workspace)
+
+        self.assertEqual(1, stats.links)
+        links = [
+            json.loads(line)
+            for line in (
+                self.workspace / "enrichment" / "links.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(1, len(links))
+        self.assertEqual(
+            stable_id(
+                "link",
+                "fixture.history.jobs",
+                source_key,
+                target_namespace,
+                target_key,
+                relation_kind,
+            ),
+            links[0]["id"],
+        )
+        self.assertEqual(0.82, links[0]["confidence"])
+        self.assertEqual(chunk_ids, links[0]["evidence"])
+        with sqlite3.connect(self.workspace / "content.sqlite") as database:
+            evidence = [
+                row[0]
+                for row in database.execute(
+                    """
+                    SELECT chunk_id
+                    FROM evidence_refs
+                    WHERE owner_type='link' AND owner_id=?
+                    ORDER BY ordinal
+                    """,
+                    (links[0]["id"],),
+                )
+            ]
+        self.assertEqual(chunk_ids, evidence)
+
+    def test_relation_metadata_conflicts_roll_back_atomically(self):
+        cases = (
+            (
+                "routingMode",
+                ("weak-only", "candidate"),
+                (0.9, 0.9),
+                "relation 聚合 routingMode 不一致",
+            ),
+            (
+                "extractorVersion",
+                (PROMPT_VERSION, "history-enrichment-prompt-v2"),
+                (0.8, 0.8),
+                "relation 聚合 extractorVersion 不一致",
+            ),
+        )
+        for case_index, (field, values, confidences, error) in enumerate(cases):
+            with self.subTest(field=field):
+                self.workspace = build_history_workspace(
+                    self.root / f"relation-conflict-{case_index}",
+                )
+                plan = create_jobs(self.workspace, profile=PROFILE_ID)
+                for job_id in plan.job_ids:
+                    self._write_output(job_id, self._valid_output(job_id))
+                    validate_job(self.workspace, job_id)
+                merge_jobs(self.workspace)
+                enrichment_before = {
+                    name: (self.workspace / "enrichment" / name).read_bytes()
+                    for name in ENRICHMENT_FILE_NAMES
+                }
+                database_before = hashlib.sha256(
+                    (self.workspace / "content.sqlite").read_bytes()
+                ).hexdigest()
+
+                source_key = "cn-history-v1:person:sima-guang"
+                for index, job_id in enumerate(plan.job_ids):
+                    chunk_id = self._input(
+                        self.workspace,
+                        job_id,
+                    )["chunks"][0]["chunkId"]
+                    output = self._valid_output(
+                        job_id,
+                        concept_key=source_key,
+                    )
+                    link = {
+                        "sourceConceptKey": source_key,
+                        "targetNamespace": "cn-history-v1",
+                        "targetConceptKey": "cn-history-v1:work:chun-qiu",
+                        "kind": "authored",
+                        "confidence": confidences[index],
+                        "routingMode": "weak-only",
+                        "extractorVersion": PROMPT_VERSION,
+                        "evidence": [chunk_id],
+                    }
+                    link[field] = values[index]
+                    output["links"] = [link]
+                    self._write_output(job_id, output)
+                    validate_job(self.workspace, job_id)
+
+                with self.assertRaisesRegex(BuildError, error):
+                    merge_jobs(self.workspace)
+                self.assertEqual(
+                    enrichment_before,
+                    {
+                        name: (
+                            self.workspace / "enrichment" / name
+                        ).read_bytes()
+                        for name in ENRICHMENT_FILE_NAMES
+                    },
+                )
+                self.assertEqual(
+                    database_before,
+                    hashlib.sha256(
+                        (self.workspace / "content.sqlite").read_bytes()
+                    ).hexdigest(),
+                )
+
+    def test_relation_aggregation_policy_is_canonical_and_recorded(self):
+        policy_path = Path(enrichment_jobs.__file__).with_name(
+            "relation_aggregation_policy.json"
+        )
+        raw = policy_path.read_bytes()
+        policy = json.loads(raw)
+        self.assertEqual(canonical_json_bytes(policy) + b"\n", raw)
+        self.assertEqual(
+            "hwiki-history-relation-aggregation-policy",
+            policy["type"],
+        )
+        self.assertEqual(
+            "cn-history-relation-aggregation-v1",
+            policy["policyId"],
+        )
+        self.assertEqual(
+            enrichment_jobs.RELATION_AGGREGATION_POLICY_SHA256,
+            hashlib.sha256(raw).hexdigest(),
+        )
+
+        plan = create_jobs(self.workspace, profile=PROFILE_ID)
+        for job_id in plan.job_ids:
+            self._write_output(job_id, self._valid_output(job_id))
+            validate_job(self.workspace, job_id)
+        stats = merge_jobs(self.workspace)
+
+        self.assertEqual(0, stats.links)
+        with sqlite3.connect(self.workspace / "content.sqlite") as database:
+            recorded = database.execute(
+                """
+                SELECT value
+                FROM build_metadata
+                WHERE key='historyRelationAggregationPolicySha256'
+                """
+            ).fetchone()
+        self.assertEqual(
+            (hashlib.sha256(raw).hexdigest(),),
+            recorded,
+        )
 
     def test_cli_exposes_create_validate_and_merge_state_machine(self):
         self.assertEqual(
