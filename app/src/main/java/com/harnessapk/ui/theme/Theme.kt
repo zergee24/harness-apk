@@ -173,12 +173,7 @@ internal object HarnessSpacing {
 
 @Composable
 fun HarnessApkTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = warmLightColorScheme(),
-        typography = HarnessTypography,
-        shapes = HarnessShapes,
-        content = content,
-    )
+    ModeTheme(MainMode.LIFE, content)
 }
 
 @Composable
