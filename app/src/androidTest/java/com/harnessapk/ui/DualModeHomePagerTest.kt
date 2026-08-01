@@ -31,8 +31,7 @@ class DualModeHomePagerTest {
 
     @Before
     fun clearPersistedMode() {
-        context.deleteSharedPreferences("home_mode")
-        (context as HarnessApkApplication).container.homeModeStore.reload()
+        (context as HarnessApkApplication).container.homeModeStore.reset()
     }
 
     @Test

@@ -22,7 +22,8 @@ class HomeModeStore(context: Context) {
         _mode.value = mode
     }
 
-    internal fun reload() {
+    internal fun reset() {
+        preferences.edit().clear().commit()
         _mode.value = load()
     }
 
