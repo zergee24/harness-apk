@@ -227,6 +227,17 @@ private class FakeConversationDao : ConversationDao {
     override suspend fun archive(id: String, updatedAt: Long) = Unit
     override suspend fun countByAgentVersion(agentId: String, version: Int) =
         rows.count { it.agentId == agentId && it.agentVersion == version }
+    override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int {
+        val matched = rows.filter { it.agentId == agentId && it.agentVersion == version }
+        rows.replaceAll {
+            if (it.agentId == agentId && it.agentVersion == version) {
+                it.copy(agentId = null, agentVersion = null, updatedAt = updatedAt)
+            } else {
+                it
+            }
+        }
+        return matched.size
+    }
 }
 
 private class FakeMessageDao : MessageDao {

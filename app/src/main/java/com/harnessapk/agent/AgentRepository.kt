@@ -1301,12 +1301,6 @@ class AgentRepository(
             recoverFileLifecycleLocked()
             val stored = dao.findVersion(agentId, version)
                 ?: return@serialized AgentVersionRemovalResult(AgentVersionRemovalOutcome.NOT_FOUND)
-            val references = requireNotNull(conversationDao) {
-                "删除智能体版本需要 ConversationDao"
-            }.countByAgentVersion(agentId, version)
-            if (references > 0) {
-                return@serialized AgentVersionRemovalResult(AgentVersionRemovalOutcome.REFERENCED)
-            }
             val agent = requireNotNull(dao.findAgent(agentId))
             val versions = dao.listVersions(agentId)
             if (agent.activeVersion == version && versions.size > 1) {
@@ -1338,6 +1332,9 @@ class AgentRepository(
             val tombstones = stageFilesForDeletion(removablePaths)
             try {
                 transactionRunner.run {
+                requireNotNull(conversationDao) {
+                    "删除智能体版本需要 ConversationDao"
+                }.clearAgentReference(agentId, version, timeProvider.nowMillis())
                 if (versions.size == 1) {
                     dao.deleteAgent(agentId)
                 } else {

@@ -833,6 +833,16 @@ private class ExecuteConversationDao : ConversationDao {
     override suspend fun archive(id: String, updatedAt: Long) = Unit
     override suspend fun countByAgentVersion(agentId: String, version: Int) =
         rows.values.count { it.agentId == agentId && it.agentVersion == version }
+    override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int {
+        var matched = 0
+        rows.values.forEach { conversation ->
+            if (conversation.agentId == agentId && conversation.agentVersion == version) {
+                rows[conversation.id] = conversation.copy(agentId = null, agentVersion = null, updatedAt = updatedAt)
+                matched += 1
+            }
+        }
+        return matched
+    }
 }
 
 private class ExecuteMessageDao : MessageDao {

@@ -59,6 +59,7 @@ import com.harnessapk.agent.V2Bundle
 import com.harnessapk.agent.V2Corpus
 import com.harnessapk.agent.V2Source
 import com.harnessapk.agent.V2SourceRecord
+import com.harnessapk.agent.AgentVersionRemovalOutcome
 import com.harnessapk.common.AppContainer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -103,6 +104,7 @@ fun AgentPackagesScreen(
     var previewInstallFailure by remember { mutableStateOf<AgentPackageInstallAttempt.Failure?>(null) }
     var isWorking by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var pendingRemoval by remember { mutableStateOf<Agent?>(null) }
     val importLoadProgress = remember { MutableStateFlow<AgentPackageLoadProgress?>(null) }
     val loadProgress by importLoadProgress.collectAsState()
 
@@ -199,6 +201,7 @@ fun AgentPackagesScreen(
                             expandedAgentId = if (expandedAgentId == agent.id) null else agent.id
                         },
                         onStartConversation = { onStartConversation(agent, sourceProjectId) },
+                        onRemoveRequest = { pendingRemoval = agent },
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
@@ -320,6 +323,48 @@ fun AgentPackagesScreen(
             )
         }
     }
+
+    pendingRemoval?.let { agent ->
+        var removing by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { if (!removing) pendingRemoval = null },
+            title = { Text("删除 ${agent.name}？") },
+            text = {
+                Text(
+                    "删除后将移除智能体包与资料索引；关联的旧会话会保留，但不再绑定该智能体。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !removing,
+                    onClick = {
+                        scope.launch {
+                            removing = true
+                            errorText = null
+                            val result = runCatching {
+                                container.agentRepository.removeVersion(agent.id, agent.activeVersion)
+                            }.getOrNull()
+                            removing = false
+                            pendingRemoval = null
+                            if (result == null || result.outcome !in REMOVAL_SUCCESS_OUTCOMES) {
+                                errorText = when (result?.outcome) {
+                                    AgentVersionRemovalOutcome.ACTIVE -> "当前版本在使用中，无法删除"
+                                    AgentVersionRemovalOutcome.NOT_FOUND -> "智能体已不存在"
+                                    else -> "删除失败，请重试"
+                                }
+                            } else {
+                                detailsRevision += 1
+                            }
+                        }
+                    },
+                ) { Text(if (removing) "正在删除" else "删除") }
+            },
+            dismissButton = {
+                TextButton(enabled = !removing, onClick = { pendingRemoval = null }) { Text("取消") }
+            },
+        )
+    }
 }
 
 @Composable
@@ -390,6 +435,7 @@ internal fun AgentPackageRow(
     expanded: Boolean,
     onToggleDetail: () -> Unit,
     onStartConversation: () -> Unit,
+    onRemoveRequest: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -406,7 +452,7 @@ internal fun AgentPackageRow(
         )
         TextButton(onClick = onToggleDetail) { Text(if (expanded) "收起详情" else "查看详情") }
         if (expanded) {
-            AgentPackageDetail(agent, detail, onStartConversation)
+            AgentPackageDetail(agent, detail, onStartConversation, onRemoveRequest)
         }
     }
 }
@@ -628,6 +674,7 @@ private fun AgentPackageDetail(
     agent: Agent,
     detail: AgentPackageDetailUiState?,
     onStartConversation: () -> Unit,
+    onRemoveRequest: () -> Unit,
 ) {
     val bodyColor = MaterialTheme.colorScheme.onSurfaceVariant
     Text("schema/version：${detail?.schemaVersion ?: "-"} / ${agent.activeVersion}", style = MaterialTheme.typography.bodySmall)
@@ -654,6 +701,9 @@ private fun AgentPackageDetail(
     TextButton(enabled = canStartAgent(agent), onClick = onStartConversation) {
         Text("开始对话")
     }
+    TextButton(onClick = onRemoveRequest) {
+        Text("删除智能体", color = MaterialTheme.colorScheme.error)
+    }
 }
 
 private val INSTALLATION_PROFILE_LABELS = mapOf(
@@ -665,6 +715,11 @@ private val INSTALLATION_PROFILE_LABELS = mapOf(
 )
 
 private const val STORAGE_REFRESH_INTERVAL_MILLIS = 1_000L
+
+private val REMOVAL_SUCCESS_OUTCOMES = setOf(
+    AgentVersionRemovalOutcome.REMOVED,
+    AgentVersionRemovalOutcome.REMOVED_CLEANUP_PENDING,
+)
 
 internal typealias AgentPackageCount = AgentPackageClassCount
 internal typealias AgentPackageDetailUiState = AgentPackageDetail
