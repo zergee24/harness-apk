@@ -14,11 +14,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -75,6 +78,8 @@ fun ConversationListScreen(
     contentPadding: PaddingValues,
     onOpenChat: (String) -> Unit,
     onCreateConversation: () -> Unit,
+    onOpenAgentPackages: () -> Unit = {},
+    onOpenWikiLibrary: () -> Unit = {},
 ) {
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
@@ -154,6 +159,12 @@ fun ConversationListScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(HarnessSpacing.item),
     ) {
+        item {
+            QuickEntryRow(
+                onOpenAgentPackages = onOpenAgentPackages,
+                onOpenWikiLibrary = onOpenWikiLibrary,
+            )
+        }
         if (conversations.isEmpty()) {
             item { EmptyConversationState(onCreateConversation) }
         } else {
@@ -446,6 +457,25 @@ private fun ConversationRow(
             },
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
+    }
+}
+
+@Composable
+private fun QuickEntryRow(
+    onOpenAgentPackages: () -> Unit,
+    onOpenWikiLibrary: () -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        AssistChip(
+            onClick = onOpenAgentPackages,
+            label = { Text("智能体") },
+            leadingIcon = { Icon(Icons.Outlined.Person, contentDescription = null) },
+        )
+        AssistChip(
+            onClick = onOpenWikiLibrary,
+            label = { Text("知识库") },
+            leadingIcon = { Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null) },
+        )
     }
 }
 

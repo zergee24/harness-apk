@@ -395,6 +395,8 @@ fun HarnessApkApp(
                             contentPadding = padding,
                             onOpenChat = { navController.navigate(Routes.chat(it)) },
                             onCreateConversation = onCreateConversation,
+                            onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
+                            onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                         )
                         MainMode.WORK -> ProjectScreen(
                             container = container,
