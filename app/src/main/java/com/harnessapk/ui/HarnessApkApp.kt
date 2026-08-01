@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -13,6 +14,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -63,6 +66,7 @@ import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
 import com.harnessapk.ui.settings.SettingsScreen
 import com.harnessapk.ui.skills.SkillsScreen
+import com.harnessapk.ui.theme.ModeTheme
 import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
 import com.harnessapk.ui.updater.startupUpdateAction
@@ -151,7 +155,6 @@ fun HarnessApkApp(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val route = backStackEntry?.destination?.route
     val canGoBack = route != null && route != Routes.Conversations
-    var mainMode by rememberSaveable { mutableStateOf(MainMode.LIFE) }
     var currentProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
     var agentImportSourceProjectId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -167,6 +170,21 @@ fun HarnessApkApp(
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
     val isHomeRoute = route == Routes.Conversations || route == null
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
+    val homeModeStore = container.homeModeStore
+    var mainMode by rememberSaveable { mutableStateOf(homeModeStore.mode.value) }
+    val pagerState = rememberPagerState(initialPage = MainMode.entries.indexOf(mainMode)) { MainMode.entries.size }
+    LaunchedEffect(pagerState.settledPage) {
+        if (pagerState.settledPage != MainMode.entries.indexOf(mainMode)) {
+            mainMode = MainMode.entries[pagerState.settledPage]
+        }
+    }
+    LaunchedEffect(mainMode) {
+        homeModeStore.save(mainMode)
+        val targetPage = MainMode.entries.indexOf(mainMode)
+        if (pagerState.currentPage != targetPage) {
+            pagerState.animateScrollToPage(targetPage)
+        }
+    }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
@@ -288,12 +306,15 @@ fun HarnessApkApp(
         mainMode = MainMode.WORK
         navController.popBackStack(Routes.Conversations, inclusive = false)
     }
+    ModeTheme(mainMode) {
     Scaffold(
         topBar = {
             if (isHomeRoute) {
                 HomeTopBar(
                     mode = mainMode,
-                    onModeChange = { mainMode = it },
+                    onModeSelected = { index ->
+                        scope.launch { pagerState.animateScrollToPage(index) }
+                    },
                     primaryAction = homePrimaryAction(mainMode),
                     showUpdateBadge = showUpdateBadge,
                     onCreateConversation = onCreateConversation,
@@ -360,41 +381,46 @@ fun HarnessApkApp(
             startDestination = Routes.Conversations,
         ) {
             composable(Routes.Conversations) {
-                when (mainMode) {
-                    MainMode.LIFE -> ConversationListScreen(
-                        container = container,
-                        contentPadding = padding,
-                        onOpenChat = { navController.navigate(Routes.chat(it)) },
-                        onCreateConversation = onCreateConversation,
-                    )
-                    MainMode.WORK -> ProjectScreen(
-                        container = container,
-                        contentPadding = padding,
-                        onCurrentProjectChange = { project ->
-                            currentProjectId = project?.id
-                            currentProjectName = project?.name
-                        },
-                        workbenchTarget = workbenchTarget,
-                        onWorkbenchTargetConsumed = { requestKey ->
-                            if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
-                        },
-                        onCreateSession = { project ->
-                            scope.launch {
-                                val request = projectConversationRequest(project.id, project.name)
-                                val conversationId = container.newConversationUseCase.create(request)
-                                navController.navigate(
-                                    Routes.chat(
-                                        conversationId = conversationId,
-                                        projectId = project.id,
-                                        focusInput = true,
-                                    ),
-                                )
-                            }
-                        },
-                        onOpenSession = { conversationId ->
-                            navController.navigate(Routes.chat(conversationId = conversationId))
-                        },
-                    )
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize(),
+                ) { page ->
+                    when (MainMode.entries[page]) {
+                        MainMode.LIFE -> ConversationListScreen(
+                            container = container,
+                            contentPadding = padding,
+                            onOpenChat = { navController.navigate(Routes.chat(it)) },
+                            onCreateConversation = onCreateConversation,
+                        )
+                        MainMode.WORK -> ProjectScreen(
+                            container = container,
+                            contentPadding = padding,
+                            onCurrentProjectChange = { project ->
+                                currentProjectId = project?.id
+                                currentProjectName = project?.name
+                            },
+                            workbenchTarget = workbenchTarget,
+                            onWorkbenchTargetConsumed = { requestKey ->
+                                if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
+                            },
+                            onCreateSession = { project ->
+                                scope.launch {
+                                    val request = projectConversationRequest(project.id, project.name)
+                                    val conversationId = container.newConversationUseCase.create(request)
+                                    navController.navigate(
+                                        Routes.chat(
+                                            conversationId = conversationId,
+                                            projectId = project.id,
+                                            focusInput = true,
+                                        ),
+                                    )
+                                }
+                            },
+                            onOpenSession = { conversationId ->
+                                navController.navigate(Routes.chat(conversationId = conversationId))
+                            },
+                        )
+                    }
                 }
             }
             composable(
@@ -631,6 +657,7 @@ fun HarnessApkApp(
             }
         }
     }
+    }
 }
 
 private fun wikiRefNavArguments() = listOf(
@@ -656,7 +683,7 @@ internal fun chatTopBarTitle(
 @Composable
 private fun HomeTopBar(
     mode: MainMode,
-    onModeChange: (MainMode) -> Unit,
+    onModeSelected: (Int) -> Unit,
     primaryAction: HomePrimaryAction,
     showUpdateBadge: Boolean,
     onCreateConversation: () -> Unit,
@@ -673,7 +700,7 @@ private fun HomeTopBar(
     ) {
         ModeSwitcher(
             mode = mode,
-            onModeChange = onModeChange,
+            onModeSelected = onModeSelected,
             modifier = Modifier
                 .weight(1f, fill = false)
                 .widthIn(max = 216.dp),
@@ -690,14 +717,13 @@ private fun HomeTopBar(
 @Composable
 private fun ModeSwitcher(
     mode: MainMode,
-    onModeChange: (MainMode) -> Unit,
+    onModeSelected: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val modes = MainMode.entries.toList()
     WarmSegmentedControl(
-        options = modes.map { it.label },
-        selectedIndex = modes.indexOf(mode).coerceAtLeast(0),
-        onSelected = { index -> onModeChange(modes[index]) },
+        options = MainMode.entries.map { it.label },
+        selectedIndex = MainMode.entries.indexOf(mode).coerceAtLeast(0),
+        onSelected = onModeSelected,
         modifier = modifier,
     )
 }

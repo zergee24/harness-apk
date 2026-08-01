@@ -40,17 +40,13 @@ class HarnessApkAppStateTest {
     }
 
     @Test
-    fun homeModeSwitcherUsesSharedSegmentedControlInsteadOfDropdown() {
+    fun homeModeSwitcherUsesPagerWithSharedSegmentedControl() {
         val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText().replace("\r\n", "\n")
-        val modeSwitcherSource = source.substringAfter("private fun ModeSwitcher").substringBefore("@Composable\nprivate fun HomeTopBarActions")
 
-        assertTrue(modeSwitcherSource.contains("WarmSegmentedControl("))
-        assertTrue(modeSwitcherSource.contains("MainMode.entries"))
-        assertFalse(modeSwitcherSource.contains("remoteEnabled"))
-        assertFalse(modeSwitcherSource.contains("MainMode.REMOTE"))
-        assertFalse(modeSwitcherSource.contains("DropdownMenu"))
-        assertFalse(modeSwitcherSource.contains("KeyboardArrowDown"))
-        assertFalse(modeSwitcherSource.contains("切换模式"))
+        assertTrue(source.contains("HorizontalPager("))
+        assertTrue(source.contains("rememberPagerState("))
+        assertTrue(source.contains("WarmSegmentedControl("))
+        assertTrue(source.contains("MainMode.entries.map { it.label }"))
     }
 
     @Test
