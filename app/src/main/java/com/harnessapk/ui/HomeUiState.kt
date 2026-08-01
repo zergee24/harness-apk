@@ -3,9 +3,8 @@ package com.harnessapk.ui
 import com.harnessapk.updater.UpdateCheckResult
 
 enum class MainMode(val label: String) {
-    SESSION("会话"),
-    PROJECT("项目"),
-    REMOTE("远程"),
+    LIFE("生活"),
+    WORK("工作"),
 }
 
 enum class HomePrimaryAction {
@@ -14,9 +13,8 @@ enum class HomePrimaryAction {
 }
 
 internal fun homePrimaryAction(mode: MainMode): HomePrimaryAction = when (mode) {
-    MainMode.SESSION -> HomePrimaryAction.CREATE_CONVERSATION
-    MainMode.PROJECT -> HomePrimaryAction.NONE
-    MainMode.REMOTE -> HomePrimaryAction.NONE
+    MainMode.LIFE -> HomePrimaryAction.CREATE_CONVERSATION
+    MainMode.WORK -> HomePrimaryAction.NONE
 }
 
 internal fun shouldShowUpdateBadge(result: UpdateCheckResult?): Boolean =
@@ -28,7 +26,7 @@ internal fun topLevelTitle(
 ): String {
     val projectName = currentProjectName?.trim().orEmpty()
     return when {
-        mode != MainMode.PROJECT -> mode.label
+        mode != MainMode.WORK -> mode.label
         projectName.isBlank() -> mode.label
         else -> "${mode.label} · $projectName"
     }

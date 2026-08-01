@@ -15,7 +15,7 @@ class AgentPackageImportStateTest {
             AgentPackageImportState(),
             AgentPackageImportEvent.ExternalBundleReceived(
                 uri = "content://bundles/agent.hbundle",
-                mainMode = MainMode.PROJECT,
+                mainMode = MainMode.WORK,
                 currentProjectId = "project-1",
             ),
         )
@@ -30,7 +30,7 @@ class AgentPackageImportStateTest {
             AgentPackageImportState(sourceProjectId = "project-1"),
             AgentPackageImportEvent.ExternalBundleReceived(
                 uri = "content://bundles/agent.hbundle",
-                mainMode = MainMode.SESSION,
+                mainMode = MainMode.LIFE,
                 currentProjectId = "project-2",
             ),
         )
@@ -85,7 +85,7 @@ class AgentPackageImportStateTest {
             AgentPackageImportState(),
             AgentPackageImportEvent.ExternalBundleReceived(
                 uri = "content://bundles/agent.hbundle",
-                mainMode = MainMode.PROJECT,
+                mainMode = MainMode.WORK,
                 currentProjectId = "project-1",
             ),
         )
@@ -94,7 +94,7 @@ class AgentPackageImportStateTest {
             first.state,
             AgentPackageImportEvent.ExternalBundleReceived(
                 uri = "content://bundles/agent.hbundle",
-                mainMode = MainMode.PROJECT,
+                mainMode = MainMode.WORK,
                 currentProjectId = "project-1",
             ),
         )

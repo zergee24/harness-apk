@@ -5,30 +5,30 @@ import org.junit.Test
 
 class HomeModeUiStateTest {
     @Test
-    fun homeContainsLocalProjectAndRemoteModes() {
+    fun homeContainsLifeAndWorkModes() {
         assertEquals(
-            listOf(MainMode.SESSION, MainMode.PROJECT, MainMode.REMOTE),
+            listOf(MainMode.LIFE, MainMode.WORK),
             MainMode.entries.toList(),
         )
     }
 
     @Test
-    fun topLevelTitleKeepsSessionModeProjectAgnostic() {
+    fun topLevelTitleLifeModeProjectAgnostic() {
         assertEquals(
-            "会话",
+            "生活",
             topLevelTitle(
-                mode = MainMode.SESSION,
+                mode = MainMode.LIFE,
                 currentProjectName = "移动端 Harness",
             ),
         )
     }
 
     @Test
-    fun topLevelTitleUsesCurrentProjectInProjectMode() {
+    fun topLevelTitleUsesCurrentProjectInWorkMode() {
         assertEquals(
-            "项目 · 移动端 Harness",
+            "工作 · 移动端 Harness",
             topLevelTitle(
-                mode = MainMode.PROJECT,
+                mode = MainMode.WORK,
                 currentProjectName = "移动端 Harness",
             ),
         )
@@ -36,15 +36,14 @@ class HomeModeUiStateTest {
 
     @Test
     fun topLevelTitleFallsBackWithoutProject() {
-        assertEquals("会话", topLevelTitle(MainMode.SESSION, currentProjectName = null))
-        assertEquals("项目", topLevelTitle(MainMode.PROJECT, currentProjectName = " "))
+        assertEquals("生活", topLevelTitle(MainMode.LIFE, currentProjectName = null))
+        assertEquals("工作", topLevelTitle(MainMode.WORK, currentProjectName = " "))
     }
 
     @Test
     fun homePrimaryActionMatchesCurrentMode() {
-        assertEquals(HomePrimaryAction.CREATE_CONVERSATION, homePrimaryAction(MainMode.SESSION))
-        assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.PROJECT))
-        assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.REMOTE))
+        assertEquals(HomePrimaryAction.CREATE_CONVERSATION, homePrimaryAction(MainMode.LIFE))
+        assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.WORK))
     }
 
     @Test

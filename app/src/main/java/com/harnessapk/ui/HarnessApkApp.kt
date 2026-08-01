@@ -74,7 +74,6 @@ import com.harnessapk.ui.wiki.WikiRecoveryState
 import com.harnessapk.ui.wiki.WikiRoutes
 import com.harnessapk.ui.wiki.WikiSearchScreen
 import com.harnessapk.ui.wiki.WikiSourceReaderScreen
-import com.harnessapk.ui.remote.RemoteScreen
 import com.harnessapk.ui.remote.RemoteSettingsScreen
 import com.harnessapk.updater.UpdateCheckResult
 import kotlinx.coroutines.launch
@@ -152,7 +151,7 @@ fun HarnessApkApp(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val route = backStackEntry?.destination?.route
     val canGoBack = route != null && route != Routes.Conversations
-    var mainMode by rememberSaveable { mutableStateOf(MainMode.SESSION) }
+    var mainMode by rememberSaveable { mutableStateOf(MainMode.LIFE) }
     var currentProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentProjectName by rememberSaveable { mutableStateOf<String?>(null) }
     var agentImportSourceProjectId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -173,10 +172,6 @@ fun HarnessApkApp(
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
     val remoteProfile by container.remoteProfileStore.profile.collectAsState()
-
-    LaunchedEffect(remoteProfile) {
-        if (remoteProfile == null && mainMode == MainMode.REMOTE) mainMode = MainMode.SESSION
-    }
 
     fun dispatchAgentPackageImport(event: AgentPackageImportEvent) {
         val transition = reduceAgentPackageImport(
@@ -291,7 +286,7 @@ fun HarnessApkApp(
             selectedPath = selectedPath,
             requestKey = workbenchRequestKey,
         )
-        mainMode = MainMode.PROJECT
+        mainMode = MainMode.WORK
         navController.popBackStack(Routes.Conversations, inclusive = false)
     }
     Scaffold(
@@ -300,7 +295,6 @@ fun HarnessApkApp(
                 HomeTopBar(
                     mode = mainMode,
                     onModeChange = { mainMode = it },
-                    remoteEnabled = remoteProfile != null,
                     primaryAction = homePrimaryAction(mainMode),
                     showUpdateBadge = showUpdateBadge,
                     onCreateConversation = onCreateConversation,
@@ -368,13 +362,13 @@ fun HarnessApkApp(
         ) {
             composable(Routes.Conversations) {
                 when (mainMode) {
-                    MainMode.SESSION -> ConversationListScreen(
+                    MainMode.LIFE -> ConversationListScreen(
                         container = container,
                         contentPadding = padding,
                         onOpenChat = { navController.navigate(Routes.chat(it)) },
                         onCreateConversation = onCreateConversation,
                     )
-                    MainMode.PROJECT -> ProjectScreen(
+                    MainMode.WORK -> ProjectScreen(
                         container = container,
                         contentPadding = padding,
                         onCurrentProjectChange = { project ->
@@ -402,7 +396,6 @@ fun HarnessApkApp(
                             navController.navigate(Routes.chat(conversationId = conversationId))
                         },
                     )
-                    MainMode.REMOTE -> RemoteScreen(container = container, contentPadding = padding)
                 }
             }
             composable(
@@ -665,7 +658,6 @@ internal fun chatTopBarTitle(
 private fun HomeTopBar(
     mode: MainMode,
     onModeChange: (MainMode) -> Unit,
-    remoteEnabled: Boolean,
     primaryAction: HomePrimaryAction,
     showUpdateBadge: Boolean,
     onCreateConversation: () -> Unit,
@@ -683,7 +675,6 @@ private fun HomeTopBar(
         ModeSwitcher(
             mode = mode,
             onModeChange = onModeChange,
-            remoteEnabled = remoteEnabled,
             modifier = Modifier
                 .weight(1f, fill = false)
                 .widthIn(max = 216.dp),
@@ -701,18 +692,15 @@ private fun HomeTopBar(
 private fun ModeSwitcher(
     mode: MainMode,
     onModeChange: (MainMode) -> Unit,
-    remoteEnabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    run {
-        val modes = MainMode.entries.filter { it != MainMode.REMOTE || remoteEnabled }
-        WarmSegmentedControl(
-            options = modes.map { it.label },
-            selectedIndex = modes.indexOf(mode).coerceAtLeast(0),
-            onSelected = { index -> onModeChange(modes[index]) },
-            modifier = modifier,
-        )
-    }
+    val modes = MainMode.entries.toList()
+    WarmSegmentedControl(
+        options = modes.map { it.label },
+        selectedIndex = modes.indexOf(mode).coerceAtLeast(0),
+        onSelected = { index -> onModeChange(modes[index]) },
+        modifier = modifier,
+    )
 }
 
 @Composable

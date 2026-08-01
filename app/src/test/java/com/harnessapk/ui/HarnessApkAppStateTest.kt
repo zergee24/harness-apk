@@ -45,7 +45,7 @@ class HarnessApkAppStateTest {
         val modeSwitcherSource = source.substringAfter("private fun ModeSwitcher").substringBefore("@Composable\nprivate fun HomeTopBarActions")
 
         assertTrue(modeSwitcherSource.contains("WarmSegmentedControl("))
-        assertTrue(modeSwitcherSource.contains("MainMode.entries.filter"))
+        assertTrue(modeSwitcherSource.contains("MainMode.entries.toList()"))
         assertTrue(modeSwitcherSource.contains("modes.map { it.label }"))
         assertFalse(modeSwitcherSource.contains("DropdownMenu"))
         assertFalse(modeSwitcherSource.contains("KeyboardArrowDown"))
