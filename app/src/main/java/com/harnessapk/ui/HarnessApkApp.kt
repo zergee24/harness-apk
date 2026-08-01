@@ -179,10 +179,8 @@ fun HarnessApkApp(
         }
     }
     LaunchedEffect(mainMode) {
-        homeModeStore.save(mainMode)
-        val targetPage = MainMode.entries.indexOf(mainMode)
-        if (pagerState.currentPage != targetPage) {
-            pagerState.animateScrollToPage(targetPage)
+        if (homeModeStore.mode.value != mainMode) {
+            homeModeStore.save(mainMode)
         }
     }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
@@ -381,6 +379,12 @@ fun HarnessApkApp(
             startDestination = Routes.Conversations,
         ) {
             composable(Routes.Conversations) {
+                LaunchedEffect(mainMode) {
+                    val targetPage = MainMode.entries.indexOf(mainMode)
+                    if (pagerState.currentPage != targetPage) {
+                        pagerState.animateScrollToPage(targetPage)
+                    }
+                }
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize(),
