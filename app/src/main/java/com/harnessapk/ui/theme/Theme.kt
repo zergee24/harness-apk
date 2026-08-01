@@ -1,11 +1,15 @@
 package com.harnessapk.ui.theme
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -178,16 +182,88 @@ fun HarnessApkTheme(content: @Composable () -> Unit) {
 
 @Composable
 fun ModeTheme(mode: MainMode, content: @Composable () -> Unit) {
+    val targetScheme = when (mode) {
+        MainMode.LIFE -> warmLightColorScheme()
+        MainMode.WORK -> techDarkColorScheme()
+    }
     MaterialTheme(
-        colorScheme = when (mode) {
-            MainMode.LIFE -> warmLightColorScheme()
-            MainMode.WORK -> techDarkColorScheme()
-        },
+        colorScheme = animateColorScheme(targetScheme),
         typography = HarnessTypography,
         shapes = when (mode) {
             MainMode.LIFE -> HarnessShapes
             MainMode.WORK -> TechShapes
         },
         content = content,
+    )
+}
+
+private const val THEME_TRANSITION_MILLIS = 300
+
+@Composable
+private fun animateColorScheme(target: ColorScheme): ColorScheme {
+    val spec = tween<Color>(durationMillis = THEME_TRANSITION_MILLIS)
+    val primary by animateColorAsState(target.primary, spec, label = "theme-primary")
+    val onPrimary by animateColorAsState(target.onPrimary, spec, label = "theme-onPrimary")
+    val primaryContainer by animateColorAsState(target.primaryContainer, spec, label = "theme-primaryContainer")
+    val onPrimaryContainer by animateColorAsState(target.onPrimaryContainer, spec, label = "theme-onPrimaryContainer")
+    val secondary by animateColorAsState(target.secondary, spec, label = "theme-secondary")
+    val onSecondary by animateColorAsState(target.onSecondary, spec, label = "theme-onSecondary")
+    val secondaryContainer by animateColorAsState(target.secondaryContainer, spec, label = "theme-secondaryContainer")
+    val onSecondaryContainer by animateColorAsState(target.onSecondaryContainer, spec, label = "theme-onSecondaryContainer")
+    val tertiary by animateColorAsState(target.tertiary, spec, label = "theme-tertiary")
+    val onTertiary by animateColorAsState(target.onTertiary, spec, label = "theme-onTertiary")
+    val tertiaryContainer by animateColorAsState(target.tertiaryContainer, spec, label = "theme-tertiaryContainer")
+    val onTertiaryContainer by animateColorAsState(target.onTertiaryContainer, spec, label = "theme-onTertiaryContainer")
+    val background by animateColorAsState(target.background, spec, label = "theme-background")
+    val onBackground by animateColorAsState(target.onBackground, spec, label = "theme-onBackground")
+    val surface by animateColorAsState(target.surface, spec, label = "theme-surface")
+    val onSurface by animateColorAsState(target.onSurface, spec, label = "theme-onSurface")
+    val surfaceVariant by animateColorAsState(target.surfaceVariant, spec, label = "theme-surfaceVariant")
+    val onSurfaceVariant by animateColorAsState(target.onSurfaceVariant, spec, label = "theme-onSurfaceVariant")
+    val outline by animateColorAsState(target.outline, spec, label = "theme-outline")
+    val outlineVariant by animateColorAsState(target.outlineVariant, spec, label = "theme-outlineVariant")
+    val error by animateColorAsState(target.error, spec, label = "theme-error")
+    val onError by animateColorAsState(target.onError, spec, label = "theme-onError")
+    val errorContainer by animateColorAsState(target.errorContainer, spec, label = "theme-errorContainer")
+    val onErrorContainer by animateColorAsState(target.onErrorContainer, spec, label = "theme-onErrorContainer")
+    val surfaceDim by animateColorAsState(target.surfaceDim, spec, label = "theme-surfaceDim")
+    val surfaceBright by animateColorAsState(target.surfaceBright, spec, label = "theme-surfaceBright")
+    val surfaceContainerLowest by animateColorAsState(target.surfaceContainerLowest, spec, label = "theme-surfaceContainerLowest")
+    val surfaceContainerLow by animateColorAsState(target.surfaceContainerLow, spec, label = "theme-surfaceContainerLow")
+    val surfaceContainer by animateColorAsState(target.surfaceContainer, spec, label = "theme-surfaceContainer")
+    val surfaceContainerHigh by animateColorAsState(target.surfaceContainerHigh, spec, label = "theme-surfaceContainerHigh")
+    val surfaceContainerHighest by animateColorAsState(target.surfaceContainerHighest, spec, label = "theme-surfaceContainerHighest")
+    return target.copy(
+        primary = primary,
+        onPrimary = onPrimary,
+        primaryContainer = primaryContainer,
+        onPrimaryContainer = onPrimaryContainer,
+        secondary = secondary,
+        onSecondary = onSecondary,
+        secondaryContainer = secondaryContainer,
+        onSecondaryContainer = onSecondaryContainer,
+        tertiary = tertiary,
+        onTertiary = onTertiary,
+        tertiaryContainer = tertiaryContainer,
+        onTertiaryContainer = onTertiaryContainer,
+        background = background,
+        onBackground = onBackground,
+        surface = surface,
+        onSurface = onSurface,
+        surfaceVariant = surfaceVariant,
+        onSurfaceVariant = onSurfaceVariant,
+        outline = outline,
+        outlineVariant = outlineVariant,
+        error = error,
+        onError = onError,
+        errorContainer = errorContainer,
+        onErrorContainer = onErrorContainer,
+        surfaceDim = surfaceDim,
+        surfaceBright = surfaceBright,
+        surfaceContainerLowest = surfaceContainerLowest,
+        surfaceContainerLow = surfaceContainerLow,
+        surfaceContainer = surfaceContainer,
+        surfaceContainerHigh = surfaceContainerHigh,
+        surfaceContainerHighest = surfaceContainerHighest,
     )
 }
