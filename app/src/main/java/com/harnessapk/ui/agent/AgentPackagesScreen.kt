@@ -177,12 +177,10 @@ fun AgentPackagesScreen(
                         errorText = "智能体已删除，部分本地文件将在下次启动时清理。"
                     }
                     AgentVersionRemovalOutcome.REFERENCED -> {
-                        container.agentRepository.setAgentEnabled(agent.id, enabled = false)
-                        errorText = "该智能体已被历史话题使用，已停用。删除相关话题后可彻底删除。"
+                        errorText = "删除失败，请稍后重试。"
                     }
                     AgentVersionRemovalOutcome.ACTIVE -> {
-                        container.agentRepository.setAgentEnabled(agent.id, enabled = false)
-                        errorText = "智能体版本正在变化，已停用，请稍后重试删除。"
+                        errorText = "智能体版本正在变化，请稍后重试删除。"
                     }
                     AgentVersionRemovalOutcome.NOT_FOUND -> Unit
                 }
@@ -530,8 +528,7 @@ private fun AgentPackageDeleteDialog(
         title = { Text("删除“${agent.name}”？") },
         text = {
             Text(
-                "删除后将无法在新会话中使用。若已有历史话题引用该版本，系统会改为停用，" +
-                    "保留历史话题；待引用清理后才会释放本地资料。",
+                "删除后将移除智能体包与资料索引。已有历史话题会保留，但会自动解除与该智能体的关联。",
             )
         },
         confirmButton = {

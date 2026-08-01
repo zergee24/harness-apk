@@ -42,6 +42,7 @@ import com.harnessapk.common.AppContainer
 import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.RemoteTimelineItem
 import com.harnessapk.remote.RemoteUiState
+import com.harnessapk.ui.markdown.MarkdownMessage
 
 @Composable
 fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
@@ -112,8 +113,9 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
                     Text(approval.reason)
                     approval.command?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { container.remoteRepository.respondToApproval(approval, "accept") }) { Text("允许一次") }
-                        OutlinedButton(onClick = { container.remoteRepository.respondToApproval(approval, "decline") }) { Text("拒绝") }
+                        Button(onClick = { container.remoteRepository.respondToApproval(approval, "allow") }) { Text("允许一次") }
+                        OutlinedButton(onClick = { container.remoteRepository.respondToApproval(approval, "allowAlways") }) { Text("总是允许") }
+                        OutlinedButton(onClick = { container.remoteRepository.respondToApproval(approval, "deny") }) { Text("拒绝") }
                     }
                 }
             }
@@ -136,7 +138,11 @@ private fun TimelineCard(item: RemoteTimelineItem) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(item.kind, style = MaterialTheme.typography.labelMedium)
-            Text(item.text)
+            if (item.kind == "agentMessage" || item.kind == "userMessage") {
+                MarkdownMessage(item.text)
+            } else {
+                Text(item.text)
+            }
             item.status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
     }

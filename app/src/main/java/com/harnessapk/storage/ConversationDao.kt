@@ -65,4 +65,13 @@ interface ConversationDao {
 
     @Query("SELECT COUNT(*) FROM conversations WHERE agentId = :agentId AND agentVersion = :version")
     suspend fun countByAgentVersion(agentId: String, version: Int): Int
+
+    @Query(
+        """
+        UPDATE conversations
+        SET agentId = NULL, agentVersion = NULL, updatedAt = :updatedAt
+        WHERE agentId = :agentId AND agentVersion = :version
+        """,
+    )
+    suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int
 }

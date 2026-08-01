@@ -246,6 +246,7 @@ private class NewConversationFakeConversationDao : ConversationDao {
     }
     override suspend fun archive(id: String, updatedAt: Long) = Unit
     override suspend fun countByAgentVersion(agentId: String, version: Int) = 0
+    override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int = 0
 }
 
 private class NewConversationFakeMessageDao : MessageDao {

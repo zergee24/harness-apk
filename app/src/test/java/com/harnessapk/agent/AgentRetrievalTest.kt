@@ -1504,7 +1504,7 @@ class AgentRetrievalTest {
     }
 
     @Test
-    fun referencedVersionCannotBeDeletedAndLastUnreferencedVersionRemovesAgent() = runTest {
+    fun referencedVersionCanBeDeletedAndLastUnreferencedVersionRemovesAgent() = runTest {
         val fixture = optionalRemovalFixture(required = false)
         val conversationDao = RemovalConversationDao(referenceCount = 1)
         val repository = AgentRepository(
@@ -1517,19 +1517,15 @@ class AgentRetrievalTest {
         )
 
         assertEquals(
-            AgentVersionRemovalOutcome.REFERENCED,
-            repository.removeVersion("agent-remove", 1).outcome,
-        )
-        conversationDao.referenceCount = 0
-        assertEquals(
             AgentVersionRemovalOutcome.REMOVED,
             repository.removeVersion("agent-remove", 1).outcome,
         )
+        assertEquals(1, conversationDao.clearCount)
         assertTrue(fixture.dao.findAgent("agent-remove") == null)
     }
 
     @Test
-    fun versionRemovalWaitsForConcurrentConversationPinInsideSharedLifecycleBoundary() = runTest {
+    fun versionRemovalClearsReferencesAfterConcurrentConversationPinInsideSharedLifecycleBoundary() = runTest {
         val coordinator = AgentLifecycleCoordinator()
         val fixture = optionalRemovalFixture(required = false, lifecycleCoordinator = coordinator)
         val conversationDao = RemovalConversationDao(referenceCount = 0)
@@ -1558,8 +1554,9 @@ class AgentRetrievalTest {
         releasePin.complete(Unit)
         pin.join()
 
-        assertEquals(AgentVersionRemovalOutcome.REFERENCED, removal.await().outcome)
-        assertTrue(fixture.dao.findVersion("agent-remove", 1) != null)
+        assertEquals(AgentVersionRemovalOutcome.REMOVED, removal.await().outcome)
+        assertEquals(1, conversationDao.clearCount)
+        assertTrue(fixture.dao.findVersion("agent-remove", 1) == null)
     }
 
     @Test
@@ -2638,7 +2635,7 @@ private class FakeV2PackageAccess(
     }
 }
 
-private class RemovalConversationDao(var referenceCount: Int) : ConversationDao {
+private class RemovalConversationDao(var referenceCount: Int, var clearCount: Int = 0) : ConversationDao {
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(emptyList())
     override suspend fun findById(id: String): ConversationEntity? = null
     override suspend fun findLatestActive(): ConversationEntity? = null
@@ -2649,6 +2646,10 @@ private class RemovalConversationDao(var referenceCount: Int) : ConversationDao 
     override suspend fun clearProject(projectId: String) = Unit
     override suspend fun archive(id: String, updatedAt: Long) = Unit
     override suspend fun countByAgentVersion(agentId: String, version: Int) = referenceCount
+    override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int {
+        clearCount += 1
+        return referenceCount
+    }
 }
 
 private fun ParsedAgentPackage.withFile(file: File): ParsedAgentPackage = when (this) {

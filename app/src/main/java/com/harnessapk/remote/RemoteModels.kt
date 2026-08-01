@@ -44,6 +44,7 @@ data class RemoteWireMessage(
     val nonce: String,
     val ciphertext: String,
     val pushKind: String? = null,
+    val ackOf: String? = null,
 )
 
 data class RemoteCommand(
