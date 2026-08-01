@@ -203,7 +203,7 @@ val appVersionCode = providers.gradleProperty("versionCodeOverride")
     .orElse(2000000)
     .get()
 val appVersionName = providers.gradleProperty("versionNameOverride")
-    .orElse("0.2.0")
+    .orElse("0.2.2")
     .get()
 
 android {
