@@ -94,6 +94,21 @@ interface AgentBundleAccess {
     ) {
         throw AgentBundleException("当前 reader 不支持已验证 V2 source 读取")
     }
+    suspend fun forEachUnverifiedV2CorpusContentSuspending(
+        bundleFile: File,
+        childPackageFileName: String,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        throw AgentBundleException("当前 reader 不支持免校验 V2 corpus 流式读取")
+    }
+    suspend fun copyUnverifiedV2SourcePayload(
+        bundleFile: File,
+        childPackageFileName: String,
+        output: OutputStream,
+    ) {
+        throw AgentBundleException("当前 reader 不支持免校验 V2 source 读取")
+    }
     suspend fun copyV2SourcePayload(
         file: File,
         packageId: String? = null,
@@ -427,6 +442,88 @@ class AgentBundleReader(
             archive.getInputStream(entry).use { input ->
                 input.copyBoundedTo(output, MAX_COMPRESSED_BYTES, path)
             }
+        }
+    }
+
+    private fun openChildPackage(bundleFile: File, childPackageFileName: String): Pair<ZipFile, ZipEntry> {
+        val archive = ZipFile(bundleFile)
+        val entry = archive.getEntry(PACKAGES_PREFIX + childPackageFileName)
+            ?: run {
+                archive.close()
+                throw AgentBundleException("bundle 缺少子包：$childPackageFileName")
+            }
+        return archive to entry
+    }
+
+    private fun extractChildPackage(
+        bundleFile: File,
+        childPackageFileName: String,
+        temporaryDirectory: File,
+    ): File {
+        val (archive, entry) = openChildPackage(bundleFile, childPackageFileName)
+        try {
+            val extracted = File.createTempFile("$childPackageFileName-", ".zip", temporaryDirectory)
+            archive.getInputStream(entry).use { input ->
+                extracted.outputStream().buffered().use { output ->
+                    input.copyBoundedTo(output, MAX_COMPRESSED_BYTES, childPackageFileName)
+                }
+            }
+            return extracted
+        } finally {
+            archive.close()
+        }
+    }
+
+    override suspend fun forEachUnverifiedV2CorpusContentSuspending(
+        bundleFile: File,
+        childPackageFileName: String,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        val childRoot = Files.createTempDirectory(temporaryDirectory.toPath(), ".harness-child-").toFile()
+        try {
+            val extracted = extractChildPackage(bundleFile, childPackageFileName, childRoot)
+            ZipFile(extracted).use { childArchive ->
+                val chunkEntry = childArchive.getEntry(V2_CHUNKS_PATH)
+                    ?: throw AgentBundleException("缺少包内文件：$V2_CHUNKS_PATH")
+                childArchive.getInputStream(chunkEntry).use { input ->
+                    input.forEachUtf8JsonLineSuspending(V2_CHUNKS_PATH) { line, lineNumber ->
+                        currentCoroutineContext().ensureActive()
+                        chunkBlock(parseV2Chunk(parseObject(line, "$V2_CHUNKS_PATH 第 $lineNumber 行")))
+                    }
+                }
+                val nodeEntry = childArchive.getEntry(V2_NODES_PATH)
+                    ?: throw AgentBundleException("缺少包内文件：$V2_NODES_PATH")
+                childArchive.getInputStream(nodeEntry).use { input ->
+                    input.forEachUtf8JsonLineSuspending(V2_NODES_PATH) { line, lineNumber ->
+                        currentCoroutineContext().ensureActive()
+                        nodeBlock(parseNode(parseObject(line, "$V2_NODES_PATH 第 $lineNumber 行")))
+                    }
+                }
+            }
+        } finally {
+            childRoot.deleteRecursively()
+        }
+    }
+
+    override suspend fun copyUnverifiedV2SourcePayload(
+        bundleFile: File,
+        childPackageFileName: String,
+        output: OutputStream,
+    ) {
+        val childRoot = Files.createTempDirectory(temporaryDirectory.toPath(), ".harness-child-").toFile()
+        try {
+            val extracted = extractChildPackage(bundleFile, childPackageFileName, childRoot)
+            ZipFile(extracted).use { childArchive ->
+                val entry = childArchive.entries().asSequence()
+                    .firstOrNull { it.name.startsWith("files/") }
+                    ?: throw AgentBundleException("缺少包内文件：files/")
+                childArchive.getInputStream(entry).use { input ->
+                    input.copyBoundedTo(output, MAX_COMPRESSED_BYTES, entry.name)
+                }
+            }
+        } finally {
+            childRoot.deleteRecursively()
         }
     }
 

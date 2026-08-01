@@ -121,7 +121,7 @@ class AgentRetrievalTest {
         assertEquals(1, result.agent.requiredCorpusCount)
         assertEquals(1, result.agent.installedCorpusCount)
         assertEquals(450, fixture.dao.chunks.size)
-        assertTrue(fixture.dao.maxChunkBatchSize <= 200)
+        assertTrue(fixture.dao.maxChunkBatchSize <= 1_000)
         assertEquals(1, fixture.dao.sources.size)
         assertFalse(session.stagedFile.exists())
         val reused = runCatching { fixture.repository.installPackage(session) }.exceptionOrNull()
@@ -1480,7 +1480,8 @@ class AgentRetrievalTest {
             V2InstallFailure.CANCEL_DURING_CHUNKS,
         )
         cases.forEach { failurePoint ->
-            val fixture = v2InstallFixture(chunkCount = 450, failure = failurePoint)
+            val chunkCount = if (failurePoint == V2InstallFailure.BATCH_INSERT) 2_000 else 450
+            val fixture = v2InstallFixture(chunkCount = chunkCount, failure = failurePoint)
             val session = fixture.repository.preparePackageImport("$failurePoint.hbundle") {
                 "bundle".byteInputStream()
             }
@@ -2558,7 +2559,7 @@ private fun v2InstallFixture(
         ),
         chunks = chunks,
         nodes = listOf(V2HierarchyNode("root", "document", "测试来源", source.sourceId, null, listOf("测试来源"), "")),
-        cancelDuringChunksAt = if (failure == V2InstallFailure.CANCEL_DURING_CHUNKS) 201 else null,
+        cancelDuringChunksAt = if (failure == V2InstallFailure.CANCEL_DURING_CHUNKS) 449 else null,
     )
     val dao = FakeAgentDao().apply {
         failChunkInsertCall = if (failure == V2InstallFailure.BATCH_INSERT) 2 else null
@@ -2664,6 +2665,25 @@ private class FakeV2PackageAccess(
     override suspend fun copyVerifiedV2SourcePayload(
         stagedSourceFile: File,
         storedName: String,
+        output: java.io.OutputStream,
+    ) {
+        output.write("raw-source".encodeToByteArray())
+    }
+    override suspend fun forEachUnverifiedV2CorpusContentSuspending(
+        bundleFile: File,
+        childPackageFileName: String,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        chunks.forEachIndexed { index, chunk ->
+            if (index == cancelDuringChunksAt) throw CancellationException("cancelled during chunks")
+            chunkBlock(chunk)
+        }
+        nodes.forEach { nodeBlock(it) }
+    }
+    override suspend fun copyUnverifiedV2SourcePayload(
+        bundleFile: File,
+        childPackageFileName: String,
         output: java.io.OutputStream,
     ) {
         output.write("raw-source".encodeToByteArray())

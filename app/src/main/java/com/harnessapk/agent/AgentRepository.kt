@@ -509,13 +509,14 @@ class AgentRepository(
         val preparedSources = mutableListOf<PreparedSourceFile>()
         try {
             var installResult: AgentInstallResult? = null
-            reader.withVerifiedV2PackagesSuspending(readablePackage) { _, stagedPackages ->
-                sources.forEach { source ->
-                    preparedSources += prepareV2SourceFile(
-                        requireNotNull(stagedPackages[source.packageSha256]) { "缺少 staged hsource：${source.manifest.sourceId}" },
-                        source,
-                    )
-                }
+            val childFileNames = agent.installPlan.packages.associateBy(V2InstallPackage::id)
+            sources.forEach { source ->
+                preparedSources += prepareV2SourceFile(
+                    readablePackage,
+                    requireNotNull(childFileNames[source.manifest.id]) { "install plan 缺少 hsource：${source.manifest.id}" }.fileName,
+                    source,
+                )
+            }
                 val now = timeProvider.nowMillis()
                 var result: AgentEntity? = null
                 requirePrivateInstallSpace(INSTALL_METADATA_SAFETY_BYTES)
@@ -592,7 +593,8 @@ class AgentRepository(
                         requirePrivateInstallSpace(conservativeCorpusInstallWorkspaceBytes(corpus.uncompressedSizeBytes))
                     }
                     installV2Corpus(
-                        requireNotNull(stagedPackages[corpus.packageSha256]) { "缺少 staged hcorpus：${corpus.manifest.id}" },
+                        readablePackage,
+                        requireNotNull(childFileNames[corpus.manifest.id]) { "install plan 缺少 hcorpus：${corpus.manifest.id}" }.fileName,
                         corpus,
                         now,
                     )
@@ -633,7 +635,6 @@ class AgentRepository(
                 AgentInstallOutcome.ALREADY_INSTALLED
             }
             installResult = AgentInstallResult(outcome, requireNotNull(result).toDomain())
-            }
             return requireNotNull(installResult)
         } catch (error: Throwable) {
             val failure = normalizeInstallFailure(error)
@@ -653,7 +654,11 @@ class AgentRepository(
         }
     }
 
-    private suspend fun prepareV2SourceFile(stagedSourceFile: File, source: V2Source): PreparedSourceFile {
+    private suspend fun prepareV2SourceFile(
+        bundleFile: File,
+        childPackageFileName: String,
+        source: V2Source,
+    ): PreparedSourceFile {
         val directory = File(filesDir, "agents/sources/${source.manifest.sourceHash}").also(fileOps::createDirectories)
         val destination = File(directory, SOURCE_PAYLOAD_NAME)
         if (destination.isFile) {
@@ -669,7 +674,7 @@ class AgentRepository(
         try {
             requirePrivateInstallSpace(installWriteBytes(source.manifest.rawSizeBytes))
             fileOps.write(part) { output ->
-                reader.copyVerifiedV2SourcePayload(stagedSourceFile, source.manifest.storedName, output)
+                reader.copyUnverifiedV2SourcePayload(bundleFile, childPackageFileName, output)
             }
             if (
                 part.length() != source.manifest.rawSizeBytes ||
@@ -790,7 +795,7 @@ class AgentRepository(
                 } else {
                     requirePrivateInstallSpace(INSTALL_METADATA_SAFETY_BYTES)
                 }
-                installV2Corpus(finalPackage, installCorpus, now)
+                installV2Corpus(finalPackage, null, installCorpus, now)
                 dao.markVersionPackageInstalled(
                     corpus.manifest.agentId,
                     corpus.manifest.version,
@@ -981,7 +986,8 @@ class AgentRepository(
     }
 
     private suspend fun installV2Corpus(
-        stagedCorpusFile: File,
+        bundleFile: File?,
+        childPackageFileName: String?,
         corpus: V2Corpus,
         now: Long,
     ) {
@@ -1038,51 +1044,62 @@ class AgentRepository(
                 nodeBatch.clear()
                 nodeSearchBatch.clear()
             }
-            reader.forEachVerifiedV2CorpusContentSuspending(
-                stagedCorpusFile,
-                chunkBlock = { chunk ->
-                    val key = chunkKey(chunk.sourceHash, chunk.id)
-                    sizeBytes += chunk.text.encodeToByteArray().size
-                    chunkBatch += AgentChunkEntity(
-                        chunkKey = key,
-                        sourceId = chunk.sourceId,
-                        sourceHash = chunk.sourceHash,
-                        chunkId = chunk.id,
-                        sourceTitle = chunk.sourceTitle,
-                        period = chunk.period,
-                        genre = chunk.genre.wireName,
-                        authorship = chunk.authorship.wireName,
-                        location = chunk.location,
-                        parentPath = chunk.parentIds.joinToString("/"),
-                        context = chunk.context,
-                        text = chunk.text,
-                        keywordsText = (chunk.keywords + chunk.ngrams).distinct().joinToString(" "),
-                        duplicateGroup = chunk.duplicateGroup,
-                        conflictKey = chunk.conflictKey,
-                        sourceAliasesJson = storageJson.encodeToString(chunk.sourceAliases.sorted()),
-                        simHash = chunk.simHash,
-                    )
-                    searchBatch += AgentChunkFtsEntity(key, (chunk.keywords + chunk.ngrams).distinct().joinToString(" "))
-                    if (chunkBatch.size >= CHUNK_BATCH_SIZE) flushChunks()
-                },
-                nodeBlock = { node ->
-                    val source = requireNotNull(sourcesById[node.sourceId])
-                    val key = chunkKey(source.sourceHash, node.id)
-                    nodeBatch += AgentHierarchyNodeEntity(
-                        nodeKey = key,
-                        sourceId = node.sourceId,
-                        sourceHash = source.sourceHash,
-                        nodeId = node.id,
-                        kind = node.kind,
-                        title = node.title,
-                        parentNodeKey = node.parentId?.let { chunkKey(source.sourceHash, it) },
-                        path = node.path.joinToString("/"),
-                        summary = node.summary,
-                    )
-                    nodeSearchBatch += AgentHierarchyFtsEntity(key, listOf(node.title, node.summary).joinToString(" "))
-                    if (nodeBatch.size >= CHUNK_BATCH_SIZE) flushNodes()
-                },
-            )
+            suspend fun processChunk(chunk: V2Chunk) {
+                val key = chunkKey(chunk.sourceHash, chunk.id)
+                sizeBytes += chunk.text.encodeToByteArray().size
+                chunkBatch += AgentChunkEntity(
+                    chunkKey = key,
+                    sourceId = chunk.sourceId,
+                    sourceHash = chunk.sourceHash,
+                    chunkId = chunk.id,
+                    sourceTitle = chunk.sourceTitle,
+                    period = chunk.period,
+                    genre = chunk.genre.wireName,
+                    authorship = chunk.authorship.wireName,
+                    location = chunk.location,
+                    parentPath = chunk.parentIds.joinToString("/"),
+                    context = chunk.context,
+                    text = chunk.text,
+                    keywordsText = (chunk.keywords + chunk.ngrams).distinct().joinToString(" "),
+                    duplicateGroup = chunk.duplicateGroup,
+                    conflictKey = chunk.conflictKey,
+                    sourceAliasesJson = storageJson.encodeToString(chunk.sourceAliases.sorted()),
+                    simHash = chunk.simHash,
+                )
+                searchBatch += AgentChunkFtsEntity(key, (chunk.keywords + chunk.ngrams).distinct().joinToString(" "))
+                if (chunkBatch.size >= CHUNK_BATCH_SIZE) flushChunks()
+            }
+            suspend fun processNode(node: V2HierarchyNode) {
+                val source = requireNotNull(sourcesById[node.sourceId])
+                val key = chunkKey(source.sourceHash, node.id)
+                nodeBatch += AgentHierarchyNodeEntity(
+                    nodeKey = key,
+                    sourceId = node.sourceId,
+                    sourceHash = source.sourceHash,
+                    nodeId = node.id,
+                    kind = node.kind,
+                    title = node.title,
+                    parentNodeKey = node.parentId?.let { chunkKey(source.sourceHash, it) },
+                    path = node.path.joinToString("/"),
+                    summary = node.summary,
+                )
+                nodeSearchBatch += AgentHierarchyFtsEntity(key, listOf(node.title, node.summary).joinToString(" "))
+                if (nodeBatch.size >= CHUNK_BATCH_SIZE) flushNodes()
+            }
+            if (bundleFile != null && childPackageFileName != null) {
+                reader.forEachUnverifiedV2CorpusContentSuspending(
+                    bundleFile,
+                    childPackageFileName,
+                    chunkBlock = ::processChunk,
+                    nodeBlock = ::processNode,
+                )
+            } else {
+                reader.forEachVerifiedV2CorpusContentSuspending(
+                    requireNotNull(bundleFile) { "缺少 hcorpus 源文件" },
+                    chunkBlock = ::processChunk,
+                    nodeBlock = ::processNode,
+                )
+            }
             flushChunks()
             flushNodes()
             corpus.sources.forEach { source ->
@@ -2264,7 +2281,7 @@ class AgentRepository(
 
     companion object {
         private const val DEFAULT_EVIDENCE_LIMIT = 8
-        private const val CHUNK_BATCH_SIZE = 200
+        private const val CHUNK_BATCH_SIZE = 1_000
         private const val FTS_SCAN_PAGE_SIZE = 64
         private const val ROUTED_CHILDREN_PER_ROUTE = 2
         private const val INSTALL_METADATA_SAFETY_BYTES = 64L * 1024L
