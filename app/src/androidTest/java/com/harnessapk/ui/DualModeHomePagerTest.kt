@@ -9,11 +9,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.swipeRight
 import androidx.test.core.app.ApplicationProvider
+import com.harnessapk.HarnessApkApplication
 import com.harnessapk.ui.theme.HarnessApkTheme
 import com.harnessapk.ui.theme.ModeTheme
 import org.junit.Assert.assertEquals
@@ -30,6 +32,7 @@ class DualModeHomePagerTest {
     @Before
     fun clearPersistedMode() {
         context.deleteSharedPreferences("home_mode")
+        (context as HarnessApkApplication).container.homeModeStore.reload()
     }
 
     @Test
@@ -64,10 +67,10 @@ class DualModeHomePagerTest {
             }
         }
         composeRule.onNodeWithText("还没有会话").assertExists()
-        composeRule.onNodeWithText("还没有会话").performTouchInput { swipeLeft() }
+        composeRule.onRoot().performTouchInput { swipeLeft() }
         composeRule.waitForIdle()
         composeRule.onNodeWithText("还没有项目").assertExists()
-        composeRule.onNodeWithText("还没有项目").performTouchInput { swipeRight() }
+        composeRule.onRoot().performTouchInput { swipeRight() }
         composeRule.waitForIdle()
         composeRule.onNodeWithText("还没有会话").assertExists()
     }

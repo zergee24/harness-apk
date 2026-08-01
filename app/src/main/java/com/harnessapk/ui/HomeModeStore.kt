@@ -22,5 +22,9 @@ class HomeModeStore(context: Context) {
         _mode.value = mode
     }
 
+    internal fun reload() {
+        _mode.value = load()
+    }
+
     private fun load(): MainMode = migrateStoredMode(preferences.getString("main_mode", null))
 }
