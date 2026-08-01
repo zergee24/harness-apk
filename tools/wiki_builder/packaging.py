@@ -93,25 +93,29 @@ def pack_workspace(
         raise BuildError(str(error)) from error
 
     target = Path(output)
-    existed_empty = False
     if target.is_symlink():
         raise BuildError(f"输出目录不能是符号链接：{target}")
     if target.exists():
         if not target.is_dir():
             raise BuildError(f"输出路径不是目录：{target}")
-        if any(target.iterdir()):
-            raise BuildError(f"输出目录非空：{target}")
-        existed_empty = True
-    target.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        try:
+            target.mkdir(parents=True)
+        except FileExistsError:
+            if target.is_symlink() or not target.is_dir():
+                raise BuildError(f"输出路径不是安全目录：{target}")
+        except OSError as error:
+            raise BuildError(f"输出目录无法创建：{error}") from error
 
     manifest = _build_manifest(loaded, private_key, content_hash)
     manifest_bytes = canonical_json_bytes(manifest)
     stem = f"{loaded.wiki_id}-v{loaded.version}"
+    final_package = target / f"{stem}.hwiki"
+    if final_package.exists() or final_package.is_symlink():
+        raise BuildError(f"发布目标已存在：{final_package}")
     staging = Path(
-        tempfile.mkdtemp(prefix=f".{target.name}.hwiki-release-", dir=target.parent)
+        tempfile.mkdtemp(prefix=f".{stem}.hwiki-release-", dir=target)
     )
-    published = False
-    removed_existing = False
     try:
         package = staging / f"{stem}.hwiki"
         try:
@@ -131,25 +135,66 @@ def pack_workspace(
             package_hash=package_hash,
             package_size=package_size,
         )
-        report_json, report_markdown = write_build_reports(staging, report)
+        reports_root = loaded.root / "reports"
+        if reports_root.is_symlink():
+            raise BuildError(f"构建报告目录不能是符号链接：{reports_root}")
+        try:
+            reports_root.mkdir(exist_ok=True)
+        except OSError as error:
+            raise BuildError(f"构建报告目录无法创建：{error}") from error
+        if not reports_root.is_dir():
+            raise BuildError(f"构建报告路径不是目录：{reports_root}")
+        report_json, report_markdown = write_build_reports(reports_root, report)
 
-        if target.exists():
-            if any(target.iterdir()):
-                raise BuildError(f"输出目录在发布前变为非空：{target}")
-            target.rmdir()
-            removed_existing = True
-        staging.rename(target)
-        published = True
+        _publish_file_no_replace(package, final_package)
         return WikiPackResult(
-            package=target / package.name,
-            report_json=target / report_json.name,
-            report_markdown=target / report_markdown.name,
+            package=final_package,
+            report_json=report_json,
+            report_markdown=report_markdown,
         )
     finally:
-        if not published:
-            shutil.rmtree(staging, ignore_errors=True)
-            if existed_empty and removed_existing and not target.exists():
-                target.mkdir()
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _publish_file_no_replace(source: Path, target: Path) -> None:
+    staged = Path(source)
+    final = Path(target)
+    if staged.is_symlink() or not staged.is_file():
+        raise BuildError(f"待发布文件不是安全的普通文件：{staged}")
+    if final.parent.is_symlink() or not final.parent.is_dir():
+        raise BuildError(f"发布目录不是安全目录：{final.parent}")
+    try:
+        payload_descriptor = os.open(
+            staged,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as error:
+        raise BuildError(f"待发布文件无法安全打开：{error}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(payload_descriptor).st_mode):
+            raise BuildError(f"待发布文件不是安全的普通文件：{staged}")
+        os.fsync(payload_descriptor)
+        try:
+            os.link(staged, final, follow_symlinks=False)
+        except FileExistsError as error:
+            raise BuildError(f"发布目标已存在：{final}") from error
+        except OSError as error:
+            raise BuildError(f"hwiki 原子发布失败：{error}") from error
+    finally:
+        os.close(payload_descriptor)
+
+    descriptor = os.open(
+        final.parent,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        raise BuildError(f"hwiki 发布目录同步失败：{error}") from error
+    finally:
+        os.close(descriptor)
 
 
 def inspect_package(package: Path) -> WikiInspection:
