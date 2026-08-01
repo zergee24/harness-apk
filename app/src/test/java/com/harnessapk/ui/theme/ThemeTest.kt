@@ -1,5 +1,6 @@
 package com.harnessapk.ui.theme
 
+import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,5 +49,23 @@ class ThemeTest {
         assertEquals(14.sp, HarnessTypography.bodySmall.fontSize)
         assertEquals(48.dp, HarnessSpacing.minimumTouchTarget)
         assertEquals(56.dp, HarnessSpacing.primaryControlHeight)
+    }
+
+    @Test
+    fun workThemeUsesApprovedTechDarkTokens() {
+        val scheme = techDarkColorScheme()
+
+        assertEquals(Color(0xFF8CC9F0), scheme.primary)
+        assertEquals(Color(0xFF101417), scheme.background)
+        assertEquals(Color(0xFF161B1F), scheme.surface)
+        assertEquals(Color(0xFFE2E5E8), scheme.onBackground)
+        assertEquals(Color(0xFFB9C3CB), scheme.onSurfaceVariant)
+    }
+
+    @Test
+    fun workThemeUsesSharpTechShapes() {
+        assertEquals(CornerSize(4.dp), TechShapes.extraSmall.topStart)
+        assertEquals(CornerSize(8.dp), TechShapes.medium.topStart)
+        assertEquals(CornerSize(12.dp), TechShapes.extraLarge.topStart)
     }
 }
