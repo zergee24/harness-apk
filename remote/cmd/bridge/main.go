@@ -25,13 +25,14 @@ import (
 )
 
 type bridgeState struct {
-	RelayURL      string            `json:"relayUrl"`
-	HostID        string            `json:"hostId"`
-	HostName      string            `json:"hostName"`
-	HostToken     string            `json:"hostToken"`
-	Pending       map[string]string `json:"pendingPairingSecrets"`
-	DeviceSecrets map[string]string `json:"deviceSecrets"`
-	Sequences     map[string]uint64 `json:"sequences"`
+	RelayURL        string                       `json:"relayUrl"`
+	HostID          string                       `json:"hostId"`
+	HostName        string                       `json:"hostName"`
+	HostToken       string                       `json:"hostToken"`
+	Pending         map[string]string            `json:"pendingPairingSecrets"`
+	DeviceSecrets   map[string]string            `json:"deviceSecrets"`
+	Sequences       map[string]uint64            `json:"sequences"`
+	PendingOutbound map[string]map[string]string `json:"pendingOutbound,omitempty"`
 }
 
 type bridge struct {
@@ -94,7 +95,7 @@ func runInit(defaultPath string, args []string) {
 	if err := postJSON(context.Background(), strings.TrimRight(*relayURL, "/")+"/v1/hosts/register", *bootstrap, "", request, &response); err != nil {
 		log.Fatal(err)
 	}
-	state := bridgeState{RelayURL: *relayURL, HostID: response.HostID, HostName: *name, HostToken: response.HostToken, Pending: map[string]string{}, DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{}}
+	state := bridgeState{RelayURL: *relayURL, HostID: response.HostID, HostName: *name, HostToken: response.HostToken, Pending: map[string]string{}, DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{}}
 	if err := saveBridgeState(*statePath, state); err != nil {
 		log.Fatal(err)
 	}
@@ -118,7 +119,7 @@ func runRecover(defaultPath string, args []string) {
 	if err := postJSON(context.Background(), strings.TrimRight(*relayURL, "/")+"/v1/hosts/recover", "", "", request, &response); err != nil {
 		log.Fatal(err)
 	}
-	state := bridgeState{RelayURL: *relayURL, HostID: response.HostID, HostName: *name, HostToken: response.HostToken, Pending: map[string]string{}, DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{}}
+	state := bridgeState{RelayURL: *relayURL, HostID: response.HostID, HostName: *name, HostToken: response.HostToken, Pending: map[string]string{}, DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{}}
 	if err := saveBridgeState(*statePath, state); err != nil {
 		log.Fatal(err)
 	}
@@ -200,6 +201,9 @@ func (b *bridge) run(ctx context.Context) error {
 	}
 	b.conn = conn
 	defer conn.Close(websocket.StatusNormalClosure, "bridge stopped")
+	if err := b.resendPending(ctx); err != nil {
+		return err
+	}
 	lines := make(chan []byte, 64)
 	errorsCh := make(chan error, 2)
 	go func() {
@@ -270,7 +274,22 @@ func (b *bridge) handleWire(ctx context.Context, raw []byte) error {
 	if err := protocol.Decrypt(secret, wire, &command); err != nil {
 		return err
 	}
+	if command.Type == "ack" && wire.AckOf != "" {
+		b.acknowledge(wire.DeviceID, wire.AckOf)
+		return nil
+	}
 	return b.executeCommand(ctx, wire.DeviceID, command)
+}
+
+func (b *bridge) acknowledge(deviceID, messageID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if pending := b.state.PendingOutbound[deviceID]; pending != nil {
+		if _, exists := pending[messageID]; exists {
+			delete(pending, messageID)
+			_ = saveBridgeState(b.path, b.state)
+		}
+	}
 }
 
 func (b *bridge) executeCommand(ctx context.Context, deviceID string, command protocol.Command) error {
@@ -356,9 +375,55 @@ func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.
 		return err
 	}
 	raw, _ := json.Marshal(wire)
+	b.mu.Lock()
+	pending := b.state.PendingOutbound[deviceID]
+	if pending == nil {
+		pending = map[string]string{}
+		b.state.PendingOutbound[deviceID] = pending
+	}
+	pending[wire.MessageID] = string(raw)
+	_ = saveBridgeState(b.path, b.state)
+	b.mu.Unlock()
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
 	return b.conn.Write(ctx, websocket.MessageText, raw)
+}
+
+func (b *bridge) resendPending(ctx context.Context) error {
+	now := time.Now().UnixMilli()
+	b.mu.Lock()
+	var wires []protocol.WireMessage
+	for deviceID, pending := range b.state.PendingOutbound {
+		for id, raw := range pending {
+			var wire protocol.WireMessage
+			if json.Unmarshal([]byte(raw), &wire) != nil || wire.ExpiresAt <= now {
+				delete(pending, id)
+			} else {
+				wires = append(wires, wire)
+			}
+		}
+		if len(pending) == 0 {
+			delete(b.state.PendingOutbound, deviceID)
+		}
+	}
+	if len(wires) == 0 && len(b.state.PendingOutbound) == 0 {
+		b.mu.Unlock()
+		return nil
+	}
+	_ = saveBridgeState(b.path, b.state)
+	b.mu.Unlock()
+	if len(wires) == 0 {
+		return nil
+	}
+	b.writeMu.Lock()
+	defer b.writeMu.Unlock()
+	for _, wire := range wires {
+		raw, _ := json.Marshal(wire)
+		if err := b.conn.Write(ctx, websocket.MessageText, raw); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *bridge) deviceSecrets() map[string]string {
@@ -450,6 +515,9 @@ func loadBridgeState(path string) (bridgeState, error) {
 	}
 	if s.Sequences == nil {
 		s.Sequences = map[string]uint64{}
+	}
+	if s.PendingOutbound == nil {
+		s.PendingOutbound = map[string]map[string]string{}
 	}
 	return s, err
 }
