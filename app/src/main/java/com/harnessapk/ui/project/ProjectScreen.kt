@@ -260,6 +260,7 @@ internal fun ProjectScreen(
     onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
     onOpenSession: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -816,7 +817,7 @@ internal fun ProjectScreen(
     }
 
     LazyColumn(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),

@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,9 +20,12 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -66,6 +70,7 @@ import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
 import com.harnessapk.ui.settings.SettingsScreen
 import com.harnessapk.ui.skills.SkillsScreen
+import com.harnessapk.ui.theme.HarnessSpacing
 import com.harnessapk.ui.theme.ModeTheme
 import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
@@ -78,6 +83,7 @@ import com.harnessapk.ui.wiki.WikiRecoveryState
 import com.harnessapk.ui.wiki.WikiRoutes
 import com.harnessapk.ui.wiki.WikiSearchScreen
 import com.harnessapk.ui.wiki.WikiSourceReaderScreen
+import com.harnessapk.ui.remote.RemoteScreen
 import com.harnessapk.ui.remote.RemoteSettingsScreen
 import com.harnessapk.updater.UpdateCheckResult
 import kotlinx.coroutines.launch
@@ -95,6 +101,7 @@ object Routes {
     const val WikiLibrary = WikiRoutes.Library
     const val Updates = "updates"
     const val RemoteSettings = "remote-settings"
+    const val RemoteControl = "remote-control"
     const val ChatPattern =
         "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}"
 
@@ -184,6 +191,7 @@ fun HarnessApkApp(
         }
     }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
+    val remoteProfile by container.remoteProfileStore.profile.collectAsState()
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
@@ -255,6 +263,7 @@ fun HarnessApkApp(
         WikiRoutes.CitationPattern -> "引用原文"
         Routes.Updates -> "更新"
         Routes.RemoteSettings -> "Codex 远程节点"
+        Routes.RemoteControl -> "远程控制"
         Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
     }
@@ -398,34 +407,46 @@ fun HarnessApkApp(
                             onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
                             onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                         )
-                        MainMode.WORK -> ProjectScreen(
-                            container = container,
-                            contentPadding = padding,
-                            onCurrentProjectChange = { project ->
-                                currentProjectId = project?.id
-                                currentProjectName = project?.name
-                            },
-                            workbenchTarget = workbenchTarget,
-                            onWorkbenchTargetConsumed = { requestKey ->
-                                if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
-                            },
-                            onCreateSession = { project ->
-                                scope.launch {
-                                    val request = projectConversationRequest(project.id, project.name)
-                                    val conversationId = container.newConversationUseCase.create(request)
-                                    navController.navigate(
-                                        Routes.chat(
-                                            conversationId = conversationId,
-                                            projectId = project.id,
-                                            focusInput = true,
-                                        ),
-                                    )
-                                }
-                            },
-                            onOpenSession = { conversationId ->
-                                navController.navigate(Routes.chat(conversationId = conversationId))
-                            },
-                        )
+                        MainMode.WORK -> Column(modifier = Modifier.fillMaxSize()) {
+                            val profile = remoteProfile
+                            if (profile != null) {
+                                RemoteEntryCard(
+                                    hostName = profile.hostName,
+                                    onClick = { navController.navigate(Routes.RemoteControl) },
+                                    modifier = Modifier
+                                        .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 8.dp),
+                                )
+                            }
+                            ProjectScreen(
+                                container = container,
+                                contentPadding = padding,
+                                onCurrentProjectChange = { project ->
+                                    currentProjectId = project?.id
+                                    currentProjectName = project?.name
+                                },
+                                workbenchTarget = workbenchTarget,
+                                onWorkbenchTargetConsumed = { requestKey ->
+                                    if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
+                                },
+                                onCreateSession = { project ->
+                                    scope.launch {
+                                        val request = projectConversationRequest(project.id, project.name)
+                                        val conversationId = container.newConversationUseCase.create(request)
+                                        navController.navigate(
+                                            Routes.chat(
+                                                conversationId = conversationId,
+                                                projectId = project.id,
+                                                focusInput = true,
+                                            ),
+                                        )
+                                    }
+                                },
+                                onOpenSession = { conversationId ->
+                                    navController.navigate(Routes.chat(conversationId = conversationId))
+                                },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
                     }
                 }
             }
@@ -661,6 +682,9 @@ fun HarnessApkApp(
             composable(Routes.RemoteSettings) {
                 RemoteSettingsScreen(container = container, contentPadding = padding)
             }
+            composable(Routes.RemoteControl) {
+                RemoteScreen(container = container, contentPadding = padding)
+            }
         }
     }
     }
@@ -759,6 +783,35 @@ private fun HomeTopBarActions(
             Icon(
                 Icons.Filled.Add,
                 contentDescription = "新建对话",
+            )
+        }
+    }
+}
+
+@Composable
+private fun RemoteEntryCard(
+    hostName: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ElevatedCard(onClick = onClick, modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(Icons.Outlined.Dns, contentDescription = null)
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Codex 远程控制", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    text = hostName,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                contentDescription = "进入远程控制",
             )
         }
     }
