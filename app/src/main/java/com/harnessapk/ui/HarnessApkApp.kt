@@ -5,8 +5,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,6 +50,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -407,7 +411,11 @@ fun HarnessApkApp(
                             onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
                             onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                         )
-                        MainMode.WORK -> Column(modifier = Modifier.fillMaxSize()) {
+                        MainMode.WORK -> Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(top = padding.calculateTopPadding()),
+                        ) {
                             val profile = remoteProfile
                             if (profile != null) {
                                 RemoteEntryCard(
@@ -419,7 +427,11 @@ fun HarnessApkApp(
                             }
                             ProjectScreen(
                                 container = container,
-                                contentPadding = padding,
+                                contentPadding = PaddingValues(
+                                    start = padding.calculateStartPadding(LocalLayoutDirection.current),
+                                    end = padding.calculateEndPadding(LocalLayoutDirection.current),
+                                    bottom = padding.calculateBottomPadding(),
+                                ),
                                 onCurrentProjectChange = { project ->
                                     currentProjectId = project?.id
                                     currentProjectName = project?.name
