@@ -171,7 +171,6 @@ fun HarnessApkApp(
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
-    val remoteProfile by container.remoteProfileStore.profile.collectAsState()
 
     fun dispatchAgentPackageImport(event: AgentPackageImportEvent) {
         val transition = reduceAgentPackageImport(
