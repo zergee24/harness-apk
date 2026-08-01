@@ -508,10 +508,17 @@ class AgentRepository(
         val readablePackage = finalPackage ?: stagedFile
         val preparedSources = mutableListOf<PreparedSourceFile>()
         try {
-            sources.forEach { source -> preparedSources += prepareV2SourceFile(readablePackage, source) }
-            val now = timeProvider.nowMillis()
-            var result: AgentEntity? = null
-            requirePrivateInstallSpace(INSTALL_METADATA_SAFETY_BYTES)
+            var installResult: AgentInstallResult? = null
+            reader.withVerifiedV2PackagesSuspending(readablePackage) { _, stagedPackages ->
+                sources.forEach { source ->
+                    preparedSources += prepareV2SourceFile(
+                        requireNotNull(stagedPackages[source.packageSha256]) { "缺少 staged hsource：${source.manifest.sourceId}" },
+                        source,
+                    )
+                }
+                val now = timeProvider.nowMillis()
+                var result: AgentEntity? = null
+                requirePrivateInstallSpace(INSTALL_METADATA_SAFETY_BYTES)
             transactionRunner.run {
                 if (existingVersion == null) {
                     val initial = AgentEntity(
@@ -584,7 +591,11 @@ class AgentRepository(
                     if (dao.findCorpus(corpus.manifest.id, corpus.packageSha256) == null) {
                         requirePrivateInstallSpace(conservativeCorpusInstallWorkspaceBytes(corpus.uncompressedSizeBytes))
                     }
-                    installV2Corpus(readablePackage, corpus, now)
+                    installV2Corpus(
+                        requireNotNull(stagedPackages[corpus.packageSha256]) { "缺少 staged hcorpus：${corpus.manifest.id}" },
+                        corpus,
+                        now,
+                    )
                     dao.markVersionPackageInstalled(
                         agent.manifest.id,
                         agent.manifest.version,
@@ -621,7 +632,9 @@ class AgentRepository(
             } else {
                 AgentInstallOutcome.ALREADY_INSTALLED
             }
-            return AgentInstallResult(outcome, requireNotNull(result).toDomain())
+            installResult = AgentInstallResult(outcome, requireNotNull(result).toDomain())
+            }
+            return requireNotNull(installResult)
         } catch (error: Throwable) {
             val failure = normalizeInstallFailure(error)
             if (finalPackage != null) {
@@ -640,7 +653,7 @@ class AgentRepository(
         }
     }
 
-    private suspend fun prepareV2SourceFile(packageFile: File, source: V2Source): PreparedSourceFile {
+    private suspend fun prepareV2SourceFile(stagedSourceFile: File, source: V2Source): PreparedSourceFile {
         val directory = File(filesDir, "agents/sources/${source.manifest.sourceHash}").also(fileOps::createDirectories)
         val destination = File(directory, SOURCE_PAYLOAD_NAME)
         if (destination.isFile) {
@@ -656,7 +669,7 @@ class AgentRepository(
         try {
             requirePrivateInstallSpace(installWriteBytes(source.manifest.rawSizeBytes))
             fileOps.write(part) { output ->
-                reader.copyV2SourcePayload(packageFile, source.manifest.id, output)
+                reader.copyVerifiedV2SourcePayload(stagedSourceFile, source.manifest.storedName, output)
             }
             if (
                 part.length() != source.manifest.rawSizeBytes ||
@@ -967,12 +980,17 @@ class AgentRepository(
         }
     }
 
-    private suspend fun installV2Corpus(packageFile: File, corpus: V2Corpus, now: Long) {
+    private suspend fun installV2Corpus(
+        stagedCorpusFile: File,
+        corpus: V2Corpus,
+        now: Long,
+    ) {
         val corpusHash = corpus.packageSha256
         if (dao.findCorpus(corpus.manifest.id, corpusHash) == null) {
             dao.insertCorpus(
                 AgentCorpusEntity(corpus.manifest.id, corpusHash, corpus.manifest.id, now, 0L),
             )
+            val sourcesById = corpus.sources.associateBy(V2SourceRecord::sourceId)
             var sizeBytes = 0L
             val chunkBatch = ArrayList<AgentChunkEntity>(CHUNK_BATCH_SIZE)
             val searchBatch = ArrayList<AgentChunkFtsEntity>(CHUNK_BATCH_SIZE)
@@ -997,33 +1015,76 @@ class AgentRepository(
                 chunkBatch.clear()
                 searchBatch.clear()
             }
-            reader.forEachV2ChunkSuspending(packageFile, corpus.manifest.id) { chunk ->
-                val key = chunkKey(chunk.sourceHash, chunk.id)
-                sizeBytes += chunk.text.encodeToByteArray().size
-                chunkBatch += AgentChunkEntity(
-                    chunkKey = key,
-                    sourceId = chunk.sourceId,
-                    sourceHash = chunk.sourceHash,
-                    chunkId = chunk.id,
-                    sourceTitle = chunk.sourceTitle,
-                    period = chunk.period,
-                    genre = chunk.genre.wireName,
-                    authorship = chunk.authorship.wireName,
-                    location = chunk.location,
-                    parentPath = chunk.parentIds.joinToString("/"),
-                    context = chunk.context,
-                    text = chunk.text,
-                    keywordsText = (chunk.keywords + chunk.ngrams).distinct().joinToString(" "),
-                    duplicateGroup = chunk.duplicateGroup,
-                    conflictKey = chunk.conflictKey,
-                    sourceAliasesJson = storageJson.encodeToString(chunk.sourceAliases.sorted()),
-                    simHash = chunk.simHash,
+            val nodeBatch = ArrayList<AgentHierarchyNodeEntity>(CHUNK_BATCH_SIZE)
+            val nodeSearchBatch = ArrayList<AgentHierarchyFtsEntity>(CHUNK_BATCH_SIZE)
+            suspend fun flushNodes() {
+                if (nodeBatch.isEmpty()) return
+                val candidates = nodeBatch.toList()
+                val results = dao.insertHierarchyNodes(candidates)
+                val ignored = candidates.zip(results).filter { it.second == -1L }.map { it.first }
+                if (ignored.isNotEmpty()) {
+                    val existing = dao.listHierarchyNodes(ignored.map(AgentHierarchyNodeEntity::nodeKey))
+                        .associateBy(AgentHierarchyNodeEntity::nodeKey)
+                    ignored.forEach { candidate ->
+                        if (existing[candidate.nodeKey] != candidate) {
+                            throw AgentBundleException("hierarchy immutable metadata 冲突：${candidate.nodeKey}")
+                        }
+                    }
+                }
+                dao.insertCorpusHierarchyRefs(
+                    candidates.map { AgentCorpusHierarchyCrossRef(corpus.manifest.id, corpusHash, it.nodeKey) },
                 )
-                searchBatch += AgentChunkFtsEntity(key, (chunk.keywords + chunk.ngrams).distinct().joinToString(" "))
-                if (chunkBatch.size >= CHUNK_BATCH_SIZE) flushChunks()
+                dao.insertHierarchySearchRows(nodeSearchBatch.zip(results).filter { it.second != -1L }.map { it.first })
+                nodeBatch.clear()
+                nodeSearchBatch.clear()
             }
+            reader.forEachVerifiedV2CorpusContentSuspending(
+                stagedCorpusFile,
+                chunkBlock = { chunk ->
+                    val key = chunkKey(chunk.sourceHash, chunk.id)
+                    sizeBytes += chunk.text.encodeToByteArray().size
+                    chunkBatch += AgentChunkEntity(
+                        chunkKey = key,
+                        sourceId = chunk.sourceId,
+                        sourceHash = chunk.sourceHash,
+                        chunkId = chunk.id,
+                        sourceTitle = chunk.sourceTitle,
+                        period = chunk.period,
+                        genre = chunk.genre.wireName,
+                        authorship = chunk.authorship.wireName,
+                        location = chunk.location,
+                        parentPath = chunk.parentIds.joinToString("/"),
+                        context = chunk.context,
+                        text = chunk.text,
+                        keywordsText = (chunk.keywords + chunk.ngrams).distinct().joinToString(" "),
+                        duplicateGroup = chunk.duplicateGroup,
+                        conflictKey = chunk.conflictKey,
+                        sourceAliasesJson = storageJson.encodeToString(chunk.sourceAliases.sorted()),
+                        simHash = chunk.simHash,
+                    )
+                    searchBatch += AgentChunkFtsEntity(key, (chunk.keywords + chunk.ngrams).distinct().joinToString(" "))
+                    if (chunkBatch.size >= CHUNK_BATCH_SIZE) flushChunks()
+                },
+                nodeBlock = { node ->
+                    val source = requireNotNull(sourcesById[node.sourceId])
+                    val key = chunkKey(source.sourceHash, node.id)
+                    nodeBatch += AgentHierarchyNodeEntity(
+                        nodeKey = key,
+                        sourceId = node.sourceId,
+                        sourceHash = source.sourceHash,
+                        nodeId = node.id,
+                        kind = node.kind,
+                        title = node.title,
+                        parentNodeKey = node.parentId?.let { chunkKey(source.sourceHash, it) },
+                        path = node.path.joinToString("/"),
+                        summary = node.summary,
+                    )
+                    nodeSearchBatch += AgentHierarchyFtsEntity(key, listOf(node.title, node.summary).joinToString(" "))
+                    if (nodeBatch.size >= CHUNK_BATCH_SIZE) flushNodes()
+                },
+            )
             flushChunks()
-            val sourcesById = corpus.sources.associateBy(V2SourceRecord::sourceId)
+            flushNodes()
             corpus.sources.forEach { source ->
                 val existing = dao.findSource(source.sourceId, source.sourceHash)
                 existing?.requireSameDescriptor(source)
@@ -1055,47 +1116,6 @@ class AgentRepository(
                     )
                 },
             )
-            val nodeBatch = ArrayList<AgentHierarchyNodeEntity>(CHUNK_BATCH_SIZE)
-            val nodeSearchBatch = ArrayList<AgentHierarchyFtsEntity>(CHUNK_BATCH_SIZE)
-            suspend fun flushNodes() {
-                if (nodeBatch.isEmpty()) return
-                val candidates = nodeBatch.toList()
-                val results = dao.insertHierarchyNodes(candidates)
-                val ignored = candidates.zip(results).filter { it.second == -1L }.map { it.first }
-                if (ignored.isNotEmpty()) {
-                    val existing = dao.listHierarchyNodes(ignored.map(AgentHierarchyNodeEntity::nodeKey))
-                        .associateBy(AgentHierarchyNodeEntity::nodeKey)
-                    ignored.forEach { candidate ->
-                        if (existing[candidate.nodeKey] != candidate) {
-                            throw AgentBundleException("hierarchy immutable metadata 冲突：${candidate.nodeKey}")
-                        }
-                    }
-                }
-                dao.insertCorpusHierarchyRefs(
-                    candidates.map { AgentCorpusHierarchyCrossRef(corpus.manifest.id, corpusHash, it.nodeKey) },
-                )
-                dao.insertHierarchySearchRows(nodeSearchBatch.zip(results).filter { it.second != -1L }.map { it.first })
-                nodeBatch.clear()
-                nodeSearchBatch.clear()
-            }
-            reader.forEachV2HierarchyNodeSuspending(packageFile, corpus.manifest.id) { node ->
-                val source = requireNotNull(sourcesById[node.sourceId])
-                val key = chunkKey(source.sourceHash, node.id)
-                nodeBatch += AgentHierarchyNodeEntity(
-                    nodeKey = key,
-                    sourceId = node.sourceId,
-                    sourceHash = source.sourceHash,
-                    nodeId = node.id,
-                    kind = node.kind,
-                    title = node.title,
-                    parentNodeKey = node.parentId?.let { chunkKey(source.sourceHash, it) },
-                    path = node.path.joinToString("/"),
-                    summary = node.summary,
-                )
-                nodeSearchBatch += AgentHierarchyFtsEntity(key, listOf(node.title, node.summary).joinToString(" "))
-                if (nodeBatch.size >= CHUNK_BATCH_SIZE) flushNodes()
-            }
-            flushNodes()
             dao.updateCorpusSize(corpus.manifest.id, corpusHash, sizeBytes)
         }
         dao.insertVersionCorpus(

@@ -66,6 +66,34 @@ interface AgentBundleAccess {
     ) {
         throw AgentBundleException("当前 reader 不支持 V2 hierarchy 流式读取")
     }
+    suspend fun forEachV2CorpusContentSuspending(
+        file: File,
+        corpusId: String? = null,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        throw AgentBundleException("当前 reader 不支持 V2 corpus 合并流式读取")
+    }
+    suspend fun <T> withVerifiedV2PackagesSuspending(
+        file: File,
+        block: suspend (ParsedAgentPackage, Map<String, File>) -> T,
+    ): T {
+        throw AgentBundleException("当前 reader 不支持 V2 已验证包上下文")
+    }
+    suspend fun forEachVerifiedV2CorpusContentSuspending(
+        stagedCorpusFile: File,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        throw AgentBundleException("当前 reader 不支持已验证 V2 corpus 流式读取")
+    }
+    suspend fun copyVerifiedV2SourcePayload(
+        stagedSourceFile: File,
+        storedName: String,
+        output: OutputStream,
+    ) {
+        throw AgentBundleException("当前 reader 不支持已验证 V2 source 读取")
+    }
     suspend fun copyV2SourcePayload(
         file: File,
         packageId: String? = null,
@@ -324,6 +352,80 @@ class AgentBundleReader(
                         block(parseNode(parseObject(line, "$V2_NODES_PATH 第 $lineNumber 行")))
                     }
                 }
+            }
+        }
+    }
+
+    override suspend fun forEachV2CorpusContentSuspending(
+        file: File,
+        corpusId: String?,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        withVerifiedPackageSuspending(file) { parsed, stagedPackages ->
+            val corpus = parsed.resolveV2Corpus(corpusId)
+            val staged = requireNotNull(stagedPackages[corpus.packageSha256])
+            ZipFile(staged).use { archive ->
+                val chunkEntry = archive.getEntry(V2_CHUNKS_PATH)
+                    ?: throw AgentBundleException("缺少包内文件：$V2_CHUNKS_PATH")
+                archive.getInputStream(chunkEntry).use { input ->
+                    input.forEachUtf8JsonLineSuspending(V2_CHUNKS_PATH) { line, lineNumber ->
+                        currentCoroutineContext().ensureActive()
+                        chunkBlock(parseV2Chunk(parseObject(line, "$V2_CHUNKS_PATH 第 $lineNumber 行")))
+                    }
+                }
+                val nodeEntry = archive.getEntry(V2_NODES_PATH)
+                    ?: throw AgentBundleException("缺少包内文件：$V2_NODES_PATH")
+                archive.getInputStream(nodeEntry).use { input ->
+                    input.forEachUtf8JsonLineSuspending(V2_NODES_PATH) { line, lineNumber ->
+                        currentCoroutineContext().ensureActive()
+                        nodeBlock(parseNode(parseObject(line, "$V2_NODES_PATH 第 $lineNumber 行")))
+                    }
+                }
+            }
+        }
+    }
+
+    override suspend fun <T> withVerifiedV2PackagesSuspending(
+        file: File,
+        block: suspend (ParsedAgentPackage, Map<String, File>) -> T,
+    ): T = withVerifiedPackageSuspending(file, block)
+
+    override suspend fun forEachVerifiedV2CorpusContentSuspending(
+        stagedCorpusFile: File,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        ZipFile(stagedCorpusFile).use { archive ->
+            val chunkEntry = archive.getEntry(V2_CHUNKS_PATH)
+                ?: throw AgentBundleException("缺少包内文件：$V2_CHUNKS_PATH")
+            archive.getInputStream(chunkEntry).use { input ->
+                input.forEachUtf8JsonLineSuspending(V2_CHUNKS_PATH) { line, lineNumber ->
+                    currentCoroutineContext().ensureActive()
+                    chunkBlock(parseV2Chunk(parseObject(line, "$V2_CHUNKS_PATH 第 $lineNumber 行")))
+                }
+            }
+            val nodeEntry = archive.getEntry(V2_NODES_PATH)
+                ?: throw AgentBundleException("缺少包内文件：$V2_NODES_PATH")
+            archive.getInputStream(nodeEntry).use { input ->
+                input.forEachUtf8JsonLineSuspending(V2_NODES_PATH) { line, lineNumber ->
+                    currentCoroutineContext().ensureActive()
+                    nodeBlock(parseNode(parseObject(line, "$V2_NODES_PATH 第 $lineNumber 行")))
+                }
+            }
+        }
+    }
+
+    override suspend fun copyVerifiedV2SourcePayload(
+        stagedSourceFile: File,
+        storedName: String,
+        output: OutputStream,
+    ) {
+        ZipFile(stagedSourceFile).use { archive ->
+            val path = "files/$storedName"
+            val entry = archive.getEntry(path) ?: throw AgentBundleException("缺少包内文件：$path")
+            archive.getInputStream(entry).use { input ->
+                input.copyBoundedTo(output, MAX_COMPRESSED_BYTES, path)
             }
         }
     }

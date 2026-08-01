@@ -2626,6 +2626,48 @@ private class FakeV2PackageAccess(
     ) {
         nodes.forEach { block(it) }
     }
+    override suspend fun forEachV2CorpusContentSuspending(
+        file: File,
+        corpusId: String?,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        chunks.forEachIndexed { index, chunk ->
+            if (index == cancelDuringChunksAt) throw CancellationException("cancelled during chunks")
+            chunkBlock(chunk)
+        }
+        nodes.forEach { nodeBlock(it) }
+    }
+    override suspend fun <T> withVerifiedV2PackagesSuspending(
+        file: File,
+        block: suspend (ParsedAgentPackage, Map<String, File>) -> T,
+    ): T {
+        val parsed = readPackage(file)
+        val staged = packages.mapValues { (marker, _) ->
+            File.createTempFile("$marker-staged", ".package").apply { writeText(marker) }
+        }.values.associateBy { stagedFile ->
+            packages.getValue(stagedFile.readText()).packageSha256
+        }
+        return block(parsed, staged)
+    }
+    override suspend fun forEachVerifiedV2CorpusContentSuspending(
+        stagedCorpusFile: File,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        chunks.forEachIndexed { index, chunk ->
+            if (index == cancelDuringChunksAt) throw CancellationException("cancelled during chunks")
+            chunkBlock(chunk)
+        }
+        nodes.forEach { nodeBlock(it) }
+    }
+    override suspend fun copyVerifiedV2SourcePayload(
+        stagedSourceFile: File,
+        storedName: String,
+        output: java.io.OutputStream,
+    ) {
+        output.write("raw-source".encodeToByteArray())
+    }
     override suspend fun copyV2SourcePayload(
         file: File,
         packageId: String?,
