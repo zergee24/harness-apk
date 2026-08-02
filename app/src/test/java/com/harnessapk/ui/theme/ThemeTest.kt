@@ -2,6 +2,7 @@ package com.harnessapk.ui.theme
 
 import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.ui.graphics.Color
+import com.harnessapk.ui.MainMode
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
@@ -67,5 +68,17 @@ class ThemeTest {
         assertEquals(CornerSize(4.dp), TechShapes.extraSmall.topStart)
         assertEquals(CornerSize(8.dp), TechShapes.medium.topStart)
         assertEquals(CornerSize(12.dp), TechShapes.extraLarge.topStart)
+    }
+
+    @Test
+    fun meModeUsesTechDarkTheme() {
+        assertEquals(
+            techDarkColorScheme().background,
+            when (MainMode.ME) {
+                MainMode.LIFE -> warmLightColorScheme()
+                MainMode.WORK -> techDarkColorScheme()
+                MainMode.ME -> techDarkColorScheme()
+            }.background,
+        )
     }
 }
