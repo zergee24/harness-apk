@@ -9,7 +9,8 @@
 本设计确认以下产品关系：
 
 - 底部导航是唯一一级导航；移除顶部模式 Tab 与 HorizontalPager 滑动面板。
-- **会话列表不属于任何模式专属**：会话是横切能力。生活 Tab 的会话列表只放普通会话，不出现"按项目分组"等项目概念；项目会话在项目工作台内管理。
+- **生活 = 默认生活项目（隐藏项目层级）**：生活 Tab 的会话列表是"生活项目"内的会话，但 UI 上不出现任何项目概念（分组、文件夹、工作台）。
+- **会话列表两套独立、互不干扰**：生活 Tab 只显示普通会话（`projectId == null`），项目会话只出现在项目工作台内（`projectId != null`），互不混排。会话仍是横切能力：两种模式各有自己的会话列表。
 - **项目概念只出现在工作 Tab**：工作 Tab = 项目列表 + 项目工作台（会话/文件夹/Git）+ 远程控制入口卡片（保留现状）。
 - **"我的" Tab = 设置聚合页**：内嵌现有 `SettingsScreen`（Provider/搜索/语音/Git/技能/智能体包/知识库/更新/远程节点），顶栏设置按钮移除。
 - 双主题分配：**生活 = 暖浅；工作、我的 = 深科技**。
@@ -22,14 +23,14 @@
 
 - 顶部模式 Tab + 滑动面板 + 面板内次级 Tab（会话列表的"最近会话/按项目分组"、项目工作台三 Tab）叠了三层导航。
 - "生活"面板内出现"按项目分组"视图，把项目概念注入了会话列表，与"项目属于工作"的认知冲突。
-- "会话列表只有生活才有"的隐含假设不成立——项目会话同样是会话，会话是横切能力。
+- 会话归属不清晰：普通会话与项目会话在同一个列表混排，靠分组视图区分，而非"生活项目/工作项目"两套独立列表。
 - 设置入口在顶栏图标，与"我的"聚合页概念割裂。
 
 ## 3. 产品目标
 
 1. 一级导航为底部三 Tab：生活 / 工作 / 我的，切换一次点按，无嵌套层级。
-2. 生活 Tab = 普通会话列表 + 智能体/知识库快捷入口 + 新建会话；无项目概念。
-3. 工作 Tab = 远程控制入口卡片（配对后可见）+ 项目列表 + 项目工作台。
+2. 生活 Tab = 普通会话列表（`projectId == null`，即"默认生活项目"的会话，隐藏项目层级）+ 智能体/知识库快捷入口 + 新建会话。
+3. 工作 Tab = 远程控制入口卡片（配对后可见）+ 项目列表 + 项目工作台（项目会话/文件夹/Git）。
 4. 我的 Tab = 设置聚合页（内嵌现有 SettingsScreen），顶栏设置按钮移除。
 5. 双主题：生活=暖浅，工作/我的=深科技，300ms 过渡保留。
 6. 启动恢复上次 Tab；进程内状态保留。
@@ -37,7 +38,8 @@
 ### 成功标准
 
 - 从任意 Tab 一次点按到达另一 Tab；页面内不再出现模式切换控件。
-- 会话列表不含任何项目分组/项目标识概念。
+- 生活 Tab 会话列表只含普通会话（项目会话零出现），无任何项目概念。
+- 项目会话只在项目工作台可见；生活会话不出现在项目工作台。
 - 顶栏只承载上下文操作（新建、搜索、设置类的当前页操作），不再承载导航。
 - 现有能力（项目工作台、Wiki、智能体、远程控制、自更新）全部可用，无功能回归。
 
@@ -69,13 +71,14 @@
 
 ### 5.2 生活 Tab
 
-- 现有 `ConversationListScreen`，**移除"按项目分组"全部逻辑**（`groupedByProject` 状态、`ConversationListHeader`、`ProjectConversationGroupHeader`、`ProjectSessionsToggleRow`、分组构建函数），仅保留普通会话列表。
+- `ConversationListScreen` 改为**只显示普通会话**（`projectId == null`，即"默认生活项目"的会话；项目层级在 UI 上隐藏），并**移除"按项目分组"全部逻辑**（`groupedByProject` 状态、`ConversationListHeader`、`ProjectConversationGroupHeader`、`ProjectSessionsToggleRow`、分组构建函数）。
+- 过滤实现：`conversations.filter { it.projectId == null }`（UI 层过滤，不动仓库层）。
 - 智能体/知识库快捷入口行保留；新建会话 FAB 保留。
 
 ### 5.3 工作 Tab
 
 - 现状保留：`Column`（顶部 inset 消费）内 `RemoteEntryCard`（profile 非空显示，点击进 `Routes.RemoteControl`）+ `ProjectScreen(modifier = weight(1f))`。
-- 项目工作台（会话/文件夹/Git）不变。
+- 项目工作台（会话/文件夹/Git）不变；项目会话列表（`ProjectWorkbenchTab.CONVERSATIONS`）只含项目会话，与生活会话互不混排。
 
 ### 5.4 我的 Tab
 
@@ -108,7 +111,7 @@
 | `ui/HomeModeStore.kt` | migrateStoredMode 加 "ME"→ME |
 | `ui/theme/Theme.kt` | ModeTheme 映射 ME→techDark+TechShapes |
 | `ui/HarnessApkApp.kt` | 首页换底部 NavigationBar 三 Tab；移除 Pager/顶部 Tab/设置按钮/Routes.Settings；我的 Tab 内嵌 SettingsScreen |
-| `ui/conversation/ConversationListScreen.kt` | 移除按项目分组全部逻辑 |
+| `ui/conversation/ConversationListScreen.kt` | 移除按项目分组全部逻辑；只显示 `projectId == null` 的普通会话 |
 | `ui/settings/SettingsScreen.kt` | 仅调整挂载方式（如需要：去掉仅被 route 使用的东西），主体不动 |
 | 测试 | HomeModeUiStateTest、HomeModeStoreTest、DualModeHomePagerTest（重写为 Tab 导航测试）、HarnessApkAppStateTest 源码断言、LifePanelQuickEntryTest/WorkPanelRemoteEntryTest 适配 |
 
@@ -117,7 +120,7 @@
 ## 7. 测试与验收
 
 - 单测：MainMode 三态、迁移（含 ME）、topLevelTitle/homePrimaryAction。
-- Compose 测试：底部导航三 Tab 切换、生活 Tab 无项目分组、我的 Tab 显示设置项、主题断言（LIFE 暖浅 / WORK、ME 深科技）。
+- Compose 测试：底部导航三 Tab 切换、生活 Tab 无项目分组且只含普通会话（项目会话不出现）、我的 Tab 显示设置项、主题断言（LIFE 暖浅 / WORK、ME 深科技）。
 - 回归：全量 JVM；androidTest 重写/适配后在设备补跑。
 - 真机验收：
   1. 底部三 Tab 一次点按切换；无顶部 Tab/滑动残留。
