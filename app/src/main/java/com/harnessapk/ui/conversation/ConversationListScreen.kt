@@ -13,19 +13,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
-import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,22 +30,18 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.Conversation
 import com.harnessapk.agent.Agent
 import com.harnessapk.common.AppContainer
-import com.harnessapk.session.WorkspaceProject
 import com.harnessapk.ui.components.ActionableEmptyState
 import com.harnessapk.ui.components.ComfortListRow
 import com.harnessapk.ui.theme.HarnessSpacing
@@ -65,12 +57,8 @@ internal fun conversationIdentityLabel(conversation: Conversation, agents: Map<S
 
 internal fun conversationMetadataLabel(
     conversation: Conversation,
-    projects: Map<String, WorkspaceProject>,
     agents: Map<String, Agent>,
-): String? = listOfNotNull(
-    conversation.projectId?.let { projects[it]?.name ?: "未知项目" },
-    conversationIdentityLabel(conversation, agents),
-).joinToString(" · ").takeIf { it.isNotEmpty() }
+): String? = conversationIdentityLabel(conversation, agents)
 
 @Composable
 fun ConversationListScreen(
@@ -86,37 +74,8 @@ fun ConversationListScreen(
     val scope = rememberCoroutineScope()
     var conversationToEdit by remember { mutableStateOf<Conversation?>(null) }
     var titleDraft by remember { mutableStateOf("") }
-    var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
-    var groupedByProject by rememberSaveable { mutableStateOf(false) }
-    var allProjectSessionsCollapsed by rememberSaveable { mutableStateOf(false) }
-    var collapsedProjectIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-
-    LaunchedEffect(Unit) {
-        projects = runCatching { container.projectWorkspaceGateway.listProjects() }
-            .getOrDefault(emptyList())
-    }
-
-    val projectsById = remember(projects) { projects.associateBy { it.id } }
+    val lifeConversations = remember(conversations) { lifeConversations(conversations) }
     val agentsById = remember(agents) { agents.associateBy { it.id } }
-    val groupedState = remember(
-        conversations,
-        projects,
-        allProjectSessionsCollapsed,
-        collapsedProjectIds,
-    ) {
-        buildProjectGroupedConversationState(
-            conversations = conversations,
-            projects = projects,
-            allProjectSessionsCollapsed = allProjectSessionsCollapsed,
-            collapsedProjectIds = collapsedProjectIds,
-        )
-    }
-
-    LaunchedEffect(groupedState.canGroupByProject) {
-        if (!groupedState.canGroupByProject) {
-            groupedByProject = false
-        }
-    }
 
     conversationToEdit?.let { conversation ->
         AlertDialog(
@@ -165,103 +124,27 @@ fun ConversationListScreen(
                 onOpenWikiLibrary = onOpenWikiLibrary,
             )
         }
-        if (conversations.isEmpty()) {
+        if (lifeConversations.isEmpty()) {
             item { EmptyConversationState(onCreateConversation) }
         } else {
-            if (groupedState.canGroupByProject) {
-                item {
-                    ConversationListHeader(
-                        groupedByProject = groupedByProject,
-                        onShowRecent = { groupedByProject = false },
-                        onShowGrouped = { groupedByProject = true },
-                    )
-                }
-            }
-            if (groupedByProject) {
-                groupedConversationDisplaySections(groupedState).forEach { section ->
-                    when (section) {
-                        is ConversationGroupedDisplaySection.ProjectGroupsToggle -> {
-                            item(key = "project-sessions-toggle") {
-                                ProjectSessionsToggleRow(
-                                    collapsed = section.collapsed,
-                                    count = section.count,
-                                    onToggle = {
-                                        allProjectSessionsCollapsed = !allProjectSessionsCollapsed
-                                        if (!allProjectSessionsCollapsed) {
-                                            collapsedProjectIds = emptySet()
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                        is ConversationGroupedDisplaySection.ProjectGroup -> {
-                            val group = section.group
-                            item(key = "project-${group.projectId}") {
-                                ProjectConversationGroupHeader(
-                                    group = group,
-                                    onToggle = {
-                                        collapsedProjectIds = if (group.projectId in collapsedProjectIds) {
-                                            collapsedProjectIds - group.projectId
-                                        } else {
-                                            collapsedProjectIds + group.projectId
-                                        }
-                                    },
-                                )
-                            }
-                            conversationItems(
-                                conversations = group.visibleConversations,
-                                projectsById = projectsById,
-                                agentsById = agentsById,
-                                onOpenChat = onOpenChat,
-                                onEdit = {
-                                    conversationToEdit = it
-                                    titleDraft = it.title
-                                },
-                                onDelete = {
-                                    scope.launch { container.chatRepository.archiveConversation(it.id) }
-                                },
-                            )
-                        }
-                        is ConversationGroupedDisplaySection.Regular -> {
-                            item { ConversationSectionHeader("普通会话") }
-                            conversationItems(
-                                conversations = section.conversations,
-                                projectsById = projectsById,
-                                agentsById = agentsById,
-                                onOpenChat = onOpenChat,
-                                onEdit = {
-                                    conversationToEdit = it
-                                    titleDraft = it.title
-                                },
-                                onDelete = {
-                                    scope.launch { container.chatRepository.archiveConversation(it.id) }
-                                },
-                            )
-                        }
-                    }
-                }
-            } else {
-                conversationItems(
-                    conversations = conversations,
-                    projectsById = projectsById,
-                    agentsById = agentsById,
-                    onOpenChat = onOpenChat,
-                    onEdit = {
-                        conversationToEdit = it
-                        titleDraft = it.title
-                    },
-                    onDelete = {
-                        scope.launch { container.chatRepository.archiveConversation(it.id) }
-                    },
-                )
-            }
+            conversationItems(
+                conversations = lifeConversations,
+                agentsById = agentsById,
+                onOpenChat = onOpenChat,
+                onEdit = {
+                    conversationToEdit = it
+                    titleDraft = it.title
+                },
+                onDelete = {
+                    scope.launch { container.chatRepository.archiveConversation(it.id) }
+                },
+            )
         }
     }
 }
 
 private fun androidx.compose.foundation.lazy.LazyListScope.conversationItems(
     conversations: List<Conversation>,
-    projectsById: Map<String, WorkspaceProject>,
     agentsById: Map<String, Agent>,
     onOpenChat: (String) -> Unit,
     onEdit: (Conversation) -> Unit,
@@ -270,139 +153,11 @@ private fun androidx.compose.foundation.lazy.LazyListScope.conversationItems(
     items(conversations, key = { it.id }) { conversation ->
         ConversationRow(
             conversation = conversation,
-            metadata = conversationMetadataLabel(conversation, projectsById, agentsById),
+            metadata = conversationMetadataLabel(conversation, agentsById),
             onOpen = { onOpenChat(conversation.id) },
             onEdit = { onEdit(conversation) },
             onDelete = { onDelete(conversation) },
         )
-    }
-}
-
-@Composable
-private fun ConversationListHeader(
-    groupedByProject: Boolean,
-    onShowRecent: () -> Unit,
-    onShowGrouped: () -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ConversationListTab(
-                text = "最近会话",
-                selected = !groupedByProject,
-                onClick = onShowRecent,
-            )
-            ConversationListTab(
-                text = "按项目分组",
-                selected = groupedByProject,
-                onClick = onShowGrouped,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ConversationListTab(
-    text: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    FilterChip(
-        selected = selected,
-        onClick = onClick,
-        label = { Text(text) },
-        colors = FilterChipDefaults.filterChipColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            selectedContainerColor = MaterialTheme.colorScheme.primary,
-            selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
-        ),
-    )
-}
-
-@Composable
-private fun ConversationSectionHeader(title: String) {
-    Text(
-        text = title,
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontWeight = FontWeight.SemiBold,
-    )
-}
-
-@Composable
-private fun ProjectConversationGroupHeader(
-    group: ConversationProjectGroup,
-    onToggle: () -> Unit,
-) {
-    TextButton(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onToggle,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = if (group.isCollapsed) {
-                        Icons.AutoMirrored.Outlined.KeyboardArrowRight
-                    } else {
-                        Icons.Outlined.KeyboardArrowDown
-                    },
-                    contentDescription = if (group.isCollapsed) "展开项目会话" else "折叠项目会话",
-                )
-                Text(
-                    text = group.projectName,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Text(
-                text = "${group.conversations.size} 个会话",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ProjectSessionsToggleRow(
-    collapsed: Boolean,
-    count: Int,
-    onToggle: () -> Unit,
-) {
-    TextButton(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onToggle,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = if (collapsed) {
-                        Icons.AutoMirrored.Outlined.KeyboardArrowRight
-                    } else {
-                        Icons.Outlined.KeyboardArrowDown
-                    },
-                    contentDescription = if (collapsed) "展开全部项目会话" else "折叠全部项目会话",
-                )
-                Text(
-                    text = if (collapsed) "项目会话已折叠" else "项目会话",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Text(
-                text = "$count 个会话",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
     }
 }
 

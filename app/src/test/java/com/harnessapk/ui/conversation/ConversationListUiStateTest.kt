@@ -3,12 +3,8 @@ package com.harnessapk.ui.conversation
 import com.harnessapk.chat.Conversation
 import com.harnessapk.agent.Agent
 import com.harnessapk.agent.AgentStatus
-import com.harnessapk.session.WorkspaceProject
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 
 class ConversationListUiStateTest {
     @Test
@@ -29,142 +25,30 @@ class ConversationListUiStateTest {
     }
 
     @Test
-    fun conversationMetadataShowsProjectAndPersonForCombinedConversation() {
-        val projects = mapOf("p1" to project("p1", "移动端 Harness"))
+    fun conversationMetadataShowsPersonForCombinedConversation() {
         val agents = mapOf("a1" to agent("a1", "李德胜"))
 
         assertEquals(
-            "移动端 Harness · 李德胜 · 基于资料模拟",
-            conversationMetadataLabel(
-                conversation("combined", "项目人物会话", 1L, "p1").copy(agentId = "a1"),
-                projects,
-                agents,
-            ),
-        )
-        assertEquals(
-            "移动端 Harness",
-            conversationMetadataLabel(conversation("project", "项目会话", 1L, "p1"), projects, agents),
-        )
-        assertEquals(
             "李德胜 · 基于资料模拟",
             conversationMetadataLabel(
-                conversation("person", "人物会话", 1L, null).copy(agentId = "a1"),
-                projects,
+                conversation("combined", "人物会话", 1L, null).copy(agentId = "a1"),
                 agents,
             ),
         )
         assertEquals(
             null,
-            conversationMetadataLabel(conversation("assistant", "普通会话", 1L, null), projects, agents),
+            conversationMetadataLabel(conversation("assistant", "普通会话", 1L, null), agents),
         )
     }
 
     @Test
-    fun conversationTabsDoNotDuplicateTitleOrUseDisabledSelectedState() {
-        val source = File("src/main/java/com/harnessapk/ui/conversation/ConversationListScreen.kt").readText()
-
-        assertFalse(source.contains("text = if (groupedByProject) \"按项目分组\" else \"最近会话\""))
-        assertFalse(source.contains("enabled = groupedByProject"))
-        assertFalse(source.contains("enabled = !groupedByProject"))
-        assertTrue(source.contains("selected = !groupedByProject"))
-        assertTrue(source.contains("selected = groupedByProject"))
-    }
-
-    @Test
-    fun groupedStateSupportsCollapsingAllProjectSessions() {
-        val state = buildProjectGroupedConversationState(
-            conversations = listOf(
-                conversation("plain", "普通对话", 30L, null),
-                conversation("p1-new", "新方案", 50L, "project-1"),
-                conversation("p1-old", "旧方案", 20L, "project-1"),
-                conversation("p2", "验收", 40L, "project-2"),
-            ),
-            projects = listOf(project("project-1", "移动端 Harness"), project("project-2", "CRM")),
-            allProjectSessionsCollapsed = true,
-            collapsedProjectIds = emptySet(),
+    fun lifeConversationsKeepsOnlyNonProjectConversations() {
+        val list = listOf(
+            conversation(id = "c1", title = "普通", updatedAt = 1L, projectId = null),
+            conversation(id = "c2", title = "项目", updatedAt = 2L, projectId = "p1"),
+            conversation(id = "c3", title = "普通", updatedAt = 3L, projectId = null),
         )
-
-        assertEquals(listOf("plain"), state.regularConversations.map { it.id })
-        assertTrue(state.allProjectSessionsCollapsed)
-        assertEquals(emptyList<String>(), state.visibleProjectGroups.map { it.projectId })
-    }
-
-    @Test
-    fun groupedModeIsAvailableOnlyWhenProjectsExist() {
-        val withoutProjects = buildProjectGroupedConversationState(
-            conversations = listOf(conversation("plain", "普通对话", 30L, null)),
-            projects = emptyList(),
-            allProjectSessionsCollapsed = false,
-            collapsedProjectIds = emptySet(),
-        )
-        val withProjects = buildProjectGroupedConversationState(
-            conversations = listOf(conversation("plain", "普通对话", 30L, null)),
-            projects = listOf(project("project-1", "移动端 Harness")),
-            allProjectSessionsCollapsed = false,
-            collapsedProjectIds = emptySet(),
-        )
-
-        assertFalse(withoutProjects.canGroupByProject)
-        assertTrue(withProjects.canGroupByProject)
-    }
-
-    @Test
-    fun groupedStateSupportsCollapsingSingleProjectSessions() {
-        val state = buildProjectGroupedConversationState(
-            conversations = listOf(
-                conversation("p1-new", "新方案", 50L, "project-1"),
-                conversation("p1-old", "旧方案", 20L, "project-1"),
-                conversation("p2", "验收", 40L, "project-2"),
-            ),
-            projects = listOf(project("project-1", "移动端 Harness"), project("project-2", "CRM")),
-            allProjectSessionsCollapsed = false,
-            collapsedProjectIds = setOf("project-1"),
-        )
-
-        assertEquals("移动端 Harness", state.projectGroups.first().projectName)
-        assertTrue(state.projectGroups.first().isCollapsed)
-        assertEquals(emptyList<String>(), state.projectGroups.first().visibleConversations.map { it.id })
-        assertEquals(listOf("p2"), state.projectGroups.last().visibleConversations.map { it.id })
-    }
-
-    @Test
-    fun groupedDisplaySectionsPutProjectSessionsBeforeRegularSessions() {
-        val state = buildProjectGroupedConversationState(
-            conversations = listOf(
-                conversation("plain-new", "普通新对话", 100L, null),
-                conversation("p1", "项目方案", 50L, "project-1"),
-                conversation("plain-old", "普通旧对话", 10L, null),
-            ),
-            projects = listOf(project("project-1", "移动端 Harness")),
-            allProjectSessionsCollapsed = false,
-            collapsedProjectIds = emptySet(),
-        )
-
-        val sections = groupedConversationDisplaySections(state)
-
-        assertEquals(listOf("toggle:false", "project:project-1", "regular"), sections.map(::sectionKey))
-        assertEquals(listOf("plain-new", "plain-old"), (sections.last() as ConversationGroupedDisplaySection.Regular).conversations.map { it.id })
-    }
-
-    @Test
-    fun groupedDisplaySectionsKeepCollapseAllControlInListWhenCollapsed() {
-        val state = buildProjectGroupedConversationState(
-            conversations = listOf(
-                conversation("plain", "普通对话", 100L, null),
-                conversation("p1", "项目方案", 50L, "project-1"),
-            ),
-            projects = listOf(project("project-1", "移动端 Harness")),
-            allProjectSessionsCollapsed = true,
-            collapsedProjectIds = emptySet(),
-        )
-
-        assertEquals(listOf("toggle:true", "regular"), groupedConversationDisplaySections(state).map(::sectionKey))
-    }
-
-    private fun sectionKey(section: ConversationGroupedDisplaySection): String = when (section) {
-        is ConversationGroupedDisplaySection.ProjectGroup -> "project:${section.group.projectId}"
-        is ConversationGroupedDisplaySection.ProjectGroupsToggle -> "toggle:${section.collapsed}"
-        is ConversationGroupedDisplaySection.Regular -> "regular"
+        assertEquals(listOf("c1", "c3"), lifeConversations(list).map { it.id })
     }
 
     private fun conversation(
@@ -180,11 +64,6 @@ class ConversationListUiStateTest {
         promptOriginal = "",
         promptOptimized = "",
         promptFinal = "",
-    )
-
-    private fun project(id: String, name: String): WorkspaceProject = WorkspaceProject(
-        id = id,
-        name = name,
     )
 
     private fun agent(id: String, name: String): Agent = Agent(
