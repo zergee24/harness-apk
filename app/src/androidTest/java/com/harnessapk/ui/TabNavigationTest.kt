@@ -68,6 +68,31 @@ class TabNavigationTest {
     }
 
     @Test
+    fun lifeToMeKeepsLifeTheme() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                HarnessApkApp()
+            }
+        }
+        composeRule.onNodeWithTag("nav-ME").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("theme-LIFE").assertExists()
+    }
+
+    @Test
+    fun workToMeKeepsWorkTheme() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                HarnessApkApp()
+            }
+        }
+        composeRule.onNodeWithTag("nav-WORK").performClick()
+        composeRule.onNodeWithTag("nav-ME").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("theme-WORK").assertExists()
+    }
+
+    @Test
     fun lifeModeAppliesWarmLightBackground() {
         var background by mutableStateOf(Color.Unspecified)
         composeRule.setContent {
@@ -89,14 +114,4 @@ class TabNavigationTest {
         assertEquals(Color(0xFF101417), background)
     }
 
-    @Test
-    fun meModeAppliesTechDarkBackground() {
-        var background by mutableStateOf(Color.Unspecified)
-        composeRule.setContent {
-            ModeTheme(MainMode.ME) {
-                background = MaterialTheme.colorScheme.background
-            }
-        }
-        assertEquals(Color(0xFF101417), background)
-    }
 }

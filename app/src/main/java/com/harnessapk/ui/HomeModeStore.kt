@@ -12,20 +12,36 @@ internal fun migrateStoredMode(raw: String?): MainMode = when (raw) {
     else -> MainMode.LIFE
 }
 
+internal fun migrateStoredThemeSource(raw: String?): MainMode = when (raw) {
+    "WORK" -> MainMode.WORK
+    else -> MainMode.LIFE
+}
+
 class HomeModeStore(context: Context) {
     private val preferences = context.getSharedPreferences("home_mode", Context.MODE_PRIVATE)
-    private val _mode = MutableStateFlow(load())
+    private val _mode = MutableStateFlow(loadMode())
     val mode: StateFlow<MainMode> = _mode.asStateFlow()
+    private val _themeSourceMode = MutableStateFlow(loadThemeSourceMode())
+    val themeSourceMode: StateFlow<MainMode> = _themeSourceMode.asStateFlow()
 
-    fun save(mode: MainMode) {
-        preferences.edit().putString("main_mode", mode.name).apply()
+    fun save(mode: MainMode, themeSourceMode: MainMode) {
+        val normalizedSource = nextThemeSource(themeSourceMode, mode)
+        preferences.edit()
+            .putString("main_mode", mode.name)
+            .putString("theme_source_mode", normalizedSource.name)
+            .apply()
         _mode.value = mode
+        _themeSourceMode.value = normalizedSource
     }
 
     internal fun reset() {
         preferences.edit().clear().commit()
-        _mode.value = load()
+        _mode.value = loadMode()
+        _themeSourceMode.value = loadThemeSourceMode()
     }
 
-    private fun load(): MainMode = migrateStoredMode(preferences.getString("main_mode", null))
+    private fun loadMode(): MainMode = migrateStoredMode(preferences.getString("main_mode", null))
+
+    private fun loadThemeSourceMode(): MainMode =
+        migrateStoredThemeSource(preferences.getString("theme_source_mode", null))
 }
