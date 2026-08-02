@@ -33,7 +33,7 @@ internal object RemoteCrypto {
     }
 
     private fun RemoteWireMessage.aad(): String = listOf(
-        version, messageId, hostId, deviceId, pairingTicket.orEmpty(), sequence, expiresAt, pushKind.orEmpty(),
+        version, messageId, hostId, deviceId, pairingTicket.orEmpty(), sequence, expiresAt, pushKind.orEmpty(), ackOf.orEmpty(),
     ).joinToString("\u0000")
 
     private fun encode(value: ByteArray): String = Base64.encodeToString(value, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)

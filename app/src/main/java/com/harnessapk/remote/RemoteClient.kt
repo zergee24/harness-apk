@@ -40,6 +40,7 @@ class RemoteRepository(
     private var socket: WebSocket? = null
     private var reconnectJob: Job? = null
     private var explicitDisconnect = false
+    private var reconnectAttempt = 0
     private val pendingCommands = mutableMapOf<String, String>()
 
     fun connect() {
@@ -55,6 +56,7 @@ class RemoteRepository(
 
     fun disconnect() {
         explicitDisconnect = true
+        reconnectAttempt = 0
         reconnectJob?.cancel()
         socket?.close(1000, "user disconnected")
         socket = null
@@ -122,9 +124,22 @@ class RemoteRepository(
         return true
     }
 
+    private fun sendAck(messageId: String) {
+        val profile = profileStore.profile.value ?: return
+        val now = System.currentTimeMillis()
+        val wire = RemoteWireMessage(
+            messageId = "ack:${UUID.randomUUID()}", hostId = profile.hostId, deviceId = profile.deviceId,
+            pairingTicket = profile.pairingTicket.takeIf(String::isNotBlank), sequence = outgoingSequence.incrementAndGet(),
+            expiresAt = now + 5 * 60_000L, nonce = "", ciphertext = "", ackOf = messageId,
+        )
+        val payload = buildJsonObject { put("type", JsonPrimitive("ack")) }
+        socket?.send(RemoteCrypto.encrypt(profile.pairingSecret, wire, payload).toJson().toString())
+    }
+
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (socket !== webSocket) return
+            reconnectAttempt = 0
             _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED, errorMessage = null)
             send(RemoteCommand(type = "host.status", requestId = requestId("host.status")))
             refreshThreads()
@@ -150,17 +165,31 @@ class RemoteRepository(
         _state.value = _state.value.copy(connectionStatus = if (explicitDisconnect) RemoteConnectionStatus.DISCONNECTED else RemoteConnectionStatus.ERROR, errorMessage = reason)
         if (explicitDisconnect) return
         reconnectJob?.cancel()
-        reconnectJob = scope.launch { delay(3_000); connect() }
+        reconnectJob = scope.launch {
+            delay(reconnectDelayMillis(reconnectAttempt))
+            reconnectAttempt++
+            connect()
+        }
+    }
+
+    private fun reconnectDelayMillis(attempt: Int): Long {
+        val exponential = 3_000L shl attempt.coerceAtMost(4)
+        return exponential.coerceAtMost(48_000L)
     }
 
     private fun handleWire(text: String) {
         val profile = requireNotNull(profileStore.profile.value)
         val wire = parseWire(text)
-        synchronized(seenMessages) {
-            check(wire.messageId !in seenMessages) { "收到重复远程消息" }
-            seenMessages += wire.messageId
-            while (seenMessages.size > 512) seenMessages.remove(seenMessages.first())
+        val firstSeen = synchronized(seenMessages) {
+            if (wire.messageId in seenMessages) false
+            else {
+                seenMessages += wire.messageId
+                while (seenMessages.size > 512) seenMessages.remove(seenMessages.first())
+                true
+            }
         }
+        sendAck(wire.messageId)
+        if (!firstSeen) return
         val event = parseRemoteEvent(RemoteCrypto.decrypt(profile.pairingSecret, wire))
         handleEvent(event)
     }
@@ -283,6 +312,7 @@ private fun RemoteWireMessage.toJson(): JsonObject = buildJsonObject {
     put("deviceId", JsonPrimitive(deviceId)); pairingTicket?.let { put("pairingTicket", JsonPrimitive(it)) }
     put("sequence", JsonPrimitive(sequence)); put("expiresAt", JsonPrimitive(expiresAt)); put("nonce", JsonPrimitive(nonce)); put("ciphertext", JsonPrimitive(ciphertext))
     pushKind?.let { put("pushKind", JsonPrimitive(it)) }
+    ackOf?.let { put("ackOf", JsonPrimitive(it)) }
 }
 
 private fun parseWire(raw: String): RemoteWireMessage {
@@ -290,6 +320,7 @@ private fun parseWire(raw: String): RemoteWireMessage {
     return RemoteWireMessage(
         version = root.long("version")?.toInt() ?: 0, messageId = root.string("messageId").orEmpty(), hostId = root.string("hostId").orEmpty(),
         deviceId = root.string("deviceId").orEmpty(), pairingTicket = root.string("pairingTicket"), sequence = root.long("sequence") ?: 0,
-        expiresAt = root.long("expiresAt") ?: 0, nonce = root.string("nonce").orEmpty(), ciphertext = root.string("ciphertext").orEmpty(), pushKind = root.string("pushKind"),
+        expiresAt = root.long("expiresAt") ?: 0, nonce = root.string("nonce").orEmpty(), ciphertext = root.string("ciphertext").orEmpty(),
+        pushKind = root.string("pushKind"), ackOf = root.string("ackOf"),
     )
 }

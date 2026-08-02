@@ -529,6 +529,17 @@ private class FakeConversationDao : ConversationDao {
     }
     override suspend fun countByAgentVersion(agentId: String, version: Int) =
         rows.values.count { it.agentId == agentId && it.agentVersion == version }
+    override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int {
+        var matched = 0
+        rows.values.forEach { conversation ->
+            if (conversation.agentId == agentId && conversation.agentVersion == version) {
+                rows[conversation.id] = conversation.copy(agentId = null, agentVersion = null, updatedAt = updatedAt)
+                matched += 1
+            }
+        }
+        refresh()
+        return matched
+    }
 
     private fun refresh() {
         flow.value = rows.values.filter { !it.isArchived }.sortedByDescending { it.updatedAt }

@@ -34,7 +34,7 @@ internal fun reduceAgentPackageImport(
         } else {
             AgentPackageImportTransition(
                 state = state.copy(
-                    sourceProjectId = event.currentProjectId.takeIf { event.mainMode == MainMode.PROJECT },
+                    sourceProjectId = event.currentProjectId.takeIf { event.mainMode == MainMode.WORK },
                     consumedExternalBundleUri = event.uri,
                 ),
                 navigateToPackages = true,

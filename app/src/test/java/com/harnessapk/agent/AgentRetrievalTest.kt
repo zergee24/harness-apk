@@ -121,7 +121,7 @@ class AgentRetrievalTest {
         assertEquals(1, result.agent.requiredCorpusCount)
         assertEquals(1, result.agent.installedCorpusCount)
         assertEquals(450, fixture.dao.chunks.size)
-        assertTrue(fixture.dao.maxChunkBatchSize <= 200)
+        assertTrue(fixture.dao.maxChunkBatchSize <= 1_000)
         assertEquals(1, fixture.dao.sources.size)
         assertFalse(session.stagedFile.exists())
         val reused = runCatching { fixture.repository.installPackage(session) }.exceptionOrNull()
@@ -1480,7 +1480,8 @@ class AgentRetrievalTest {
             V2InstallFailure.CANCEL_DURING_CHUNKS,
         )
         cases.forEach { failurePoint ->
-            val fixture = v2InstallFixture(chunkCount = 450, failure = failurePoint)
+            val chunkCount = if (failurePoint == V2InstallFailure.BATCH_INSERT) 2_000 else 450
+            val fixture = v2InstallFixture(chunkCount = chunkCount, failure = failurePoint)
             val session = fixture.repository.preparePackageImport("$failurePoint.hbundle") {
                 "bundle".byteInputStream()
             }
@@ -1504,7 +1505,7 @@ class AgentRetrievalTest {
     }
 
     @Test
-    fun referencedVersionCannotBeDeletedAndLastUnreferencedVersionRemovesAgent() = runTest {
+    fun referencedVersionCanBeDeletedAndLastUnreferencedVersionRemovesAgent() = runTest {
         val fixture = optionalRemovalFixture(required = false)
         val conversationDao = RemovalConversationDao(referenceCount = 1)
         val repository = AgentRepository(
@@ -1517,19 +1518,15 @@ class AgentRetrievalTest {
         )
 
         assertEquals(
-            AgentVersionRemovalOutcome.REFERENCED,
-            repository.removeVersion("agent-remove", 1).outcome,
-        )
-        conversationDao.referenceCount = 0
-        assertEquals(
             AgentVersionRemovalOutcome.REMOVED,
             repository.removeVersion("agent-remove", 1).outcome,
         )
+        assertEquals(1, conversationDao.clearCount)
         assertTrue(fixture.dao.findAgent("agent-remove") == null)
     }
 
     @Test
-    fun versionRemovalWaitsForConcurrentConversationPinInsideSharedLifecycleBoundary() = runTest {
+    fun versionRemovalClearsReferencesAfterConcurrentConversationPinInsideSharedLifecycleBoundary() = runTest {
         val coordinator = AgentLifecycleCoordinator()
         val fixture = optionalRemovalFixture(required = false, lifecycleCoordinator = coordinator)
         val conversationDao = RemovalConversationDao(referenceCount = 0)
@@ -1558,8 +1555,9 @@ class AgentRetrievalTest {
         releasePin.complete(Unit)
         pin.join()
 
-        assertEquals(AgentVersionRemovalOutcome.REFERENCED, removal.await().outcome)
-        assertTrue(fixture.dao.findVersion("agent-remove", 1) != null)
+        assertEquals(AgentVersionRemovalOutcome.REMOVED, removal.await().outcome)
+        assertEquals(1, conversationDao.clearCount)
+        assertTrue(fixture.dao.findVersion("agent-remove", 1) == null)
     }
 
     @Test
@@ -2561,7 +2559,7 @@ private fun v2InstallFixture(
         ),
         chunks = chunks,
         nodes = listOf(V2HierarchyNode("root", "document", "测试来源", source.sourceId, null, listOf("测试来源"), "")),
-        cancelDuringChunksAt = if (failure == V2InstallFailure.CANCEL_DURING_CHUNKS) 201 else null,
+        cancelDuringChunksAt = if (failure == V2InstallFailure.CANCEL_DURING_CHUNKS) 449 else null,
     )
     val dao = FakeAgentDao().apply {
         failChunkInsertCall = if (failure == V2InstallFailure.BATCH_INSERT) 2 else null
@@ -2629,6 +2627,67 @@ private class FakeV2PackageAccess(
     ) {
         nodes.forEach { block(it) }
     }
+    override suspend fun forEachV2CorpusContentSuspending(
+        file: File,
+        corpusId: String?,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        chunks.forEachIndexed { index, chunk ->
+            if (index == cancelDuringChunksAt) throw CancellationException("cancelled during chunks")
+            chunkBlock(chunk)
+        }
+        nodes.forEach { nodeBlock(it) }
+    }
+    override suspend fun <T> withVerifiedV2PackagesSuspending(
+        file: File,
+        block: suspend (ParsedAgentPackage, Map<String, File>) -> T,
+    ): T {
+        val parsed = readPackage(file)
+        val staged = packages.mapValues { (marker, _) ->
+            File.createTempFile("$marker-staged", ".package").apply { writeText(marker) }
+        }.values.associateBy { stagedFile ->
+            packages.getValue(stagedFile.readText()).packageSha256
+        }
+        return block(parsed, staged)
+    }
+    override suspend fun forEachVerifiedV2CorpusContentSuspending(
+        stagedCorpusFile: File,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        chunks.forEachIndexed { index, chunk ->
+            if (index == cancelDuringChunksAt) throw CancellationException("cancelled during chunks")
+            chunkBlock(chunk)
+        }
+        nodes.forEach { nodeBlock(it) }
+    }
+    override suspend fun copyVerifiedV2SourcePayload(
+        stagedSourceFile: File,
+        storedName: String,
+        output: java.io.OutputStream,
+    ) {
+        output.write("raw-source".encodeToByteArray())
+    }
+    override suspend fun forEachUnverifiedV2CorpusContentSuspending(
+        bundleFile: File,
+        childPackageFileName: String,
+        chunkBlock: suspend (V2Chunk) -> Unit,
+        nodeBlock: suspend (V2HierarchyNode) -> Unit,
+    ) {
+        chunks.forEachIndexed { index, chunk ->
+            if (index == cancelDuringChunksAt) throw CancellationException("cancelled during chunks")
+            chunkBlock(chunk)
+        }
+        nodes.forEach { nodeBlock(it) }
+    }
+    override suspend fun copyUnverifiedV2SourcePayload(
+        bundleFile: File,
+        childPackageFileName: String,
+        output: java.io.OutputStream,
+    ) {
+        output.write("raw-source".encodeToByteArray())
+    }
     override suspend fun copyV2SourcePayload(
         file: File,
         packageId: String?,
@@ -2638,7 +2697,7 @@ private class FakeV2PackageAccess(
     }
 }
 
-private class RemovalConversationDao(var referenceCount: Int) : ConversationDao {
+private class RemovalConversationDao(var referenceCount: Int, var clearCount: Int = 0) : ConversationDao {
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(emptyList())
     override suspend fun findById(id: String): ConversationEntity? = null
     override suspend fun findLatestActive(): ConversationEntity? = null
@@ -2649,6 +2708,10 @@ private class RemovalConversationDao(var referenceCount: Int) : ConversationDao 
     override suspend fun clearProject(projectId: String) = Unit
     override suspend fun archive(id: String, updatedAt: Long) = Unit
     override suspend fun countByAgentVersion(agentId: String, version: Int) = referenceCount
+    override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int {
+        clearCount += 1
+        return referenceCount
+    }
 }
 
 private fun ParsedAgentPackage.withFile(file: File): ParsedAgentPackage = when (this) {

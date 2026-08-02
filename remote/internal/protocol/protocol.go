@@ -34,6 +34,7 @@ type WireMessage struct {
 	Nonce         string `json:"nonce"`
 	Ciphertext    string `json:"ciphertext"`
 	PushKind      string `json:"pushKind,omitempty"`
+	AckOf         string `json:"ackOf,omitempty"`
 }
 
 type Command struct {
@@ -149,5 +150,5 @@ func Decrypt(secret []byte, message WireMessage, target any) error {
 }
 
 func (m WireMessage) aad() string {
-	return fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s", m.Version, m.MessageID, m.HostID, m.DeviceID, m.PairingTicket, m.Sequence, m.ExpiresAt, m.PushKind)
+	return fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s\x00%s", m.Version, m.MessageID, m.HostID, m.DeviceID, m.PairingTicket, m.Sequence, m.ExpiresAt, m.PushKind, m.AckOf)
 }

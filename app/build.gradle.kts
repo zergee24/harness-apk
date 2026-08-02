@@ -29,8 +29,9 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { it.isPresent }
 
-val aliyunPushAppKey = providers.gradleProperty("aliyunPushAppKey").orElse("")
-val aliyunPushAppSecret = providers.gradleProperty("aliyunPushAppSecret").orElse("")
+val emptyAliyunPushValue = ""
+val aliyunPushAppKey = providers.gradleProperty("aliyunPushAppKey").orElse(emptyAliyunPushValue)
+val aliyunPushAppSecret = providers.gradleProperty("aliyunPushAppSecret").orElse(emptyAliyunPushValue)
 
 val agentV2FixtureWorkspace = rootProject.layout.buildDirectory.dir("agent-v2-fixture")
 val agentV2FixtureDist = rootProject.layout.buildDirectory.dir("agent-v2-dist")
@@ -202,7 +203,7 @@ val appVersionCode = providers.gradleProperty("versionCodeOverride")
     .orElse(2000000)
     .get()
 val appVersionName = providers.gradleProperty("versionNameOverride")
-    .orElse("0.2.0")
+    .orElse("0.2.4")
     .get()
 
 android {

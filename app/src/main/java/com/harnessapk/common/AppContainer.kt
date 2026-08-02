@@ -84,6 +84,7 @@ import com.harnessapk.remote.AliyunPushManager
 import com.harnessapk.remote.RemoteEnrollmentClient
 import com.harnessapk.remote.RemoteProfileStore
 import com.harnessapk.remote.RemoteRepository
+import com.harnessapk.ui.HomeModeStore
 
 class AppContainer(
     context: Context,
@@ -131,6 +132,7 @@ class AppContainer(
     val providerCatalogHttpClient = AppHttpClients.providerCatalog()
     val remoteHttpClient = AppHttpClients.remote()
     val remoteProfileStore = RemoteProfileStore(appContext, ApiKeyCipher("harness_apk_remote_keys"))
+    val homeModeStore = HomeModeStore(appContext)
     val remoteEnrollmentClient = RemoteEnrollmentClient(remoteHttpClient)
     val aliyunPushManager = AliyunPushManager(appContext)
     val remoteRepository = RemoteRepository(remoteProfileStore, remoteHttpClient, applicationScope)

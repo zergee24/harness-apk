@@ -39,3 +39,25 @@ func TestExpiredMessageRejected(t *testing.T) {
 		t.Fatalf("expected expired error, got %v", err)
 	}
 }
+
+func TestAckWireRoundTripAndAckOfBinding(t *testing.T) {
+	secret, _ := NewSecret()
+	wire, err := Encrypt(secret, WireMessage{HostID: "mac", DeviceID: "phone", Sequence: 2, AckOf: "original-msg"}, Command{Type: "ack"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wire.AckOf != "original-msg" {
+		t.Fatalf("ackOf = %q", wire.AckOf)
+	}
+	var command Command
+	if err := Decrypt(secret, wire, &command); err != nil {
+		t.Fatal(err)
+	}
+	if command.Type != "ack" {
+		t.Fatalf("type = %q", command.Type)
+	}
+	wire.AckOf = "tampered"
+	if err := Decrypt(secret, wire, &command); err == nil || !strings.Contains(err.Error(), "authentication") {
+		t.Fatalf("expected authentication error for tampered ackOf, got %v", err)
+	}
+}
