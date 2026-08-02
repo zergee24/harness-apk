@@ -40,13 +40,14 @@ class HarnessApkAppStateTest {
     }
 
     @Test
-    fun homeModeSwitcherUsesPagerWithSharedSegmentedControl() {
+    fun homeNavigationUsesBottomBarWithoutPager() {
         val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText().replace("\r\n", "\n")
 
-        assertTrue(source.contains("HorizontalPager("))
-        assertTrue(source.contains("rememberPagerState("))
-        assertTrue(source.contains("WarmSegmentedControl("))
-        assertTrue(source.contains("MainMode.entries.map { it.label }"))
+        assertTrue(source.contains("NavigationBar {"))
+        assertTrue(source.contains("NavigationBarItem("))
+        assertFalse(source.contains("HorizontalPager("))
+        assertFalse(source.contains("rememberPagerState("))
+        assertFalse(source.contains("WarmSegmentedControl("))
     }
 
     @Test
@@ -76,30 +77,17 @@ class HarnessApkAppStateTest {
     }
 
     @Test
-    fun homeModeSwitcherUsesCompactSingleLineSegments() {
-        val appSource = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
-        val componentSource = File("src/main/java/com/harnessapk/ui/components/WarmComponents.kt").readText()
-        val modeSwitcherSource = appSource.substringAfter("private fun ModeSwitcher").substringBefore("@Composable\nprivate fun HomeTopBarActions")
-        val segmentedSource = componentSource.substringAfter("fun WarmSegmentedControl").substringBefore("@Composable\nfun ActionableEmptyState")
-
-        assertTrue(modeSwitcherSource.contains("modifier = modifier"))
-        assertTrue(segmentedSource.contains("modifier.height(48.dp)"))
-        assertTrue(segmentedSource.contains(".weight(1f)"))
-        assertTrue(segmentedSource.contains("style = MaterialTheme.typography.labelMedium"))
-        assertTrue(segmentedSource.contains("maxLines = 1"))
-        assertTrue(segmentedSource.contains("softWrap = false"))
-    }
-
-    @Test
-    fun homeModeSwitcherUsesDedicatedTopBarSpace() {
-        val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText()
+    fun homeTopBarKeepsNewConversationActionWithoutModeSwitcherOrSettings() {
+        val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText().replace("\r\n", "\n")
         val topBarSource = source.substringAfter("topBar = {").substringBefore("},\n    ) { padding")
 
         assertTrue(topBarSource.contains("if (isHomeRoute)"))
         assertTrue(topBarSource.contains("HomeTopBar("))
         assertTrue(source.contains("private fun HomeTopBar("))
-        assertTrue(source.contains(".weight(1f, fill = false)"))
-        assertTrue(source.contains("widthIn(max = 216.dp)"))
+        assertTrue(source.contains("contentDescription = \"新建对话\""))
+        assertFalse(source.contains("ModeSwitcher("))
+        assertFalse(source.contains("onOpenSettings"))
+        assertFalse(source.contains("WarmSegmentedControl("))
     }
 
     private fun conversation(id: String, title: String): Conversation = Conversation(

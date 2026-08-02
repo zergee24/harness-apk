@@ -16,10 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -34,6 +31,8 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -51,6 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -64,7 +64,6 @@ import com.harnessapk.chat.Conversation
 import com.harnessapk.ui.agent.AgentPackagesScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.chat.ConversationWikiTopBarAction
-import com.harnessapk.ui.components.WarmSegmentedControl
 import com.harnessapk.ui.conversation.ConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
 import com.harnessapk.ui.project.ProjectWorkbenchDestination
@@ -95,7 +94,6 @@ import kotlinx.coroutines.withContext
 
 object Routes {
     const val Conversations = "conversations"
-    const val Settings = "settings"
     const val Providers = "providers"
     const val Search = "search"
     const val Voice = "voice"
@@ -183,12 +181,6 @@ fun HarnessApkApp(
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
     val homeModeStore = container.homeModeStore
     var mainMode by rememberSaveable { mutableStateOf(homeModeStore.mode.value) }
-    val pagerState = rememberPagerState(initialPage = MainMode.entries.indexOf(mainMode)) { MainMode.entries.size }
-    LaunchedEffect(pagerState.settledPage) {
-        if (pagerState.settledPage != MainMode.entries.indexOf(mainMode)) {
-            mainMode = MainMode.entries[pagerState.settledPage]
-        }
-    }
     LaunchedEffect(mainMode) {
         if (homeModeStore.mode.value != mainMode) {
             homeModeStore.save(mainMode)
@@ -253,7 +245,6 @@ fun HarnessApkApp(
     }
 
     val title = when (route) {
-        Routes.Settings -> "设置"
         Routes.Providers -> "模型配置"
         Routes.Search -> "搜索能力"
         Routes.Voice -> "语音能力"
@@ -322,14 +313,9 @@ fun HarnessApkApp(
         topBar = {
             if (isHomeRoute) {
                 HomeTopBar(
-                    mode = mainMode,
-                    onModeSelected = { index ->
-                        scope.launch { pagerState.animateScrollToPage(index) }
-                    },
                     primaryAction = homePrimaryAction(mainMode),
                     showUpdateBadge = showUpdateBadge,
                     onCreateConversation = onCreateConversation,
-                    onOpenSettings = { navController.navigate(Routes.Settings) },
                 )
             } else {
                 TopAppBar(
@@ -386,96 +372,98 @@ fun HarnessApkApp(
                 )
             }
         },
+        bottomBar = {
+            NavigationBar {
+                MainMode.entries.forEach { mode ->
+                    NavigationBarItem(
+                        selected = mainMode == mode,
+                        onClick = { mainMode = mode },
+                        modifier = Modifier.testTag("nav-${mode.name}"),
+                        icon = { Icon(homeModeIcon(mode), contentDescription = null) },
+                        label = { Text(mode.label) },
+                    )
+                }
+            }
+        },
     ) { padding ->
         NavHost(
             navController = navController,
             startDestination = Routes.Conversations,
         ) {
             composable(Routes.Conversations) {
-                LaunchedEffect(mainMode) {
-                    val targetPage = MainMode.entries.indexOf(mainMode)
-                    if (pagerState.currentPage != targetPage) {
-                        pagerState.animateScrollToPage(targetPage)
-                    }
-                }
-                HorizontalPager(
-                    state = pagerState,
-                    modifier = Modifier.fillMaxSize(),
-                ) { page ->
-                    when (MainMode.entries[page]) {
-                        MainMode.LIFE -> ConversationListScreen(
-                            container = container,
-                            contentPadding = padding,
-                            onOpenChat = { navController.navigate(Routes.chat(it)) },
-                            onCreateConversation = onCreateConversation,
-                            onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
-                            onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
-                        )
-                        MainMode.WORK -> Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(top = padding.calculateTopPadding()),
-                        ) {
-                            val profile = remoteProfile
-                            if (profile != null) {
-                                RemoteEntryCard(
-                                    hostName = profile.hostName,
-                                    onClick = { navController.navigate(Routes.RemoteControl) },
-                                    modifier = Modifier
-                                        .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 8.dp),
-                                )
-                            }
-                            ProjectScreen(
-                                container = container,
-                                contentPadding = PaddingValues(
-                                    start = padding.calculateStartPadding(LocalLayoutDirection.current),
-                                    end = padding.calculateEndPadding(LocalLayoutDirection.current),
-                                    bottom = padding.calculateBottomPadding(),
-                                ),
-                                onCurrentProjectChange = { project ->
-                                    currentProjectId = project?.id
-                                    currentProjectName = project?.name
-                                },
-                                workbenchTarget = workbenchTarget,
-                                onWorkbenchTargetConsumed = { requestKey ->
-                                    if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
-                                },
-                                onCreateSession = { project ->
-                                    scope.launch {
-                                        val request = projectConversationRequest(project.id, project.name)
-                                        val conversationId = container.newConversationUseCase.create(request)
-                                        navController.navigate(
-                                            Routes.chat(
-                                                conversationId = conversationId,
-                                                projectId = project.id,
-                                                focusInput = true,
-                                            ),
-                                        )
-                                    }
-                                },
-                                onOpenSession = { conversationId ->
-                                    navController.navigate(Routes.chat(conversationId = conversationId))
-                                },
-                                modifier = Modifier.weight(1f),
+                when (mainMode) {
+                    MainMode.LIFE -> ConversationListScreen(
+                        container = container,
+                        contentPadding = padding,
+                        onOpenChat = { navController.navigate(Routes.chat(it)) },
+                        onCreateConversation = onCreateConversation,
+                        onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
+                        onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
+                    )
+                    MainMode.WORK -> Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(top = padding.calculateTopPadding()),
+                    ) {
+                        val profile = remoteProfile
+                        if (profile != null) {
+                            RemoteEntryCard(
+                                hostName = profile.hostName,
+                                onClick = { navController.navigate(Routes.RemoteControl) },
+                                modifier = Modifier
+                                    .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 8.dp),
                             )
                         }
-                        MainMode.ME -> SettingsScreen(
-                            contentPadding = padding,
-                            onOpenProviders = { navController.navigate(Routes.Providers) },
-                            onOpenSearch = { navController.navigate(Routes.Search) },
-                            onOpenVoice = { navController.navigate(Routes.Voice) },
-                            onOpenGit = { navController.navigate(Routes.Git) },
-                            onOpenSkills = { navController.navigate(Routes.Skills) },
-                            onOpenAgentPackages = {
-                                dispatchAgentPackageImport(AgentPackageImportEvent.SettingsOpened)
-                                navController.navigate(Routes.AgentPackages)
+                        ProjectScreen(
+                            container = container,
+                            contentPadding = PaddingValues(
+                                start = padding.calculateStartPadding(LocalLayoutDirection.current),
+                                end = padding.calculateEndPadding(LocalLayoutDirection.current),
+                                bottom = padding.calculateBottomPadding(),
+                            ),
+                            onCurrentProjectChange = { project ->
+                                currentProjectId = project?.id
+                                currentProjectName = project?.name
                             },
-                            onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
-                            onOpenUpdates = { navController.navigate(Routes.Updates) },
-                            onOpenRemote = { navController.navigate(Routes.RemoteSettings) },
-                            showUpdateBadge = showUpdateBadge,
+                            workbenchTarget = workbenchTarget,
+                            onWorkbenchTargetConsumed = { requestKey ->
+                                if (workbenchTarget?.requestKey == requestKey) workbenchTarget = null
+                            },
+                            onCreateSession = { project ->
+                                scope.launch {
+                                    val request = projectConversationRequest(project.id, project.name)
+                                    val conversationId = container.newConversationUseCase.create(request)
+                                    navController.navigate(
+                                        Routes.chat(
+                                            conversationId = conversationId,
+                                            projectId = project.id,
+                                            focusInput = true,
+                                        ),
+                                    )
+                                }
+                            },
+                            onOpenSession = { conversationId ->
+                                navController.navigate(Routes.chat(conversationId = conversationId))
+                            },
+                            modifier = Modifier.weight(1f),
                         )
                     }
+                    MainMode.ME -> SettingsScreen(
+                        contentPadding = padding,
+                        onOpenProviders = { navController.navigate(Routes.Providers) },
+                        onOpenSearch = { navController.navigate(Routes.Search) },
+                        onOpenVoice = { navController.navigate(Routes.Voice) },
+                        onOpenGit = { navController.navigate(Routes.Git) },
+                        onOpenSkills = { navController.navigate(Routes.Skills) },
+                        onOpenAgentPackages = {
+                            dispatchAgentPackageImport(AgentPackageImportEvent.SettingsOpened)
+                            navController.navigate(Routes.AgentPackages)
+                        },
+                        onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
+                        onOpenUpdates = { navController.navigate(Routes.Updates) },
+                        onOpenRemote = { navController.navigate(Routes.RemoteSettings) },
+                        showUpdateBadge = showUpdateBadge,
+                    )
                 }
             }
             composable(
@@ -534,24 +522,6 @@ fun HarnessApkApp(
             }
             composable(Routes.Providers) {
                 ProviderSettingsScreen(container = container, contentPadding = padding)
-            }
-            composable(Routes.Settings) {
-                SettingsScreen(
-                    contentPadding = padding,
-                    onOpenProviders = { navController.navigate(Routes.Providers) },
-                    onOpenSearch = { navController.navigate(Routes.Search) },
-                    onOpenVoice = { navController.navigate(Routes.Voice) },
-                    onOpenGit = { navController.navigate(Routes.Git) },
-                    onOpenSkills = { navController.navigate(Routes.Skills) },
-                    onOpenAgentPackages = {
-                        dispatchAgentPackageImport(AgentPackageImportEvent.SettingsOpened)
-                        navController.navigate(Routes.AgentPackages)
-                    },
-                    onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
-                    onOpenUpdates = { navController.navigate(Routes.Updates) },
-                    onOpenRemote = { navController.navigate(Routes.RemoteSettings) },
-                    showUpdateBadge = showUpdateBadge,
-                )
             }
             composable(Routes.Search) {
                 SearchSettingsScreen(container = container, contentPadding = padding)
@@ -740,12 +710,9 @@ internal fun chatTopBarTitle(
 
 @Composable
 private fun HomeTopBar(
-    mode: MainMode,
-    onModeSelected: (Int) -> Unit,
     primaryAction: HomePrimaryAction,
     showUpdateBadge: Boolean,
     onCreateConversation: () -> Unit,
-    onOpenSettings: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -756,34 +723,12 @@ private fun HomeTopBar(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ModeSwitcher(
-            mode = mode,
-            onModeSelected = onModeSelected,
-            modifier = Modifier
-                .weight(1f, fill = false)
-                .widthIn(max = 216.dp),
-        )
         HomeTopBarActions(
             primaryAction = primaryAction,
             showUpdateBadge = showUpdateBadge,
             onCreateConversation = onCreateConversation,
-            onOpenSettings = onOpenSettings,
         )
     }
-}
-
-@Composable
-private fun ModeSwitcher(
-    mode: MainMode,
-    onModeSelected: (Int) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    WarmSegmentedControl(
-        options = MainMode.entries.map { it.label },
-        selectedIndex = MainMode.entries.indexOf(mode).coerceAtLeast(0),
-        onSelected = onModeSelected,
-        modifier = modifier,
-    )
 }
 
 @Composable
@@ -791,27 +736,20 @@ private fun HomeTopBarActions(
     primaryAction: HomePrimaryAction,
     showUpdateBadge: Boolean,
     onCreateConversation: () -> Unit,
-    onOpenSettings: () -> Unit,
 ) {
-    Box {
-        IconButton(onClick = onOpenSettings) {
-            Icon(Icons.Outlined.Settings, contentDescription = "设置")
-        }
-        if (showUpdateBadge) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(9.dp)
-                    .background(MaterialTheme.colorScheme.error, CircleShape),
-            )
-        }
-    }
     if (primaryAction != HomePrimaryAction.NONE) {
-        FilledIconButton(onClick = onCreateConversation) {
-            Icon(
-                Icons.Filled.Add,
-                contentDescription = "新建对话",
-            )
+        Box {
+            FilledIconButton(onClick = onCreateConversation) {
+                Icon(Icons.Filled.Add, contentDescription = "新建对话")
+            }
+            if (showUpdateBadge) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(9.dp)
+                        .background(MaterialTheme.colorScheme.error, CircleShape),
+                )
+            }
         }
     }
 }

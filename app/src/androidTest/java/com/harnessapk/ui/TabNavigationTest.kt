@@ -6,14 +6,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.swipeLeft
-import androidx.compose.ui.test.swipeRight
 import androidx.test.core.app.ApplicationProvider
 import com.harnessapk.HarnessApkApplication
 import com.harnessapk.ui.theme.HarnessApkTheme
@@ -23,7 +20,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 
-class DualModeHomePagerTest {
+class TabNavigationTest {
     @get:Rule
     val composeRule = createComposeRule()
 
@@ -35,43 +32,40 @@ class DualModeHomePagerTest {
     }
 
     @Test
-    fun homeShowsBothModeTabsAndSettlesToLifePanel() {
+    fun bottomNavShowsThreeTabsAndSettlesToLife() {
         composeRule.setContent {
             HarnessApkTheme {
                 HarnessApkApp()
             }
         }
-        composeRule.onNodeWithText("生活").assertExists()
-        composeRule.onNodeWithText("工作").assertExists()
+        composeRule.onNodeWithTag("nav-LIFE").assertExists()
+        composeRule.onNodeWithTag("nav-WORK").assertExists()
+        composeRule.onNodeWithTag("nav-ME").assertExists()
         composeRule.onNodeWithText("还没有会话").assertExists()
     }
 
     @Test
-    fun clickingWorkTabSwitchesToWorkPanel() {
+    fun clickingWorkTabShowsProjectPanel() {
         composeRule.setContent {
             HarnessApkTheme {
                 HarnessApkApp()
             }
         }
-        composeRule.onNodeWithText("工作").performClick()
+        composeRule.onNodeWithTag("nav-WORK").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("还没有项目").assertExists()
     }
 
     @Test
-    fun swipingBetweenPanelsSwitchesMode() {
+    fun clickingMeTabShowsSettingsAggregation() {
         composeRule.setContent {
             HarnessApkTheme {
                 HarnessApkApp()
             }
         }
-        composeRule.onNodeWithText("还没有会话").assertExists()
-        composeRule.onRoot().performTouchInput { swipeLeft() }
+        composeRule.onNodeWithTag("nav-ME").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("还没有项目").assertExists()
-        composeRule.onRoot().performTouchInput { swipeRight() }
-        composeRule.waitForIdle()
-        composeRule.onNodeWithText("还没有会话").assertExists()
+        composeRule.onNodeWithText("模型配置").assertExists()
     }
 
     @Test
@@ -82,19 +76,19 @@ class DualModeHomePagerTest {
                 background = MaterialTheme.colorScheme.background
             }
         }
-        composeRule.onNode(isRoot()).assertExists()
+        composeRule.onRoot().assertExists()
         assertEquals(Color(0xFF101417), background)
     }
 
     @Test
-    fun lifeModeAppliesWarmLightBackground() {
+    fun meModeAppliesTechDarkBackground() {
         var background by mutableStateOf(Color.Unspecified)
         composeRule.setContent {
-            ModeTheme(MainMode.LIFE) {
+            ModeTheme(MainMode.ME) {
                 background = MaterialTheme.colorScheme.background
             }
         }
-        composeRule.onNode(isRoot()).assertExists()
-        assertEquals(Color(0xFFFAF7F6), background)
+        composeRule.onRoot().assertExists()
+        assertEquals(Color(0xFF101417), background)
     }
 }

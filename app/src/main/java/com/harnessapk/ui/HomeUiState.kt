@@ -1,11 +1,22 @@
 package com.harnessapk.ui
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.AccountTree
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.ui.graphics.vector.ImageVector
 import com.harnessapk.updater.UpdateCheckResult
 
 enum class MainMode(val label: String) {
     LIFE("生活"),
     WORK("工作"),
     ME("我的"),
+}
+
+internal fun homeModeIcon(mode: MainMode): ImageVector = when (mode) {
+    MainMode.LIFE -> Icons.AutoMirrored.Outlined.Chat
+    MainMode.WORK -> Icons.Outlined.AccountTree
+    MainMode.ME -> Icons.Outlined.Person
 }
 
 enum class HomePrimaryAction {
