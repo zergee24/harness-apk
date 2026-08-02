@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -32,7 +33,7 @@ class HarnessApkAppNavigationTest {
         composeRule.onNodeWithText("智能体包").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
 
-        composeRule.onNodeWithText("设置").assertIsDisplayed()
+        composeRule.onNodeWithText("我的").assertIsDisplayed()
     }
 
     @Test
@@ -48,7 +49,7 @@ class HarnessApkAppNavigationTest {
         composeRule.onNodeWithText("Wiki 知识库").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
 
-        composeRule.onNodeWithText("设置").assertIsDisplayed()
+        composeRule.onNodeWithText("我的").assertIsDisplayed()
     }
 
     @Test
@@ -73,7 +74,7 @@ class HarnessApkAppNavigationTest {
 
         composeRule.onNodeWithText("智能体包").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
-        composeRule.onNodeWithText("设置").assertIsDisplayed()
+        composeRule.onNodeWithText("我的").assertIsDisplayed()
     }
 
     @Test
@@ -98,7 +99,7 @@ class HarnessApkAppNavigationTest {
 
         composeRule.onNodeWithText("Wiki 知识库").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
-        composeRule.onNodeWithText("设置").assertIsDisplayed()
+        composeRule.onNodeWithText("我的").assertIsDisplayed()
     }
 
     @Test
@@ -110,7 +111,8 @@ class HarnessApkAppNavigationTest {
     }
 
     private fun openSettings() {
-        composeRule.onNodeWithContentDescription("设置").performClick()
-        composeRule.onNodeWithText("设置").assertIsDisplayed()
+        composeRule.onNodeWithTag("nav-ME").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("我的").assertIsDisplayed()
     }
 }

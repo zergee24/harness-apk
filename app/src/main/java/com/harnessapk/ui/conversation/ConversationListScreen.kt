@@ -37,7 +37,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.Conversation
 import com.harnessapk.agent.Agent
@@ -74,7 +73,7 @@ fun ConversationListScreen(
     val scope = rememberCoroutineScope()
     var conversationToEdit by remember { mutableStateOf<Conversation?>(null) }
     var titleDraft by remember { mutableStateOf("") }
-    val lifeConversations = remember(conversations) { lifeConversations(conversations) }
+    val visibleConversations = remember(conversations) { lifeConversations(conversations) }
     val agentsById = remember(agents) { agents.associateBy { it.id } }
 
     conversationToEdit?.let { conversation ->
@@ -124,11 +123,11 @@ fun ConversationListScreen(
                 onOpenWikiLibrary = onOpenWikiLibrary,
             )
         }
-        if (lifeConversations.isEmpty()) {
+        if (visibleConversations.isEmpty()) {
             item { EmptyConversationState(onCreateConversation) }
         } else {
             conversationItems(
-                conversations = lifeConversations,
+                conversations = visibleConversations,
                 agentsById = agentsById,
                 onOpenChat = onOpenChat,
                 onEdit = {

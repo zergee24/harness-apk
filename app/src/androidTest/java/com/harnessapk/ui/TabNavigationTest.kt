@@ -9,7 +9,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import com.harnessapk.HarnessApkApplication
@@ -76,7 +75,6 @@ class TabNavigationTest {
                 background = MaterialTheme.colorScheme.background
             }
         }
-        composeRule.onRoot().assertExists()
         assertEquals(Color(0xFFFAF7F6), background)
     }
 
