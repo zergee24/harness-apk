@@ -459,6 +459,22 @@ fun HarnessApkApp(
                                 modifier = Modifier.weight(1f),
                             )
                         }
+                        MainMode.ME -> SettingsScreen(
+                            contentPadding = padding,
+                            onOpenProviders = { navController.navigate(Routes.Providers) },
+                            onOpenSearch = { navController.navigate(Routes.Search) },
+                            onOpenVoice = { navController.navigate(Routes.Voice) },
+                            onOpenGit = { navController.navigate(Routes.Git) },
+                            onOpenSkills = { navController.navigate(Routes.Skills) },
+                            onOpenAgentPackages = {
+                                dispatchAgentPackageImport(AgentPackageImportEvent.SettingsOpened)
+                                navController.navigate(Routes.AgentPackages)
+                            },
+                            onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
+                            onOpenUpdates = { navController.navigate(Routes.Updates) },
+                            onOpenRemote = { navController.navigate(Routes.RemoteSettings) },
+                            showUpdateBadge = showUpdateBadge,
+                        )
                     }
                 }
             }

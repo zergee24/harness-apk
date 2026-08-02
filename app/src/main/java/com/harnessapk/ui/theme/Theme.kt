@@ -185,6 +185,7 @@ fun ModeTheme(mode: MainMode, content: @Composable () -> Unit) {
     val targetScheme = when (mode) {
         MainMode.LIFE -> warmLightColorScheme()
         MainMode.WORK -> techDarkColorScheme()
+        MainMode.ME -> techDarkColorScheme()
     }
     MaterialTheme(
         colorScheme = animateColorScheme(targetScheme),
@@ -192,6 +193,7 @@ fun ModeTheme(mode: MainMode, content: @Composable () -> Unit) {
         shapes = when (mode) {
             MainMode.LIFE -> HarnessShapes
             MainMode.WORK -> TechShapes
+            MainMode.ME -> TechShapes
         },
         content = content,
     )

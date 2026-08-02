@@ -21,17 +21,7 @@ class HomeModeStoreTest {
     }
 
     @Test
-    fun legacySessionMapsToLife() {
-        assertEquals(MainMode.LIFE, migrateStoredMode("SESSION"))
-    }
-
-    @Test
-    fun legacyProjectMapsToWork() {
-        assertEquals(MainMode.WORK, migrateStoredMode("PROJECT"))
-    }
-
-    @Test
-    fun legacyRemoteMapsToWork() {
-        assertEquals(MainMode.WORK, migrateStoredMode("REMOTE"))
+    fun meModeRoundTrips() {
+        assertEquals(MainMode.ME, migrateStoredMode("ME"))
     }
 }

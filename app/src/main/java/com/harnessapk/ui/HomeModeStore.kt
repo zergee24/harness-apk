@@ -7,8 +7,8 @@ import kotlinx.coroutines.flow.asStateFlow
 
 internal fun migrateStoredMode(raw: String?): MainMode = when (raw) {
     "LIFE" -> MainMode.LIFE
-    "SESSION" -> MainMode.LIFE
-    "WORK", "PROJECT", "REMOTE" -> MainMode.WORK
+    "WORK" -> MainMode.WORK
+    "ME" -> MainMode.ME
     else -> MainMode.LIFE
 }
 

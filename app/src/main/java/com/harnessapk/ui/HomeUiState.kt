@@ -5,6 +5,7 @@ import com.harnessapk.updater.UpdateCheckResult
 enum class MainMode(val label: String) {
     LIFE("生活"),
     WORK("工作"),
+    ME("我的"),
 }
 
 enum class HomePrimaryAction {
@@ -15,6 +16,7 @@ enum class HomePrimaryAction {
 internal fun homePrimaryAction(mode: MainMode): HomePrimaryAction = when (mode) {
     MainMode.LIFE -> HomePrimaryAction.CREATE_CONVERSATION
     MainMode.WORK -> HomePrimaryAction.NONE
+    MainMode.ME -> HomePrimaryAction.NONE
 }
 
 internal fun shouldShowUpdateBadge(result: UpdateCheckResult?): Boolean =

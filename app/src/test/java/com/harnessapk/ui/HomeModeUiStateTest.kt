@@ -5,9 +5,9 @@ import org.junit.Test
 
 class HomeModeUiStateTest {
     @Test
-    fun homeContainsLifeAndWorkModes() {
+    fun homeContainsLifeWorkAndMeModes() {
         assertEquals(
-            listOf(MainMode.LIFE, MainMode.WORK),
+            listOf(MainMode.LIFE, MainMode.WORK, MainMode.ME),
             MainMode.entries.toList(),
         )
     }
@@ -41,9 +41,16 @@ class HomeModeUiStateTest {
     }
 
     @Test
+    fun topLevelTitleMeModeIsStatic() {
+        assertEquals("我的", topLevelTitle(MainMode.ME, currentProjectName = "移动端 Harness"))
+        assertEquals("我的", topLevelTitle(MainMode.ME, currentProjectName = null))
+    }
+
+    @Test
     fun homePrimaryActionMatchesCurrentMode() {
         assertEquals(HomePrimaryAction.CREATE_CONVERSATION, homePrimaryAction(MainMode.LIFE))
         assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.WORK))
+        assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.ME))
     }
 
     @Test
