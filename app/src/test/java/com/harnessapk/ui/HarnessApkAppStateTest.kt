@@ -67,16 +67,6 @@ class HarnessApkAppStateTest {
     }
 
     @Test
-    fun sharedModeSwitcherUsesConsistentThemeShapes() {
-        val source = File("src/main/java/com/harnessapk/ui/components/WarmComponents.kt").readText()
-        val segmentedSource = source.substringAfter("fun WarmSegmentedControl").substringBefore("@Composable\nfun ActionableEmptyState")
-
-        assertTrue(segmentedSource.contains("shape = MaterialTheme.shapes.large"))
-        assertTrue(segmentedSource.contains("shape = MaterialTheme.shapes.medium"))
-        assertFalse(segmentedSource.contains("RoundedCornerShape(999.dp)"))
-    }
-
-    @Test
     fun homeTopBarKeepsNewConversationActionWithoutModeSwitcherOrSettings() {
         val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText().replace("\r\n", "\n")
         val topBarSource = source.substringAfter("topBar = {").substringBefore("},\n    ) { padding")

@@ -373,15 +373,17 @@ fun HarnessApkApp(
             }
         },
         bottomBar = {
-            NavigationBar {
-                MainMode.entries.forEach { mode ->
-                    NavigationBarItem(
-                        selected = mainMode == mode,
-                        onClick = { mainMode = mode },
-                        modifier = Modifier.testTag("nav-${mode.name}"),
-                        icon = { Icon(homeModeIcon(mode), contentDescription = null) },
-                        label = { Text(mode.label) },
-                    )
+            if (isHomeRoute) {
+                NavigationBar {
+                    MainMode.entries.forEach { mode ->
+                        NavigationBarItem(
+                            selected = mainMode == mode,
+                            onClick = { mainMode = mode },
+                            modifier = Modifier.testTag("nav-${mode.name}"),
+                            icon = { Icon(homeModeIcon(mode), contentDescription = null) },
+                            label = { Text(mode.label) },
+                        )
+                    }
                 }
             }
         },

@@ -69,6 +69,18 @@ class TabNavigationTest {
     }
 
     @Test
+    fun lifeModeAppliesWarmLightBackground() {
+        var background by mutableStateOf(Color.Unspecified)
+        composeRule.setContent {
+            ModeTheme(MainMode.LIFE) {
+                background = MaterialTheme.colorScheme.background
+            }
+        }
+        composeRule.onRoot().assertExists()
+        assertEquals(Color(0xFFFAF7F6), background)
+    }
+
+    @Test
     fun workModeAppliesTechDarkBackground() {
         var background by mutableStateOf(Color.Unspecified)
         composeRule.setContent {
@@ -76,7 +88,6 @@ class TabNavigationTest {
                 background = MaterialTheme.colorScheme.background
             }
         }
-        composeRule.onRoot().assertExists()
         assertEquals(Color(0xFF101417), background)
     }
 
@@ -88,7 +99,6 @@ class TabNavigationTest {
                 background = MaterialTheme.colorScheme.background
             }
         }
-        composeRule.onRoot().assertExists()
         assertEquals(Color(0xFF101417), background)
     }
 }
