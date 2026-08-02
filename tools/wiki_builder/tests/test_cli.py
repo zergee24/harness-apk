@@ -42,6 +42,7 @@ class WikiBuilderCliTest(unittest.TestCase):
                 NoEncryption(),
             )
         )
+        self.key.chmod(0o600)
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -120,6 +121,27 @@ class WikiBuilderCliTest(unittest.TestCase):
         not_a_directory.write_text("occupied", encoding="utf-8")
         with self.assertRaisesRegex(BuildError, "不是目录"):
             pack_workspace(self.workspace, not_a_directory, self.key)
+
+    def test_pack_requires_exact_private_key_mode_0600(self):
+        self._prepare()
+        write_fixture_enrichment(self.workspace)
+        main(["enrich", str(self.workspace)])
+
+        for index, mode in enumerate((0o644, 0o400, 0o4600)):
+            with self.subTest(mode=oct(mode)):
+                self.key.chmod(mode)
+                destination = self.root / f"unsafe-key-mode-{index}"
+                with self.assertRaisesRegex(BuildError, "0600"):
+                    pack_workspace(self.workspace, destination, self.key)
+                self.assertFalse(destination.exists())
+
+        self.key.chmod(0o600)
+        result = pack_workspace(
+            self.workspace,
+            self.root / "exact-key-mode",
+            self.key,
+        )
+        self.assertTrue(result.package.is_file())
 
     def test_pack_publishes_two_workspaces_into_shared_destination_in_either_order(self):
         self._prepare()

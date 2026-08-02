@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.serialization import (
 ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
 RESERVED_PATHS = frozenset({"checksums.json", "signature.json"})
 SOURCE_HASH_BUFFER_SIZE = 1024 * 1024
+MAX_PRIVATE_KEY_BYTES = 64 * 1024
 
 
 class PackageFormatError(ValueError):
@@ -50,11 +51,85 @@ def canonical_json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def load_ed25519_private_key(path: Path) -> Ed25519PrivateKey:
+def load_ed25519_private_key(
+    path: Path,
+    *,
+    required_mode: int | None = None,
+) -> Ed25519PrivateKey:
+    key_path = Path(path)
+    if (
+        required_mode is not None
+        and (
+            type(required_mode) is not int
+            or required_mode < 0
+            or required_mode > 0o7777
+        )
+    ):
+        raise PackageFormatError("发布者私钥权限要求无效")
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        key = load_pem_private_key(Path(path).read_bytes(), password=None)
-    except (OSError, ValueError, TypeError) as error:
-        raise PackageFormatError(f"发布者私钥无法读取：{path}：{error}") from error
+        descriptor = os.open(key_path, flags)
+    except OSError as error:
+        raise PackageFormatError(
+            f"发布者私钥无法安全读取：{key_path}：{error}"
+        ) from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise PackageFormatError(
+                f"发布者私钥必须是普通文件：{key_path}"
+            )
+        if (
+            required_mode is not None
+            and stat.S_IMODE(before.st_mode) != required_mode
+        ):
+            raise PackageFormatError(
+                "发布者私钥权限必须严格为 "
+                f"{required_mode:04o}：{key_path}"
+            )
+        if before.st_size <= 0 or before.st_size > MAX_PRIVATE_KEY_BYTES:
+            raise PackageFormatError(
+                f"发布者私钥大小无效：{key_path}"
+            )
+        chunks = []
+        total = 0
+        while block := os.read(descriptor, 8192):
+            chunks.append(block)
+            total += len(block)
+            if total > MAX_PRIVATE_KEY_BYTES:
+                raise PackageFormatError(
+                    f"发布者私钥大小无效：{key_path}"
+                )
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        try:
+            canonical = os.stat(key_path, follow_symlinks=False)
+        except OSError as error:
+            raise PackageFormatError(
+                f"发布者私钥在读取期间发生变化：{key_path}"
+            ) from error
+        if (
+            len(raw) != before.st_size
+            or not _same_file_identity(before, after)
+            or not _same_file_identity(after, canonical)
+        ):
+            raise PackageFormatError(
+                f"发布者私钥在读取期间发生变化：{key_path}"
+            )
+        try:
+            key = load_pem_private_key(raw, password=None)
+        except (ValueError, TypeError) as error:
+            raise PackageFormatError(
+                f"发布者私钥无法读取：{key_path}：{error}"
+            ) from error
+    except OSError as error:
+        raise PackageFormatError(
+            f"发布者私钥无法安全读取：{key_path}：{error}"
+        ) from error
+    finally:
+        os.close(descriptor)
     if not isinstance(key, Ed25519PrivateKey):
         raise PackageFormatError("发布者私钥必须是 Ed25519")
     return key
@@ -329,6 +404,7 @@ def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
         first.st_dev == second.st_dev
         and first.st_ino == second.st_ino
         and first.st_mode == second.st_mode
+        and first.st_nlink == second.st_nlink
         and first.st_size == second.st_size
         and first.st_mtime_ns == second.st_mtime_ns
         and first.st_ctime_ns == second.st_ctime_ns

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
@@ -13,6 +14,7 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
 )
 
+from tools import package_format
 from tools.package_format import (
     PackageFormatError,
     canonical_json_bytes,
@@ -146,6 +148,77 @@ class PackageFormatTest(unittest.TestCase):
             self.key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()),
             loaded.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()),
         )
+
+    def test_private_key_loader_requires_exact_mode_and_rejects_symlink(self):
+        key_path = self.root / "publisher.pem"
+        key_path.write_bytes(
+            self.key.private_bytes(
+                Encoding.PEM,
+                PrivateFormat.PKCS8,
+                NoEncryption(),
+            )
+        )
+        key_path.chmod(0o600)
+
+        self.assertIsInstance(
+            load_ed25519_private_key(key_path, required_mode=0o600),
+            Ed25519PrivateKey,
+        )
+        key_path.chmod(0o644)
+        with self.assertRaisesRegex(PackageFormatError, "0600"):
+            load_ed25519_private_key(key_path, required_mode=0o600)
+
+        key_path.chmod(0o600)
+        alias = self.root / "publisher-alias.pem"
+        alias.symlink_to(key_path)
+        with self.assertRaisesRegex(PackageFormatError, "无法安全读取"):
+            load_ed25519_private_key(alias, required_mode=0o600)
+
+    def test_private_key_loader_rejects_same_inode_change_during_read(self):
+        key_path = self.root / "publisher.pem"
+        original = self.key.private_bytes(
+            Encoding.PEM,
+            PrivateFormat.PKCS8,
+            NoEncryption(),
+        )
+        key_path.write_bytes(original)
+        key_path.chmod(0o600)
+        real_read = package_format.os.read
+        changed = False
+
+        def mutate_after_first_read(descriptor, size):
+            nonlocal changed
+            block = real_read(descriptor, size)
+            if block and not changed:
+                changed = True
+                key_path.write_bytes(b"x" * len(original))
+                key_path.chmod(0o600)
+            return block
+
+        with mock.patch.object(
+            package_format.os,
+            "read",
+            side_effect=mutate_after_first_read,
+        ), self.assertRaisesRegex(PackageFormatError, "发生变化"):
+            load_ed25519_private_key(key_path, required_mode=0o600)
+
+    def test_private_key_loader_maps_descriptor_read_error(self):
+        key_path = self.root / "publisher.pem"
+        key_path.write_bytes(
+            self.key.private_bytes(
+                Encoding.PEM,
+                PrivateFormat.PKCS8,
+                NoEncryption(),
+            )
+        )
+        key_path.chmod(0o600)
+
+        with mock.patch.object(
+            package_format.os,
+            "read",
+            side_effect=OSError("injected-read-error"),
+        ), self.assertRaisesRegex(PackageFormatError, "无法安全读取"):
+            load_ed25519_private_key(key_path, required_mode=0o600)
 
     def test_shared_writer_matches_existing_agent_v2_containers(self):
         source = self.root / "source.bin"

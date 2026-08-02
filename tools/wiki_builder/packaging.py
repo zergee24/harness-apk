@@ -88,7 +88,10 @@ def pack_workspace(
     if key_path.is_symlink() or not key_path.is_file():
         raise BuildError("publisher key 必须是已存在的普通文件")
     try:
-        private_key = load_ed25519_private_key(key_path)
+        private_key = load_ed25519_private_key(
+            key_path,
+            required_mode=0o600,
+        )
     except PackageFormatError as error:
         raise BuildError(str(error)) from error
 
