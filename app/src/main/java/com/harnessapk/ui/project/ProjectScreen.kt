@@ -81,6 +81,7 @@ import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.git.GitBranchSummary
 import com.harnessapk.git.GitCloneRequest
+import com.harnessapk.git.GitDiffStat
 import com.harnessapk.git.GitStatusSummary
 import com.harnessapk.markdownpdf.AndroidMarkdownPdfWriter
 import com.harnessapk.project.ProjectArtifactType
@@ -99,6 +100,7 @@ import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.update
 
 internal data class ProjectDeliverableRefresh(
     val generation: Int,
@@ -285,12 +287,18 @@ internal fun ProjectScreen(
     var showCloneRepositoryDialog by rememberSaveable { mutableStateOf(false) }
     var showCommitDialog by rememberSaveable { mutableStateOf(false) }
     var showBranchDialog by rememberSaveable { mutableStateOf(false) }
+    var showPendingCommitDialog by rememberSaveable { mutableStateOf(false) }
+    var showPushPromptDialog by rememberSaveable { mutableStateOf(false) }
+    var pendingCommitDiffStat by remember { mutableStateOf<List<GitDiffStat>>(emptyList()) }
+    val appliedProjectPaths by container.projectAppliedPaths.collectAsState()
     var projectToDelete by remember { mutableStateOf<Project?>(null) }
     var projectToRename by remember { mutableStateOf<Project?>(null) }
     var gitStatus by remember { mutableStateOf<GitStatusSummary?>(null) }
     var gitBranches by remember { mutableStateOf<List<GitBranchSummary>>(emptyList()) }
 
     val selectedProject = projects.firstOrNull { it.id == selectedProjectId }
+    val pendingCommitPaths = appliedProjectPaths[selectedProject?.id].orEmpty()
+        .filter { path -> gitStatus?.files?.any { it.path == path } == true }
     val visibleDeliverables = filterProjectArtifacts(deliverables, artifactFilter)
     val artifactTree = remember(visibleDeliverables) { buildProjectArtifactTree(visibleDeliverables) }
     val visibleTreeItems = remember(artifactTree, collapsedDirectoryPaths) {
@@ -593,6 +601,47 @@ internal fun ProjectScreen(
         }
     }
 
+    fun openPendingCommit(project: Project) {
+        scope.launch {
+            runCatching {
+                withContext(container.dispatchers.io) {
+                    container.gitEngine.diffStat(project.rootDirectory)
+                }
+            }.onSuccess { stats ->
+                pendingCommitDiffStat = stats
+                showPendingCommitDialog = true
+            }.onFailure {
+                statusText = it.toUserMessage()
+            }
+        }
+    }
+
+    fun commitPendingPaths(project: Project, paths: List<String>, message: String) {
+        if (paths.isEmpty()) {
+            showPendingCommitDialog = false
+            statusText = "没有可提交的写回文件"
+            return
+        }
+        scope.launch {
+            runCatching {
+                withContext(container.dispatchers.io) {
+                    val author = container.gitCredentialStore.commitAuthor()
+                    container.gitEngine.stagePathsAndCommit(project.rootDirectory, paths, message, author)
+                }
+            }.onSuccess { commit ->
+                showPendingCommitDialog = false
+                statusText = "已提交：${commit.shortId}（${paths.size} 文件）"
+                container.projectAppliedPaths.update { it - project.id }
+                pendingCommitDiffStat = emptyList()
+                refreshDeliverables()
+                refreshGitState()
+                showPushPromptDialog = true
+            }.onFailure {
+                statusText = it.toUserMessage()
+            }
+        }
+    }
+
     fun pushCurrentBranch(project: Project) {
         scope.launch {
             runCatching {
@@ -786,6 +835,28 @@ internal fun ProjectScreen(
         CommitDialog(
             onDismiss = { showCommitDialog = false },
             onCommit = { message -> commitAll(selectedProject, message) },
+        )
+    }
+
+    if (showPendingCommitDialog && selectedProject != null) {
+        PendingCommitDialog(
+            paths = pendingCommitPaths,
+            diffStats = pendingCommitDiffStat,
+            onCommit = { message -> commitPendingPaths(selectedProject, pendingCommitPaths, message) },
+            onDismiss = { showPendingCommitDialog = false },
+        )
+    }
+
+    if (showPushPromptDialog && selectedProject != null) {
+        PushPromptDialog(
+            branch = gitStatus?.currentBranch ?: selectedProject.name,
+            aheadCount = gitStatus?.aheadCount ?: 0,
+            behindCount = gitStatus?.behindCount ?: 0,
+            onConfirm = {
+                showPushPromptDialog = false
+                pushCurrentBranch(selectedProject)
+            },
+            onDismiss = { showPushPromptDialog = false },
         )
     }
 
@@ -1039,6 +1110,8 @@ internal fun ProjectScreen(
                         ProjectGitPanel(
                             status = gitStatus,
                             branches = gitBranches,
+                            pendingCommitCount = pendingCommitPaths.size,
+                            onOpenPendingCommit = { openPendingCommit(selectedProject) },
                             onInitRepository = { initGitRepository(selectedProject) },
                             onCloneRepository = { showCloneRepositoryDialog = true },
                             onRefresh = { refreshGitState() },

@@ -79,6 +79,7 @@ import com.harnessapk.websearch.JinaWebSearchClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import com.harnessapk.remote.AliyunPushManager
@@ -382,4 +383,10 @@ class AppContainer(
      * 使用无 replay 的 SharedFlow：只在有活跃收集者时投递，避免切项目时回放旧值。
      */
     val projectContentInvalidation = MutableSharedFlow<String>(extraBufferCapacity = 1)
+
+    /**
+     * 记录每个项目"本轮会话已评审并 apply 的写回文件相对路径"，作为 Git 提交白名单默认选中来源。
+     * key = 项目 id，value = 相对项目根目录的路径列表。
+     */
+    val projectAppliedPaths = MutableStateFlow<Map<String, List<String>>>(emptyMap())
 }

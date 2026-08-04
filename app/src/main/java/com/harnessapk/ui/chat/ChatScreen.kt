@@ -207,6 +207,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import java.util.Locale
 import java.util.UUID
 
@@ -1338,6 +1339,11 @@ fun ChatScreen(
                     },
                 )
                 if (result.succeeded.isNotEmpty()) {
+                    val writtenPaths = result.succeeded.mapNotNull { it.writtenDeliverable?.path ?: it.proposal.path }
+                    container.projectAppliedPaths.update { current ->
+                        val existing = current[state.draft.projectId].orEmpty()
+                        current + (state.draft.projectId to (existing + writtenPaths).distinct())
+                    }
                     container.projectContentInvalidation.tryEmit(state.draft.projectId)
                 }
             } catch (error: CancellationException) {
@@ -1540,6 +1546,11 @@ fun ChatScreen(
                     },
                 )
                 if (result.succeeded.isNotEmpty()) {
+                    val writtenPaths = result.succeeded.mapNotNull { it.writtenDeliverable?.path ?: it.proposal.path }
+                    container.projectAppliedPaths.update { current ->
+                        val existing = current[projectId].orEmpty()
+                        current + (projectId to (existing + writtenPaths).distinct())
+                    }
                     container.projectContentInvalidation.tryEmit(projectId)
                 }
             } finally {
