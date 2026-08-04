@@ -741,6 +741,15 @@ internal fun ProjectScreen(
         }
     }
 
+    LaunchedEffect(selectedProjectId) {
+        container.projectContentInvalidation.collect { changedProjectId ->
+            val current = selectedProject ?: return@collect
+            if (current.id == changedProjectId) {
+                refreshGitState(current)
+            }
+        }
+    }
+
     LaunchedEffect(selectedProjectId, selectedDeliverableId, artifactFilter, deliverables) {
         if (selectedDeliverableId != null && visibleDeliverables.none { it.id == selectedDeliverableId }) {
             selectedDeliverableId = visibleDeliverables.firstOrNull()?.id
