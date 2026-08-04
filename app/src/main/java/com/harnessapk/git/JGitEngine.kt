@@ -174,7 +174,11 @@ class JGitEngine {
             paths.forEach { rawPath ->
                 val path = rawPath.trim()
                 if (path.isNotEmpty()) {
-                    git.add().addFilepattern(path).call()
+                    if (File(directory, path).isFile) {
+                        git.add().addFilepattern(path).call()
+                    } else {
+                        git.rm().addFilepattern(path).call()
+                    }
                 }
             }
             val commit = git.commit()

@@ -134,6 +134,34 @@ class JGitEngineTest {
     }
 
     @Test
+    fun stagePathsAndCommitHandlesDeletedPathViaRm() {
+        val remote = createBareRemote()
+        val worktree = temporaryFolder.newFolder("worktree")
+        val engine = JGitEngine()
+        engine.cloneRepository(GitCloneRequest(remote.toURI().toString(), "main", worktree))
+
+        worktree.resolve("docs/old.md").writeProjectText("# Old\n")
+        worktree.resolve("docs/keep.md").writeProjectText("# Keep\n")
+        engine.stageAllAndCommit(
+            directory = worktree,
+            message = "init",
+            author = GitCommitAuthor(name = "Harness", email = "harness@example.com"),
+        )
+
+        worktree.resolve("docs/old.md").delete()
+
+        engine.stagePathsAndCommit(
+            directory = worktree,
+            paths = listOf("docs/old.md"),
+            message = "删除 old",
+            author = GitCommitAuthor(name = "Harness", email = "harness@example.com"),
+        )
+
+        val status = engine.status(worktree)
+        assertTrue("删除提交后工作区应干净，实际：${status.files}", status.isClean)
+    }
+
+    @Test
     fun diffStatReportsAddedLinesForNewAndAppendedFiles() {
         val remote = createBareRemote()
         val worktree = temporaryFolder.newFolder("worktree")
