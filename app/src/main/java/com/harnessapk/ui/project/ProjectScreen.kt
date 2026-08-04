@@ -280,6 +280,7 @@ internal fun ProjectScreen(
     var artifactText by rememberSaveable { mutableStateOf("") }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var artifactFilter by rememberSaveable { mutableStateOf(defaultProjectArtifactFilter()) }
+    var artifactSort by rememberSaveable { mutableStateOf(ProjectArtifactSort.TREE) }
     var collapsedDirectoryPaths by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var statusText by rememberSaveable { mutableStateOf<String?>(null) }
     var previewMode by rememberSaveable { mutableStateOf(false) }
@@ -304,6 +305,24 @@ internal fun ProjectScreen(
     val visibleTreeItems = remember(artifactTree, collapsedDirectoryPaths) {
         flattenProjectArtifactTree(artifactTree, collapsedDirectoryPaths)
     }
+    val recentTreeItems = remember(visibleDeliverables, artifactSort) {
+        if (artifactSort == ProjectArtifactSort.RECENT) {
+            sortProjectArtifacts(visibleDeliverables, ProjectArtifactSort.RECENT).map { deliverable ->
+                ProjectArtifactTreeItem(
+                    node = ProjectArtifactTreeNode(
+                        name = deliverable.title,
+                        path = deliverable.relativePath,
+                        deliverable = deliverable,
+                    ),
+                    depth = 0,
+                    isCollapsed = false,
+                )
+            }
+        } else {
+            emptyList()
+        }
+    }
+    val activeTreeItems = if (artifactSort == ProjectArtifactSort.RECENT) recentTreeItems else visibleTreeItems
     val selectedDeliverable = visibleDeliverables.firstOrNull { it.id == selectedDeliverableId }
     val selectedProjectConversations = projectConversations(conversations, selectedProjectId)
     val workbenchOverview = projectWorkbenchOverview(
@@ -1005,7 +1024,7 @@ internal fun ProjectScreen(
                             modifier = Modifier.fillMaxWidth(),
                             value = searchQuery,
                             onValueChange = { searchQuery = it },
-                            label = { Text("搜索项目交付物") },
+                            label = { Text("搜索文件名或路径") },
                             singleLine = true,
                         )
                     }
@@ -1021,8 +1040,20 @@ internal fun ProjectScreen(
                         )
                     }
 
-                    if (visibleTreeItems.isNotEmpty()) {
-                        items(visibleTreeItems, key = { it.path }) { treeItem ->
+                    item {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ProjectArtifactSort.entries.forEach { sort ->
+                                FilterChip(
+                                    selected = artifactSort == sort,
+                                    onClick = { artifactSort = sort },
+                                    label = { Text(sort.label) },
+                                )
+                            }
+                        }
+                    }
+
+                    if (activeTreeItems.isNotEmpty()) {
+                        items(activeTreeItems, key = { it.path }) { treeItem ->
                             ProjectArtifactTreeRow(
                                 treeItem = treeItem,
                                 selected = treeItem.deliverable?.id == selectedDeliverableId,

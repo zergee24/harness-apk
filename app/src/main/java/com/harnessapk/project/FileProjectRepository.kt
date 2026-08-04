@@ -229,15 +229,9 @@ class FileProjectRepository(
     suspend fun searchDeliverables(projectId: String, query: String): List<ProjectDeliverable> {
         val normalizedQuery = query.trim()
         if (normalizedQuery.isBlank()) return emptyList()
-        val project = projectDirectory(projectId)
         return listDeliverables(projectId).filter { deliverable ->
-            val file = checkedProjectFile(project, deliverable.id)
             deliverable.title.contains(normalizedQuery, ignoreCase = true) ||
-                deliverable.relativePath.contains(normalizedQuery, ignoreCase = true) ||
-                (
-                    deliverable.artifactType.isTextPreviewable &&
-                        file.readText().contains(normalizedQuery, ignoreCase = true)
-                    )
+                deliverable.relativePath.contains(normalizedQuery, ignoreCase = true)
         }
     }
 

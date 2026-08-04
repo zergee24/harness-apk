@@ -77,7 +77,8 @@ class ProjectRepositoryTest {
         )
 
         assertTrue(repository.readDeliverable(project.id, deliverable.id).contains("Markdown-first 项目空间"))
-        assertEquals(listOf(deliverable.id), repository.searchDeliverables(project.id, "Markdown-first").map { it.id })
+        assertEquals(listOf(deliverable.id), repository.searchDeliverables(project.id, "项目模式").map { it.id })
+        assertTrue(repository.searchDeliverables(project.id, "Markdown-first").isEmpty())
         assertTrue(repository.listDeliverables(project.id).any { it.id == deliverable.id })
 
         val session = repository.saveSessionSummary(
@@ -284,7 +285,10 @@ class ProjectRepositoryTest {
         )
         assertEquals(
             listOf("notes/brief.md"),
-            repository.searchDeliverables(project.id, "验收标准").map { it.relativePath },
+            repository.searchDeliverables(project.id, "brief").map { it.relativePath },
+        )
+        assertTrue(
+            repository.searchDeliverables(project.id, "验收标准").isEmpty(),
         )
     }
 
