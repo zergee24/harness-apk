@@ -54,6 +54,24 @@ class HomeModeUiStateTest {
     }
 
     @Test
+    fun meModeInheritsLastBusinessTheme() {
+        assertEquals(MainMode.LIFE, resolveThemeMode(MainMode.ME, MainMode.LIFE))
+        assertEquals(MainMode.WORK, resolveThemeMode(MainMode.ME, MainMode.WORK))
+    }
+
+    @Test
+    fun businessTabsAlwaysUseTheirOwnTheme() {
+        assertEquals(MainMode.LIFE, resolveThemeMode(MainMode.LIFE, MainMode.WORK))
+        assertEquals(MainMode.WORK, resolveThemeMode(MainMode.WORK, MainMode.LIFE))
+    }
+
+    @Test
+    fun selectingMeKeepsNormalizedSource() {
+        assertEquals(MainMode.WORK, nextThemeSource(MainMode.WORK, MainMode.ME))
+        assertEquals(MainMode.LIFE, nextThemeSource(MainMode.ME, MainMode.ME))
+    }
+
+    @Test
     fun chatRouteKeepsOldQueriesAndOptionallyCarriesSourceMessage() {
         assertEquals(
             "",

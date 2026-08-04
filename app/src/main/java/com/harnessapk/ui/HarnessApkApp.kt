@@ -181,9 +181,13 @@ fun HarnessApkApp(
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
     val homeModeStore = container.homeModeStore
     var mainMode by rememberSaveable { mutableStateOf(homeModeStore.mode.value) }
-    LaunchedEffect(mainMode) {
-        if (homeModeStore.mode.value != mainMode) {
-            homeModeStore.save(mainMode)
+    var themeSourceMode by rememberSaveable { mutableStateOf(homeModeStore.themeSourceMode.value) }
+    LaunchedEffect(mainMode, themeSourceMode) {
+        if (
+            homeModeStore.mode.value != mainMode ||
+            homeModeStore.themeSourceMode.value != themeSourceMode
+        ) {
+            homeModeStore.save(mainMode, themeSourceMode)
         }
     }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
@@ -305,11 +309,14 @@ fun HarnessApkApp(
             selectedPath = selectedPath,
             requestKey = workbenchRequestKey,
         )
+        themeSourceMode = MainMode.WORK
         mainMode = MainMode.WORK
         navController.popBackStack(Routes.Conversations, inclusive = false)
     }
-    ModeTheme(mainMode) {
+    val effectiveThemeMode = resolveThemeMode(mainMode, themeSourceMode)
+    ModeTheme(effectiveThemeMode) {
     Scaffold(
+        modifier = Modifier.testTag("theme-${effectiveThemeMode.name}"),
         topBar = {
             if (isHomeRoute) {
                 HomeTopBar(
@@ -378,7 +385,10 @@ fun HarnessApkApp(
                     MainMode.entries.forEach { mode ->
                         NavigationBarItem(
                             selected = mainMode == mode,
-                            onClick = { mainMode = mode },
+                            onClick = {
+                                themeSourceMode = nextThemeSource(themeSourceMode, mode)
+                                mainMode = mode
+                            },
                             modifier = Modifier.testTag("nav-${mode.name}"),
                             icon = { Icon(homeModeIcon(mode), contentDescription = null) },
                             label = { Text(mode.label) },

@@ -71,14 +71,14 @@ class ThemeTest {
     }
 
     @Test
-    fun meModeUsesTechDarkTheme() {
-        assertEquals(
-            techDarkColorScheme().background,
-            when (MainMode.ME) {
-                MainMode.LIFE -> warmLightColorScheme()
-                MainMode.WORK -> techDarkColorScheme()
-                MainMode.ME -> techDarkColorScheme()
-            }.background,
-        )
+    fun modeThemeTargetsApprovedColorSchemes() {
+        assertEquals(Color(0xFFFAF7F6), themeColorScheme(MainMode.LIFE).background)
+        assertEquals(Color(0xFF101417), themeColorScheme(MainMode.WORK).background)
+    }
+
+    @Test
+    fun modeThemeTargetsApprovedShapeFamilies() {
+        assertEquals(CornerSize(14.dp), themeShapes(MainMode.LIFE).medium.topStart)
+        assertEquals(CornerSize(8.dp), themeShapes(MainMode.WORK).medium.topStart)
     }
 }

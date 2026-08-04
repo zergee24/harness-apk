@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
                 NoEncryption(),
             )
         )
+        key_path.chmod(0o600)
         result = pack_workspace(workspace, output, key_path)
     print(result.package)
     return 0

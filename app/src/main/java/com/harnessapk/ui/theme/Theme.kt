@@ -1,7 +1,12 @@
 package com.harnessapk.ui.theme
 
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateColor
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -9,14 +14,14 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.harnessapk.ui.MainMode
+import com.harnessapk.ui.normalizeThemeSource
 
 internal fun warmLightColorScheme() = lightColorScheme(
     primary = Color(0xFFD98278),
@@ -182,90 +187,127 @@ fun HarnessApkTheme(content: @Composable () -> Unit) {
 
 @Composable
 fun ModeTheme(mode: MainMode, content: @Composable () -> Unit) {
-    val targetScheme = when (mode) {
-        MainMode.LIFE -> warmLightColorScheme()
-        MainMode.WORK -> techDarkColorScheme()
-        MainMode.ME -> techDarkColorScheme()
-    }
+    val transition = updateTransition(
+        targetState = normalizeThemeSource(mode),
+        label = "mode-theme",
+    )
     MaterialTheme(
-        colorScheme = animateColorScheme(targetScheme),
+        colorScheme = transition.animatedColorScheme(),
         typography = HarnessTypography,
-        shapes = when (mode) {
-            MainMode.LIFE -> HarnessShapes
-            MainMode.WORK -> TechShapes
-            MainMode.ME -> TechShapes
-        },
+        shapes = transition.animatedShapes(),
         content = content,
     )
 }
 
-private const val THEME_TRANSITION_MILLIS = 300
+internal fun themeColorScheme(mode: MainMode): ColorScheme = when (normalizeThemeSource(mode)) {
+    MainMode.LIFE -> warmLightColorScheme()
+    MainMode.WORK -> techDarkColorScheme()
+    MainMode.ME -> error("Theme source must resolve to LIFE or WORK")
+}
+
+internal fun themeShapes(mode: MainMode): Shapes {
+    val radii = themeCornerRadii(mode)
+    return Shapes(
+        extraSmall = RoundedCornerShape(radii.extraSmall),
+        small = RoundedCornerShape(radii.small),
+        medium = RoundedCornerShape(radii.medium),
+        large = RoundedCornerShape(radii.large),
+        extraLarge = RoundedCornerShape(radii.extraLarge),
+    )
+}
+
+private data class ThemeCornerRadii(
+    val extraSmall: Dp,
+    val small: Dp,
+    val medium: Dp,
+    val large: Dp,
+    val extraLarge: Dp,
+)
+
+private fun themeCornerRadii(mode: MainMode): ThemeCornerRadii = when (normalizeThemeSource(mode)) {
+    MainMode.LIFE -> ThemeCornerRadii(8.dp, 10.dp, 14.dp, 18.dp, 22.dp)
+    MainMode.WORK -> ThemeCornerRadii(4.dp, 6.dp, 8.dp, 10.dp, 12.dp)
+    MainMode.ME -> error("Theme source must resolve to LIFE or WORK")
+}
+
+private const val THEME_TRANSITION_MILLIS = 450
 
 @Composable
-private fun animateColorScheme(target: ColorScheme): ColorScheme {
-    val spec = tween<Color>(durationMillis = THEME_TRANSITION_MILLIS)
-    val primary by animateColorAsState(target.primary, spec, label = "theme-primary")
-    val onPrimary by animateColorAsState(target.onPrimary, spec, label = "theme-onPrimary")
-    val primaryContainer by animateColorAsState(target.primaryContainer, spec, label = "theme-primaryContainer")
-    val onPrimaryContainer by animateColorAsState(target.onPrimaryContainer, spec, label = "theme-onPrimaryContainer")
-    val secondary by animateColorAsState(target.secondary, spec, label = "theme-secondary")
-    val onSecondary by animateColorAsState(target.onSecondary, spec, label = "theme-onSecondary")
-    val secondaryContainer by animateColorAsState(target.secondaryContainer, spec, label = "theme-secondaryContainer")
-    val onSecondaryContainer by animateColorAsState(target.onSecondaryContainer, spec, label = "theme-onSecondaryContainer")
-    val tertiary by animateColorAsState(target.tertiary, spec, label = "theme-tertiary")
-    val onTertiary by animateColorAsState(target.onTertiary, spec, label = "theme-onTertiary")
-    val tertiaryContainer by animateColorAsState(target.tertiaryContainer, spec, label = "theme-tertiaryContainer")
-    val onTertiaryContainer by animateColorAsState(target.onTertiaryContainer, spec, label = "theme-onTertiaryContainer")
-    val background by animateColorAsState(target.background, spec, label = "theme-background")
-    val onBackground by animateColorAsState(target.onBackground, spec, label = "theme-onBackground")
-    val surface by animateColorAsState(target.surface, spec, label = "theme-surface")
-    val onSurface by animateColorAsState(target.onSurface, spec, label = "theme-onSurface")
-    val surfaceVariant by animateColorAsState(target.surfaceVariant, spec, label = "theme-surfaceVariant")
-    val onSurfaceVariant by animateColorAsState(target.onSurfaceVariant, spec, label = "theme-onSurfaceVariant")
-    val outline by animateColorAsState(target.outline, spec, label = "theme-outline")
-    val outlineVariant by animateColorAsState(target.outlineVariant, spec, label = "theme-outlineVariant")
-    val error by animateColorAsState(target.error, spec, label = "theme-error")
-    val onError by animateColorAsState(target.onError, spec, label = "theme-onError")
-    val errorContainer by animateColorAsState(target.errorContainer, spec, label = "theme-errorContainer")
-    val onErrorContainer by animateColorAsState(target.onErrorContainer, spec, label = "theme-onErrorContainer")
-    val surfaceDim by animateColorAsState(target.surfaceDim, spec, label = "theme-surfaceDim")
-    val surfaceBright by animateColorAsState(target.surfaceBright, spec, label = "theme-surfaceBright")
-    val surfaceContainerLowest by animateColorAsState(target.surfaceContainerLowest, spec, label = "theme-surfaceContainerLowest")
-    val surfaceContainerLow by animateColorAsState(target.surfaceContainerLow, spec, label = "theme-surfaceContainerLow")
-    val surfaceContainer by animateColorAsState(target.surfaceContainer, spec, label = "theme-surfaceContainer")
-    val surfaceContainerHigh by animateColorAsState(target.surfaceContainerHigh, spec, label = "theme-surfaceContainerHigh")
-    val surfaceContainerHighest by animateColorAsState(target.surfaceContainerHighest, spec, label = "theme-surfaceContainerHighest")
+private fun Transition<MainMode>.animatedColor(
+    label: String,
+    selector: (ColorScheme) -> Color,
+): Color = animateColor(
+    transitionSpec = {
+        tween(
+            durationMillis = THEME_TRANSITION_MILLIS,
+            easing = FastOutSlowInEasing,
+        )
+    },
+    label = label,
+) { state -> selector(themeColorScheme(state)) }.value
+
+@Composable
+private fun Transition<MainMode>.animatedCorner(
+    label: String,
+    selector: (ThemeCornerRadii) -> Dp,
+): Dp = animateDp(
+    transitionSpec = {
+        tween(
+            durationMillis = THEME_TRANSITION_MILLIS,
+            easing = FastOutSlowInEasing,
+        )
+    },
+    label = label,
+) { state -> selector(themeCornerRadii(state)) }.value
+
+@Composable
+private fun Transition<MainMode>.animatedShapes(): Shapes = Shapes(
+    extraSmall = RoundedCornerShape(animatedCorner("theme-shape-extraSmall") { it.extraSmall }),
+    small = RoundedCornerShape(animatedCorner("theme-shape-small") { it.small }),
+    medium = RoundedCornerShape(animatedCorner("theme-shape-medium") { it.medium }),
+    large = RoundedCornerShape(animatedCorner("theme-shape-large") { it.large }),
+    extraLarge = RoundedCornerShape(animatedCorner("theme-shape-extraLarge") { it.extraLarge }),
+)
+
+@Composable
+private fun Transition<MainMode>.animatedColorScheme(): ColorScheme {
+    val target = themeColorScheme(targetState)
     return target.copy(
-        primary = primary,
-        onPrimary = onPrimary,
-        primaryContainer = primaryContainer,
-        onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary,
-        onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer,
-        onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary,
-        onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer,
-        onTertiaryContainer = onTertiaryContainer,
-        background = background,
-        onBackground = onBackground,
-        surface = surface,
-        onSurface = onSurface,
-        surfaceVariant = surfaceVariant,
-        onSurfaceVariant = onSurfaceVariant,
-        outline = outline,
-        outlineVariant = outlineVariant,
-        error = error,
-        onError = onError,
-        errorContainer = errorContainer,
-        onErrorContainer = onErrorContainer,
-        surfaceDim = surfaceDim,
-        surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest,
+        primary = animatedColor("theme-primary") { it.primary },
+        onPrimary = animatedColor("theme-onPrimary") { it.onPrimary },
+        primaryContainer = animatedColor("theme-primaryContainer") { it.primaryContainer },
+        onPrimaryContainer = animatedColor("theme-onPrimaryContainer") { it.onPrimaryContainer },
+        inversePrimary = animatedColor("theme-inversePrimary") { it.inversePrimary },
+        secondary = animatedColor("theme-secondary") { it.secondary },
+        onSecondary = animatedColor("theme-onSecondary") { it.onSecondary },
+        secondaryContainer = animatedColor("theme-secondaryContainer") { it.secondaryContainer },
+        onSecondaryContainer = animatedColor("theme-onSecondaryContainer") { it.onSecondaryContainer },
+        tertiary = animatedColor("theme-tertiary") { it.tertiary },
+        onTertiary = animatedColor("theme-onTertiary") { it.onTertiary },
+        tertiaryContainer = animatedColor("theme-tertiaryContainer") { it.tertiaryContainer },
+        onTertiaryContainer = animatedColor("theme-onTertiaryContainer") { it.onTertiaryContainer },
+        background = animatedColor("theme-background") { it.background },
+        onBackground = animatedColor("theme-onBackground") { it.onBackground },
+        surface = animatedColor("theme-surface") { it.surface },
+        onSurface = animatedColor("theme-onSurface") { it.onSurface },
+        surfaceVariant = animatedColor("theme-surfaceVariant") { it.surfaceVariant },
+        onSurfaceVariant = animatedColor("theme-onSurfaceVariant") { it.onSurfaceVariant },
+        surfaceTint = animatedColor("theme-surfaceTint") { it.surfaceTint },
+        inverseSurface = animatedColor("theme-inverseSurface") { it.inverseSurface },
+        inverseOnSurface = animatedColor("theme-inverseOnSurface") { it.inverseOnSurface },
+        error = animatedColor("theme-error") { it.error },
+        onError = animatedColor("theme-onError") { it.onError },
+        errorContainer = animatedColor("theme-errorContainer") { it.errorContainer },
+        onErrorContainer = animatedColor("theme-onErrorContainer") { it.onErrorContainer },
+        outline = animatedColor("theme-outline") { it.outline },
+        outlineVariant = animatedColor("theme-outlineVariant") { it.outlineVariant },
+        scrim = animatedColor("theme-scrim") { it.scrim },
+        surfaceDim = animatedColor("theme-surfaceDim") { it.surfaceDim },
+        surfaceBright = animatedColor("theme-surfaceBright") { it.surfaceBright },
+        surfaceContainerLowest = animatedColor("theme-surfaceContainerLowest") { it.surfaceContainerLowest },
+        surfaceContainerLow = animatedColor("theme-surfaceContainerLow") { it.surfaceContainerLow },
+        surfaceContainer = animatedColor("theme-surfaceContainer") { it.surfaceContainer },
+        surfaceContainerHigh = animatedColor("theme-surfaceContainerHigh") { it.surfaceContainerHigh },
+        surfaceContainerHighest = animatedColor("theme-surfaceContainerHighest") { it.surfaceContainerHighest },
     )
 }

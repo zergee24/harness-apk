@@ -40,7 +40,11 @@ class EnrichmentStats:
     concept_registry_hash: str
 
 
-def import_enrichment(workspace: Path) -> EnrichmentStats:
+def import_enrichment(
+    workspace: Path,
+    *,
+    preserve_link_evidence_order: bool = False,
+) -> EnrichmentStats:
     """Replace all semantic rows atomically from canonical JSONL assets."""
 
     loaded = load_workspace(workspace)
@@ -57,7 +61,11 @@ def import_enrichment(workspace: Path) -> EnrichmentStats:
         aliases = _import_aliases(database, loaded)
         mentions = _import_mentions(database, loaded)
         annotations = _import_annotations(database, loaded)
-        links = _import_links(database, loaded)
+        links = _import_links(
+            database,
+            loaded,
+            preserve_evidence_order=preserve_link_evidence_order,
+        )
         _rebuild_term_alias_fts(database)
         if _sha256_regular_file(registry_path) != registry_hash:
             raise BuildError("concept-registry 在导入期间发生变化")
@@ -384,7 +392,12 @@ def _import_annotations(database: sqlite3.Connection, workspace: WikiWorkspace) 
     return count
 
 
-def _import_links(database: sqlite3.Connection, workspace: WikiWorkspace) -> int:
+def _import_links(
+    database: sqlite3.Connection,
+    workspace: WikiWorkspace,
+    *,
+    preserve_evidence_order: bool,
+) -> int:
     count = 0
     previous: str | None = None
     path = workspace.enrichment_path / "links.jsonl"
@@ -447,7 +460,13 @@ def _import_links(database: sqlite3.Connection, workspace: WikiWorkspace) -> int
                 canonical_json_bytes(metadata).decode("utf-8"),
             ),
         )
-        _insert_evidence(database, "link", link_id, evidence)
+        _insert_evidence(
+            database,
+            "link",
+            link_id,
+            evidence,
+            preserve_order=preserve_evidence_order,
+        )
         count += 1
     return count
 
@@ -486,8 +505,14 @@ def _insert_evidence(
     owner_type: str,
     owner_id: str,
     evidence: Iterable[EvidenceRefInput],
+    *,
+    preserve_order: bool = False,
 ) -> None:
-    ordered = sorted(evidence, key=lambda item: (item.chunk_id, item.role))
+    ordered = (
+        list(evidence)
+        if preserve_order
+        else sorted(evidence, key=lambda item: (item.chunk_id, item.role))
+    )
     chunk_ids = [item.chunk_id for item in ordered]
     if len(chunk_ids) != len(set(chunk_ids)):
         raise BuildError(f"{owner_type} {owner_id} 包含重复 evidence chunk")

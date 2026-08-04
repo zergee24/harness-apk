@@ -24,4 +24,13 @@ class HomeModeStoreTest {
     fun meModeRoundTrips() {
         assertEquals(MainMode.ME, migrateStoredMode("ME"))
     }
+
+    @Test
+    fun storedThemeSourceOnlyAcceptsBusinessModes() {
+        assertEquals(MainMode.LIFE, migrateStoredThemeSource(null))
+        assertEquals(MainMode.LIFE, migrateStoredThemeSource("UNKNOWN_LEGACY"))
+        assertEquals(MainMode.LIFE, migrateStoredThemeSource("ME"))
+        assertEquals(MainMode.LIFE, migrateStoredThemeSource("LIFE"))
+        assertEquals(MainMode.WORK, migrateStoredThemeSource("WORK"))
+    }
 }

@@ -34,6 +34,15 @@ from .history_profile import (
 )
 
 JOBS_DIRECTORY_NAME = "history-jobs"
+RELATION_AGGREGATION_POLICY_PATH = Path(__file__).with_name(
+    "relation_aggregation_policy.json"
+)
+RELATION_AGGREGATION_METADATA_KEY = (
+    "historyRelationAggregationPolicySha256"
+)
+RELATION_AGGREGATION_POLICY_SHA256 = (
+    "e05bd318e6901865a0e309fc408c4862b8d6700d9a56c12942890eb33f1e64e7"
+)
 _TOKEN = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*\Z")
 _REVIEW_STATES = {"auto-high-confidence", "reviewed", "unresolved"}
 
@@ -147,6 +156,7 @@ def validate_job(workspace: Path, job_id: str) -> JobValidation:
 def merge_jobs(workspace: Path) -> EnrichmentStats:
     loaded = load_workspace(workspace)
     _require_history_workspace(loaded, PROFILE_ID)
+    relation_policy_sha256 = _relation_aggregation_policy_sha256()
     jobs_root = loaded.root / JOBS_DIRECTORY_NAME
     manifest = _load_manifest(jobs_root)
     validated: list[tuple[dict[str, object], dict[str, object]]] = []
@@ -161,7 +171,55 @@ def merge_jobs(workspace: Path) -> EnrichmentStats:
             raise BuildError(f"job 尚未通过 validate-job：{job_id}")
         validated.append((job, output))
     assets = _merge_outputs(loaded, validated)
-    return _preflight_and_swap(loaded, assets)
+    return _preflight_and_swap(
+        loaded,
+        assets,
+        build_metadata={
+            RELATION_AGGREGATION_METADATA_KEY: relation_policy_sha256,
+        },
+    )
+
+
+def _relation_aggregation_policy_sha256() -> str:
+    if (
+        RELATION_AGGREGATION_POLICY_PATH.is_symlink()
+        or not RELATION_AGGREGATION_POLICY_PATH.is_file()
+    ):
+        raise BuildError("history relation 聚合策略缺失或不安全")
+    try:
+        raw = RELATION_AGGREGATION_POLICY_PATH.read_bytes()
+        policy = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BuildError("history relation 聚合策略不是有效 JSON") from error
+    provenance = (
+        policy.get("provenance")
+        if isinstance(policy, dict)
+        else None
+    )
+    policy_sha256 = hashlib.sha256(raw).hexdigest()
+    if (
+        not isinstance(policy, dict)
+        or raw != canonical_json_bytes(policy) + b"\n"
+        or policy_sha256 != RELATION_AGGREGATION_POLICY_SHA256
+        or policy.get("type")
+        != "hwiki-history-relation-aggregation-policy"
+        or type(policy.get("schemaVersion")) is not int
+        or policy.get("schemaVersion") != 1
+        or policy.get("policyId")
+        != "cn-history-relation-aggregation-v1"
+        or policy.get("identityFields")
+        != [
+            "sourceConceptKey",
+            "targetNamespace",
+            "targetConceptKey",
+            "kind",
+        ]
+        or not isinstance(provenance, dict)
+        or provenance.get("componentField")
+        != RELATION_AGGREGATION_METADATA_KEY
+    ):
+        raise BuildError("history relation 聚合策略 canonical 契约无效")
+    return policy_sha256
 
 
 def _build_job_inputs(workspace: WikiWorkspace) -> tuple[dict[str, object], ...]:
@@ -629,7 +687,6 @@ def _merge_outputs(
             )
 
     annotations = []
-    links = []
     for job, output in validated:
         for annotation in output["annotations"]:
             annotations.append(
@@ -649,34 +706,12 @@ def _merge_outputs(
                     "evidence": annotation["evidence"],
                 }
             )
-        for link in output["links"]:
-            source_key = str(link["sourceConceptKey"])
-            if source_key not in term_ids:
-                raise BuildError(f"link source concept 未进入 registry：{source_key}")
-            links.append(
-                {
-                    "id": stable_id(
-                        "link",
-                        workspace.wiki_id,
-                        source_key,
-                        link["targetNamespace"],
-                        link["targetConceptKey"],
-                        link["kind"],
-                    ),
-                    "sourceType": "term",
-                    "sourceId": term_ids[source_key],
-                    "targetNamespace": link["targetNamespace"],
-                    "targetType": "concept",
-                    "targetId": link["targetConceptKey"],
-                    "kind": link["kind"],
-                    "confidence": link["confidence"],
-                    "metadata": {
-                        "routingMode": link["routingMode"],
-                        "extractorVersion": link["extractorVersion"],
-                    },
-                    "evidence": link["evidence"],
-                }
-            )
+    links = _aggregate_links(
+        workspace,
+        validated,
+        term_ids,
+        _canonical_chunk_order(workspace),
+    )
 
     return {
         "concept-registry.jsonl": tuple(registry),
@@ -689,9 +724,125 @@ def _merge_outputs(
     }
 
 
+def _canonical_chunk_order(workspace: WikiWorkspace) -> dict[str, int]:
+    database_uri = workspace.database_path.resolve().as_uri() + "?mode=ro"
+    with sqlite3.connect(database_uri, uri=True) as database:
+        chunk_ids = [
+            str(row[0])
+            for row in database.execute(
+                """
+                SELECT chunks.chunk_id
+                FROM chunks
+                JOIN sections USING(section_id)
+                JOIN documents USING(document_id)
+                ORDER BY
+                    documents.ordinal,
+                    sections.ordinal,
+                    chunks.ordinal,
+                    chunks.chunk_id
+                """
+            )
+        ]
+    if len(chunk_ids) != len(set(chunk_ids)):
+        raise BuildError("workspace canonical chunk ordinal 不唯一")
+    return {
+        chunk_id: ordinal for ordinal, chunk_id in enumerate(chunk_ids)
+    }
+
+
+def _aggregate_links(
+    workspace: WikiWorkspace,
+    validated: list[tuple[dict[str, object], dict[str, object]]],
+    term_ids: dict[str, str],
+    chunk_order: dict[str, int],
+) -> list[dict[str, object]]:
+    groups: dict[
+        tuple[str, str, str, str],
+        list[dict[str, object]],
+    ] = defaultdict(list)
+    for _job, output in validated:
+        for link in output["links"]:
+            identity = (
+                str(link["sourceConceptKey"]),
+                str(link["targetNamespace"]),
+                str(link["targetConceptKey"]),
+                str(link["kind"]),
+            )
+            groups[identity].append(link)
+
+    links: list[dict[str, object]] = []
+    valid_chunk_ids = set(chunk_order)
+    for identity in sorted(groups):
+        source_key, target_namespace, target_key, kind = identity
+        if source_key not in term_ids:
+            raise BuildError(
+                f"link source concept 未进入 registry：{source_key}"
+            )
+        group = groups[identity]
+        routing_modes = {
+            str(link["routingMode"]) for link in group
+        }
+        if len(routing_modes) != 1:
+            raise BuildError(
+                f"relation 聚合 routingMode 不一致：{identity}"
+            )
+        extractor_versions = {
+            str(link["extractorVersion"]) for link in group
+        }
+        if len(extractor_versions) != 1:
+            raise BuildError(
+                f"relation 聚合 extractorVersion 不一致：{identity}"
+            )
+        evidence = {
+            str(chunk_id)
+            for link in group
+            for chunk_id in link["evidence"]
+        }
+        outside_workspace = sorted(evidence - valid_chunk_ids)
+        if outside_workspace:
+            raise BuildError(
+                "relation 聚合 evidence 不在 workspace："
+                f"{outside_workspace[0]}"
+            )
+        if not evidence:
+            raise BuildError(f"relation 聚合 evidence 为空：{identity}")
+        links.append(
+            {
+                "id": stable_id(
+                    "link",
+                    workspace.wiki_id,
+                    source_key,
+                    target_namespace,
+                    target_key,
+                    kind,
+                ),
+                "sourceType": "term",
+                "sourceId": term_ids[source_key],
+                "targetNamespace": target_namespace,
+                "targetType": "concept",
+                "targetId": target_key,
+                "kind": kind,
+                "confidence": max(
+                    float(link["confidence"]) for link in group
+                ),
+                "metadata": {
+                    "routingMode": next(iter(routing_modes)),
+                    "extractorVersion": next(iter(extractor_versions)),
+                },
+                "evidence": sorted(
+                    evidence,
+                    key=chunk_order.__getitem__,
+                ),
+            }
+        )
+    return links
+
+
 def _preflight_and_swap(
     workspace: WikiWorkspace,
     assets: dict[str, tuple[dict[str, object], ...]],
+    *,
+    build_metadata: dict[str, str] | None = None,
 ) -> EnrichmentStats:
     temporary_root = Path(
         tempfile.mkdtemp(prefix=".history-merge-", dir=workspace.root.parent)
@@ -711,7 +862,24 @@ def _preflight_and_swap(
             with (staging_enrichment / file_name).open("xb") as stream:
                 for row in rows:
                     stream.write(canonical_json_bytes(row) + b"\n")
-        stats = import_enrichment(temporary_root)
+        stats = import_enrichment(
+            temporary_root,
+            preserve_link_evidence_order=True,
+        )
+        if build_metadata:
+            with sqlite3.connect(
+                temporary_root / "content.sqlite"
+            ) as database:
+                for key, value in sorted(build_metadata.items()):
+                    database.execute(
+                        """
+                        INSERT INTO build_metadata(key, value)
+                        VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                        """,
+                        (key, value),
+                    )
+                database.commit()
 
         database_backup = backup_root / "content.sqlite"
         enrichment_backup = backup_root / "enrichment"
