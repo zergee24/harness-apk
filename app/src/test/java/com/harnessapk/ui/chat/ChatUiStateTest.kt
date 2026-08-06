@@ -1,5 +1,7 @@
 package com.harnessapk.ui.chat
 
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
@@ -492,6 +494,42 @@ class ChatUiStateTest {
     fun sendButtonContentDescriptionUsesPauseWhenBusy() {
         assertEquals("暂停生成", sendButtonContentDescription(isBusy = true))
         assertEquals("发送", sendButtonContentDescription(isBusy = false))
+    }
+
+    @Test
+    fun enterSendsWhileShiftEnterKeepsTheLineBreak() {
+        assertTrue(
+            shouldSendChatInputOnKeyEvent(
+                key = Key.Enter,
+                eventType = KeyEventType.KeyDown,
+                shiftPressed = false,
+                canSend = true,
+            ),
+        )
+        assertFalse(
+            shouldSendChatInputOnKeyEvent(
+                key = Key.Enter,
+                eventType = KeyEventType.KeyDown,
+                shiftPressed = true,
+                canSend = true,
+            ),
+        )
+        assertFalse(
+            shouldSendChatInputOnKeyEvent(
+                key = Key.Enter,
+                eventType = KeyEventType.KeyUp,
+                shiftPressed = false,
+                canSend = true,
+            ),
+        )
+        assertFalse(
+            shouldSendChatInputOnKeyEvent(
+                key = Key.Enter,
+                eventType = KeyEventType.KeyDown,
+                shiftPressed = false,
+                canSend = false,
+            ),
+        )
     }
 
     @Test

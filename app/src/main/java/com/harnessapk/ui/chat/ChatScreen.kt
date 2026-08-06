@@ -43,6 +43,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -109,6 +111,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -119,6 +127,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -4375,12 +4384,35 @@ private fun ChatInputBar(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 56.dp)
-                        .focusRequester(inputFocusRequester),
+                        .focusRequester(inputFocusRequester)
+                        .onPreviewKeyEvent { event ->
+                            if (
+                                shouldSendChatInputOnKeyEvent(
+                                    key = event.key,
+                                    eventType = event.type,
+                                    shiftPressed = event.isShiftPressed,
+                                    canSend = canSend,
+                                )
+                            ) {
+                                onSend()
+                                true
+                            } else {
+                                false
+                            }
+                        },
                     value = text,
                     onValueChange = onTextChange,
                     placeholder = { Text("发消息") },
                     minLines = 1,
                     maxLines = 5,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = {
+                            if (canSend) {
+                                onSend()
+                            }
+                        },
+                    ),
                 )
                 when (trailingAction) {
                     ChatInputTrailingAction.ATTACHMENT -> ChatImageSourceEntryMenu(
@@ -4411,6 +4443,16 @@ private fun ChatInputBar(
         }
     }
 }
+
+internal fun shouldSendChatInputOnKeyEvent(
+    key: Key,
+    eventType: KeyEventType,
+    shiftPressed: Boolean,
+    canSend: Boolean,
+): Boolean = key == Key.Enter &&
+    eventType == KeyEventType.KeyDown &&
+    !shiftPressed &&
+    canSend
 
 @Composable
 internal fun ConversationWikiTopBarAction(
