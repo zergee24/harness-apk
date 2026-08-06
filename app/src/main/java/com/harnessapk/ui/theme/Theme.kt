@@ -1,5 +1,8 @@
 package com.harnessapk.ui.theme
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.animation.animateColor
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Transition
@@ -14,12 +17,15 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import com.harnessapk.ui.MainMode
 import com.harnessapk.ui.normalizeThemeSource
 
@@ -187,8 +193,19 @@ fun HarnessApkTheme(content: @Composable () -> Unit) {
 
 @Composable
 fun ModeTheme(mode: MainMode, content: @Composable () -> Unit) {
+    val resolvedMode = normalizeThemeSource(mode)
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = view.context.findActivity()?.window ?: return@SideEffect
+            val controller = WindowCompat.getInsetsController(window, view)
+            val lightBars = resolvedMode == MainMode.LIFE
+            controller.isAppearanceLightStatusBars = lightBars
+            controller.isAppearanceLightNavigationBars = lightBars
+        }
+    }
     val transition = updateTransition(
-        targetState = normalizeThemeSource(mode),
+        targetState = resolvedMode,
         label = "mode-theme",
     )
     MaterialTheme(
@@ -197,6 +214,15 @@ fun ModeTheme(mode: MainMode, content: @Composable () -> Unit) {
         shapes = transition.animatedShapes(),
         content = content,
     )
+}
+
+private fun Context.findActivity(): Activity? {
+    var context: Context? = this
+    while (context is ContextWrapper) {
+        if (context is Activity) return context
+        context = context.baseContext
+    }
+    return null
 }
 
 internal fun themeColorScheme(mode: MainMode): ColorScheme = when (normalizeThemeSource(mode)) {

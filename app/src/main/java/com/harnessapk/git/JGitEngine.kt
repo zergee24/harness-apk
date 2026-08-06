@@ -5,11 +5,17 @@ import org.eclipse.jgit.api.CreateBranchCommand
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.ListBranchCommand
 import org.eclipse.jgit.api.MergeCommand
+import org.eclipse.jgit.diff.DiffFormatter
 import org.eclipse.jgit.lib.PersonIdent
 import org.eclipse.jgit.lib.Repository
 import org.eclipse.jgit.lib.RepositoryState
 import org.eclipse.jgit.transport.RefSpec
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
+import org.eclipse.jgit.treewalk.AbstractTreeIterator
+import org.eclipse.jgit.treewalk.CanonicalTreeParser
+import org.eclipse.jgit.treewalk.EmptyTreeIterator
+import org.eclipse.jgit.treewalk.FileTreeIterator
+import org.eclipse.jgit.util.io.NullOutputStream
 
 class JGitEngine {
     fun cloneRepository(request: GitCloneRequest) {
@@ -148,6 +154,67 @@ class JGitEngine {
                 message = commit.fullMessage,
             )
         }
+    }
+
+    /**
+     * 只暂存并提交指定路径（白名单提交），不执行 `git add -A`。
+     * 适用于把"本轮已评审并 apply 的写回文件"落地为一个提交，其余工作区改动保持不暂存。
+     */
+    fun stagePathsAndCommit(
+        directory: File,
+        paths: List<String>,
+        message: String,
+        author: GitCommitAuthor,
+    ): GitCommitResult {
+        val trimmedMessage = message.trim()
+        require(trimmedMessage.isNotBlank()) { "提交信息不能为空" }
+        require(paths.isNotEmpty()) { "没有可提交的文件" }
+        val person = PersonIdent(author.name.trim(), author.email.trim())
+        return withGit(directory, "提交失败") { git ->
+            paths.forEach { rawPath ->
+                val path = rawPath.trim()
+                if (path.isNotEmpty()) {
+                    if (File(directory, path).isFile) {
+                        git.add().addFilepattern(path).call()
+                    } else {
+                        git.rm().addFilepattern(path).call()
+                    }
+                }
+            }
+            val commit = git.commit()
+                .setMessage(trimmedMessage)
+                .setAuthor(person)
+                .setCommitter(person)
+                .call()
+            GitCommitResult(
+                id = commit.name,
+                shortId = commit.name.take(7),
+                message = commit.fullMessage,
+            )
+        }
+    }
+
+    /**
+     * 计算工作区相对 HEAD 的逐文件增删行数统计（未提交改动摘要）。
+     */
+    fun diffStat(directory: File): List<GitDiffStat> = withGit(directory, "读取改动统计失败") { git ->
+        val repository = git.repository
+        val oldTreeIter: AbstractTreeIterator = runCatching {
+            val treeId = repository.resolve("HEAD^{tree}")
+            requireNotNull(treeId)
+            val reader = repository.newObjectReader()
+            CanonicalTreeParser().apply { reset(reader, treeId) }
+        }.getOrElse { EmptyTreeIterator() }
+        val newTreeIter = FileTreeIterator(repository)
+        val formatter = DiffFormatter(NullOutputStream.INSTANCE)
+        formatter.setRepository(repository)
+        val entries = formatter.scan(oldTreeIter, newTreeIter)
+        entries.map { entry ->
+            val edits = runCatching { formatter.toFileHeader(entry).toEditList() }.getOrDefault(emptyList())
+            val added = edits.sumOf { it.lengthB }
+            val deleted = edits.sumOf { it.lengthA }
+            GitDiffStat(entry.newPath.ifBlank { entry.oldPath }, added, deleted)
+        }.sortedBy { it.path }
     }
 
     fun push(directory: File, credentials: GitCredentials?) {

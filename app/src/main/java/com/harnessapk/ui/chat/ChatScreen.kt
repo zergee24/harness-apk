@@ -207,6 +207,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import java.util.Locale
 import java.util.UUID
 
@@ -1337,6 +1338,14 @@ fun ChatScreen(
                         null
                     },
                 )
+                if (result.succeeded.isNotEmpty()) {
+                    val writtenPaths = result.succeeded.mapNotNull { it.writtenDeliverable?.path ?: it.proposal.path }
+                    container.projectAppliedPaths.update { current ->
+                        val existing = current[state.draft.projectId].orEmpty()
+                        current + (state.draft.projectId to (existing + writtenPaths).distinct())
+                    }
+                    container.projectContentInvalidation.tryEmit(state.draft.projectId)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -1536,6 +1545,14 @@ fun ChatScreen(
                         null
                     },
                 )
+                if (result.succeeded.isNotEmpty()) {
+                    val writtenPaths = result.succeeded.mapNotNull { it.writtenDeliverable?.path ?: it.proposal.path }
+                    container.projectAppliedPaths.update { current ->
+                        val existing = current[projectId].orEmpty()
+                        current + (projectId to (existing + writtenPaths).distinct())
+                    }
+                    container.projectContentInvalidation.tryEmit(projectId)
+                }
             } finally {
                 legacyMarkdownReviewApplyController.complete(attempt)
                 if (
@@ -2096,6 +2113,8 @@ fun ChatScreen(
                 onOpenModelPicker = { showModelPicker = true },
                 identityState = identityState,
                 onSelectIdentity = identityController::selectIdentity,
+                projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
+                onOpenSessionConfig = { showSessionConfig = true },
                 contextStatus = contextStatus,
                 isCompressingContext = isCompressingContext,
                 onCompressContext = ::compressContextNow,
@@ -3206,6 +3225,11 @@ internal fun MarkdownFileChangeCard(
                     }
                     MarkdownFileChangeStatus.APPLIED -> {
                         AppliedPathList(state.appliedPaths)
+                        Text(
+                            text = "Git 工作区已更新（未提交）",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
                         Button(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -3232,6 +3256,11 @@ internal fun MarkdownFileChangeCard(
                             fontWeight = FontWeight.SemiBold,
                         )
                         AppliedPathList(state.appliedPaths)
+                        Text(
+                            text = "Git 工作区已更新（未提交）",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
                         Text(
                             "写入失败",
                             style = MaterialTheme.typography.labelLarge,
@@ -4195,6 +4224,8 @@ private fun ChatInputBar(
     onOpenModelPicker: () -> Unit,
     identityState: ConversationIdentityUiState,
     onSelectIdentity: (String?) -> Unit,
+    projectName: String?,
+    onOpenSessionConfig: () -> Unit,
     contextStatus: ContextWindowStatus,
     isCompressingContext: Boolean,
     onCompressContext: () -> Unit,
@@ -4242,6 +4273,27 @@ private fun ChatInputBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                projectName?.let { name ->
+                    FilterChip(
+                        modifier = Modifier.heightIn(min = 48.dp),
+                        selected = true,
+                        onClick = onOpenSessionConfig,
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Outlined.Folder,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                    )
+                }
                 if (showWebSearch) {
                     FilterChip(
                         modifier = Modifier.heightIn(min = 48.dp),

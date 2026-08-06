@@ -57,6 +57,12 @@ data class GitBranchSummary(
     val isRemote: Boolean,
 )
 
+data class GitDiffStat(
+    val path: String,
+    val added: Int,
+    val deleted: Int,
+)
+
 data class GitPullResult(
     val fastForward: Boolean,
     val message: String,

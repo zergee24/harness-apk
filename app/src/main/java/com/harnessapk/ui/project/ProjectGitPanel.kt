@@ -33,6 +33,8 @@ import com.harnessapk.ui.theme.HarnessSpacing
 internal fun ProjectGitPanel(
     status: GitStatusSummary?,
     branches: List<GitBranchSummary>,
+    pendingCommitCount: Int,
+    onOpenPendingCommit: () -> Unit,
     onInitRepository: () -> Unit,
     onCloneRepository: () -> Unit,
     onRefresh: () -> Unit,
@@ -88,6 +90,14 @@ internal fun ProjectGitPanel(
             }
 
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (pendingCommitCount > 0) {
+                    item {
+                        Button(
+                            modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = onOpenPendingCommit,
+                        ) { Text("待提交($pendingCommitCount)") }
+                    }
+                }
                 item {
                     Button(
                         modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),

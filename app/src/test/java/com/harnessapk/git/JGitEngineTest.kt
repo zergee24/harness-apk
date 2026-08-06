@@ -108,6 +108,85 @@ class JGitEngineTest {
         }
     }
 
+    @Test
+    fun stagePathsAndCommitCommitsOnlyWhitelistedPaths() {
+        val remote = createBareRemote()
+        val worktree = temporaryFolder.newFolder("worktree")
+        val engine = JGitEngine()
+        engine.cloneRepository(GitCloneRequest(remote.toURI().toString(), "main", worktree))
+
+        worktree.resolve("docs/a.md").writeProjectText("# A\n")
+        worktree.resolve("docs/b.md").writeProjectText("# B\n")
+
+        engine.stagePathsAndCommit(
+            directory = worktree,
+            paths = listOf("docs/a.md"),
+            message = "仅提交 A",
+            author = GitCommitAuthor(name = "Harness", email = "harness@example.com"),
+        )
+
+        val status = engine.status(worktree)
+        assertEquals(1, status.untrackedCount)
+        assertEquals(
+            "docs/b.md",
+            status.files.single { it.type == GitChangeType.UNTRACKED }.path,
+        )
+    }
+
+    @Test
+    fun stagePathsAndCommitHandlesDeletedPathViaRm() {
+        val remote = createBareRemote()
+        val worktree = temporaryFolder.newFolder("worktree")
+        val engine = JGitEngine()
+        engine.cloneRepository(GitCloneRequest(remote.toURI().toString(), "main", worktree))
+
+        worktree.resolve("docs/old.md").writeProjectText("# Old\n")
+        worktree.resolve("docs/keep.md").writeProjectText("# Keep\n")
+        engine.stageAllAndCommit(
+            directory = worktree,
+            message = "init",
+            author = GitCommitAuthor(name = "Harness", email = "harness@example.com"),
+        )
+
+        worktree.resolve("docs/old.md").delete()
+
+        engine.stagePathsAndCommit(
+            directory = worktree,
+            paths = listOf("docs/old.md"),
+            message = "删除 old",
+            author = GitCommitAuthor(name = "Harness", email = "harness@example.com"),
+        )
+
+        val status = engine.status(worktree)
+        assertTrue("删除提交后工作区应干净，实际：${status.files}", status.isClean)
+    }
+
+    @Test
+    fun diffStatReportsAddedLinesForNewAndAppendedFiles() {
+        val remote = createBareRemote()
+        val worktree = temporaryFolder.newFolder("worktree")
+        val engine = JGitEngine()
+        engine.cloneRepository(GitCloneRequest(remote.toURI().toString(), "main", worktree))
+
+        worktree.resolve("docs/plan.md").writeProjectText("a\nb\nc\n")
+        val newFileStats = engine.diffStat(worktree)
+        val newPlanStat = newFileStats.single { it.path == "docs/plan.md" }
+        assertEquals(3, newPlanStat.added)
+        assertEquals(0, newPlanStat.deleted)
+
+        engine.stageAllAndCommit(
+            directory = worktree,
+            message = "init plan",
+            author = GitCommitAuthor(name = "Harness", email = "harness@example.com"),
+        )
+
+        worktree.resolve("docs/plan.md").writeProjectText("a\nb\nc\nd\ne\n")
+        val appendedStats = engine.diffStat(worktree)
+        val appendedPlanStat = appendedStats.single { it.path == "docs/plan.md" }
+        assertEquals(2, appendedPlanStat.added)
+        assertEquals(0, appendedPlanStat.deleted)
+    }
+
     private fun createBareRemote(): File {
         val seed = temporaryFolder.newFolder("seed")
         val remote = temporaryFolder.newFolder("remote.git")

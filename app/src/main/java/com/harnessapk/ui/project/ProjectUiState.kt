@@ -120,6 +120,19 @@ internal enum class ProjectArtifactFilter(val label: String) {
 
 internal fun defaultProjectArtifactFilter(): ProjectArtifactFilter = ProjectArtifactFilter.ALL
 
+internal enum class ProjectArtifactSort(val label: String) {
+    TREE("目录树"),
+    RECENT("最近修改"),
+}
+
+internal fun sortProjectArtifacts(
+    deliverables: List<ProjectDeliverable>,
+    sort: ProjectArtifactSort,
+): List<ProjectDeliverable> = when (sort) {
+    ProjectArtifactSort.TREE -> deliverables
+    ProjectArtifactSort.RECENT -> deliverables.sortedByDescending { it.updatedAt }
+}
+
 internal fun filterProjectArtifacts(
     deliverables: List<ProjectDeliverable>,
     filter: ProjectArtifactFilter,

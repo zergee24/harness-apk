@@ -1,5 +1,8 @@
 package com.harnessapk.ui.updater
 
+import android.app.Activity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -54,6 +57,16 @@ fun UpdateSettingsScreen(
     var checking by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf(initialResult) }
     var launchedInstallForSha by remember { mutableStateOf<String?>(null) }
+    val installLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        statusIsError = false
+        status = if (result.resultCode == Activity.RESULT_OK) {
+            "安装完成"
+        } else {
+            "安装未完成（已取消或失败），可点\"继续安装\"重试"
+        }
+    }
     val downloaded = (downloadState as? UpdateDownloadState.Ready)?.result
     val showingProgress = checking || downloadState is UpdateDownloadState.Downloading
 
@@ -79,7 +92,7 @@ fun UpdateSettingsScreen(
     fun openInstallerOrPermissionSettings(apk: ApkDownloadResult) {
         when (installLaunchTarget(container.apkInstaller.canRequestPackageInstalls())) {
             InstallLaunchTarget.INSTALLER -> {
-                context.startActivity(container.apkInstaller.installIntent(apk.file))
+                installLauncher.launch(container.apkInstaller.installIntent(apk.file))
                 launchedInstallForSha = apk.sha256
                 status = "已打开系统安装器，请按系统提示完成安装"
             }
@@ -238,7 +251,7 @@ fun UpdateSettingsScreen(
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 when (installLaunchTarget(container.apkInstaller.canRequestPackageInstalls())) {
-                                    InstallLaunchTarget.INSTALLER -> context.startActivity(container.apkInstaller.installIntent(apk.file))
+                                    InstallLaunchTarget.INSTALLER -> installLauncher.launch(container.apkInstaller.installIntent(apk.file))
                                     InstallLaunchTarget.UNKNOWN_SOURCES_SETTINGS -> context.startActivity(container.apkInstaller.unknownSourcesSettingsIntent())
                                 }
                             },
