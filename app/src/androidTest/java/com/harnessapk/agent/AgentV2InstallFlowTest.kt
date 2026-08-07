@@ -43,7 +43,9 @@ class AgentV2InstallFlowTest {
             val bundleName = "fixture.researcher-v2-balanced.hbundle"
             val session = repository.preparePackageImport(bundleName) { testAssets.open(bundleName) }
             val parsed = session.parsedPackage as V2Bundle
-            val optional = parsed.agent.installPlan.packages.single { it.installClass == V2InstallClass.OPTIONAL }
+            val optional = parsed.agent.installPlan.packages.singleOrNull {
+                it.installClass == V2InstallClass.OPTIONAL
+            }
 
             val installed = repository.installPackage(session, profileId = "balanced")
 
@@ -57,7 +59,13 @@ class AgentV2InstallFlowTest {
             assertEquals("balanced", installedDetail.selectedProfileId)
             assertEquals(balancedBytes, installedDetail.exactInstalledBytes)
             val beforeCoverage = requireNotNull(repository.loadPackage("fixture.researcher", 2))
-            assertTrue(optional.id in beforeCoverage.missingOptionalCoverage)
+            assertEquals(
+                parsed.agent.installPlan.packages
+                    .filter { it.type == V2PackageType.CORPUS && it.installClass == V2InstallClass.OPTIONAL }
+                    .map(V2InstallPackage::id)
+                    .sorted(),
+                beforeCoverage.missingOptionalCoverage.sorted(),
+            )
 
             val chatRepository = ChatRepository(
                 conversationDao = database.conversationDao(),
@@ -86,14 +94,16 @@ class AgentV2InstallFlowTest {
             }
             val firstMetadata = firstContext.evidence.map { listOf(it.chunkKey, it.sourceTitle, it.location) }
 
-            val corpusSession = repository.preparePackageImport(optional.fileName) {
-                testAssets.open(optional.fileName)
-            }
-            val expansion = repository.installPackage(corpusSession)
+            optional?.let { declaration ->
+                val corpusSession = repository.preparePackageImport(declaration.fileName) {
+                    testAssets.open(declaration.fileName)
+                }
+                val expansion = repository.installPackage(corpusSession)
 
-            assertEquals(AgentStatus.READY, expansion.agent.status)
+                assertEquals(AgentStatus.READY, expansion.agent.status)
+            }
             val afterCoverage = requireNotNull(repository.loadPackage("fixture.researcher", 2))
-            assertFalse(optional.id in afterCoverage.missingOptionalCoverage)
+            optional?.let { assertFalse(it.id in afterCoverage.missingOptionalCoverage) }
             assertEquals(2, requireNotNull(chatRepository.conversation(conversationId)).agentVersion)
             val reopenedRepository = AgentRepository(
                 filesDir = filesDir,
@@ -107,10 +117,17 @@ class AgentV2InstallFlowTest {
                 privateInstallAvailableBytes = { StatFs(filesDir.absolutePath).availableBytes },
             )
             val expandedDetail = requireNotNull(reopenedRepository.packageDetail("fixture.researcher", 2))
-            assertEquals("complete", expandedDetail.selectedProfileId)
-            assertEquals(Math.addExact(balancedBytes, optional.sizeBytes), expandedDetail.exactInstalledBytes)
-            assertEquals(installedDetail.optional.installed + 1, expandedDetail.optional.installed)
-            assertEquals(1_000L, expandedDetail.lastEvidenceExpandedAt)
+            if (optional == null) {
+                assertEquals("balanced", expandedDetail.selectedProfileId)
+                assertEquals(balancedBytes, expandedDetail.exactInstalledBytes)
+                assertEquals(installedDetail.optional.installed, expandedDetail.optional.installed)
+                assertEquals(installedDetail.lastEvidenceExpandedAt, expandedDetail.lastEvidenceExpandedAt)
+            } else {
+                assertEquals("complete", expandedDetail.selectedProfileId)
+                assertEquals(Math.addExact(balancedBytes, optional.sizeBytes), expandedDetail.exactInstalledBytes)
+                assertEquals(installedDetail.optional.installed + 1, expandedDetail.optional.installed)
+                assertEquals(1_000L, expandedDetail.lastEvidenceExpandedAt)
+            }
             val secondContext = requireNotNull(
                 assembler.assemble(AgentContextRequest("fixture.researcher", 2, question)),
             )

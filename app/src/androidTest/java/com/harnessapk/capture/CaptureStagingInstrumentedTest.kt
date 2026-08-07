@@ -7,6 +7,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
+import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.UUID
 import org.junit.Assert.assertEquals
@@ -140,5 +142,40 @@ class CaptureStagingInstrumentedTest {
 
         assertTrue(failure?.message.orEmpty().contains("50 MiB"))
         assertTrue(context.cacheDir.resolve("capture-staging/$draftId").exists().not())
+    }
+
+    @Test
+    fun storageFailureCleansTheEntirePartiallyStagedBatch() {
+        val draftId = UUID.randomUUID().toString()
+        val store = CaptureStagingStore(
+            context = context,
+            inputOpener = { "shared bytes".byteInputStream() },
+            outputOpener = { file ->
+                if (file.name.startsWith(".2-")) {
+                    object : OutputStream() {
+                        override fun write(value: Int) = throw IOException("ENOSPC")
+                        override fun write(buffer: ByteArray, offset: Int, length: Int) = throw IOException("ENOSPC")
+                    }
+                } else {
+                    file.outputStream()
+                }
+            },
+        )
+
+        val failure = runCatching {
+            store.stage(
+                draftId,
+                IncomingShareRequest(
+                    text = "",
+                    items = listOf(
+                        IncomingShareItem("file:///first", "first.pdf", "application/pdf", 12L),
+                        IncomingShareItem("file:///second", "second.pdf", "application/pdf", 12L),
+                    ),
+                ),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is IOException)
+        assertFalse(context.cacheDir.resolve("capture-staging/$draftId").exists())
     }
 }

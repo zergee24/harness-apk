@@ -4,11 +4,13 @@ import android.content.Context
 import android.net.Uri
 import java.io.File
 import java.io.InputStream
+import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.UUID
 
 class CaptureStagingStore(
     context: Context,
+    private val outputOpener: (File) -> OutputStream = File::outputStream,
     private val inputOpener: (Uri) -> InputStream? = { uri ->
         context.applicationContext.contentResolver.openInputStream(uri)
     },
@@ -42,7 +44,7 @@ class CaptureStagingStore(
                 var itemBytes = 0L
                 inputOpener(Uri.parse(item.sourceUri)).use { input ->
                     requireNotNull(input) { "无法读取分享文件：${item.displayName}" }
-                    temporary.outputStream().buffered().use { output ->
+                    outputOpener(temporary).buffered().use { output ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                         while (true) {
                             val count = input.read(buffer)
