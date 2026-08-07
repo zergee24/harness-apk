@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Delete
@@ -46,7 +45,6 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.Conversation
 import com.harnessapk.agent.Agent
 import com.harnessapk.common.AppContainer
-import com.harnessapk.ui.components.ActionableEmptyState
 import com.harnessapk.ui.components.ComfortListRow
 import com.harnessapk.ui.theme.HarnessSpacing
 import java.text.SimpleDateFormat
@@ -129,22 +127,18 @@ fun ConversationListScreen(
                 onCreateConversation = onCreateConversation,
             )
         }
-        if (visibleConversations.isEmpty()) {
-            item { EmptyConversationState(onCreateConversation) }
-        } else {
-            conversationItems(
-                conversations = visibleConversations,
-                agentsById = agentsById,
-                onOpenChat = onOpenChat,
-                onEdit = {
-                    conversationToEdit = it
-                    titleDraft = it.title
-                },
-                onDelete = {
-                    scope.launch { container.chatRepository.archiveConversation(it.id) }
-                },
-            )
-        }
+        conversationItems(
+            conversations = visibleConversations,
+            agentsById = agentsById,
+            onOpenChat = onOpenChat,
+            onEdit = {
+                conversationToEdit = it
+                titleDraft = it.title
+            },
+            onDelete = {
+                scope.launch { container.chatRepository.archiveConversation(it.id) }
+            },
+        )
     }
 }
 
@@ -249,17 +243,6 @@ private fun QuickEntryRow(
             Icon(Icons.Filled.Add, contentDescription = "新建对话")
         }
     }
-}
-
-@Composable
-private fun EmptyConversationState(onCreateConversation: () -> Unit) {
-    ActionableEmptyState(
-        title = "还没有会话",
-        message = "新建会话后，内容会保存在本机，并在长会话中自动整理记忆摘要。",
-        actionLabel = "新建会话",
-        onAction = onCreateConversation,
-        icon = Icons.AutoMirrored.Outlined.Chat,
-    )
 }
 
 @Composable

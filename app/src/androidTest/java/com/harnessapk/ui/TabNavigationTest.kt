@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -31,7 +32,7 @@ class TabNavigationTest {
     }
 
     @Test
-    fun bottomNavShowsThreeTabsAndSettlesToLife() {
+    fun bottomNavShowsThreeTabsAndKeepsTheEmptyLifePanelQuiet() {
         composeRule.setContent {
             HarnessApkTheme {
                 HarnessApkApp()
@@ -40,7 +41,8 @@ class TabNavigationTest {
         composeRule.onNodeWithTag("nav-LIFE").assertExists()
         composeRule.onNodeWithTag("nav-WORK").assertExists()
         composeRule.onNodeWithTag("nav-ME").assertExists()
-        composeRule.onNodeWithText("还没有会话").assertExists()
+        composeRule.onNodeWithContentDescription("新建对话").assertExists()
+        composeRule.onNodeWithText("还没有会话").assertDoesNotExist()
     }
 
     @Test
