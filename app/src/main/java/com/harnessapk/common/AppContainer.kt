@@ -38,6 +38,7 @@ import com.harnessapk.chat.ManualContextCompressionUseCase
 import com.harnessapk.chat.NewConversationUseCase
 import com.harnessapk.chat.ConversationWikiDefaultsCopier
 import com.harnessapk.chat.ConversationWikiScopeReplacer
+import com.harnessapk.chat.ConversationDraftStore
 import com.harnessapk.chat.QueuedAttachmentStore
 import com.harnessapk.chat.SendMessageUseCase
 import com.harnessapk.chat.WikiSourcePartWriter
@@ -337,6 +338,7 @@ class AppContainer(
         wikiScopeSnapshotProvider = conversationWikiRepository::snapshotEnabled,
     )
     val chatSendRecoveryStore = ChatSendRecoveryStore()
+    val conversationDraftStore = ConversationDraftStore(appContext, json)
     val chatExecutionCoordinator = ChatExecutionCoordinator(
         executionRepository = chatExecutionRepository,
         sendMessageUseCase = sendMessageUseCase,

@@ -75,6 +75,7 @@ import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
 import com.harnessapk.ui.updater.startupUpdateAction
 import com.harnessapk.ui.voice.VoiceSettingsScreen
+import com.harnessapk.ui.voice.rememberSystemVoiceInput
 import com.harnessapk.ui.wiki.WikiLibraryScreen
 import com.harnessapk.ui.wiki.WikiBrowserScreen
 import com.harnessapk.ui.wiki.WikiCitationSourceScreen
@@ -490,6 +491,7 @@ fun HarnessApkApp(
                     },
                 ),
             ) { entry ->
+                val voiceInput = rememberSystemVoiceInput()
                 ChatScreen(
                     container = container,
                     conversationId = entry.arguments?.getString("conversationId").orEmpty(),
@@ -521,6 +523,10 @@ fun HarnessApkApp(
                     onOpenWikiCitation = { citationId ->
                         navController.navigate(WikiRoutes.citation(citationId))
                     },
+                    voiceInputState = voiceInput.state,
+                    onStartVoiceInput = voiceInput.start,
+                    onStopVoiceInput = voiceInput.stop,
+                    onVoiceInputConsumed = voiceInput.consume,
                     contentPadding = padding,
                 )
             }

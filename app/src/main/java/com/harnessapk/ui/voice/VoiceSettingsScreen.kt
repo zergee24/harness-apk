@@ -36,7 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.harnessapk.common.AppContainer
 import com.harnessapk.voice.VoiceSettings
-import com.harnessapk.voice.requiresCloudConfiguration
+import com.harnessapk.voice.transcriptionLanguageOptions
 import kotlinx.coroutines.launch
 
 @Composable
@@ -53,10 +53,8 @@ fun VoiceSettingsScreen(
                 PackageManager.PERMISSION_GRANTED,
         )
     }
-    var microphoneTestText by remember { mutableStateOf<String?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         permissionGranted = granted
-        microphoneTestText = if (granted) "麦克风权限已开启，可以使用系统语音转写。" else "未获得麦克风权限，语音输入不可用。"
     }
 
     Column(
@@ -67,69 +65,22 @@ fun VoiceSettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Surface(shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp) {
-            ListItem(
-                headlineContent = { Text("启用语音输入") },
-                supportingContent = {
-                    Text(
-                        if (settings.requiresCloudConfiguration()) {
-                            "当前语音 Provider 需要云端配置。"
-                        } else {
-                            "无需配置 voice 模型，默认使用 Android 系统语音识别，转写后先填入输入框。"
-                        },
-                    )
-                },
-                trailingContent = {
-                    Switch(
-                        checked = settings.speechInputEnabled,
-                        onCheckedChange = {
-                            scope.launch { container.settingsStore.setSpeechInputEnabled(it) }
-                        },
-                    )
-                },
-            )
-        }
-        SettingsSection(title = "转写设置") {
+        SettingsSection(title = "转写语言") {
             Text(
-                text = "系统兜底：无 API Key、无账单、无 voice 模型选择；云端 STT 后续作为可选增强。",
+                text = "音频由设备当前的系统语音服务处理，系统服务可能联网；转写结果只填入输入框，不会自动发送。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text("默认 Provider：Android 系统语音识别", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("zh-CN", "en-US").forEach { language ->
+                transcriptionLanguageOptions().forEach { language ->
                     FilterChip(
-                        selected = settings.defaultTranscriptionLanguage == language,
+                        selected = settings.defaultTranscriptionLanguage == language.value,
                         onClick = {
-                            scope.launch { container.settingsStore.setDefaultTranscriptionLanguage(language) }
+                            scope.launch { container.settingsStore.setDefaultTranscriptionLanguage(language.value) }
                         },
-                        label = { Text(language) },
+                        label = { Text(language.label) },
                     )
                 }
             }
-            SettingSwitchRow(
-                title = "自动标点",
-                description = "系统 Provider 支持时会尽量补齐标点。",
-                checked = settings.autoPunctuation,
-                onCheckedChange = { scope.launch { container.settingsStore.setAutoPunctuation(it) } },
-            )
-            SettingSwitchRow(
-                title = "转写后填入输入框",
-                description = "保留用户确认和编辑步骤。",
-                checked = settings.autoFillInput,
-                onCheckedChange = { scope.launch { container.settingsStore.setAutoFillTranscription(it) } },
-            )
-            SettingSwitchRow(
-                title = "转写后自动发送",
-                description = "默认关闭，给小孩和老人留确认机会。",
-                checked = settings.autoSendAfterTranscription,
-                onCheckedChange = { scope.launch { container.settingsStore.setAutoSendAfterTranscription(it) } },
-            )
-            SettingSwitchRow(
-                title = "保存原始音频",
-                description = "第一版默认不保存录音。",
-                checked = settings.saveOriginalAudio,
-                onCheckedChange = { scope.launch { container.settingsStore.setSaveOriginalAudio(it) } },
-            )
         }
         SettingsSection(title = "麦克风权限") {
             Text(
@@ -144,20 +95,6 @@ fun VoiceSettingsScreen(
             ) {
                 Text(if (permissionGranted) "重新检查权限" else "授权麦克风")
             }
-            TextButton(
-                onClick = {
-                    microphoneTestText = if (permissionGranted) {
-                        "麦克风权限正常。请回到会话页点击麦克风按钮开始转写。"
-                    } else {
-                        "请先授权麦克风。"
-                    }
-                },
-            ) {
-                Text("麦克风测试")
-            }
-            microphoneTestText?.let {
-                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
         }
         SettingsSection(title = "朗读输出") {
             SettingSwitchRow(
@@ -166,7 +103,6 @@ fun VoiceSettingsScreen(
                 checked = settings.ttsEnabled,
                 onCheckedChange = { scope.launch { container.settingsStore.setTtsEnabled(it) } },
             )
-            Text("默认 Provider：Android 系统 TTS，无需配置 voice 模型。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("语速：${"%.1f".format(settings.ttsSpeechRate)}x")
             Slider(
                 value = settings.ttsSpeechRate,
@@ -175,10 +111,6 @@ fun VoiceSettingsScreen(
                 },
                 valueRange = 0.6f..1.4f,
                 steps = 7,
-            )
-            Text(
-                text = "当前版本不接入云端语音服务；如果后续启用云端 STT/TTS，会在这里明确提示音频或文本会发送给对应 Provider。",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

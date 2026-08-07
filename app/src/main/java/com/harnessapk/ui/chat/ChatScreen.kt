@@ -134,6 +134,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.Conversation
+import com.harnessapk.chat.ConversationDraft
 import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.ChatExecutionPhase
 import com.harnessapk.chat.ChatExecutionRequestContext
@@ -207,6 +208,8 @@ import com.harnessapk.websearch.WebSearchSettings
 import com.harnessapk.websearch.nativeWebSearchModeForRequest
 import com.harnessapk.websearch.shouldUseExternalWebSearch
 import com.harnessapk.voice.VoiceSettings
+import com.harnessapk.voice.VoiceInputPhase
+import com.harnessapk.voice.VoiceInputState
 import com.harnessapk.wiki.WikiRef
 import com.harnessapk.wiki.WikiVersionState
 import com.harnessapk.wiki.MessageWikiCitation
@@ -268,6 +271,10 @@ fun ChatScreen(
     initialSourceMessageId: String? = null,
     onOpenConversationMessage: (conversationId: String, messageId: String) -> Unit = { _, _ -> },
     onOpenWikiCitation: (String) -> Unit = {},
+    voiceInputState: VoiceInputState = VoiceInputState(),
+    onStartVoiceInput: (currentDraft: String, language: String) -> Unit = { _, _ -> },
+    onStopVoiceInput: () -> Unit = {},
+    onVoiceInputConsumed: () -> Unit = {},
     contentPadding: PaddingValues,
 ) {
     val persistedMessages by remember(conversationId) {
@@ -311,8 +318,9 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val inputFocusRequester = remember { FocusRequester() }
-    var text by remember { mutableStateOf("") }
+    var text by rememberSaveable(conversationId) { mutableStateOf("") }
     var selectedImages by remember { mutableStateOf<List<PendingImageAttachment>>(emptyList()) }
+    var persistentDraftLoaded by remember(conversationId) { mutableStateOf(false) }
     var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
     var showModelPicker by remember { mutableStateOf(false) }
@@ -408,6 +416,25 @@ fun ChatScreen(
     val sendRequestState by container.chatSendRecoveryStore
         .observe(conversationId)
         .collectAsState(initial = container.chatSendRecoveryStore.current(conversationId))
+    LaunchedEffect(conversationId) {
+        val draft = withContext(container.dispatchers.io) {
+            container.conversationDraftStore.load(conversationId)
+        }
+        if (text.isEmpty() && selectedImages.isEmpty()) {
+            text = draft.text
+            selectedImages = draft.attachments
+        }
+        persistentDraftLoaded = true
+    }
+    LaunchedEffect(conversationId, persistentDraftLoaded, text, selectedImages) {
+        if (!persistentDraftLoaded) return@LaunchedEffect
+        withContext(container.dispatchers.io) {
+            container.conversationDraftStore.save(
+                conversationId,
+                ConversationDraft(text = text, attachments = selectedImages),
+            )
+        }
+    }
     AgentMemoryConversationLeaveEffect(
         conversationId = conversationId,
         onConversationLeft = container.agentMemoryCoordinator::onConversationLeft,
@@ -502,6 +529,24 @@ fun ChatScreen(
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
         Unit
+    }
+
+    LaunchedEffect(voiceInputState) {
+        val hasVoiceUpdate = voiceInputState.phase != VoiceInputPhase.IDLE ||
+            voiceInputState.committedText != null
+        if (hasVoiceUpdate && voiceInputState.displayText != text) {
+            text = voiceInputState.displayText
+        }
+        voiceInputState.errorMessage?.let { message ->
+            errorText = if (voiceInputState.incomplete) "$message，已保留当前文字" else message
+        }
+        if (
+            voiceInputState.committedText != null ||
+            voiceInputState.phase == VoiceInputPhase.CANCELLED ||
+            voiceInputState.phase == VoiceInputPhase.ERROR
+        ) {
+            onVoiceInputConsumed()
+        }
     }
 
     DisposableEffect(context) {
@@ -2111,10 +2156,12 @@ fun ChatScreen(
                         webSearchEnabled = enabled
                     }
                 },
-                showVoiceInput = shouldShowVoiceInputButton(voiceSettings),
                 onStartVoiceTranscription = {
-                    errorText = "语音能力已开启，但当前版本暂未接入可用的语音输入方案"
+                    errorText = null
+                    onStartVoiceInput(text, voiceSettings.defaultTranscriptionLanguage)
                 },
+                isVoiceInputActive = voiceInputState.active,
+                onStopVoiceTranscription = onStopVoiceInput,
                 providers = providers,
                 selectedProviderId = selectedProviderId,
                 selectedModel = selectedModel,
@@ -2431,8 +2478,6 @@ internal fun shouldAutoFocusChatInput(
 
 internal fun shouldShowWebSearchButton(settings: WebSearchSettings): Boolean = settings.enabled
 
-internal fun shouldShowVoiceInputButton(settings: VoiceSettings): Boolean = settings.speechInputEnabled
-
 internal fun handleStopIntent(
     cancelActiveSend: () -> Unit,
     cancelVisibleAssistant: () -> Unit,
@@ -2445,7 +2490,7 @@ internal fun sendButtonContentDescription(isBusy: Boolean): String =
     if (isBusy) "暂停生成" else "发送"
 
 internal enum class ChatInputTrailingAction {
-    ATTACHMENT,
+    VOICE,
     SEND,
     STOP,
 }
@@ -2459,11 +2504,13 @@ internal fun chatInputTrailingAction(
     text: String,
     hasSelectedImage: Boolean,
     isBusy: Boolean,
+    isVoiceActive: Boolean = false,
 ): ChatInputTrailingAction =
     when {
-        text.isNotBlank() || hasSelectedImage -> ChatInputTrailingAction.SEND
+        isVoiceActive -> ChatInputTrailingAction.STOP
         isBusy -> ChatInputTrailingAction.STOP
-        else -> ChatInputTrailingAction.ATTACHMENT
+        text.isNotBlank() || hasSelectedImage -> ChatInputTrailingAction.SEND
+        else -> ChatInputTrailingAction.VOICE
     }
 
 internal fun executionStatusLabel(status: ChatExecutionStatus): String? = when (status) {
@@ -4224,8 +4271,9 @@ private fun ChatInputBar(
     showWebSearch: Boolean,
     webSearchEnabled: Boolean,
     onToggleWebSearch: (Boolean) -> Unit,
-    showVoiceInput: Boolean,
     onStartVoiceTranscription: () -> Unit,
+    isVoiceInputActive: Boolean,
+    onStopVoiceTranscription: () -> Unit,
     providers: List<ProviderProfile>,
     selectedProviderId: String?,
     selectedModel: String,
@@ -4252,6 +4300,7 @@ private fun ChatInputBar(
         text = text,
         hasSelectedImage = selectedImages.isNotEmpty(),
         isBusy = isBusy,
+        isVoiceActive = isVoiceInputActive,
     )
 
     Surface(
@@ -4318,18 +4367,6 @@ private fun ChatInputBar(
                         label = { Text("联网") },
                     )
                 }
-                if (showVoiceInput) {
-                    IconButton(
-                        modifier = Modifier.size(48.dp),
-                        onClick = onStartVoiceTranscription,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Mic,
-                            contentDescription = "语音输入",
-                            modifier = Modifier.size(22.dp),
-                        )
-                    }
-                }
                 ModelStatusChip(
                     providers = providers,
                     selectedProviderId = selectedProviderId,
@@ -4380,6 +4417,10 @@ private fun ChatInputBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
+                ChatImageSourceEntryMenu(
+                    onTakePhoto = onTakePhoto,
+                    onPickFromAlbum = onPickFromAlbum,
+                )
                 OutlinedTextField(
                     modifier = Modifier
                         .weight(1f)
@@ -4414,32 +4455,52 @@ private fun ChatInputBar(
                         },
                     ),
                 )
-                when (trailingAction) {
-                    ChatInputTrailingAction.ATTACHMENT -> ChatImageSourceEntryMenu(
-                        onTakePhoto = onTakePhoto,
-                        onPickFromAlbum = onPickFromAlbum,
-                    )
-                    ChatInputTrailingAction.SEND -> FilledIconButton(
-                        modifier = Modifier.size(56.dp),
-                        enabled = canSend,
-                        onClick = onSend,
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = sendButtonContentDescription(isBusy = false),
-                        )
-                    }
-                    ChatInputTrailingAction.STOP -> FilledIconButton(
-                        modifier = Modifier.size(56.dp),
-                        onClick = onStop,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Stop,
-                            contentDescription = sendButtonContentDescription(isBusy = true),
-                        )
-                    }
-                }
+                ChatInputPrimaryAction(
+                    action = trailingAction,
+                    canSend = canSend,
+                    voiceActive = isVoiceInputActive,
+                    onVoice = onStartVoiceTranscription,
+                    onSend = onSend,
+                    onStopVoice = onStopVoiceTranscription,
+                    onStopGeneration = onStop,
+                )
             }
+        }
+    }
+}
+
+@Composable
+internal fun ChatInputPrimaryAction(
+    action: ChatInputTrailingAction,
+    canSend: Boolean,
+    voiceActive: Boolean,
+    onVoice: () -> Unit,
+    onSend: () -> Unit,
+    onStopVoice: () -> Unit,
+    onStopGeneration: () -> Unit,
+) {
+    FilledIconButton(
+        modifier = Modifier.size(48.dp),
+        enabled = action != ChatInputTrailingAction.SEND || canSend,
+        onClick = when (action) {
+            ChatInputTrailingAction.VOICE -> onVoice
+            ChatInputTrailingAction.SEND -> onSend
+            ChatInputTrailingAction.STOP -> if (voiceActive) onStopVoice else onStopGeneration
+        },
+    ) {
+        when (action) {
+            ChatInputTrailingAction.VOICE -> Icon(
+                imageVector = Icons.Outlined.Mic,
+                contentDescription = "开始语音输入",
+            )
+            ChatInputTrailingAction.SEND -> Icon(
+                imageVector = Icons.AutoMirrored.Filled.Send,
+                contentDescription = sendButtonContentDescription(isBusy = false),
+            )
+            ChatInputTrailingAction.STOP -> Icon(
+                imageVector = Icons.Filled.Stop,
+                contentDescription = if (voiceActive) "停止语音输入" else sendButtonContentDescription(isBusy = true),
+            )
         }
     }
 }

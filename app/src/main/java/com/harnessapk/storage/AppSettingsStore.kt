@@ -60,7 +60,7 @@ class AppSettingsStore(private val context: Context) {
     val voiceSettings: Flow<VoiceSettings> = context.appSettingsDataStore.data.map {
         VoiceSettings(
             speechInputEnabled = it[VOICE_SPEECH_INPUT_ENABLED] ?: false,
-            defaultTranscriptionLanguage = it[VOICE_TRANSCRIPTION_LANGUAGE] ?: "zh-CN",
+            defaultTranscriptionLanguage = it[VOICE_TRANSCRIPTION_LANGUAGE] ?: "system",
             autoPunctuation = it[VOICE_AUTO_PUNCTUATION] ?: true,
             autoFillInput = it[VOICE_AUTO_FILL_INPUT] ?: true,
             autoSendAfterTranscription = it[VOICE_AUTO_SEND_AFTER_TRANSCRIPTION] ?: false,
@@ -135,7 +135,7 @@ class AppSettingsStore(private val context: Context) {
     }
 
     suspend fun setDefaultTranscriptionLanguage(value: String) {
-        context.appSettingsDataStore.edit { it[VOICE_TRANSCRIPTION_LANGUAGE] = value.trim().ifBlank { "zh-CN" } }
+        context.appSettingsDataStore.edit { it[VOICE_TRANSCRIPTION_LANGUAGE] = value.trim().ifBlank { "system" } }
     }
 
     suspend fun setAutoPunctuation(value: Boolean) {

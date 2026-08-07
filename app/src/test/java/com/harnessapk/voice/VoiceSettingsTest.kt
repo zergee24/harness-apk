@@ -12,7 +12,7 @@ class VoiceSettingsTest {
 
         assertFalse(settings.speechInputEnabled)
         assertEquals(VoiceProviderType.ANDROID_SYSTEM, settings.defaultSpeechProvider)
-        assertEquals("zh-CN", settings.defaultTranscriptionLanguage)
+        assertEquals("system", settings.defaultTranscriptionLanguage)
         assertTrue(settings.autoPunctuation)
         assertTrue(settings.autoFillInput)
         assertFalse(settings.autoSendAfterTranscription)
@@ -40,5 +40,17 @@ class VoiceSettingsTest {
         assertEquals("帮我总结这段话", mergeTranscriptIntoInput("", "帮我总结这段话"))
         assertEquals("已有草稿\n补充语音", mergeTranscriptIntoInput("已有草稿", "补充语音"))
         assertEquals("已有草稿", mergeTranscriptIntoInput("已有草稿", "   "))
+    }
+
+    @Test
+    fun transcriptionLanguageOptionsStayLimitedToSystemChineseAndEnglish() {
+        assertEquals(
+            listOf(
+                TranscriptionLanguageOption("system", "跟随系统"),
+                TranscriptionLanguageOption("zh-CN", "中文"),
+                TranscriptionLanguageOption("en-US", "English"),
+            ),
+            transcriptionLanguageOptions(),
+        )
     }
 }

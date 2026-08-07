@@ -8,7 +8,7 @@ enum class VoiceProviderType {
 data class VoiceSettings(
     val speechInputEnabled: Boolean = false,
     val defaultSpeechProvider: VoiceProviderType = VoiceProviderType.ANDROID_SYSTEM,
-    val defaultTranscriptionLanguage: String = "zh-CN",
+    val defaultTranscriptionLanguage: String = "system",
     val autoPunctuation: Boolean = true,
     val autoFillInput: Boolean = true,
     val autoSendAfterTranscription: Boolean = false,
@@ -27,3 +27,14 @@ fun mergeTranscriptIntoInput(currentText: String, transcript: String): String {
     val cleanCurrent = currentText.trimEnd()
     return if (cleanCurrent.isBlank()) cleanTranscript else "$cleanCurrent\n$cleanTranscript"
 }
+
+data class TranscriptionLanguageOption(
+    val value: String,
+    val label: String,
+)
+
+fun transcriptionLanguageOptions(): List<TranscriptionLanguageOption> = listOf(
+    TranscriptionLanguageOption("system", "跟随系统"),
+    TranscriptionLanguageOption("zh-CN", "中文"),
+    TranscriptionLanguageOption("en-US", "English"),
+)

@@ -533,18 +533,19 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun chatInputKeepsAttachmentEntryAvailableWhileComposing() {
+    fun chatInputUsesOneTrailingPrimaryAction() {
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = false))
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "   ", hasSelectedImage = false))
 
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
         assertFalse(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = true))
 
-        assertEquals(ChatInputTrailingAction.ATTACHMENT, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false))
-        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "你好", hasSelectedImage = false, isBusy = false))
-        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = true, isBusy = false))
-        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true))
-        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "下一轮", hasSelectedImage = false, isBusy = true))
+        assertEquals(ChatInputTrailingAction.VOICE, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false, isVoiceActive = false))
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "你好", hasSelectedImage = false, isBusy = false, isVoiceActive = false))
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = true, isBusy = false, isVoiceActive = false))
+        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false, isVoiceActive = true))
+        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true, isVoiceActive = false))
+        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "下一轮", hasSelectedImage = false, isBusy = true, isVoiceActive = false))
 
         assertFalse(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.QUEUED))))
         assertFalse(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.SUCCEEDED))))
@@ -728,22 +729,21 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun chatInputDoesNotExposeSystemVoiceButton() {
+    fun chatInputExposesSystemVoiceAsTheEmptyPrimaryAction() {
         val source = java.io.File("src/main/java/com/harnessapk/ui/chat/ChatScreen.kt").readText()
 
-        assertFalse(source.contains("onVoiceInput"))
+        assertTrue(source.contains("contentDescription = \"开始语音输入\""))
+        assertFalse(source.contains("contentDescription = \"语音输入\""))
     }
 
     @Test
     fun chatCapabilityButtonsAreHiddenWhenGlobalCapabilitiesAreDisabled() {
         assertFalse(shouldShowWebSearchButton(WebSearchSettings(enabled = false)))
-        assertFalse(shouldShowVoiceInputButton(VoiceSettings(speechInputEnabled = false)))
     }
 
     @Test
     fun chatCapabilityButtonsAreVisibleWhenGlobalCapabilitiesAreEnabled() {
         assertTrue(shouldShowWebSearchButton(WebSearchSettings(enabled = true)))
-        assertTrue(shouldShowVoiceInputButton(VoiceSettings(speechInputEnabled = true)))
     }
 
     @Test
