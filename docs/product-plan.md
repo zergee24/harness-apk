@@ -129,6 +129,8 @@ Harness 不再以“比通用 AI 客户端多几个功能”为目标，也不�
 
 详细规格：`docs/superpowers/specs/2026-08-07-m1-zero-friction-capture-design.md`
 
+实施与进度：`docs/superpowers/plans/2026-08-07-m1-zero-friction-capture-progress.md`
+
 #### M1.1 系统语音输入闭环
 
 - 接通 Android `SpeechRecognizer` 或系统语音识别 Activity，默认中文，可在设置中切换语言。

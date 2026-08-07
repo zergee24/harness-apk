@@ -4,9 +4,11 @@
 
 实施周期：2026-08-08 至 2026-09-07
 
-状态：可进入实施拆解
+状态：实施基线已锁定，代码待开发
 
 关联路线图：`docs/product-plan.md` v5
+
+实施与进度：`docs/superpowers/plans/2026-08-07-m1-zero-friction-capture-progress.md`
 
 ## 1. 目标
 
