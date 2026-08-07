@@ -70,7 +70,7 @@ Harness 不再以“比通用 AI 客户端多几个功能”为目标，也不�
 
 项目与 Mac 工作区只建立**弱绑定**：项目不复制或拥有 Mac 工作区，解绑不删除任何一端文件。三个月内不做隐藏双向同步。
 
-`.hagent` 的关系记忆只保存跨项目仍然成立的称谓、表达偏好和关系变化；项目决策、进度、文件与任务事实只能进入对应项目上下文。两类记忆检索和写入分开，避免人物关系把不同项目串在一起。
+与 Agent 身份关联的关系记忆按稳定 `agentId` 保存在本机 Room，只保存跨项目仍然成立的称谓、表达偏好和关系变化，不写入 `.hagent` 包。项目决策、进度、文件与任务事实只能进入对应项目上下文。两类记忆检索和写入分开，避免人物关系把不同项目串在一起。
 
 ## 4. 当前基线
 
@@ -127,6 +127,8 @@ Harness 不再以“比通用 AI 客户端多几个功能”为目标，也不�
 
 目标：减少“打开 App、找入口、重复解释”的时间，先把移动端输入做到真正可用。
 
+详细规格：`docs/superpowers/specs/2026-08-07-m1-zero-friction-capture-design.md`
+
 #### M1.1 系统语音输入闭环
 
 - 接通 Android `SpeechRecognizer` 或系统语音识别 Activity，默认中文，可在设置中切换语言。
@@ -138,6 +140,7 @@ Harness 不再以“比通用 AI 客户端多几个功能”为目标，也不�
 
 - 支持从浏览器、相册、文件管理器分享文本、URL、图片和普通文件到 Harness。
 - 文本、URL、图片进入“发送草稿”；普通文件只能导入目标项目，不直接塞入模型上下文。
+- 图片和文件必须先复制到应用私有暂存并计算内容哈希，不能只持久化可能随进程失效的外部 URI。
 - 只出现一个轻量目的地面板：最近会话 / 最近项目 / 新会话；默认预选最近合理目标，但发送或导入仍需一次确认。
 - 记住上次目的地，不创建“收件箱”顶层页面。
 
@@ -167,6 +170,8 @@ Harness 不再以“比通用 AI 客户端多几个功能”为目标，也不�
 
 目标：把现有远程控制从“能操作 Codex”升级为“能可靠监督一个长期任务”。
 
+详细规格：`docs/superpowers/specs/2026-08-07-m2-cross-device-run-design.md`
+
 #### M2.1 项目与 Mac 工作区弱绑定
 
 - 新增 `ProjectRemoteBinding(projectId, hostId, cwd, repositoryFingerprint)`。
@@ -177,7 +182,8 @@ Harness 不再以“比通用 AI 客户端多几个功能”为目标，也不�
 #### M2.2 可持久化远程任务快照
 
 - 本地保存 Thread / Turn、项目、目标、状态、最后事件序号、审批和完成摘要。
-- Bridge 与 App 使用幂等请求 ID 和事件序号；断网或进程被杀后可以从最后确认位置恢复。
+- Bridge 与 App 使用持久化幂等请求 ID；Bridge 保存可重放的 Logical Event Journal，重连时以新 Wire 包重放，避免当前 5 分钟传输 TTL 导致长任务事件丢失。
+- Android 以逻辑事件序号恢复；出现 Journal Gap 时必须通过 `thread/read`、未决审批账本和 Run Snapshot 做权威对账，不能只依赖最后事件序号。
 - 不强行合并本地聊天执行器和 Codex app-server，只建立统一的 Activity 读模型，控制重构范围。
 
 #### M2.3 统一活动与审批入口
@@ -213,11 +219,14 @@ Harness 不再以“比通用 AI 客户端多几个功能”为目标，也不�
 
 目标：闭合“会话 / Codex 任务 -> 项目 Markdown -> Git”，减少下次重新解释项目背景。
 
+详细规格：`docs/superpowers/specs/2026-08-07-m3-project-memory-closure-design.md`
+
 #### M3.1 项目级历史检索
 
 - 在项目会话发送前，按需检索该项目的 `context.md`、Markdown 文件和历史项目会话。
 - 首期使用本地 FTS、标题、路径和时间排序，不在手机运行 embedding 或 GraphRAG。
-- 注入上下文必须带来源类型和稳定定位；回答可回跳到消息或项目文件。
+- 注入上下文必须带来源类型、内容 SHA-256、可选 Git Blob 和稳定定位；回答可回跳到消息或项目文件。
+- 每轮实际使用的项目片段保存为不可变 Evidence Snapshot。当前文件变化或删除时，旧引用默认展示当时片段并提示版本变化，不能静默指向新内容。
 - 检索范围严格限制在当前项目，生活会话和其他项目不参与。
 - Agent 关系记忆可以影响表达方式，但不能作为项目事实来源；涉及项目事实时必须回到项目 Markdown、项目会话或任务证据。
 
@@ -364,6 +373,9 @@ Harness 不再以“比通用 AI 客户端多几个功能”为目标，也不�
 ## 12. 相关文档
 
 - `docs/agent-harness-top50-benchmark-2026-08-07.md`
+- `docs/superpowers/specs/2026-08-07-m1-zero-friction-capture-design.md`
+- `docs/superpowers/specs/2026-08-07-m2-cross-device-run-design.md`
+- `docs/superpowers/specs/2026-08-07-m3-project-memory-closure-design.md`
 - `docs/agent-landscape-2026-08-04.md`（历史趋势观察）
 - `docs/rikkahub-comparison-2026-07-10.md`（历史单产品对比）
 - `docs/superpowers/specs/2026-07-18-conversation-identity-persona-agent-v2-design.md`
