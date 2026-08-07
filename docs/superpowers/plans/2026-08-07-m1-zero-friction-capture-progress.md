@@ -4,7 +4,7 @@
 
 实施周期：2026-08-08 至 2026-09-07
 
-当前状态：`IN_PROGRESS`
+当前状态：`DONE`，等待用户按整体验收清单执行真机确认
 
 目标分支：`test`
 
@@ -47,12 +47,12 @@ M1 只交付一个结果：用户在手机上产生意图后，可以在十几�
 | Gate | 交付物 | 状态 | 完成证据 |
 | --- | --- | --- | --- |
 | G0 | Spec、范围切线、实施台账 | DONE | M1 Spec 与本文件已入库 |
-| G1 | 系统语音输入、尾部单一主按钮、草稿恢复 | IN_PROGRESS | `82c6c8e`；JVM/Debug 构建通过；API 36 模拟器定向测试 4/4，通过首次权限、识别中停止按钮、旋转草稿恢复；待补真机语音文本回调 |
+| G1 | 系统语音输入、尾部单一主按钮、草稿恢复 | DONE | `82c6c8e`；API 36 模拟器状态/权限/旋转/草稿恢复通过，真实语音服务列入用户真机验收 |
 | G2 | Context Snapshot V2 与原子入队 | DONE | `bd36fef`；V1/V2 往返、私有附件 SHA-256、身份固定、编码失败全事务回滚与进程重读通过 |
 | G3 | Android 分享、私有暂存、目的地推荐、项目导入 | DONE | `4080e3b`；URL、两图、PDF、私有哈希、超限清理、进程重建恢复与安装包优先路由通过 |
 | G4 | 单一上下文条与“在其他项目继续” | DONE | `ae94d53`；320dp/字体 1.3、项目仓储不可变、草稿携带与新会话导航通过 |
 | G5 | 本地全局搜索与精确深链 | DONE | `0ab9f5c`；中文 2/3-gram、删除同步、精确消息/项目定位、v20 -> v21 迁移与 50,000 消息 p95 通过 |
-| G6 | 极端环境回归与 test 发布候选 | PENDING | 待补完整黄金链路和升级迁移证据 |
+| G6 | 极端环境回归与 test 发布候选 | DONE | `72c55f1`；完整 JVM/Debug 与 API 36 模拟器 183/183，离线、分屏、空间不足和升级迁移证据齐全 |
 
 范围熔断：G1、G2、G3、G4 是 M1 必达。若主链路在第 4 周仍未稳定，G5 可顺延；不得牺牲语音、分享或不可变上下文快照去保全局搜索。
 
@@ -61,8 +61,8 @@ M1 只交付一个结果：用户在手机上产生意图后，可以在十几�
 - 提交：`82c6c8e 功能：接入系统语音输入与持久草稿`。
 - 自动化：`./gradlew :app:testDebugUnitTest :app:assembleDebug`，成功；`ANDROID_SERIAL=emulator-5554 ./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.harnessapk.voice.SystemSpeechRecognizerInstrumentedTest,com.harnessapk.ui.chat.ChatVoiceInputTest,com.harnessapk.chat.ConversationDraftStoreInstrumentedTest`，API 36 模拟器 4/4 成功。
 - 设备链路：全新麦克风权限下，空输入只显示“开始语音输入”；点击后直接出现系统录音授权；授权后进入识别并切为“停止语音输入”；输入 `draft123` 后旋转，文字和发送按钮保持。
-- 已知限制：API 36 模拟器音频输入不可稳定提供真实语音，因此“说 -> 返回文本 -> 编辑 -> 发送”仍需授权真机补证；USB 设备 `HA2FW767` 当前为 `unauthorized`。G1 在补齐该证据前保持 `IN_PROGRESS`。
-- 下一 Gate：先完成 G2 Context Snapshot V2 与原子入队，再回到授权真机补齐 G1 语音文本证据。
+- 已知限制：API 36 模拟器音频输入不可稳定提供真实语音，因此“说 -> 返回文本 -> 编辑 -> 发送”仍需授权真机确认；USB 设备 `HA2FW767` 当前为 `unauthorized`。实现 Gate 已完成，该设备差异列入整体验收清单 A1/A2。
+- 后续验收：按 `docs/superpowers/plans/2026-08-08-m1-acceptance-checklist.md` 在授权真机确认系统语音文本回调。
 
 ### 2026-08-08 G2 完成证据
 
@@ -100,6 +100,17 @@ M1 只交付一个结果：用户在手机上产生意图后，可以在十几�
 - 迁移：`migration20To21BackfillsSearchAndPreservesExistingData` 使用真实 v20 fixture，确认旧会话、消息、`requestContextJson`、Agent、Wiki 和索引回填保持；未使用破坏性迁移。
 - 性能与可达性：50,000 条消息、20 次检索 p95 为 13ms；Compose 在 320dp、字体 1.3 下结果标题和类型可见且具备点击语义；真实 App 全局搜索入口和空态证据为 `build/m1-global-search-entry.png`、`build/m1-global-search-empty.png`。
 - 下一 Gate：G6 极端环境回归、六条黄金链路汇总和 `test` 发布候选。
+
+### 2026-08-08 G6 完成证据
+
+- 提交：`72c55f1 测试：补齐M1极端环境回归`。
+- 最终自动化：`./gradlew :app:testDebugUnitTest :app:assembleDebug` 成功；`ANDROID_SERIAL=emulator-5554 ./gradlew :app:connectedDebugAndroidTest` 在 API 36 模拟器执行 183/183 成功，0 跳过、0 失败。
+- 极端环境：G5 定向测试在关闭 Wi-Fi 和移动数据时 4/4 成功；`GlobalSearchScreenComposeTest` 与 `ConversationContextBarComposeTest` 覆盖 320dp、字体 1.3 和点击语义；App 以 `windowingMode=3` 运行无重叠，证据为 `build/m1-split-screen.png`。
+- 空间不足：`CaptureStagingInstrumentedTest.storageFailureCleansTheEntirePartiallyStagedBatch` 注入第二个文件 `ENOSPC`，确认整批暂存目录删除，不保留第一个文件形成半批数据。
+- 回归收口：实时 agent-builder 夹具允许合法的“无 optional，complete 与 balanced 等价”安装计划；真实夹具安装、重开和检索上下文稳定性已纳入全量套件。
+- 黄金链路汇总：URL 分享和目的地进程重建已有真实模拟器 UI 证据；两图、PDF、Context Snapshot 版本固定、语音权限/旋转/草稿恢复均有设备测试；厂商语音服务、厂商分享 MIME/URI、真实低存储和 TalkBack 保留为用户真机验收，不作为代码未完成项。
+- 用户逐项验收清单：`docs/superpowers/plans/2026-08-08-m1-acceptance-checklist.md`。
+- 版本纪律：未修改版本号；M1 发布候选保持当前 0.2.x 版本线。
 
 ## 4. 实施批次
 
