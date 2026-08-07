@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatRepositoryTest {
@@ -120,6 +121,23 @@ class ChatRepositoryTest {
 
         val conversation = repository.conversation(conversationId)!!
         assertEquals("project-1", conversation.projectId)
+    }
+
+    @Test
+    fun projectCanChangeBeforeFirstUserMessageButIsImmutableAfterwards() = runTest {
+        val repository = repository(FakeConversationDao(), TimeProvider { 36L })
+        val conversationId = repository.createConversation(projectId = "project-a")
+
+        repository.updateConversationProject(conversationId, "project-b")
+        assertEquals("project-b", repository.conversation(conversationId)?.projectId)
+
+        repository.insertUserMessage(conversationId, "开始讨论", emptyList())
+        val failure = runCatching {
+            repository.updateConversationProject(conversationId, "project-c")
+        }.exceptionOrNull()
+
+        assertTrue(failure?.message.orEmpty().contains("在其他项目继续"))
+        assertEquals("project-b", repository.conversation(conversationId)?.projectId)
     }
 
     @Test

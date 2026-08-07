@@ -136,8 +136,14 @@ class ChatRepository(
         val conversation = conversationDao.findById(id) ?: return
         val normalizedProjectId = projectId?.trim()?.ifBlank { null }
         if (conversation.projectId == normalizedProjectId) return
+        require(messageDao.countUserMessages(id) == 0) {
+            "已有消息的会话不能修改项目，请在其他项目继续"
+        }
         conversationDao.update(
-            conversation.copy(projectId = normalizedProjectId),
+            conversation.copy(
+                projectId = normalizedProjectId,
+                updatedAt = timeProvider.nowMillis(),
+            ),
         )
     }
 

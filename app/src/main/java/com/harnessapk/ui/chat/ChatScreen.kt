@@ -160,6 +160,7 @@ import com.harnessapk.chat.identityLockedForPendingSend
 import com.harnessapk.chat.projectContextSha256
 import com.harnessapk.chat.supportsReasoningEffort
 import com.harnessapk.agent.AgentVersionCoverage
+import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.agentmemory.AgentMemory
 import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
@@ -271,6 +272,7 @@ fun ChatScreen(
     onSearchRequestConsumed: () -> Unit = {},
     onOpenProjectFiles: (projectId: String, selectedPath: String?) -> Unit = { _, _ -> },
     onOpenProjectGit: (projectId: String) -> Unit = {},
+    onContinueInProject: (conversationId: String, projectId: String?) -> Unit = { _, _ -> },
     initialSourceMessageId: String? = null,
     onOpenConversationMessage: (conversationId: String, messageId: String) -> Unit = { _, _ -> },
     onOpenWikiCitation: (String) -> Unit = {},
@@ -352,6 +354,7 @@ fun ChatScreen(
     var fixedVersionCoverage by remember(conversationId) { mutableStateOf<AgentVersionCoverage?>(null) }
     var agentOpening by remember(conversationId) { mutableStateOf<String?>(null) }
     var showSessionConfig by remember { mutableStateOf(false) }
+    var showConversationContext by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
     var deliverables by remember { mutableStateOf<List<MarkdownDeliverable>>(emptyList()) }
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
@@ -683,7 +686,15 @@ fun ChatScreen(
 
     LaunchedEffect(conversationId, initialProjectId) {
         if (!initialProjectId.isNullOrBlank()) {
-            container.chatRepository.updateConversationProject(conversationId, initialProjectId)
+            val loadedConversation = container.chatRepository.conversation(conversationId)
+            val hasUserMessage = container.chatRepository.hasUserMessage(conversationId)
+            if (loadedConversation?.projectId == null && !hasUserMessage) {
+                container.chatRepository.updateConversationProject(conversationId, initialProjectId)
+                conversation = container.chatRepository.conversation(conversationId)
+                selectedProjectId = initialProjectId
+            } else {
+                selectedProjectId = loadedConversation?.projectId
+            }
         }
     }
 
@@ -1230,6 +1241,55 @@ fun ChatScreen(
                 sessionConfigStatus = it.toUserMessage()
             }
             isOptimizingPrompt = false
+        }
+    }
+
+    fun selectContextProject(targetProjectId: String?) {
+        val hasUserMessage = persistedUserMessage ||
+            firstMessagePending ||
+            messages.any { it.role == MessageRole.USER }
+        when (conversationProjectChange(selectedProjectId, targetProjectId, hasUserMessage)) {
+            ConversationProjectChange.KEEP_CURRENT -> Unit
+            ConversationProjectChange.UPDATE_CURRENT -> {
+                selectedProjectId = targetProjectId
+                sessionConfigStatus = null
+                scope.launch {
+                    runCatching {
+                        container.chatRepository.updateConversationProject(conversationId, targetProjectId)
+                        container.chatRepository.conversation(conversationId)
+                    }.onSuccess { refreshed ->
+                        conversation = refreshed
+                    }.onFailure { error ->
+                        sessionConfigStatus = error.toUserMessage()
+                    }
+                }
+            }
+            ConversationProjectChange.CONTINUE_IN_NEW -> {
+                val targetProject = projects.firstOrNull { it.id == targetProjectId }
+                scope.launch {
+                    runCatching {
+                        val identity = identityState.selectedAgentId?.let(InitialConversationIdentity::Agent)
+                            ?: InitialConversationIdentity.Assistant
+                        val newConversationId = container.newConversationUseCase.create(
+                            title = targetProject?.name?.let { "$it 会话" } ?: "新会话",
+                            projectId = targetProjectId,
+                            identity = identity,
+                            wikiScope = conversationWikiMounts.filter { it.enabled }.map { it.ref },
+                        )
+                        container.conversationDraftStore.save(
+                            newConversationId,
+                            ConversationDraft(text = text, attachments = selectedImages),
+                        )
+                        container.conversationDraftStore.clear(conversationId)
+                        newConversationId
+                    }.onSuccess { newConversationId ->
+                        showConversationContext = false
+                        onContinueInProject(newConversationId, targetProjectId)
+                    }.onFailure { error ->
+                        sessionConfigStatus = error.toUserMessage()
+                    }
+                }
+            }
         }
     }
 
@@ -1867,18 +1927,55 @@ fun ChatScreen(
         )
     }
 
+    if (showConversationContext) {
+        val contextSummary = ConversationContextSummary(
+            projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
+            identityName = identityState.selectedName,
+            enabledWikiCount = wikiScopeState.options.count { it.enabled && !it.unavailable },
+            model = selectedModel,
+            webSearchEnabled = webSearchEnabled,
+            contextPercent = contextWindowUsagePercent(contextStatus),
+        )
+        ConversationContextSheet(
+            summary = contextSummary,
+            projects = projects.map { ContextProjectOption(it.id, it.name) },
+            selectedProjectId = selectedProjectId,
+            projectLocked = persistedUserMessage || firstMessagePending || messages.any { it.role == MessageRole.USER },
+            identityState = identityState,
+            wikiLabel = wikiScopeState.toolbarLabel,
+            showWebSearch = shouldShowWebSearchButton(webSearchSettings) && !isAgentConversation,
+            webSearchEnabled = webSearchEnabled,
+            canCompressContext = contextWindowCanManualCompress(contextStatus),
+            isCompressingContext = isCompressingContext,
+            onSelectProject = ::selectContextProject,
+            onSelectIdentity = identityController::selectIdentity,
+            onOpenWiki = {
+                showConversationContext = false
+                showWikiScopePicker = true
+            },
+            onOpenModel = {
+                showConversationContext = false
+                showModelPicker = true
+            },
+            onToggleWebSearch = { enabled ->
+                if (enabled && !webSearchSettings.enabled) {
+                    errorText = "请先在设置 -> 搜索能力启用联网搜索"
+                } else {
+                    errorText = null
+                    webSearchEnabled = enabled
+                }
+            },
+            onCompressContext = ::compressContextNow,
+            onDismiss = { showConversationContext = false },
+        )
+    }
+
     if (showSessionConfig) {
         SessionConfigDialog(
-            projects = projects,
-            selectedProjectId = selectedProjectId,
             promptText = finalSessionPrompt.ifBlank { rawSessionPrompt },
             optimizedPrompt = optimizedSessionPrompt,
             status = sessionConfigStatus,
             isOptimizing = isOptimizingPrompt,
-            onSelectProject = {
-                selectedProjectId = it
-                sessionConfigStatus = null
-            },
             onPromptChange = {
                 rawSessionPrompt = it
                 finalSessionPrompt = it
@@ -2173,34 +2270,21 @@ fun ChatScreen(
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
                 onRemoveImage = ::removeSelectedImage,
-                showWebSearch = shouldShowWebSearchButton(webSearchSettings) && !isAgentConversation,
-                webSearchEnabled = webSearchEnabled,
-                onToggleWebSearch = { enabled ->
-                    if (enabled && !webSearchSettings.enabled) {
-                        errorText = "请先在设置 -> 搜索能力启用联网搜索"
-                    } else {
-                        errorText = null
-                        webSearchEnabled = enabled
-                    }
-                },
                 onStartVoiceTranscription = {
                     errorText = null
                     onStartVoiceInput(text, voiceSettings.defaultTranscriptionLanguage)
                 },
                 isVoiceInputActive = voiceInputState.active,
                 onStopVoiceTranscription = onStopVoiceInput,
-                providers = providers,
-                selectedProviderId = selectedProviderId,
-                selectedModel = selectedModel,
-                selectedReasoningEffort = selectedReasoningEffort,
-                onOpenModelPicker = { showModelPicker = true },
-                identityState = identityState,
-                onSelectIdentity = identityController::selectIdentity,
-                projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
-                onOpenSessionConfig = { showSessionConfig = true },
-                contextStatus = contextStatus,
-                isCompressingContext = isCompressingContext,
-                onCompressContext = ::compressContextNow,
+                contextSummary = ConversationContextSummary(
+                    projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
+                    identityName = identityState.selectedName,
+                    enabledWikiCount = wikiScopeState.options.count { it.enabled && !it.unavailable },
+                    model = selectedModel,
+                    webSearchEnabled = webSearchEnabled,
+                    contextPercent = contextWindowUsagePercent(contextStatus),
+                ),
+                onOpenContext = { showConversationContext = true },
                 inputFocusRequester = inputFocusRequester,
                 canSend = selectedProvider != null &&
                     selectedModel.isNotBlank() &&
@@ -2923,13 +3007,10 @@ private fun MarkdownDiffLineView(line: MarkdownDiffLine) {
 
 @Composable
 private fun SessionConfigDialog(
-    projects: List<WorkspaceProject>,
-    selectedProjectId: String?,
     promptText: String,
     optimizedPrompt: String,
     status: String?,
     isOptimizing: Boolean,
-    onSelectProject: (String?) -> Unit,
     onPromptChange: (String) -> Unit,
     onOptimizePrompt: () -> Unit,
     onUseOptimizedPrompt: () -> Unit,
@@ -2945,34 +3026,6 @@ private fun SessionConfigDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (projects.isEmpty()) {
-                    Text(
-                        text = "项目模块还未接入，可先作为临时会话使用。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                } else {
-                    Row(
-                        modifier = Modifier
-                            .horizontalScroll(rememberScrollState())
-                            .fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        FilterChip(
-                            selected = selectedProjectId == null,
-                            onClick = { onSelectProject(null) },
-                            label = { Text("临时") },
-                        )
-                        projects.forEach { project ->
-                            FilterChip(
-                                selected = project.id == selectedProjectId,
-                                onClick = { onSelectProject(project.id) },
-                                label = { Text(project.name) },
-                            )
-                        }
-                    }
-                }
-                HorizontalDivider()
                 OutlinedTextField(
                     modifier = Modifier.fillMaxWidth(),
                     value = promptText,
@@ -4359,24 +4412,11 @@ private fun ChatInputBar(
     onTakePhoto: () -> Unit,
     onPickFromAlbum: () -> Unit,
     onRemoveImage: (Uri) -> Unit,
-    showWebSearch: Boolean,
-    webSearchEnabled: Boolean,
-    onToggleWebSearch: (Boolean) -> Unit,
     onStartVoiceTranscription: () -> Unit,
     isVoiceInputActive: Boolean,
     onStopVoiceTranscription: () -> Unit,
-    providers: List<ProviderProfile>,
-    selectedProviderId: String?,
-    selectedModel: String,
-    selectedReasoningEffort: ReasoningEffort,
-    onOpenModelPicker: () -> Unit,
-    identityState: ConversationIdentityUiState,
-    onSelectIdentity: (String?) -> Unit,
-    projectName: String?,
-    onOpenSessionConfig: () -> Unit,
-    contextStatus: ContextWindowStatus,
-    isCompressingContext: Boolean,
-    onCompressContext: () -> Unit,
+    contextSummary: ConversationContextSummary,
+    onOpenContext: () -> Unit,
     inputFocusRequester: FocusRequester,
     canSend: Boolean,
     isBusy: Boolean,
@@ -4386,7 +4426,6 @@ private fun ChatInputBar(
     canSendFileChange: Boolean,
     onSendFileChange: () -> Unit,
 ) {
-    var showContextDetails by remember { mutableStateOf(false) }
     val trailingAction = chatInputTrailingAction(
         text = text,
         hasSelectedImage = selectedImages.isNotEmpty(),
@@ -4415,93 +4454,15 @@ private fun ChatInputBar(
                     onPickFromAlbum = onPickFromAlbum,
                 )
             }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                projectName?.let { name ->
-                    FilterChip(
-                        modifier = Modifier.heightIn(min = 48.dp),
-                        selected = true,
-                        onClick = onOpenSessionConfig,
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Outlined.Folder,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        },
-                        label = {
-                            Text(
-                                text = name,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        },
-                    )
-                }
-                if (showWebSearch) {
-                    FilterChip(
-                        modifier = Modifier.heightIn(min = 48.dp),
-                        selected = webSearchEnabled,
-                        onClick = { onToggleWebSearch(!webSearchEnabled) },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Outlined.Search,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        },
-                        label = { Text("联网") },
-                    )
-                }
-                ModelStatusChip(
-                    providers = providers,
-                    selectedProviderId = selectedProviderId,
-                    selectedModel = selectedModel,
-                    selectedReasoningEffort = selectedReasoningEffort,
-                    onOpenModelPicker = onOpenModelPicker,
-                )
-                if (identityState.mutable) {
-                    ConversationIdentityPicker(
-                        state = identityState,
-                        onSelectAgentId = onSelectIdentity,
-                        onShowDetails = {},
-                    )
-                }
-                ContextStatusChip(
-                    contextStatus = contextStatus,
-                    expanded = showContextDetails,
-                    isCompressingContext = isCompressingContext,
-                    onExpandedChange = { showContextDetails = it },
-                    onCompressContext = onCompressContext,
-                )
-                if (showFileChangeSuggestion) {
-                    FilterChip(
-                        modifier = Modifier.heightIn(min = 48.dp),
-                        selected = false,
-                        enabled = canSendFileChange,
-                        onClick = onSendFileChange,
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Outlined.Assignment,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        },
-                        label = { Text("文件变更") },
-                    )
-                }
-            }
+            ConversationContextBar(summary = contextSummary, onClick = onOpenContext)
             if (showFileChangeSuggestion) {
-                Text(
-                    text = "建议使用文件变更模式",
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.labelMedium,
-                )
+                TextButton(
+                    enabled = canSendFileChange,
+                    onClick = onSendFileChange,
+                ) {
+                    Icon(Icons.AutoMirrored.Outlined.Assignment, contentDescription = null)
+                    Text("使用文件变更")
+                }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),

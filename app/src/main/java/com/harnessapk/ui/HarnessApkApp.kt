@@ -564,6 +564,15 @@ fun HarnessApkApp(
                     onOpenProjectGit = { projectId ->
                         openWorkbench(projectId, ProjectWorkbenchDestination.GIT)
                     },
+                    onContinueInProject = { continuedConversationId, projectId ->
+                        navController.navigate(
+                            Routes.chat(
+                                conversationId = continuedConversationId,
+                                projectId = projectId,
+                                focusInput = true,
+                            ),
+                        )
+                    },
                     initialSourceMessageId = entry.arguments?.getString("sourceMessageId"),
                     onOpenConversationMessage = { sourceConversationId, sourceMessageId ->
                         navController.navigate(
