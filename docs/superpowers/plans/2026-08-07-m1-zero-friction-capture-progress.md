@@ -4,7 +4,7 @@
 
 实施周期：2026-08-08 至 2026-09-07
 
-当前状态：`READY_TO_BUILD`
+当前状态：`IN_PROGRESS`
 
 目标分支：`test`
 
@@ -47,7 +47,7 @@ M1 只交付一个结果：用户在手机上产生意图后，可以在十几�
 | Gate | 交付物 | 状态 | 完成证据 |
 | --- | --- | --- | --- |
 | G0 | Spec、范围切线、实施台账 | DONE | M1 Spec 与本文件已入库 |
-| G1 | 系统语音输入、尾部单一主按钮、草稿恢复 | PENDING | 待补 JVM、Compose、真机证据 |
+| G1 | 系统语音输入、尾部单一主按钮、草稿恢复 | IN_PROGRESS | `82c6c8e`；JVM/Debug 构建通过；API 36 模拟器定向测试 4/4，通过首次权限、识别中停止按钮、旋转草稿恢复；待补真机语音文本回调 |
 | G2 | Context Snapshot V2 与原子入队 | PENDING | 待补兼容、事务、进程恢复测试 |
 | G3 | Android 分享、私有暂存、目的地推荐、项目导入 | PENDING | 待补 Intent、文件、进程重建真机证据 |
 | G4 | 单一上下文条与“在其他项目继续” | PENDING | 待补 320dp、身份和项目不可变测试 |
@@ -55,6 +55,14 @@ M1 只交付一个结果：用户在手机上产生意图后，可以在十几�
 | G6 | 极端环境回归与 test 发布候选 | PENDING | 待补完整黄金链路和升级迁移证据 |
 
 范围熔断：G1、G2、G3、G4 是 M1 必达。若主链路在第 4 周仍未稳定，G5 可顺延；不得牺牲语音、分享或不可变上下文快照去保全局搜索。
+
+### 2026-08-08 G1 阶段证据
+
+- 提交：`82c6c8e 功能：接入系统语音输入与持久草稿`。
+- 自动化：`./gradlew :app:testDebugUnitTest :app:assembleDebug`，成功；`ANDROID_SERIAL=emulator-5554 ./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.harnessapk.voice.SystemSpeechRecognizerInstrumentedTest,com.harnessapk.ui.chat.ChatVoiceInputTest,com.harnessapk.chat.ConversationDraftStoreInstrumentedTest`，API 36 模拟器 4/4 成功。
+- 设备链路：全新麦克风权限下，空输入只显示“开始语音输入”；点击后直接出现系统录音授权；授权后进入识别并切为“停止语音输入”；输入 `draft123` 后旋转，文字和发送按钮保持。
+- 已知限制：API 36 模拟器音频输入不可稳定提供真实语音，因此“说 -> 返回文本 -> 编辑 -> 发送”仍需授权真机补证；USB 设备 `HA2FW767` 当前为 `unauthorized`。G1 在补齐该证据前保持 `IN_PROGRESS`。
+- 下一 Gate：先完成 G2 Context Snapshot V2 与原子入队，再回到授权真机补齐 G1 语音文本证据。
 
 ## 4. 实施批次
 
