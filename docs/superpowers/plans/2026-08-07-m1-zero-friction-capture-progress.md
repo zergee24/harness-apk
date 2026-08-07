@@ -51,7 +51,7 @@ M1 只交付一个结果：用户在手机上产生意图后，可以在十几�
 | G2 | Context Snapshot V2 与原子入队 | DONE | `bd36fef`；V1/V2 往返、私有附件 SHA-256、身份固定、编码失败全事务回滚与进程重读通过 |
 | G3 | Android 分享、私有暂存、目的地推荐、项目导入 | DONE | `4080e3b`；URL、两图、PDF、私有哈希、超限清理、进程重建恢复与安装包优先路由通过 |
 | G4 | 单一上下文条与“在其他项目继续” | DONE | `ae94d53`；320dp/字体 1.3、项目仓储不可变、草稿携带与新会话导航通过 |
-| G5 | 本地全局搜索与精确深链 | PENDING | 待补中文检索、删除同步、50,000 消息基准 |
+| G5 | 本地全局搜索与精确深链 | DONE | `0ab9f5c`；中文 2/3-gram、删除同步、精确消息/项目定位、v20 -> v21 迁移与 50,000 消息 p95 通过 |
 | G6 | 极端环境回归与 test 发布候选 | PENDING | 待补完整黄金链路和升级迁移证据 |
 
 范围熔断：G1、G2、G3、G4 是 M1 必达。若主链路在第 4 周仍未稳定，G5 可顺延；不得牺牲语音、分享或不可变上下文快照去保全局搜索。
@@ -90,6 +90,16 @@ M1 只交付一个结果：用户在手机上产生意图后，可以在十几�
 - 继续规则：已有消息时选择其他项目会创建新会话，沿用当前身份和已启用 Wiki 精确版本，携带未发送文字与图片草稿，不复制历史消息或 Markdown 弱关联。
 - 设备链路：API 36 模拟器在输入法打开时摘要条保持单行；面板完整可滚动。证据为 `build/m1-context-bar.png`、`build/m1-context-sheet.png`。
 - 下一 Gate：G5 本地全局搜索、精确深链与 Room 迁移。
+
+### 2026-08-08 G5 完成证据
+
+- 提交：`0ab9f5c 功能：实现本地全局搜索与精确定位`。
+- 自动化：搜索与项目仓储定向 JVM 测试、`:app:assembleDebug`、`:app:compileDebugAndroidTestKotlin` 成功；API 36 模拟器在关闭 Wi-Fi 和移动数据后运行 G5 定向 instrumentation/Compose 4/4 成功。
+- 索引：Room 21 新增 `local_search_documents` 与 FTS4 `unicode61` 索引；会话、用户/助手消息和 Wiki 引用由主表触发器同步写入和删除，项目名称由文件仓储同步；索引可从主数据重建，索引异常不阻断已完成的项目文件操作。
+- 检索与定位：中文复用 `WikiSourceSearch` 的归一化及 CJK 2/3-gram；一个搜索输入和一个统一结果列表；消息结果携带 `conversationId + messageId` 并滚动高亮，项目结果打开对应工作台会话页。
+- 迁移：`migration20To21BackfillsSearchAndPreservesExistingData` 使用真实 v20 fixture，确认旧会话、消息、`requestContextJson`、Agent、Wiki 和索引回填保持；未使用破坏性迁移。
+- 性能与可达性：50,000 条消息、20 次检索 p95 为 13ms；Compose 在 320dp、字体 1.3 下结果标题和类型可见且具备点击语义；真实 App 全局搜索入口和空态证据为 `build/m1-global-search-entry.png`、`build/m1-global-search-empty.png`。
+- 下一 Gate：G6 极端环境回归、六条黄金链路汇总和 `test` 发布候选。
 
 ## 4. 实施批次
 
