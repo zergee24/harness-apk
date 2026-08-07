@@ -139,6 +139,8 @@ import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.ChatExecutionPhase
 import com.harnessapk.chat.ChatExecutionRequestContext
 import com.harnessapk.chat.ChatExecutionStatus
+import com.harnessapk.chat.ContextSnapshotDraftV2
+import com.harnessapk.chat.ContextSnapshotV2
 import com.harnessapk.chat.ChatSendRequestPhase
 import com.harnessapk.chat.ChatSendRequestState
 import com.harnessapk.chat.EnqueueChatRequest
@@ -155,6 +157,7 @@ import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.chat.defaultReasoningEffort
 import com.harnessapk.chat.hideWikiCitationTokensForDisplay
 import com.harnessapk.chat.identityLockedForPendingSend
+import com.harnessapk.chat.projectContextSha256
 import com.harnessapk.chat.supportsReasoningEffort
 import com.harnessapk.agent.AgentVersionCoverage
 import com.harnessapk.agentmemory.AgentMemory
@@ -1015,10 +1018,21 @@ fun ChatScreen(
         val isFirstUserMessage = identityMessageStateKnown &&
             !persistedUserMessage &&
             messages.none { it.role == MessageRole.USER }
+        val projectIdSnapshot = selectedProjectId
+        val selectedProjectSnapshot = projects.firstOrNull { it.id == projectIdSnapshot }
+        val projectContextSnapshot = projectContext
+        val providerIdSnapshot = selectedProviderId ?: return
+        val modelSnapshot = selectedModel.takeIf(String::isNotBlank) ?: return
+        val reasoningEffortSnapshot = selectedReasoningEffort
+        val webSearchEnabledSnapshot = webSearchEnabled
+        val webSearchSettingsSnapshot = webSearchSettings
+        val agentIdSnapshot = conversation?.agentId
+        val agentVersionSnapshot = conversation?.agentVersion
+        val capturedAt = System.currentTimeMillis()
         val sessionRequestContext = sessionRequestContext(
             finalPrompt = finalSessionPrompt.ifBlank { optimizedSessionPrompt.ifBlank { rawSessionPrompt } },
-            project = projects.firstOrNull { it.id == selectedProjectId },
-            projectContext = projectContext,
+            project = selectedProjectSnapshot,
+            projectContext = projectContextSnapshot,
             markdowns = deliverables,
         )
         val draftAttachments = selectedImages
@@ -1046,14 +1060,27 @@ fun ChatScreen(
                 conversationId = conversationId,
                 content = body.ifEmpty { "请看这张截图" },
                 attachments = draftAttachments,
-                providerId = selectedProviderId,
-                model = selectedModel,
-                reasoningEffort = selectedReasoningEffort,
+                providerId = providerIdSnapshot,
+                model = modelSnapshot,
+                reasoningEffort = reasoningEffortSnapshot,
                 requestContext = ChatExecutionRequestContext(
                     sessionContext = sessionRequestContext,
-                    webSearchEnabled = webSearchEnabled,
-                    webSearchSettings = webSearchSettings,
+                    webSearchEnabled = webSearchEnabledSnapshot,
+                    webSearchSettings = webSearchSettingsSnapshot,
                     wikiScopeSnapshot = wikiScope,
+                ),
+                contextSnapshotDraft = ContextSnapshotDraftV2(
+                    projectId = projectIdSnapshot,
+                    projectName = selectedProjectSnapshot?.name,
+                    projectContextSha256 = projectContextSha256(projectIdSnapshot, projectContextSnapshot),
+                    agentId = agentIdSnapshot,
+                    agentVersion = agentVersionSnapshot,
+                    wikiScope = wikiScope,
+                    providerId = providerIdSnapshot,
+                    model = modelSnapshot,
+                    reasoningEffort = reasoningEffortSnapshot,
+                    webSearchEnabled = webSearchEnabledSnapshot,
+                    capturedAt = capturedAt,
                 ),
             )
             if (container.chatSendRecoveryManager.start(conversationId, requestState, enqueueRequest) == null) {
@@ -3611,6 +3638,30 @@ internal fun completedProcessSummary(
     if (isEmpty()) add("过程与来源")
 }.joinToString(" · ")
 
+internal fun contextSnapshotSummary(snapshot: ContextSnapshotV2): String = buildList {
+    add(snapshot.projectName ?: "临时会话")
+    snapshot.agentId?.let { add("$it@v${snapshot.agentVersion ?: "?"}") }
+    if (snapshot.wikiScope.isNotEmpty()) add("Wiki ${snapshot.wikiScope.size}")
+    add(snapshot.model)
+}.joinToString(" · ")
+
+internal fun contextSnapshotDetails(snapshot: ContextSnapshotV2): String = buildList {
+    add("项目：${snapshot.projectName ?: "无"}${snapshot.projectId?.let { " ($it)" }.orEmpty()}")
+    snapshot.projectContextSha256?.let { add("项目上下文 SHA-256：$it") }
+    add("智能体：${snapshot.agentId?.let { "$it@v${snapshot.agentVersion ?: "?"}" } ?: "普通助手"}")
+    add(
+        "Wiki：" + snapshot.wikiScope
+            .joinToString { "${it.wikiId}@v${it.version}" }
+            .ifBlank { "无" },
+    )
+    add("模型：${snapshot.providerId} / ${snapshot.model} / ${snapshot.reasoningEffort}")
+    add("联网：${if (snapshot.webSearchEnabled) "开" else "关"}")
+    add("附件：${snapshot.attachments.size}")
+    snapshot.attachments.forEachIndexed { index, attachment ->
+        add("附件 ${index + 1}：${attachment.mimeType} · ${attachment.sizeBytes} B · ${attachment.sha256}")
+    }
+}.joinToString("\n")
+
 private val messageContentPartTypes = setOf(
     UiMessagePartType.TEXT,
     UiMessagePartType.IMAGE,
@@ -3896,6 +3947,7 @@ private fun MessageBubble(
     val isUser = message.role == MessageRole.USER
     var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
     var actionMenuExpanded by remember(message.id) { mutableStateOf(false) }
+    var contextSnapshotExpanded by remember(message.id) { mutableStateOf(false) }
     val presentation = chatBubblePresentation(message.role)
     val uriHandler = LocalUriHandler.current
     val hideAgentCitationMarkers = isAgentConversation && parts.any { it.type == UiMessagePartType.AGENT_SOURCES }
@@ -4016,6 +4068,45 @@ private fun MessageBubble(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.labelSmall,
                         )
+                    }
+                }
+                if (isUser) {
+                    executionEntry?.requestContext?.contextSnapshot?.let { snapshot ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 40.dp)
+                                .clickable { contextSnapshotExpanded = !contextSnapshotExpanded },
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                modifier = Modifier.weight(1f),
+                                text = "发送上下文 · ${contextSnapshotSummary(snapshot)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Icon(
+                                imageVector = if (contextSnapshotExpanded) {
+                                    Icons.Outlined.ExpandLess
+                                } else {
+                                    Icons.Outlined.ExpandMore
+                                },
+                                contentDescription = if (contextSnapshotExpanded) "收起发送上下文" else "展开发送上下文",
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                        if (contextSnapshotExpanded) {
+                            SelectionContainer {
+                                Text(
+                                    text = contextSnapshotDetails(snapshot),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                )
+                            }
+                        }
                     }
                 }
                 if (parts.isNotEmpty()) {

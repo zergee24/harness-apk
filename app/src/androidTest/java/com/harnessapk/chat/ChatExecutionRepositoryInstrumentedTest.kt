@@ -88,7 +88,7 @@ class ChatExecutionRepositoryInstrumentedTest {
         )
         val conversationId = chatRepository.createConversation(agentId = "a1", agentVersion = 1)
 
-        repository.enqueue(
+        val entry = repository.enqueue(
             EnqueueChatRequest(
                 conversationId = conversationId,
                 content = "第一条消息",
@@ -96,11 +96,27 @@ class ChatExecutionRepositoryInstrumentedTest {
                 providerId = null,
                 model = null,
                 reasoningEffort = defaultReasoningEffort(),
-                requestContext = ChatExecutionRequestContext(),
+                requestContext = ChatExecutionRequestContext(
+                    contextSnapshot = ContextSnapshotV2(
+                        projectId = null,
+                        projectName = null,
+                        projectContextSha256 = null,
+                        agentId = "a1",
+                        agentVersion = 1,
+                        wikiScope = emptyList(),
+                        providerId = "provider",
+                        model = "model",
+                        reasoningEffort = ReasoningEffort.HIGH.name,
+                        webSearchEnabled = false,
+                        attachments = emptyList(),
+                        capturedAt = 1L,
+                    ),
+                ),
             ),
         )
 
         assertEquals(4, database.conversationDao().findById(conversationId)!!.agentVersion)
+        assertEquals(4, entry.requestContext.contextSnapshot?.agentVersion)
         assertEquals(1, database.messageDao().listForConversation(conversationId).count { it.role == "USER" })
     }
 
@@ -254,6 +270,33 @@ class ChatExecutionRepositoryInstrumentedTest {
             assertTrue(error.message.orEmpty().contains("queue insert failure"))
         }
 
+        assertEquals(1, database.conversationDao().findById(conversationId)!!.agentVersion)
+        assertEquals(0, database.messageDao().countUserMessages(conversationId))
+        assertEquals(0, database.chatExecutionEntryDao().listForConversation(conversationId).size)
+    }
+
+    @Test
+    fun contextEncodingFailureRollsBackIdentityMessageAttachmentsAndQueueEntry() = runBlocking {
+        database.agentDao().upsertAgent(readyAgent(id = "a1", activeVersion = 4))
+        val conversationId = chatRepository.createConversation(agentId = "a1", agentVersion = 1)
+        val failingRepository = ChatExecutionRepository(
+            database = database,
+            dao = database.chatExecutionEntryDao(),
+            chatRepository = chatRepository,
+            identityRepository = identityRepository,
+            timeProvider = TimeProvider { 10L },
+            requestContextEncoder = { throw IllegalStateException("snapshot encode failure") },
+        )
+        val attachment = PendingImageAttachment(
+            uri = android.net.Uri.parse("file:///tmp/snapshot.jpg"),
+            mimeType = "image/jpeg",
+        )
+
+        val failure = runCatching {
+            failingRepository.enqueue(request(conversationId).copy(attachments = listOf(attachment)))
+        }.exceptionOrNull()
+
+        assertEquals("snapshot encode failure", failure?.message)
         assertEquals(1, database.conversationDao().findById(conversationId)!!.agentVersion)
         assertEquals(0, database.messageDao().countUserMessages(conversationId))
         assertEquals(0, database.chatExecutionEntryDao().listForConversation(conversationId).size)

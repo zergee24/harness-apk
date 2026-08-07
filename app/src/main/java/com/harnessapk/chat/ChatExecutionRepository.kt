@@ -22,6 +22,7 @@ data class EnqueueChatRequest(
     val model: String?,
     val reasoningEffort: ReasoningEffort,
     val requestContext: ChatExecutionRequestContext,
+    val contextSnapshotDraft: ContextSnapshotDraftV2? = null,
 )
 
 data class ChatExecutionEnqueueOutcome(
@@ -37,6 +38,7 @@ class ChatExecutionRepository(
     private val timeProvider: TimeProvider,
     private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
     private val wikiScopeSnapshotProvider: suspend (conversationId: String) -> List<WikiRef> = { emptyList() },
+    private val requestContextEncoder: (ChatExecutionRequestContext) -> String = ::encodeExecutionRequestContext,
 ) {
     fun observeForConversation(conversationId: String): Flow<List<ChatExecutionEntry>> =
         dao.observeForConversation(conversationId).map { rows -> rows.map(ChatExecutionEntryEntity::toDomain) }
@@ -50,6 +52,13 @@ class ChatExecutionRepository(
             return@withTransaction ChatExecutionEnqueueOutcome(existing, insertedByThisCall = false)
         }
         identityRepository.pinForFirstMessage(request.conversationId)
+        val pinnedConversation = chatRepository.conversation(request.conversationId)
+        val requestContext = request.requestContext.copy(
+            contextSnapshot = request.requestContext.contextSnapshot?.copy(
+                agentId = pinnedConversation?.agentId,
+                agentVersion = pinnedConversation?.agentVersion,
+            ),
+        )
         val now = timeProvider.nowMillis()
         val userMessageId = chatRepository.insertUserMessage(
             conversationId = request.conversationId,
@@ -68,7 +77,7 @@ class ChatExecutionRepository(
             providerId = request.providerId,
             model = request.model,
             reasoningEffort = request.reasoningEffort.name,
-            requestContextJson = encodeExecutionRequestContext(request.requestContext),
+            requestContextJson = requestContextEncoder(requestContext),
             phase = null,
             automaticRetryCount = 0,
             interruptionReason = null,

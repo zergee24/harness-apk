@@ -21,17 +21,20 @@ import java.nio.file.SecureDirectoryStream
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributeView
 import java.nio.file.attribute.BasicFileAttributes
+import java.security.MessageDigest
 import java.util.ArrayList
 import java.util.Collections
 import java.util.UUID
 
 class PersistedAttachmentBatch internal constructor(
     attachments: List<PendingImageAttachment>,
+    snapshots: List<AttachmentSnapshot> = emptyList(),
     private val ownerToken: Any,
     generatedEntries: List<OwnedAttachmentEntry>,
     internal val directoryFileKey: Any,
 ) {
     val attachments: List<PendingImageAttachment> = Collections.unmodifiableList(ArrayList(attachments))
+    val snapshots: List<AttachmentSnapshot> = Collections.unmodifiableList(ArrayList(snapshots))
 
     private val generatedEntries: List<OwnedAttachmentEntry> = Collections.unmodifiableList(ArrayList(generatedEntries))
 
@@ -81,6 +84,7 @@ class QueuedAttachmentStore internal constructor(
                     sources.forEach { source ->
                         val persisted = persistOne(source, managedDirectory)
                         record.attachments += persisted.attachment
+                        record.snapshots += persisted.snapshot
                         record.generatedEntries += persisted.finalEntry
                     }
                     onBatchPersisted()
@@ -88,6 +92,7 @@ class QueuedAttachmentStore internal constructor(
                     requireCurrentRootIdentity(trustedFilesPath, trustedRootIdentity, "应用文件目录在保存期间发生变化")
                     PersistedAttachmentBatch(
                         attachments = record.attachments,
+                        snapshots = record.snapshots,
                         ownerToken = record.ownerToken,
                         generatedEntries = record.generatedEntries,
                         directoryFileKey = record.directoryFileKey,
@@ -164,6 +169,27 @@ class QueuedAttachmentStore internal constructor(
                     source.mimeType,
                 ),
                 finalEntry = requireNotNull(finalEntry),
+                snapshot = managedDirectory.newByteChannel(
+                    relativePath(finalName),
+                    setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS),
+                ).use { channel ->
+                    Channels.newInputStream(channel).use { input ->
+                        val digest = MessageDigest.getInstance("SHA-256")
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        var sizeBytes = 0L
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            digest.update(buffer, 0, count)
+                            sizeBytes += count
+                        }
+                        AttachmentSnapshot(
+                            mimeType = source.mimeType,
+                            sizeBytes = sizeBytes,
+                            sha256 = digest.digest().joinToString("") { byte -> "%02x".format(byte) },
+                        )
+                    }
+                },
             )
         } catch (error: Throwable) {
             temporaryEntry?.let { entry -> runCatching { deleteOwnedEntry(managedDirectory, entry.name, entry.fileKey) } }
@@ -415,12 +441,14 @@ class QueuedAttachmentStore internal constructor(
         val ownerToken: Any,
         val directoryFileKey: Any,
         val attachments: MutableList<PendingImageAttachment> = mutableListOf(),
+        val snapshots: MutableList<AttachmentSnapshot> = mutableListOf(),
         val generatedEntries: MutableList<OwnedAttachmentEntry> = mutableListOf(),
     )
 
     private data class PersistedAttachment(
         val attachment: PendingImageAttachment,
         val finalEntry: OwnedAttachmentEntry,
+        val snapshot: AttachmentSnapshot,
     )
 
     private data class TrustedRoot(

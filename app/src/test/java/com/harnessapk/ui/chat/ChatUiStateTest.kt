@@ -3,6 +3,8 @@ package com.harnessapk.ui.chat
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import com.harnessapk.chat.ChatMessage
+import com.harnessapk.chat.AttachmentSnapshot
+import com.harnessapk.chat.ContextSnapshotV2
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.ReasoningEffort
@@ -22,6 +24,7 @@ import com.harnessapk.ui.model.resolveModelSelection
 import com.harnessapk.ui.model.selectableModelsForProvider
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.websearch.WebSearchSettings
+import com.harnessapk.wiki.WikiRef
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -32,6 +35,28 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class ChatUiStateTest {
+    @Test
+    fun sentContextSummaryAndDetailsExposeImmutableVersionsAndHashes() {
+        val snapshot = ContextSnapshotV2(
+            projectId = "project-1",
+            projectName = "健康计划",
+            projectContextSha256 = "a".repeat(64),
+            agentId = "doctor",
+            agentVersion = 3,
+            wikiScope = listOf(WikiRef("health", 2)),
+            providerId = "openai",
+            model = "gpt-5.6-terra",
+            reasoningEffort = "XHIGH",
+            webSearchEnabled = false,
+            attachments = listOf(AttachmentSnapshot("image/jpeg", 12L, "b".repeat(64))),
+            capturedAt = 1L,
+        )
+
+        assertEquals("健康计划 · doctor@v3 · Wiki 1 · gpt-5.6-terra", contextSnapshotSummary(snapshot))
+        assertTrue(contextSnapshotDetails(snapshot).contains("health@v2"))
+        assertTrue(contextSnapshotDetails(snapshot).contains("b".repeat(64)))
+    }
+
     @Test
     fun onlyLatestReasoningPartAutoExpandsWhileStreaming() {
         val older = UiMessagePartDraft(

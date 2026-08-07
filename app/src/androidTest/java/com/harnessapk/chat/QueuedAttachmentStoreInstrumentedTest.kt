@@ -16,6 +16,7 @@ import com.harnessapk.security.EncryptedValue
 import com.harnessapk.security.StringCipher
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.websearch.JinaWebSearchClient
+import com.harnessapk.wiki.WikiRef
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -42,6 +43,7 @@ import java.nio.file.Files
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.LinkOption
 import java.nio.file.attribute.BasicFileAttributes
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.TimeUnit
@@ -81,6 +83,61 @@ class QueuedAttachmentStoreInstrumentedTest {
         managedDirectory.deleteRecursively()
         sourceDirectory.deleteRecursively()
         sourceDirectory.mkdirs()
+    }
+
+    @Test
+    fun persistedBatchCapturesContentHashAndSizeFromPrivateCopy() {
+        val expectedBytes = "first.jpg bytes".encodeToByteArray()
+
+        val batch = QueuedAttachmentStore(context).persistAll(listOf(sourceAttachment("first.jpg")))
+
+        assertEquals(1, batch.snapshots.size)
+        assertEquals("image/jpeg", batch.snapshots.single().mimeType)
+        assertEquals(expectedBytes.size.toLong(), batch.snapshots.single().sizeBytes)
+        assertEquals(
+            MessageDigest.getInstance("SHA-256").digest(expectedBytes).joinToString("") { "%02x".format(it) },
+            batch.snapshots.single().sha256,
+        )
+    }
+
+    @Test
+    fun coordinatorFinalizesAndPersistsSnapshotFromPrivateAttachments() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        val request = request(
+            conversationId = conversationId,
+            requestId = "snapshot-with-attachment",
+            attachments = listOf(sourceAttachment("first.jpg")),
+        ).copy(
+            contextSnapshotDraft = ContextSnapshotDraftV2(
+                projectId = "project-1",
+                projectName = "项目一",
+                projectContextSha256 = "a".repeat(64),
+                agentId = null,
+                agentVersion = null,
+                wikiScope = listOf(WikiRef("wiki-1", 2)),
+                providerId = "provider-1",
+                model = "model-1",
+                reasoningEffort = ReasoningEffort.HIGH,
+                webSearchEnabled = true,
+                capturedAt = 99L,
+            ),
+        )
+        val coordinator = coordinator()
+
+        val entry = try {
+            coordinator.enqueue(request)
+        } finally {
+            coordinator.close()
+        }
+
+        val snapshot = requireNotNull(entry.requestContext.contextSnapshot)
+        assertEquals("project-1", snapshot.projectId)
+        assertEquals(listOf(WikiRef("wiki-1", 2)), snapshot.wikiScope)
+        assertEquals("provider-1", entry.providerId)
+        assertEquals("model-1", entry.model)
+        assertEquals(1, snapshot.attachments.size)
+        assertEquals("first.jpg bytes".encodeToByteArray().size.toLong(), snapshot.attachments.single().sizeBytes)
+        assertEquals(snapshot, executionRepository.entry(entry.id)!!.requestContext.contextSnapshot)
     }
 
     @After

@@ -57,7 +57,21 @@ class ChatExecutionCoordinator(
     suspend fun enqueue(request: EnqueueChatRequest): ChatExecutionEntry = withContext(dispatchers.io) {
         val attachmentBatch = attachmentStore.persistAll(request.attachments)
         try {
-            val outcome = executionRepository.enqueueWithOutcome(request.copy(attachments = attachmentBatch.attachments))
+            val snapshot = request.contextSnapshotDraft?.finalize(attachmentBatch.snapshots)
+            val finalizedRequest = request.copy(
+                attachments = attachmentBatch.attachments,
+                providerId = snapshot?.providerId ?: request.providerId,
+                model = snapshot?.model ?: request.model,
+                reasoningEffort = snapshot?.reasoningEffort
+                    ?.let { runCatching { ReasoningEffort.valueOf(it) }.getOrNull() }
+                    ?: request.reasoningEffort,
+                requestContext = request.requestContext.copy(
+                    webSearchEnabled = snapshot?.webSearchEnabled ?: request.requestContext.webSearchEnabled,
+                    wikiScopeSnapshot = snapshot?.wikiScope ?: request.requestContext.wikiScopeSnapshot,
+                    contextSnapshot = snapshot ?: request.requestContext.contextSnapshot,
+                ),
+            )
+            val outcome = executionRepository.enqueueWithOutcome(finalizedRequest)
             if (!outcome.insertedByThisCall) {
                 cleanupAttachments(attachmentBatch)
             }

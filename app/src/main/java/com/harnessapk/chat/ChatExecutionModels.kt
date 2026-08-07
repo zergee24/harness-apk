@@ -7,10 +7,13 @@ import com.harnessapk.wiki.decodeWikiScopeSnapshot
 import com.harnessapk.wiki.encodeWikiScopeSnapshot
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.security.MessageDigest
 
 enum class ChatExecutionType {
     NORMAL,
@@ -46,7 +49,66 @@ data class ChatExecutionRequestContext(
     val webSearchEnabled: Boolean = false,
     val webSearchSettings: WebSearchSettings = WebSearchSettings(),
     val wikiScopeSnapshot: List<WikiRef>? = null,
+    val contextSnapshot: ContextSnapshotV2? = null,
 )
+
+data class AttachmentSnapshot(
+    val mimeType: String,
+    val sizeBytes: Long,
+    val sha256: String,
+)
+
+data class ContextSnapshotV2(
+    val schemaVersion: Int = 2,
+    val projectId: String?,
+    val projectName: String?,
+    val projectContextSha256: String?,
+    val agentId: String?,
+    val agentVersion: Int?,
+    val wikiScope: List<WikiRef>,
+    val providerId: String,
+    val model: String,
+    val reasoningEffort: String,
+    val webSearchEnabled: Boolean,
+    val attachments: List<AttachmentSnapshot>,
+    val capturedAt: Long,
+)
+
+data class ContextSnapshotDraftV2(
+    val projectId: String?,
+    val projectName: String?,
+    val projectContextSha256: String?,
+    val agentId: String?,
+    val agentVersion: Int?,
+    val wikiScope: List<WikiRef>,
+    val providerId: String,
+    val model: String,
+    val reasoningEffort: ReasoningEffort,
+    val webSearchEnabled: Boolean,
+    val capturedAt: Long,
+) {
+    fun finalize(attachments: List<AttachmentSnapshot>): ContextSnapshotV2 = ContextSnapshotV2(
+        projectId = projectId,
+        projectName = projectName,
+        projectContextSha256 = projectContextSha256,
+        agentId = agentId,
+        agentVersion = agentVersion,
+        wikiScope = wikiScope,
+        providerId = providerId,
+        model = model,
+        reasoningEffort = reasoningEffort.name,
+        webSearchEnabled = webSearchEnabled,
+        attachments = attachments,
+        capturedAt = capturedAt,
+    )
+}
+
+internal fun projectContextSha256(projectId: String?, projectContext: String): String? =
+    projectId?.let {
+        MessageDigest.getInstance("SHA-256")
+            .digest(projectContext.encodeToByteArray())
+            .joinToString("") { byte -> "%02x".format(byte) }
+    }
 
 internal suspend fun captureLegacyWikiScopeSnapshot(
     context: ChatExecutionRequestContext,
@@ -116,6 +178,29 @@ internal fun encodeExecutionRequestContext(context: ChatExecutionRequestContext)
         put("projectContext", JsonPrimitive(session.projectContext))
         put("deliverableMarkdown", JsonPrimitive(session.deliverableMarkdown))
     }
+    context.contextSnapshot?.let { snapshot ->
+        put("schemaVersion", JsonPrimitive(snapshot.schemaVersion))
+        put("webSearchEnabled", JsonPrimitive(snapshot.webSearchEnabled))
+        put("wikiScopeSnapshot", Json.parseToJsonElement(encodeWikiScopeSnapshot(snapshot.wikiScope)))
+        snapshot.projectId?.let { put("projectId", JsonPrimitive(it)) }
+        snapshot.projectName?.let { put("snapshotProjectName", JsonPrimitive(it)) }
+        snapshot.projectContextSha256?.let { put("projectContextSha256", JsonPrimitive(it)) }
+        snapshot.agentId?.let { put("agentId", JsonPrimitive(it)) }
+        snapshot.agentVersion?.let { put("agentVersion", JsonPrimitive(it)) }
+        put("providerId", JsonPrimitive(snapshot.providerId))
+        put("model", JsonPrimitive(snapshot.model))
+        put("reasoningEffort", JsonPrimitive(snapshot.reasoningEffort))
+        put("capturedAt", JsonPrimitive(snapshot.capturedAt))
+        put("attachments", buildJsonArray {
+            snapshot.attachments.forEach { attachment ->
+                add(buildJsonObject {
+                    put("mimeType", JsonPrimitive(attachment.mimeType))
+                    put("sizeBytes", JsonPrimitive(attachment.sizeBytes))
+                    put("sha256", JsonPrimitive(attachment.sha256))
+                })
+            }
+        })
+    }
 }.toString()
 
 internal fun decodeExecutionRequestContext(raw: String): ChatExecutionRequestContext {
@@ -133,6 +218,31 @@ internal fun decodeExecutionRequestContext(raw: String): ChatExecutionRequestCon
     val wikiScopeSnapshot = root["wikiScopeSnapshot"]?.let { encodedScope ->
         decodeWikiScopeSnapshot(encodedScope.toString())
     }
+    val contextSnapshot = if (root.string("schemaVersion")?.toIntOrNull() == 2) {
+        ContextSnapshotV2(
+            projectId = root.string("projectId"),
+            projectName = root.string("snapshotProjectName"),
+            projectContextSha256 = root.string("projectContextSha256"),
+            agentId = root.string("agentId"),
+            agentVersion = root.string("agentVersion")?.toIntOrNull(),
+            wikiScope = wikiScopeSnapshot.orEmpty(),
+            providerId = root.string("providerId").orEmpty(),
+            model = root.string("model").orEmpty(),
+            reasoningEffort = root.string("reasoningEffort").orEmpty(),
+            webSearchEnabled = root.string("webSearchEnabled")?.toBoolean() ?: false,
+            attachments = root["attachments"]?.jsonArray.orEmpty().map { element ->
+                val attachment = element.jsonObject
+                AttachmentSnapshot(
+                    mimeType = attachment.string("mimeType").orEmpty(),
+                    sizeBytes = attachment.string("sizeBytes")?.toLongOrNull() ?: 0L,
+                    sha256 = attachment.string("sha256").orEmpty(),
+                )
+            },
+            capturedAt = root.string("capturedAt")?.toLongOrNull() ?: 0L,
+        )
+    } else {
+        null
+    }
     return ChatExecutionRequestContext(
         sessionContext = sessionContext,
         webSearchEnabled = root.string("webSearchEnabled")?.toBoolean() ?: false,
@@ -140,6 +250,7 @@ internal fun decodeExecutionRequestContext(raw: String): ChatExecutionRequestCon
             maxResults = root.string("webSearchMaxResults")?.toIntOrNull() ?: WebSearchSettings().maxResults,
         ),
         wikiScopeSnapshot = wikiScopeSnapshot,
+        contextSnapshot = contextSnapshot,
     )
 }
 

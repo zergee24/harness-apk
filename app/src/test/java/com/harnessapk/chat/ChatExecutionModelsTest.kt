@@ -76,6 +76,60 @@ class ChatExecutionModelsTest {
     }
 
     @Test
+    fun contextSnapshotV2RoundTripsEveryImmutableField() {
+        val snapshot = ContextSnapshotV2(
+            projectId = "project-1",
+            projectName = "长辈健康",
+            projectContextSha256 = "a".repeat(64),
+            agentId = "doctor",
+            agentVersion = 7,
+            wikiScope = listOf(WikiRef("health.guide", 3)),
+            providerId = "openai",
+            model = "gpt-5.6-terra",
+            reasoningEffort = ReasoningEffort.XHIGH.name,
+            webSearchEnabled = true,
+            attachments = listOf(
+                AttachmentSnapshot(
+                    mimeType = "image/jpeg",
+                    sizeBytes = 123L,
+                    sha256 = "b".repeat(64),
+                ),
+            ),
+            capturedAt = 1_234L,
+        )
+        val context = ChatExecutionRequestContext(
+            wikiScopeSnapshot = snapshot.wikiScope,
+            contextSnapshot = snapshot,
+        )
+
+        val encoded = encodeExecutionRequestContext(context)
+        val decoded = decodeExecutionRequestContext(encoded)
+
+        assertTrue(encoded.contains("\"schemaVersion\":2"))
+        assertEquals(snapshot, decoded.contextSnapshot)
+        assertEquals(snapshot.wikiScope, decoded.wikiScopeSnapshot)
+    }
+
+    @Test
+    fun legacyV1ContextDecodesWithoutInventingV2Snapshot() {
+        val decoded = decodeExecutionRequestContext(
+            """{"webSearchEnabled":true,"wikiScopeSnapshot":[]}""",
+        )
+
+        assertNull(decoded.contextSnapshot)
+        assertEquals(emptyList<WikiRef>(), decoded.wikiScopeSnapshot)
+    }
+
+    @Test
+    fun contextHashUsesUtf8Sha256AndNullWithoutProject() {
+        assertEquals(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            projectContextSha256(projectId = "project", projectContext = "abc"),
+        )
+        assertNull(projectContextSha256(projectId = null, projectContext = "abc"))
+    }
+
+    @Test
     fun executionContextRoundTripsExplicitEmptyWikiScope() {
         val context = ChatExecutionRequestContext(wikiScopeSnapshot = emptyList())
 
