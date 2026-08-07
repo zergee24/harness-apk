@@ -792,6 +792,7 @@ fun ChatScreen(
             sourceLocationStatus = null
             streamingAutoScrollEnabled = false
             listState.scrollToItem(index)
+            highlightedMessageId = sourceMessageId
         }
     }
 

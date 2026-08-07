@@ -20,6 +20,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
@@ -70,6 +71,7 @@ fun ConversationListScreen(
     onCreateConversation: () -> Unit,
     onOpenAgentPackages: () -> Unit = {},
     onOpenWikiLibrary: () -> Unit = {},
+    onOpenGlobalSearch: () -> Unit = {},
 ) {
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
@@ -124,6 +126,7 @@ fun ConversationListScreen(
             QuickEntryRow(
                 onOpenAgentPackages = onOpenAgentPackages,
                 onOpenWikiLibrary = onOpenWikiLibrary,
+                onOpenGlobalSearch = onOpenGlobalSearch,
                 onCreateConversation = onCreateConversation,
             )
         }
@@ -218,6 +221,7 @@ private fun ConversationRow(
 private fun QuickEntryRow(
     onOpenAgentPackages: () -> Unit,
     onOpenWikiLibrary: () -> Unit,
+    onOpenGlobalSearch: () -> Unit,
     onCreateConversation: () -> Unit,
 ) {
     Row(
@@ -236,6 +240,12 @@ private fun QuickEntryRow(
             leadingIcon = { Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null) },
         )
         Spacer(modifier = Modifier.weight(1f))
+        IconButton(
+            modifier = Modifier.size(48.dp),
+            onClick = onOpenGlobalSearch,
+        ) {
+            Icon(Icons.Outlined.Search, contentDescription = "全局搜索")
+        }
         FilledIconButton(
             modifier = Modifier.size(48.dp),
             onClick = onCreateConversation,

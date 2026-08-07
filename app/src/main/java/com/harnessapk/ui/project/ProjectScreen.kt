@@ -40,6 +40,7 @@ import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Save
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -262,6 +263,7 @@ internal fun ProjectScreen(
     onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
     onOpenSession: (String) -> Unit,
+    onOpenGlobalSearch: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -933,6 +935,7 @@ internal fun ProjectScreen(
                     searchQuery = ""
                 },
                 onCreateProject = { showNewProjectDialog = true },
+                onOpenGlobalSearch = onOpenGlobalSearch,
                 onCloneRepository = { showCloneRepositoryDialog = true },
                 onCreateSession = {
                     selectedProject?.let { project ->
@@ -1208,6 +1211,7 @@ private fun ProjectHeader(
     overview: ProjectWorkbenchOverview,
     onSelectProject: (Project) -> Unit,
     onCreateProject: () -> Unit,
+    onOpenGlobalSearch: () -> Unit,
     onCloneRepository: () -> Unit,
     onCreateSession: () -> Unit,
     onImportProjectPackage: () -> Unit,
@@ -1328,6 +1332,9 @@ private fun ProjectHeader(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        IconButton(onClick = onOpenGlobalSearch) {
+                            Icon(Icons.Outlined.Search, contentDescription = "全局搜索")
+                        }
                         overflowMenu()
                     }
                     Button(
@@ -1346,7 +1353,14 @@ private fun ProjectHeader(
                     overview = overview,
                     onSelectProject = { projectMenuExpanded = true },
                     onCreateSession = onCreateSession,
-                    overflowContent = overflowMenu,
+                    overflowContent = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = onOpenGlobalSearch) {
+                                Icon(Icons.Outlined.Search, contentDescription = "全局搜索")
+                            }
+                            overflowMenu()
+                        }
+                    },
                 )
             }
 

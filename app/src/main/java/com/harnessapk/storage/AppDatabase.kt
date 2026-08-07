@@ -38,8 +38,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WikiRetrievalRunEntity::class,
         MessageWikiUsageEntity::class,
         MessageWikiCitationEntity::class,
+        LocalSearchDocumentEntity::class,
+        LocalSearchFtsEntity::class,
     ],
-    version = 20,
+    version = 21,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -56,6 +58,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun agentMemoryDao(): AgentMemoryDao
     abstract fun wikiDao(): WikiDao
     abstract fun conversationWikiDao(): ConversationWikiDao
+    abstract fun localSearchDao(): LocalSearchDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -954,5 +957,183 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE chat_execution_entries ADD COLUMN interruptionReason TEXT")
             }
         }
+
+        val MIGRATION_20_21: Migration = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                ensureLocalSearchSchema(db)
+                backfillLocalSearch(db)
+            }
+        }
+
+        val LOCAL_SEARCH_CALLBACK: Callback = object : Callback() {
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                ensureLocalSearchSchema(db)
+            }
+        }
     }
 }
+
+private fun ensureLocalSearchSchema(db: SupportSQLiteDatabase) {
+    db.execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS local_search_documents (
+            id TEXT NOT NULL PRIMARY KEY,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            conversationId TEXT,
+            messageId TEXT,
+            projectId TEXT,
+            updatedAt INTEGER NOT NULL
+        )
+        """.trimIndent(),
+    )
+    db.execSQL("CREATE INDEX IF NOT EXISTS index_local_search_documents_type ON local_search_documents(type)")
+    db.execSQL("CREATE INDEX IF NOT EXISTS index_local_search_documents_conversationId ON local_search_documents(conversationId)")
+    db.execSQL("CREATE INDEX IF NOT EXISTS index_local_search_documents_messageId ON local_search_documents(messageId)")
+    db.execSQL("CREATE INDEX IF NOT EXISTS index_local_search_documents_projectId ON local_search_documents(projectId)")
+    db.execSQL(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS local_search_fts
+        USING FTS4(documentId TEXT NOT NULL, searchText TEXT NOT NULL, tokenize=unicode61)
+        """.trimIndent(),
+    )
+    localSearchTriggerSql.forEach(db::execSQL)
+}
+
+private fun backfillLocalSearch(db: SupportSQLiteDatabase) {
+    db.execSQL(
+        """
+        INSERT OR REPLACE INTO local_search_documents
+            (id, type, title, body, conversationId, messageId, projectId, updatedAt)
+        SELECT 'conversation:' || id, 'CONVERSATION', title, title, id, NULL, projectId, updatedAt
+        FROM conversations WHERE isArchived = 0
+        """.trimIndent(),
+    )
+    db.execSQL(
+        """
+        INSERT OR REPLACE INTO local_search_documents
+            (id, type, title, body, conversationId, messageId, projectId, updatedAt)
+        SELECT 'message:' || messages.id, 'MESSAGE', conversations.title, messages.content,
+               messages.conversationId, messages.id, conversations.projectId, messages.updatedAt
+        FROM messages INNER JOIN conversations ON conversations.id = messages.conversationId
+        WHERE messages.role IN ('USER', 'ASSISTANT') AND TRIM(messages.content) != '' AND conversations.isArchived = 0
+        """.trimIndent(),
+    )
+    db.execSQL(
+        """
+        INSERT OR REPLACE INTO local_search_documents
+            (id, type, title, body, conversationId, messageId, projectId, updatedAt)
+        SELECT 'source:' || citations.id, 'MESSAGE_SOURCE', citations.sourceTitle,
+               citations.wikiTitle || ' ' || citations.sectionPath || ' ' || citations.originalTextSnapshot,
+               messages.conversationId, citations.messageId, conversations.projectId, citations.createdAt
+        FROM message_wiki_citations AS citations
+        INNER JOIN messages ON messages.id = citations.messageId
+        INNER JOIN conversations ON conversations.id = messages.conversationId
+        WHERE conversations.isArchived = 0
+        """.trimIndent(),
+    )
+    db.execSQL("DELETE FROM local_search_fts")
+    db.execSQL(
+        """
+        INSERT INTO local_search_fts(documentId, searchText)
+        SELECT id, title || ' ' || body FROM local_search_documents
+        """.trimIndent(),
+    )
+}
+
+private val localSearchTriggerSql = listOf(
+    "DROP TRIGGER IF EXISTS local_search_conversation_insert",
+    "DROP TRIGGER IF EXISTS local_search_conversation_update",
+    "DROP TRIGGER IF EXISTS local_search_conversation_delete",
+    "DROP TRIGGER IF EXISTS local_search_message_insert",
+    "DROP TRIGGER IF EXISTS local_search_message_update",
+    "DROP TRIGGER IF EXISTS local_search_message_delete",
+    "DROP TRIGGER IF EXISTS local_search_citation_insert",
+    "DROP TRIGGER IF EXISTS local_search_citation_delete",
+    """
+    CREATE TRIGGER local_search_conversation_insert AFTER INSERT ON conversations BEGIN
+      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
+      SELECT 'conversation:' || NEW.id,'CONVERSATION',NEW.title,NEW.title,NEW.id,NULL,NEW.projectId,NEW.updatedAt
+      WHERE NEW.isArchived = 0;
+      DELETE FROM local_search_fts WHERE documentId = 'conversation:' || NEW.id;
+      INSERT INTO local_search_fts(documentId,searchText)
+      SELECT 'conversation:' || NEW.id,NEW.title WHERE NEW.isArchived = 0;
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER local_search_conversation_update AFTER UPDATE ON conversations BEGIN
+      DELETE FROM local_search_fts WHERE documentId = 'conversation:' || NEW.id;
+      DELETE FROM local_search_documents WHERE id = 'conversation:' || NEW.id;
+      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
+      SELECT 'conversation:' || NEW.id,'CONVERSATION',NEW.title,NEW.title,NEW.id,NULL,NEW.projectId,NEW.updatedAt
+      WHERE NEW.isArchived = 0;
+      INSERT INTO local_search_fts(documentId,searchText)
+      SELECT 'conversation:' || NEW.id,NEW.title WHERE NEW.isArchived = 0;
+      UPDATE local_search_documents SET title = NEW.title, projectId = NEW.projectId
+      WHERE conversationId = NEW.id AND type != 'CONVERSATION';
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER local_search_conversation_delete AFTER DELETE ON conversations BEGIN
+      DELETE FROM local_search_fts WHERE documentId IN
+        (SELECT id FROM local_search_documents WHERE conversationId = OLD.id);
+      DELETE FROM local_search_documents WHERE conversationId = OLD.id;
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER local_search_message_insert AFTER INSERT ON messages BEGIN
+      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
+      SELECT 'message:' || NEW.id,'MESSAGE',conversations.title,NEW.content,NEW.conversationId,NEW.id,
+             conversations.projectId,NEW.updatedAt FROM conversations
+      WHERE conversations.id = NEW.conversationId AND conversations.isArchived = 0
+        AND NEW.role IN ('USER','ASSISTANT') AND TRIM(NEW.content) != '';
+      DELETE FROM local_search_fts WHERE documentId = 'message:' || NEW.id;
+      INSERT INTO local_search_fts(documentId,searchText)
+      SELECT 'message:' || NEW.id,NEW.content FROM conversations
+      WHERE conversations.id = NEW.conversationId AND conversations.isArchived = 0
+        AND NEW.role IN ('USER','ASSISTANT') AND TRIM(NEW.content) != '';
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER local_search_message_update AFTER UPDATE ON messages BEGIN
+      DELETE FROM local_search_fts WHERE documentId = 'message:' || NEW.id;
+      DELETE FROM local_search_documents WHERE id = 'message:' || NEW.id;
+      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
+      SELECT 'message:' || NEW.id,'MESSAGE',conversations.title,NEW.content,NEW.conversationId,NEW.id,
+             conversations.projectId,NEW.updatedAt FROM conversations
+      WHERE conversations.id = NEW.conversationId AND conversations.isArchived = 0
+        AND NEW.role IN ('USER','ASSISTANT') AND TRIM(NEW.content) != '';
+      INSERT INTO local_search_fts(documentId,searchText)
+      SELECT 'message:' || NEW.id,NEW.content FROM conversations
+      WHERE conversations.id = NEW.conversationId AND conversations.isArchived = 0
+        AND NEW.role IN ('USER','ASSISTANT') AND TRIM(NEW.content) != '';
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER local_search_message_delete AFTER DELETE ON messages BEGIN
+      DELETE FROM local_search_fts WHERE documentId IN
+        (SELECT id FROM local_search_documents WHERE messageId = OLD.id);
+      DELETE FROM local_search_documents WHERE messageId = OLD.id;
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER local_search_citation_insert AFTER INSERT ON message_wiki_citations BEGIN
+      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
+      SELECT 'source:' || NEW.id,'MESSAGE_SOURCE',NEW.sourceTitle,
+             NEW.wikiTitle || ' ' || NEW.sectionPath || ' ' || NEW.originalTextSnapshot,
+             messages.conversationId,NEW.messageId,conversations.projectId,NEW.createdAt
+      FROM messages INNER JOIN conversations ON conversations.id = messages.conversationId
+      WHERE messages.id = NEW.messageId AND conversations.isArchived = 0;
+      DELETE FROM local_search_fts WHERE documentId = 'source:' || NEW.id;
+      INSERT INTO local_search_fts(documentId,searchText)
+      SELECT 'source:' || NEW.id,NEW.sourceTitle || ' ' || NEW.wikiTitle || ' ' || NEW.sectionPath || ' ' || NEW.originalTextSnapshot;
+    END
+    """.trimIndent(),
+    """
+    CREATE TRIGGER local_search_citation_delete AFTER DELETE ON message_wiki_citations BEGIN
+      DELETE FROM local_search_fts WHERE documentId = 'source:' || OLD.id;
+      DELETE FROM local_search_documents WHERE id = 'source:' || OLD.id;
+    END
+    """.trimIndent(),
+)

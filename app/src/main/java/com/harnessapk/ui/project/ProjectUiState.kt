@@ -41,7 +41,7 @@ internal fun projectWorkbenchTabGuidance(tab: ProjectWorkbenchTab): String = whe
     ProjectWorkbenchTab.GIT -> "查看当前分支和工作区变更"
 }
 
-internal enum class ProjectWorkbenchDestination { FILES, GIT }
+internal enum class ProjectWorkbenchDestination { CONVERSATIONS, FILES, GIT }
 
 internal data class ProjectWorkbenchTarget(
     val projectId: String,
@@ -52,6 +52,7 @@ internal data class ProjectWorkbenchTarget(
 
 internal fun projectWorkbenchTab(destination: ProjectWorkbenchDestination): ProjectWorkbenchTab =
     when (destination) {
+        ProjectWorkbenchDestination.CONVERSATIONS -> ProjectWorkbenchTab.CONVERSATIONS
         ProjectWorkbenchDestination.FILES -> ProjectWorkbenchTab.FOLDER
         ProjectWorkbenchDestination.GIT -> ProjectWorkbenchTab.GIT
     }

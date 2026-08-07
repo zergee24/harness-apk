@@ -52,6 +52,45 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
     @Test
+    fun migration20To21BackfillsSearchAndPreservesExistingData() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-20-21-search-${System.nanoTime()}.db"
+        createVersion15Fixture(context, name)
+        upgradeVersion15FixtureTo20(context, name)
+        seedVersion20SearchMigrationData(context, name)
+
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(AppDatabase.MIGRATION_20_21)
+            .addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK)
+            .build()
+        val sqlite = migrated.openHelper.writableDatabase
+
+        assertEquals(21, sqlite.version)
+        assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+        assertEquals(
+            "{}",
+            sqlite.string("SELECT requestContextJson FROM chat_execution_entries WHERE id = 'entry-queue'"),
+        )
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agents WHERE id = 'agent-v2'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM wikis WHERE id = 'wiki-v20'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM wiki_versions WHERE wikiId = 'wiki-v20'"))
+        assertEquals(
+            "默认使用中文",
+            sqlite.string("SELECT body FROM local_search_documents WHERE id = 'message:daily-message'"),
+        )
+        assertEquals(
+            1,
+            sqlite.scalarInt(
+                "SELECT COUNT(*) FROM local_search_fts WHERE documentId = 'message:daily-message'",
+            ),
+        )
+        sqlite.assertNoForeignKeyViolations()
+        migrated.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
     fun migration17To19CreatesConversationWikiHistoryTables() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-17-18-wiki-${System.nanoTime()}.db"
@@ -64,11 +103,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
+                AppDatabase.MIGRATION_20_21,
             )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(20, sqlite.version)
+        assertEquals(21, sqlite.version)
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wikis'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wiki_versions'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversation_wiki_mounts'"))
@@ -841,11 +881,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
+                    AppDatabase.MIGRATION_20_21,
             )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(20, sqlite.version)
+        assertEquals(21, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "daily-conversation|USER|默认使用中文",
@@ -1108,7 +1149,7 @@ class AppDatabaseTest {
         val migrated = version15
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(20, sqlite.version)
+        assertEquals(21, sqlite.version)
         assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals("默认使用中文", sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"))
         assertEquals("notes/project.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
@@ -1163,11 +1204,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
+                AppDatabase.MIGRATION_20_21,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(20, sqlite.version)
+        assertEquals(21, sqlite.version)
         assertEquals(
             1,
             sqlite.scalarInt(
@@ -1352,13 +1394,14 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
+                AppDatabase.MIGRATION_20_21,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
         val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
 
         assertTrue("迁移耗时 ${elapsedMillis}ms，阻塞了会话页启动", elapsedMillis < 5_000)
-        assertEquals(20, sqlite.version)
+        assertEquals(21, sqlite.version)
         assertEquals(12_001, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
         assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         db.conversationDao().insert(conversation("post-large-upgrade", updatedAt = 32L))
@@ -1385,6 +1428,7 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
+                AppDatabase.MIGRATION_20_21,
             )
             .build()
         db.openHelper.writableDatabase
@@ -1433,11 +1477,12 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_17_18,
                     AppDatabase.MIGRATION_18_19,
                     AppDatabase.MIGRATION_19_20,
+                    AppDatabase.MIGRATION_20_21,
                 )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(20, sqlite.version)
+            assertEquals(21, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -1479,11 +1524,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
+                AppDatabase.MIGRATION_20_21,
             )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(20, sqlite.version)
+            assertEquals(21, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -2039,6 +2085,99 @@ class AppDatabaseTest {
         )
         val db = helper.writableDatabase
         check(db.version == 16)
+        helper.close()
+    }
+
+    private fun upgradeVersion15FixtureTo20(context: Context, name: String) {
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(
+                    object : SupportSQLiteOpenHelper.Callback(20) {
+                        override fun onConfigure(db: SupportSQLiteDatabase) {
+                            db.setForeignKeyConstraintsEnabled(true)
+                        }
+
+                        override fun onCreate(db: SupportSQLiteDatabase) {
+                            error("version 15 fixture must already exist")
+                        }
+
+                        override fun onUpgrade(
+                            db: SupportSQLiteDatabase,
+                            oldVersion: Int,
+                            newVersion: Int,
+                        ) {
+                            check(oldVersion == 15 && newVersion == 20)
+                            AppDatabase.MIGRATION_15_16.migrate(db)
+                            AppDatabase.MIGRATION_16_17.migrate(db)
+                            AppDatabase.MIGRATION_17_18.migrate(db)
+                            AppDatabase.MIGRATION_18_19.migrate(db)
+                            AppDatabase.MIGRATION_19_20.migrate(db)
+                        }
+                    },
+                )
+                .build(),
+        )
+        val db = helper.writableDatabase
+        check(db.version == 20)
+        helper.close()
+    }
+
+    private fun seedVersion20SearchMigrationData(context: Context, name: String) {
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(
+                    object : SupportSQLiteOpenHelper.Callback(20) {
+                        override fun onConfigure(db: SupportSQLiteDatabase) {
+                            db.setForeignKeyConstraintsEnabled(true)
+                        }
+
+                        override fun onCreate(db: SupportSQLiteDatabase) {
+                            error("version 20 fixture must already exist")
+                        }
+
+                        override fun onUpgrade(
+                            db: SupportSQLiteDatabase,
+                            oldVersion: Int,
+                            newVersion: Int,
+                        ) = error("unexpected upgrade $oldVersion -> $newVersion")
+                    },
+                )
+                .build(),
+        )
+        val db = helper.writableDatabase
+        db.execSQL(
+            """
+            INSERT INTO chat_execution_entries (
+                id, conversationId, userMessageId, assistantMessageId, targetAssistantMessageId,
+                sequence, type, status, providerId, model, reasoningEffort, requestContextJson,
+                errorMessage, createdAt, updatedAt, phase, automaticRetryCount, interruptionReason
+            ) VALUES (
+                'entry-queue', 'daily-conversation', 'daily-message', NULL, NULL,
+                1, 'NORMAL', 'QUEUED', 'provider-1', 'model-1', 'HIGH', '{}',
+                NULL, 2, 2, NULL, 0, NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO wikis (id, title, description, activeVersion, createdAt, updatedAt)
+            VALUES ('wiki-v20', '迁移知识库', '', 1, 1, 1)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO wiki_versions (
+                wikiId, version, contentPath, schemaVersion, contentHash, packageHash,
+                publisherKeyId, publisherFingerprint, manifestJson, sizeBytes,
+                enabledForNewConversations, state, installedAt, invalidReason
+            ) VALUES (
+                'wiki-v20', 1, '/tmp/wiki-v20', 1, '${"e".repeat(64)}', '${"f".repeat(64)}',
+                'key', 'fingerprint', '{}', 10, 1, 'READY', 1, NULL
+            )
+            """.trimIndent(),
+        )
         helper.close()
     }
 

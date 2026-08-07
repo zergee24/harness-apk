@@ -13,6 +13,8 @@ import java.util.zip.ZipOutputStream
 class FileProjectRepository(
     rootDirectory: File,
     private val timeProvider: TimeProvider,
+    private val onProjectUpsert: suspend (Project) -> Unit = {},
+    private val onProjectDelete: suspend (String) -> Unit = {},
 ) {
     private val projectsRoot = rootDirectory.resolve("projects")
 
@@ -43,12 +45,14 @@ class FileProjectRepository(
             """.trimIndent() + "\n",
         )
 
-        return Project(
+        val created = Project(
             id = projectId,
             name = trimmedName,
             rootDirectory = root,
             updatedAt = timeProvider.nowMillis(),
         )
+        runCatching { onProjectUpsert(created) }
+        return created
     }
 
     suspend fun createProjectFromPreparedDirectory(
@@ -66,7 +70,9 @@ class FileProjectRepository(
             writeLocalProjectName(root, trimmedName)
             excludeLocalHarnessMetadata(root)
             root.setLastModified(timeProvider.nowMillis())
-            return projectFromDirectory(root)
+            val created = projectFromDirectory(root)
+            runCatching { onProjectUpsert(created) }
+            return created
         } catch (error: Throwable) {
             root.deleteRecursively()
             throw error
@@ -89,7 +95,9 @@ class FileProjectRepository(
         writeLocalProjectName(project, trimmedName)
         excludeLocalHarnessMetadata(project)
         project.setLastModified(timeProvider.nowMillis())
-        return projectFromDirectory(project)
+        val renamed = projectFromDirectory(project)
+        runCatching { onProjectUpsert(renamed) }
+        return renamed
     }
 
     suspend fun deleteProject(projectId: String) {
@@ -97,6 +105,7 @@ class FileProjectRepository(
         if (!project.deleteRecursively()) {
             throw ProjectWorkspaceException("删除项目失败：$projectId")
         }
+        runCatching { onProjectDelete(projectId) }
     }
 
     suspend fun importFile(projectId: String, displayName: String, source: File): String {

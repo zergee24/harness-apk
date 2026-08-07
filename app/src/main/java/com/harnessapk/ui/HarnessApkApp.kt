@@ -70,6 +70,7 @@ import com.harnessapk.ui.project.ProjectScreen
 import com.harnessapk.ui.project.ProjectWorkbenchTarget
 import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
+import com.harnessapk.ui.search.GlobalSearchScreen
 import com.harnessapk.ui.settings.SettingsScreen
 import com.harnessapk.ui.skills.SkillsScreen
 import com.harnessapk.ui.theme.HarnessSpacing
@@ -96,6 +97,7 @@ object Routes {
     const val Conversations = "conversations"
     const val Providers = "providers"
     const val Search = "search"
+    const val GlobalSearch = "global-search"
     const val Voice = "voice"
     const val Git = "git"
     const val Skills = "skills"
@@ -264,6 +266,7 @@ fun HarnessApkApp(
     val title = when (route) {
         Routes.Providers -> "模型配置"
         Routes.Search -> "搜索能力"
+        Routes.GlobalSearch -> "全局搜索"
         Routes.Voice -> "语音能力"
         Routes.Git -> "Git / Gitee"
         Routes.Skills -> "技能 / 插件"
@@ -459,6 +462,7 @@ fun HarnessApkApp(
                         onCreateConversation = onCreateConversation,
                         onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
                         onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
+                        onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                     )
                     MainMode.WORK -> Column(
                         modifier = Modifier
@@ -505,6 +509,7 @@ fun HarnessApkApp(
                             onOpenSession = { conversationId ->
                                 navController.navigate(Routes.chat(conversationId = conversationId))
                             },
+                            onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -756,6 +761,26 @@ fun HarnessApkApp(
             }
             composable(Routes.RemoteControl) {
                 RemoteScreen(container = container, contentPadding = padding)
+            }
+            composable(Routes.GlobalSearch) {
+                GlobalSearchScreen(
+                    container = container,
+                    contentPadding = padding,
+                    onOpenMessage = { conversationId, messageId ->
+                        navController.navigate(
+                            Routes.chat(
+                                conversationId = conversationId,
+                                sourceMessageId = messageId,
+                            ),
+                        )
+                    },
+                    onOpenConversation = { conversationId ->
+                        navController.navigate(Routes.chat(conversationId))
+                    },
+                    onOpenProject = { projectId ->
+                        openWorkbench(projectId, ProjectWorkbenchDestination.CONVERSATIONS)
+                    },
+                )
             }
         }
     }

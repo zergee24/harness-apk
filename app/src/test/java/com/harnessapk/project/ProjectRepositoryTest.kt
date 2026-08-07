@@ -52,6 +52,22 @@ class ProjectRepositoryTest {
     }
 
     @Test
+    fun searchIndexFailureDoesNotFailCompletedProjectMutation() = runTest {
+        val repository = FileProjectRepository(
+            rootDirectory = temporaryFolder.root,
+            timeProvider = TimeProvider { 100L },
+            onProjectUpsert = { error("search unavailable") },
+            onProjectDelete = { error("search unavailable") },
+        )
+
+        val project = repository.createProject("索引降级")
+        assertTrue(project.rootDirectory.isDirectory)
+
+        repository.deleteProject(project.id)
+        assertFalse(project.rootDirectory.exists())
+    }
+
+    @Test
     fun boundedProjectContextReadRejectsOversizedFilesWithoutReturningPartialFacts() = runTest {
         val repository = FileProjectRepository(
             rootDirectory = temporaryFolder.root,

@@ -57,6 +57,7 @@ import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderCapabilityCatalogClient
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.security.ApiKeyCipher
+import com.harnessapk.search.LocalSearchRepository
 import com.harnessapk.session.PromptOptimizerUseCase
 import com.harnessapk.session.MarkdownNotebookRepository
 import com.harnessapk.session.WikiMarkdownContextRepository
@@ -82,6 +83,7 @@ import com.harnessapk.updater.UpdateDownloadCoordinator
 import com.harnessapk.websearch.JinaWebSearchClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -124,7 +126,8 @@ class AppContainer(
         AppDatabase.MIGRATION_17_18,
         AppDatabase.MIGRATION_18_19,
         AppDatabase.MIGRATION_19_20,
-    ).build()
+        AppDatabase.MIGRATION_20_21,
+    ).addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
     val gitCredentialStore = GitCredentialStore(appContext, apiKeyCipher)
@@ -262,10 +265,16 @@ class AppContainer(
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
     val queuedAttachmentStore = QueuedAttachmentStore(appContext)
     val conversationDraftStore = ConversationDraftStore(appContext, json)
+    val localSearchRepository = LocalSearchRepository(database.localSearchDao(), dispatchers)
     val projectRepository = FileProjectRepository(
         rootDirectory = appContext.filesDir,
         timeProvider = SystemTimeProvider,
+        onProjectUpsert = localSearchRepository::upsertProject,
+        onProjectDelete = localSearchRepository::deleteProject,
     )
+    private val localSearchWarmup = applicationScope.launch {
+        localSearchRepository.rebuildTokens(projectRepository.listProjects())
+    }
     val captureDraftRepository = CaptureDraftRepository(appContext)
     val captureStagingStore = CaptureStagingStore(appContext)
     val captureImportCoordinator = CaptureImportCoordinator(
