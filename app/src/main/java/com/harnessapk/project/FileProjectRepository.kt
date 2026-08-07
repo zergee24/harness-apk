@@ -99,6 +99,29 @@ class FileProjectRepository(
         }
     }
 
+    suspend fun importFile(projectId: String, displayName: String, source: File): String {
+        require(source.isFile) { "导入文件不存在" }
+        val files = projectDirectory(projectId).resolve("files").apply { mkdirs() }
+        val safeName = File(displayName).name
+            .replace(Regex("[\\/:*?\"<>|]"), "_")
+            .trim('.', ' ')
+            .take(160)
+            .ifBlank { "shared-file" }
+        val destination = uniqueImportedFile(files, safeName)
+        val temporary = files.resolve(".${destination.name}.${UUID.randomUUID()}.tmp")
+        try {
+            source.inputStream().buffered().use { input ->
+                temporary.outputStream().buffered().use(input::copyTo)
+            }
+            check(temporary.renameTo(destination)) { "导入项目文件失败" }
+            projectDirectory(projectId).setLastModified(timeProvider.nowMillis())
+            return "files/${destination.name}"
+        } catch (error: Throwable) {
+            temporary.delete()
+            throw error
+        }
+    }
+
     suspend fun readProjectContext(projectId: String): String {
         val project = projectDirectory(projectId)
         return projectContextFile(project)?.readText().orEmpty()
@@ -437,6 +460,19 @@ class FileProjectRepository(
         var counter = 2
         while (checkedProjectFile(project, candidate).exists()) {
             candidate = "$basePath-$counter.pdf"
+            counter += 1
+        }
+        return candidate
+    }
+
+    private fun uniqueImportedFile(directory: File, requestedName: String): File {
+        val requested = File(requestedName)
+        val extension = requested.extension.takeIf(String::isNotBlank)?.let { ".$it" }.orEmpty()
+        val baseName = requested.nameWithoutExtension.ifBlank { "shared-file" }
+        var candidate = directory.resolve(baseName + extension)
+        var counter = 2
+        while (candidate.exists()) {
+            candidate = directory.resolve("$baseName-$counter$extension")
             counter += 1
         }
         return candidate

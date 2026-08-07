@@ -44,6 +44,9 @@ import com.harnessapk.chat.SendMessageUseCase
 import com.harnessapk.chat.WikiSourcePartWriter
 import com.harnessapk.chat.assembleAgentContextForConversation
 import com.harnessapk.chat.webSearchAllowedForAgentConversation
+import com.harnessapk.capture.CaptureDraftRepository
+import com.harnessapk.capture.CaptureImportCoordinator
+import com.harnessapk.capture.CaptureStagingStore
 import com.harnessapk.git.GitCredentialStore
 import com.harnessapk.git.JGitEngine
 import com.harnessapk.network.OpenAiCompatibleClient
@@ -258,9 +261,20 @@ class AppContainer(
     val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
     val queuedAttachmentStore = QueuedAttachmentStore(appContext)
+    val conversationDraftStore = ConversationDraftStore(appContext, json)
     val projectRepository = FileProjectRepository(
         rootDirectory = appContext.filesDir,
         timeProvider = SystemTimeProvider,
+    )
+    val captureDraftRepository = CaptureDraftRepository(appContext)
+    val captureStagingStore = CaptureStagingStore(appContext)
+    val captureImportCoordinator = CaptureImportCoordinator(
+        repository = captureDraftRepository,
+        stagingStore = captureStagingStore,
+        chatImageStore = chatImageStore,
+        conversationDraftStore = conversationDraftStore,
+        projectRepository = projectRepository,
+        dispatchers = dispatchers,
     )
     private val agentMemoryPolicy = AgentMemoryPolicy()
     val agentMemoryExtractionUseCase = AgentMemoryExtractionUseCase(
@@ -338,7 +352,6 @@ class AppContainer(
         wikiScopeSnapshotProvider = conversationWikiRepository::snapshotEnabled,
     )
     val chatSendRecoveryStore = ChatSendRecoveryStore()
-    val conversationDraftStore = ConversationDraftStore(appContext, json)
     val chatExecutionCoordinator = ChatExecutionCoordinator(
         executionRepository = chatExecutionRepository,
         sendMessageUseCase = sendMessageUseCase,

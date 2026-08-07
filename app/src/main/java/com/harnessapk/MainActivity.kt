@@ -13,6 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import com.harnessapk.chat.ChatExecutionService
+import com.harnessapk.capture.toIncomingShareRequest
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
 import com.harnessapk.agent.externalAgentBundleUri
 import com.harnessapk.ui.HarnessApkApp
@@ -62,16 +63,39 @@ class MainActivity : ComponentActivity() {
         incomingAgentBundleUri = null
         incomingWikiPackageUri = null
         val packageUri = intent.wikiPackageUri()
-        when {
-            intent.type == H_WIKI_MIME_TYPE && packageUri != null -> acceptWikiPackage(intent, packageUri)
-            intent.type == H_BUNDLE_MIME_TYPE -> incomingAgentBundleUri = intent.agentBundleUri()
+        val packageHandled = when {
+            intent.type == H_WIKI_MIME_TYPE && packageUri != null -> {
+                acceptWikiPackage(intent, packageUri)
+                true
+            }
+            intent.type == H_BUNDLE_MIME_TYPE -> {
+                incomingAgentBundleUri = intent.agentBundleUri()
+                true
+            }
             intent.action == Intent.ACTION_SEND &&
                 isGenericWikiPackageMimeType(intent.type) &&
                 packageUri != null -> {
-                if (contentResolver.displayName(packageUri).isHwikiFileName()) {
-                    acceptWikiPackage(intent, packageUri)
-                } else {
-                    incomingAgentBundleUri = intent.agentBundleUri()
+                when {
+                    contentResolver.displayName(packageUri).isHwikiFileName() -> {
+                        acceptWikiPackage(intent, packageUri)
+                        true
+                    }
+                    contentResolver.displayName(packageUri).isHbundleFileName() -> {
+                        incomingAgentBundleUri = intent.agentBundleUri()
+                        true
+                    }
+                    else -> false
+                }
+            }
+            else -> false
+        }
+        if (!packageHandled) {
+            intent.toIncomingShareRequest(contentResolver)?.let { request ->
+                setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
+                lifecycleScope.launch {
+                    runCatching {
+                        (application as HarnessApkApplication).container.captureImportCoordinator.stage(request)
+                    }
                 }
             }
         }
@@ -100,3 +124,5 @@ private fun ContentResolver.displayName(uri: Uri): String? = runCatching {
 }.getOrNull() ?: uri.lastPathSegment
 
 private fun String?.isHwikiFileName(): Boolean = this?.endsWith(".hwiki", ignoreCase = true) == true
+
+private fun String?.isHbundleFileName(): Boolean = this?.endsWith(".hbundle", ignoreCase = true) == true

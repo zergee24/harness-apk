@@ -18,6 +18,21 @@ class ProjectRepositoryTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun sharedFilesImportOnlyUnderProjectFilesWithStableCollisionNames() = runTest {
+        val repository = FileProjectRepository(temporaryFolder.root, TimeProvider { 100L })
+        val project = repository.createProject("分享文件")
+        val source = temporaryFolder.newFile("source.pdf").apply { writeText("pdf bytes") }
+
+        val first = repository.importFile(project.id, "../report.pdf", source)
+        val second = repository.importFile(project.id, "report.pdf", source)
+
+        assertEquals("files/report.pdf", first)
+        assertEquals("files/report-2.pdf", second)
+        assertEquals("pdf bytes", project.rootDirectory.resolve(first).readText())
+        assertFalse(requireNotNull(project.rootDirectory.parentFile).resolve("report.pdf").exists())
+    }
+
+    @Test
     fun createProjectCreatesMarkdownWorkspace() = runTest {
         val repository = FileProjectRepository(
             rootDirectory = temporaryFolder.root,

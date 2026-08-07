@@ -57,6 +57,9 @@ import androidx.navigation.navArgument
 import com.harnessapk.HarnessApkApplication
 import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.chat.Conversation
+import com.harnessapk.project.Project
+import com.harnessapk.ui.capture.CaptureDestinationSheet
+import com.harnessapk.ui.capture.CaptureTransferOverlay
 import com.harnessapk.ui.agent.AgentPackagesScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.chat.ConversationWikiTopBarAction
@@ -188,10 +191,23 @@ fun HarnessApkApp(
         }
     }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
+    val captureDraft by container.captureDraftRepository.activeDraft.collectAsState()
+    val captureTransferState by container.captureImportCoordinator.transferState.collectAsState()
+    var captureProjects by remember { mutableStateOf<List<Project>>(emptyList()) }
+    var captureActionBusy by remember { mutableStateOf(false) }
+    var captureActionError by remember { mutableStateOf<String?>(null) }
     val remoteProfile by container.remoteProfileStore.profile.collectAsState()
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
+
+    LaunchedEffect(captureDraft?.id) {
+        if (captureDraft != null) {
+            captureProjects = withContext(container.dispatchers.io) {
+                container.projectRepository.listProjects()
+            }
+        }
+    }
 
     fun dispatchAgentPackageImport(event: AgentPackageImportEvent) {
         val transition = reduceAgentPackageImport(
@@ -309,6 +325,45 @@ fun HarnessApkApp(
         themeSourceMode = MainMode.WORK
         mainMode = MainMode.WORK
         navController.popBackStack(Routes.Conversations, inclusive = false)
+    }
+    fun deliverCaptureToConversation(draftId: String, conversationId: String, projectId: String? = null) {
+        scope.launch {
+            captureActionBusy = true
+            captureActionError = null
+            runCatching {
+                container.captureImportCoordinator.deliverToConversation(draftId, conversationId)
+            }.onSuccess {
+                navController.navigate(
+                    Routes.chat(conversationId = conversationId, projectId = projectId, focusInput = true),
+                )
+            }.onFailure { error ->
+                captureActionError = error.message ?: "分享内容写入会话失败"
+            }
+            captureActionBusy = false
+        }
+    }
+    fun createCaptureConversation(draftId: String, project: Project?) {
+        scope.launch {
+            captureActionBusy = true
+            captureActionError = null
+            runCatching {
+                val request = project?.let { projectConversationRequest(it.id, it.name) } ?: homeConversationRequest()
+                val conversationId = container.newConversationUseCase.create(request)
+                container.captureImportCoordinator.deliverToConversation(draftId, conversationId)
+                conversationId
+            }.onSuccess { conversationId ->
+                navController.navigate(
+                    Routes.chat(
+                        conversationId = conversationId,
+                        projectId = project?.id,
+                        focusInput = true,
+                    ),
+                )
+            }.onFailure { error ->
+                captureActionError = error.message ?: "创建分享会话失败"
+            }
+            captureActionBusy = false
+        }
     }
     val effectiveThemeMode = resolveThemeMode(mainMode, themeSourceMode)
     ModeTheme(effectiveThemeMode) {
@@ -694,6 +749,41 @@ fun HarnessApkApp(
                 RemoteScreen(container = container, contentPadding = padding)
             }
         }
+    }
+    CaptureTransferOverlay(
+        state = captureTransferState,
+        onDismissError = container.captureImportCoordinator::clearTransferError,
+    )
+    captureDraft?.let { draft ->
+        CaptureDestinationSheet(
+            draft = draft,
+            conversations = conversations,
+            projects = captureProjects,
+            busy = captureActionBusy,
+            errorMessage = captureActionError,
+            onConversation = { conversationId ->
+                deliverCaptureToConversation(draft.id, conversationId)
+            },
+            onProjectConversation = { project -> createCaptureConversation(draft.id, project) },
+            onImportToProject = { projectId ->
+                scope.launch {
+                    captureActionBusy = true
+                    captureActionError = null
+                    runCatching {
+                        container.captureImportCoordinator.importFilesToProject(draft.id, projectId)
+                    }.onSuccess { paths ->
+                        openWorkbench(projectId, ProjectWorkbenchDestination.FILES, paths.firstOrNull())
+                    }.onFailure { error ->
+                        captureActionError = error.message ?: "导入项目文件失败"
+                    }
+                    captureActionBusy = false
+                }
+            },
+            onNewConversation = { createCaptureConversation(draft.id, null) },
+            onDiscard = {
+                scope.launch { container.captureImportCoordinator.discard(draft.id) }
+            },
+        )
     }
     }
 }
