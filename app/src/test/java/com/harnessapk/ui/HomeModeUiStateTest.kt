@@ -47,13 +47,6 @@ class HomeModeUiStateTest {
     }
 
     @Test
-    fun homePrimaryActionMatchesCurrentMode() {
-        assertEquals(HomePrimaryAction.CREATE_CONVERSATION, homePrimaryAction(MainMode.LIFE))
-        assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.WORK))
-        assertEquals(HomePrimaryAction.NONE, homePrimaryAction(MainMode.ME))
-    }
-
-    @Test
     fun meModeInheritsLastBusinessTheme() {
         assertEquals(MainMode.LIFE, resolveThemeMode(MainMode.ME, MainMode.LIFE))
         assertEquals(MainMode.WORK, resolveThemeMode(MainMode.ME, MainMode.WORK))

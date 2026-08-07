@@ -1,7 +1,6 @@
 package com.harnessapk.ui
 
 import android.net.Uri
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,12 +11,10 @@ import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
@@ -27,7 +24,6 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -319,11 +315,7 @@ fun HarnessApkApp(
         modifier = Modifier.testTag("theme-${effectiveThemeMode.name}"),
         topBar = {
             if (isHomeRoute) {
-                HomeTopBar(
-                    primaryAction = homePrimaryAction(mainMode),
-                    showUpdateBadge = showUpdateBadge,
-                    onCreateConversation = onCreateConversation,
-                )
+                HomeStatusBarInset()
             } else {
                 TopAppBar(
                     title = { Text(title) },
@@ -721,49 +713,8 @@ internal fun chatTopBarTitle(
     ?: "对话"
 
 @Composable
-private fun HomeTopBar(
-    primaryAction: HomePrimaryAction,
-    showUpdateBadge: Boolean,
-    onCreateConversation: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .height(64.dp)
-            .padding(horizontal = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        HomeTopBarActions(
-            primaryAction = primaryAction,
-            showUpdateBadge = showUpdateBadge,
-            onCreateConversation = onCreateConversation,
-        )
-    }
-}
-
-@Composable
-private fun HomeTopBarActions(
-    primaryAction: HomePrimaryAction,
-    showUpdateBadge: Boolean,
-    onCreateConversation: () -> Unit,
-) {
-    if (primaryAction != HomePrimaryAction.NONE) {
-        Box {
-            FilledIconButton(onClick = onCreateConversation) {
-                Icon(Icons.Filled.Add, contentDescription = "新建对话")
-            }
-            if (showUpdateBadge) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .size(9.dp)
-                        .background(MaterialTheme.colorScheme.error, CircleShape),
-                )
-            }
-        }
-    }
+private fun HomeStatusBarInset() {
+    Box(modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars))
 }
 
 @Composable

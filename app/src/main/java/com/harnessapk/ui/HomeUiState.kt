@@ -43,17 +43,6 @@ internal fun homeModeIcon(mode: MainMode): ImageVector = when (mode) {
     MainMode.ME -> Icons.Outlined.Person
 }
 
-enum class HomePrimaryAction {
-    CREATE_CONVERSATION,
-    NONE,
-}
-
-internal fun homePrimaryAction(mode: MainMode): HomePrimaryAction = when (mode) {
-    MainMode.LIFE -> HomePrimaryAction.CREATE_CONVERSATION
-    MainMode.WORK -> HomePrimaryAction.NONE
-    MainMode.ME -> HomePrimaryAction.NONE
-}
-
 internal fun shouldShowUpdateBadge(result: UpdateCheckResult?): Boolean =
     result?.updateAvailable == true || result?.forceUpdate == true
 

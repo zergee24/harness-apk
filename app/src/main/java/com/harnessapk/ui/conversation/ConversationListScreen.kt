@@ -6,14 +6,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MoreVert
@@ -22,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.Conversation
 import com.harnessapk.agent.Agent
@@ -121,6 +126,7 @@ fun ConversationListScreen(
             QuickEntryRow(
                 onOpenAgentPackages = onOpenAgentPackages,
                 onOpenWikiLibrary = onOpenWikiLibrary,
+                onCreateConversation = onCreateConversation,
             )
         }
         if (visibleConversations.isEmpty()) {
@@ -218,8 +224,13 @@ private fun ConversationRow(
 private fun QuickEntryRow(
     onOpenAgentPackages: () -> Unit,
     onOpenWikiLibrary: () -> Unit,
+    onCreateConversation: () -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         AssistChip(
             onClick = onOpenAgentPackages,
             label = { Text("智能体") },
@@ -230,6 +241,13 @@ private fun QuickEntryRow(
             label = { Text("知识库") },
             leadingIcon = { Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null) },
         )
+        Spacer(modifier = Modifier.weight(1f))
+        FilledIconButton(
+            modifier = Modifier.size(48.dp),
+            onClick = onCreateConversation,
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = "新建对话")
+        }
     }
 }
 

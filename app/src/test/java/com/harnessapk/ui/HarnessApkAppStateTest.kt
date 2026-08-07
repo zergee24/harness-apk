@@ -67,14 +67,14 @@ class HarnessApkAppStateTest {
     }
 
     @Test
-    fun homeTopBarKeepsNewConversationActionWithoutModeSwitcherOrSettings() {
+    fun homeTopBarOnlyReservesTheStatusBarInset() {
         val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText().replace("\r\n", "\n")
         val topBarSource = source.substringAfter("topBar = {").substringBefore("},\n    ) { padding")
 
         assertTrue(topBarSource.contains("if (isHomeRoute)"))
-        assertTrue(topBarSource.contains("HomeTopBar("))
-        assertTrue(source.contains("private fun HomeTopBar("))
-        assertTrue(source.contains("contentDescription = \"新建对话\""))
+        assertTrue(topBarSource.contains("HomeStatusBarInset()"))
+        assertTrue(source.contains("private fun HomeStatusBarInset()"))
+        assertFalse(source.contains("private fun HomeTopBar("))
         assertFalse(source.contains("ModeSwitcher("))
         assertFalse(source.contains("onOpenSettings"))
         assertFalse(source.contains("WarmSegmentedControl("))
