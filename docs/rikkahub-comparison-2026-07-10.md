@@ -1,6 +1,6 @@
 # Harness APK test 版与 RikkaHub 对比
 
-> **状态（2026-08-04）：本文"做窄、守项目文件闭环、Git 可见"的核心结论仍有效，并被 `docs/product-plan.md` v4 采纳；其中与 v3 计划相冲突的排序（如旧 P1/P2 划分）已被 v4 取代。阅读路线图请以 `product-plan.md` v4 为准。**
+> **状态（2026-08-07）：本文仅保留为 2026-07-10 的单产品快照。50 产品对标见 `docs/agent-harness-top50-benchmark-2026-08-07.md`，当前路线图以 `docs/product-plan.md` v5 为准。**
 
 ## 版本口径
 

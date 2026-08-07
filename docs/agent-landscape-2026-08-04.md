@@ -1,6 +1,6 @@
 # Agent 生态与豆包能力观察（2026-08-04）
 
-> **状态（2026-08-04）：本文的"做窄、守项目闭环"结论已被 `docs/product-plan.md` v4 采纳并取代；其对外部生态的观察仍作为历史背景保留。阅读路线图请以 `product-plan.md` v4 为准。**
+> **状态（2026-08-07）：本文仅保留为 2026-08-04 的趋势快照。50 产品对标已由 `docs/agent-harness-top50-benchmark-2026-08-07.md` 取代，当前路线图以 `docs/product-plan.md` v5 为准。**
 
 > 本文为产品路线图 grilling 前的背景材料，定位类似 `rikkahub-comparison-2026-07-10.md`：把外部生态信号收敛成"对 Harness APK 的启示"，不直接修改路线图。路线图修订在后续 grilling 中逐项决策。
 >
