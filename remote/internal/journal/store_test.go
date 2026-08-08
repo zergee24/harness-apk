@@ -88,6 +88,56 @@ func TestCompactionRecordsGapBeforeDroppingUnackedEvent(t *testing.T) {
 	}
 }
 
+func TestResumeAfterOriginalWireTTLReenvelopesPendingLogicalEvent(t *testing.T) {
+	key := bytes.Repeat([]byte{0x51}, 32)
+	secret := bytes.Repeat([]byte{0x52}, 32)
+	store, err := Open(filepath.Join(t.TempDir(), "journal.log"), key, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := protocol.LogicalEvent{
+		SchemaVersion: 1, EventID: "event-old", HostID: "host-1", DeviceID: "device-1",
+		RunID: "run-1", Sequence: 1, Type: "run.completed",
+		CreatedAt: time.Now().Add(-10 * time.Minute).UnixMilli(),
+	}
+	if err := store.Append(event); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := store.Replay(event.EventID, secret, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wire.ExpiresAt <= time.Now().UnixMilli() || wire.Sequence != 99 {
+		t.Fatalf("replayed wire did not get a fresh envelope: %#v", wire)
+	}
+	var decoded protocol.LogicalEvent
+	if err := protocol.Decrypt(secret, wire, &decoded); err != nil || decoded.EventID != event.EventID {
+		t.Fatalf("decoded=%#v err=%v", decoded, err)
+	}
+}
+
+func TestGapRequiresSnapshotOnlyWhenCursorIsBehindDroppedRange(t *testing.T) {
+	store, _ := Open(filepath.Join(t.TempDir(), "journal.log"), bytes.Repeat([]byte{0x53}, 32), 2)
+	for sequence := uint64(1); sequence <= 3; sequence++ {
+		_ = store.Append(protocol.LogicalEvent{
+			SchemaVersion: 1, EventID: protocolID(sequence), HostID: "host-1", DeviceID: "device-1",
+			RunID: "run-1", Sequence: sequence, Type: "run.running", CreatedAt: int64(sequence),
+		})
+	}
+	if err := store.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	if !store.RequiresSnapshot("host-1", "device-1", 0) {
+		t.Fatal("cursor behind dropped event did not require snapshot")
+	}
+	if store.RequiresSnapshot("host-1", "device-1", 1) {
+		t.Fatal("cursor already through dropped event unnecessarily required snapshot")
+	}
+	if store.RequiresSnapshot("host-1", "device-1", 3) {
+		t.Fatal("cursor ahead of dropped event unnecessarily required snapshot")
+	}
+}
+
 func protocolID(sequence uint64) string {
 	return "event-" + time.Unix(int64(sequence), 0).UTC().Format("150405")
 }

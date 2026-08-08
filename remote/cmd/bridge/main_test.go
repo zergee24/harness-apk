@@ -63,3 +63,14 @@ func TestUnownedEventIsNotBroadcast(t *testing.T) {
 		t.Fatalf("targets = %#v", got)
 	}
 }
+
+func TestSnapshotStatusMapsAuthoritativeTurnState(t *testing.T) {
+	completed, line := snapshotStatus(json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"completed"}}]}}`), "turn-1")
+	if completed != "COMPLETED" || line != "任务已完成" {
+		t.Fatalf("completed=%q line=%q", completed, line)
+	}
+	running, _ := snapshotStatus(json.RawMessage(`{"thread":{"turns":[{"id":"turn-2","status":{"type":"inProgress"}}]}}`), "turn-2")
+	if running != "RUNNING" {
+		t.Fatalf("running=%q", running)
+	}
+}

@@ -30,7 +30,7 @@ class RemoteRepository(
     private val profileStore: RemoteProfileProvider,
     private val httpClient: OkHttpClient,
     private val scope: CoroutineScope,
-) : RemoteCommandSender {
+) : RemoteCommandSender, RemoteSyncSender {
     private val _state = MutableStateFlow(RemoteUiState())
     val state: StateFlow<RemoteUiState> = _state.asStateFlow()
     private val _notifications = MutableSharedFlow<RemoteNotification>(extraBufferCapacity = 8)
@@ -42,6 +42,18 @@ class RemoteRepository(
     private var explicitDisconnect = false
     private var reconnectAttempt = 0
     private val pendingCommands = mutableMapOf<String, String>()
+    @Volatile
+    private var syncCoordinator: RemoteSyncCoordinator? = null
+    @Volatile
+    private var connectedHandler: (suspend (hostId: String, deviceId: String) -> Unit)? = null
+
+    fun attachSyncCoordinator(coordinator: RemoteSyncCoordinator) {
+        syncCoordinator = coordinator
+    }
+
+    fun attachConnectedHandler(handler: suspend (hostId: String, deviceId: String) -> Unit) {
+        connectedHandler = handler
+    }
 
     fun connect() {
         val profile = profileStore.profile.value ?: return
@@ -108,6 +120,9 @@ class RemoteRepository(
     override fun send(command: RebuiltRemoteCommand): Boolean =
         sendPayload(command.commandId, command.payload)
 
+    override fun send(command: JsonObject): Boolean =
+        sendPayload(command.string("requestId") ?: "sync:${UUID.randomUUID()}", command)
+
     private fun sendPayload(requestId: String, payload: JsonObject): Boolean {
         val profile = profileStore.profile.value
         if (profile == null) {
@@ -154,6 +169,13 @@ class RemoteRepository(
             _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED, errorMessage = null)
             send(RemoteCommand(type = "host.status", requestId = requestId("host.status")))
             refreshThreads()
+            val profile = profileStore.profile.value
+            if (profile != null) {
+                scope.launch {
+                    syncCoordinator?.resume(profile.hostId, profile.deviceId)
+                    connectedHandler?.invoke(profile.hostId, profile.deviceId)
+                }
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -201,8 +223,16 @@ class RemoteRepository(
         }
         sendAck(wire.messageId)
         if (!firstSeen) return
-        val event = parseRemoteEvent(RemoteCrypto.decrypt(profile.pairingSecret, wire))
-        handleEvent(event)
+        val plain = RemoteCrypto.decrypt(profile.pairingSecret, wire)
+        val root = Json.parseToJsonElement(plain).jsonObject
+        if (root["schemaVersion"] != null && root["eventId"] != null) {
+            val event = parseRemoteLogicalEvent(plain)
+            syncCoordinator?.let { coordinator ->
+                scope.launch { coordinator.onLogicalEvent(event) }
+            }
+        } else {
+            handleEvent(parseRemoteEvent(plain))
+        }
     }
 
     internal fun handleEvent(event: RemoteEvent) {
@@ -218,6 +248,16 @@ class RemoteRepository(
                 workspaceCandidates = parseWorkspaceCandidates(event),
                 workspaceCandidatesLoaded = true,
             )
+            "sync.gap" -> {
+                val hostId = profileStore.profile.value?.hostId ?: return
+                syncCoordinator?.let { coordinator -> scope.launch { coordinator.onGap(hostId) } }
+            }
+            "sync.snapshot" -> {
+                val payload = event.payload as? JsonObject ?: return
+                syncCoordinator?.let { coordinator ->
+                    scope.launch { coordinator.onSnapshot(parseRemoteRunSnapshot(payload)) }
+                }
+            }
             "approval.request" -> handleApproval(event)
             "codex.event" -> handleCodexEvent(event)
         }

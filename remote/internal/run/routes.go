@@ -135,6 +135,34 @@ func (s *RouteStore) ByThread(threadID string) (Route, bool) {
 	return Route{}, false
 }
 
+func (s *RouteStore) ByRuns(runIDs []string) []Route {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]Route, 0, len(runIDs))
+	for _, runID := range runIDs {
+		if route := s.data.Routes[runID]; route != nil {
+			result = append(result, *route)
+		}
+	}
+	return result
+}
+
+func (s *RouteStore) ApprovalsForRuns(runIDs []string) []Approval {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wanted := make(map[string]struct{}, len(runIDs))
+	for _, runID := range runIDs {
+		wanted[runID] = struct{}{}
+	}
+	result := make([]Approval, 0)
+	for _, approval := range s.data.Approvals {
+		if _, ok := wanted[approval.RunID]; ok {
+			result = append(result, cloneApproval(*approval))
+		}
+	}
+	return result
+}
+
 func (s *RouteStore) PutApproval(approval Approval) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

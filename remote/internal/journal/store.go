@@ -161,6 +161,37 @@ func (s *Store) Pending(hostID, deviceID string) []protocol.LogicalEvent {
 	return result
 }
 
+func (s *Store) Head(hostID, deviceID string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := streamKey{hostID, deviceID}
+	head := s.ackedThrough[key]
+	for _, id := range s.streams[key] {
+		if sequence := s.events[id].Sequence; sequence > head {
+			head = sequence
+		}
+	}
+	return head
+}
+
+func (s *Store) RequiresSnapshot(hostID, deviceID string, after uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := streamKey{hostID, deviceID}
+	gapFrom, hasGap := s.gaps[key]
+	if !hasGap || after >= gapFrom {
+		return false
+	}
+	firstAvailable := uint64(0)
+	for _, id := range s.streams[key] {
+		sequence := s.events[id].Sequence
+		if sequence > after && (firstAvailable == 0 || sequence < firstAvailable) {
+			firstAvailable = sequence
+		}
+	}
+	return firstAvailable == 0 || firstAvailable > after+1
+}
+
 func (s *Store) GapFrom(hostID, deviceID string) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

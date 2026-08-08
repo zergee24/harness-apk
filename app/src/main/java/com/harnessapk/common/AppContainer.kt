@@ -96,6 +96,9 @@ import com.harnessapk.remote.RemoteCommandOutbox
 import com.harnessapk.remote.RemoteRunLauncher
 import com.harnessapk.remote.RemoteTransport
 import com.harnessapk.remote.RoomRemoteCommandStore
+import com.harnessapk.remote.RemoteEventReducer
+import com.harnessapk.remote.RemoteSyncCoordinator
+import com.harnessapk.remote.RoomRemoteSyncState
 import com.harnessapk.remote.RemoteProfileStore
 import com.harnessapk.remote.RemoteRepository
 import com.harnessapk.ui.HomeModeStore
@@ -160,6 +163,15 @@ class AppContainer(
     val remoteCommandOutbox = RemoteCommandOutbox(RoomRemoteCommandStore(database.remoteDao()))
     val remoteRunLauncher = RemoteRunLauncher(database, remoteCommandOutbox)
     val remoteTransport = RemoteTransport(remoteCommandOutbox, remoteRepository)
+    val remoteEventReducer = RemoteEventReducer(database)
+    val remoteSyncCoordinator = RemoteSyncCoordinator(
+        RoomRemoteSyncState(database, remoteEventReducer),
+        remoteRepository,
+    )
+    init {
+        remoteRepository.attachSyncCoordinator(remoteSyncCoordinator)
+        remoteRepository.attachConnectedHandler { _, _ -> remoteTransport.flush() }
+    }
     val gitEngine = JGitEngine()
     val providerRepository = ProviderRepository(
         dao = database.providerProfileDao(),

@@ -441,6 +441,10 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		return b.requestWorkspaceCandidates(ctx, deviceID, command)
 	case "run.start":
 		return b.startRun(ctx, deviceID, command)
+	case "sync.resume":
+		return b.resumeLogicalEvents(ctx, deviceID, command)
+	case "run.snapshot":
+		return b.sendRunSnapshot(ctx, deviceID, command.OpenRunIDs, command.RequestID)
 	case "thread.read":
 		return b.requestAppServer(ctx, deviceID, command, "thread/read", map[string]any{"threadId": command.ThreadID, "includeTurns": true})
 	case "thread.start":
@@ -611,6 +615,137 @@ func (b *bridge) emitLogicalEvent(
 	return eventID, err
 }
 
+func (b *bridge) resumeLogicalEvents(ctx context.Context, deviceID string, command protocol.Command) error {
+	if b.journal == nil {
+		return errors.New("logical journal is unavailable")
+	}
+	head := b.journal.Head(b.state.HostID, deviceID)
+	ackThrough := command.HighestContiguousSequence
+	if ackThrough > head {
+		ackThrough = head
+	}
+	if err := b.journal.Ack(b.state.HostID, deviceID, ackThrough); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	forceSnapshot := b.state.NeedsInitialGapSnapshot
+	b.mu.Unlock()
+	if forceSnapshot || command.HighestContiguousSequence > head || b.journal.RequiresSnapshot(b.state.HostID, deviceID, ackThrough) {
+		return b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "sync.gap", RequestID: command.RequestID,
+			Payload: mustJSON(map[string]any{
+				"journalHead": b.journal.Head(b.state.HostID, deviceID),
+				"openRunIds":  command.OpenRunIDs,
+			}),
+			CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}
+	for _, event := range b.journal.Pending(b.state.HostID, deviceID) {
+		if event.Sequence <= command.HighestContiguousSequence {
+			continue
+		}
+		if err := b.transmitJournaledEvent(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type runSnapshot struct {
+	RunID          string          `json:"runId"`
+	Status         string          `json:"status"`
+	ThreadID       string          `json:"threadId,omitempty"`
+	TurnID         string          `json:"turnId,omitempty"`
+	LatestLine     string          `json:"latestLine"`
+	CompletionJSON json.RawMessage `json:"completion,omitempty"`
+	ErrorMessage   string          `json:"errorMessage,omitempty"`
+}
+
+func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []string, requestID string) error {
+	routes := b.routes.ByRuns(runIDs)
+	runs := make([]runSnapshot, 0, len(routes))
+	for _, route := range routes {
+		snapshot := runSnapshot{
+			RunID: route.RunID, ThreadID: route.ThreadID, TurnID: route.TurnID,
+			Status: "RECONCILING", LatestLine: "正在与 Mac 对账",
+		}
+		if route.ThreadID != "" {
+			readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			result, err := b.app.client.Call(readCtx, "thread/read", map[string]any{
+				"threadId": route.ThreadID, "includeTurns": true,
+			})
+			cancel()
+			if err == nil {
+				snapshot.Status, snapshot.LatestLine = snapshotStatus(result, route.TurnID)
+			}
+		}
+		runs = append(runs, snapshot)
+	}
+	approvals := make([]map[string]any, 0)
+	for _, approval := range b.routes.ApprovalsForRuns(runIDs) {
+		approvals = append(approvals, map[string]any{
+			"approvalId": approval.ApprovalID, "runId": approval.RunID,
+			"processEpoch": approval.ProcessEpoch, "serverRequestId": approval.ServerRequestID,
+			"status": approval.Status,
+		})
+	}
+	payload := mustJSON(map[string]any{
+		"hostId": b.state.HostID, "deviceId": deviceID,
+		"journalHead":  b.journal.Head(b.state.HostID, deviceID),
+		"processEpoch": b.app.client.ProcessEpoch(),
+		"runs":         runs, "approvals": approvals,
+	})
+	if err := b.sendEvent(ctx, deviceID, protocol.Event{
+		Type: "sync.snapshot", RequestID: requestID, Payload: payload, CreatedAt: time.Now().UnixMilli(),
+	}, ""); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	b.state.NeedsInitialGapSnapshot = false
+	err := saveBridgeState(b.path, b.state)
+	b.mu.Unlock()
+	return err
+}
+
+func snapshotStatus(raw json.RawMessage, turnID string) (string, string) {
+	var result struct {
+		Thread struct {
+			Turns []struct {
+				ID     string          `json:"id"`
+				Status json.RawMessage `json:"status"`
+			} `json:"turns"`
+		} `json:"thread"`
+	}
+	if json.Unmarshal(raw, &result) != nil {
+		return "RECONCILING", "正在与 Mac 对账"
+	}
+	for index := len(result.Thread.Turns) - 1; index >= 0; index-- {
+		turn := result.Thread.Turns[index]
+		if turnID != "" && turn.ID != turnID {
+			continue
+		}
+		var object struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(turn.Status, &object)
+		status := object.Type
+		if status == "" {
+			_ = json.Unmarshal(turn.Status, &status)
+		}
+		switch strings.ToLower(status) {
+		case "completed":
+			return "COMPLETED", "任务已完成"
+		case "failed":
+			return "FAILED", "任务失败"
+		case "interrupted", "cancelled", "canceled":
+			return "CANCELLED", "任务已停止"
+		default:
+			return "RUNNING", "任务正在 Mac 上运行"
+		}
+	}
+	return "RUNNING", "任务正在 Mac 上运行"
+}
+
 func (b *bridge) sendLogicalEvent(ctx context.Context, event protocol.LogicalEvent) error {
 	if b.journal == nil {
 		return errors.New("logical journal is unavailable")
@@ -624,6 +759,10 @@ func (b *bridge) sendLogicalEvent(ctx context.Context, event protocol.LogicalEve
 	} else if err := b.journal.Append(event); err != nil {
 		return err
 	}
+	return b.transmitJournaledEvent(ctx, event)
+}
+
+func (b *bridge) transmitJournaledEvent(ctx context.Context, event protocol.LogicalEvent) error {
 	b.mu.Lock()
 	encoded := b.state.DeviceSecrets[event.DeviceID]
 	b.state.Sequences[event.DeviceID]++
