@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Upsert
 
 @Dao
 interface RemoteDao {
@@ -22,7 +23,7 @@ interface RemoteDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertRun(run: RemoteRunEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertRun(run: RemoteRunEntity)
 
     @Query("SELECT * FROM remote_runs WHERE id = :runId LIMIT 1")
@@ -64,7 +65,7 @@ interface RemoteDao {
     @Query("SELECT * FROM remote_command_outbox WHERE commandId = :commandId LIMIT 1")
     suspend fun command(commandId: String): RemoteCommandOutboxEntity?
 
-    @Query("SELECT * FROM remote_command_outbox WHERE status IN ('PENDING', 'SENT', 'ACCEPTED', 'UNKNOWN') AND nextAttemptAt <= :now ORDER BY nextAttemptAt, createdAt")
+    @Query("SELECT * FROM remote_command_outbox WHERE status IN ('PENDING', 'SENT') AND nextAttemptAt <= :now ORDER BY nextAttemptAt, createdAt")
     suspend fun retryableCommands(now: Long): List<RemoteCommandOutboxEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
