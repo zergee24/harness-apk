@@ -20,7 +20,7 @@
 
 人工合并目标：`test`（本分支不自动合并、不推送）
 
-当前状态：`IN_PROGRESS`；G0/G1/G2 已完成，G3 Workspace Binding 与原子 Run 启动实施中；三个产品边界继续采用第 2 节默认建议
+当前状态：`IN_PROGRESS`；G0/G1/G2/G3 已完成，G4 Resume、Replay、Gap 与 Snapshot 恢复实施中；三个产品边界继续采用第 2 节默认建议
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -481,7 +481,7 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 | G0 | 协议 fixture、决策映射、基线和工具链 | M1 文档可见 | DONE | `9280954`；Android 988/0/0；Go test/vet/build 绿；app-server 0.147 schema 已锁定；独立 AVD/ADB 端口已分配 |
 | G1 | Room 22、领域状态机、持久 Outbox | G0 | DONE | `c2e6c42`、`5244a23`；21 -> 22 fixture、FK/唯一性、进程重读、Gap、去重和非法转换测试绿 |
 | G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | DONE | `71dd536`、`fbdd639`；Go unit/vet/build/race 绿；同 Logical Event 重封装、旧 IN_FLIGHT 变 UNKNOWN、route/epoch 恢复通过 |
-| G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | PENDING | 已绑定项目 3 次点击内进入 QUEUED/RUNNING；无路径输入；重复 start 一次执行 |
+| G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | DONE | `adcae43`、`a1c0891`；项目页无路径输入；Run + Outbox 单事务；重复 start 仅一次 `turn/start`；隔离设备 7/7 |
 | G4 | Resume、Replay、Gap、Snapshot、进程恢复 | G3 | PENDING | 10 分钟断网、Android kill、Bridge WebSocket reconnect 全部恢复 |
 | G5 | Activity、审批、通知精确深链 | G4 | PENDING | 同一 Pending Approval 从通知/Activity 到同一记录；重复点击一次生效 |
 | G6 | 手机时间线、完成卡、测试/Git 证据 | G5 | PENDING | 10k event 分页、未测试显示未验证、窄屏/字体 1.3 通过 |
@@ -763,7 +763,7 @@ git commit -m "重构：隔离Codex协议适配与任务路由"
 - Modify: `app/src/main/java/com/harnessapk/ui/project/ProjectScreen.kt`
 - Modify: `app/src/main/java/com/harnessapk/ui/HarnessApkApp.kt`
 
-- [ ] **Step 1: 写 remote 脱敏、Candidate 排序、空候选、fingerprint mismatch 和项目生命周期测试**
+- [x] **Step 1: 写 remote 脱敏、Candidate 排序、空候选、fingerprint mismatch 和项目生命周期测试**
 
 固定 fixture 包含：带 user/token/query 的 HTTPS remote、scp remote、无 Git 目录、symlink cwd、detached HEAD。
 
@@ -773,7 +773,7 @@ git commit -m "重构：隔离Codex协议适配与任务路由"
 @Test fun rebindingRequiresExplicitConfirmationWhenFingerprintChanges()
 ```
 
-- [ ] **Step 2: 运行 Go/Kotlin 定向测试确认入口不存在**
+- [x] **Step 2: 运行 Go/Kotlin 定向测试确认入口不存在**
 
 Run: `cd remote && go test ./internal/workspace`
 
@@ -781,17 +781,17 @@ Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.WorkspaceC
 
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 Bridge inspect 和项目页绑定 Sheet**
+- [x] **Step 3: 实现 Bridge inspect 和项目页绑定 Sheet**
 
 项目页动作文案严格为：未绑定“在 Mac 上继续”、已绑定“交给 Mac”、有开放 Run 显示最新状态并进入详情。候选为空只显示“先在 Mac Codex 中打开一次该项目”，没有路径输入框。
 
-- [ ] **Step 4: Compose 验证 320dp/字体 1.3 和凭证不泄漏**
+- [x] **Step 4: Compose 验证 320dp/字体 1.3 和凭证不泄漏**
 
 Run: `ADB_LOCAL_TRANSPORT_MAX_PORT=5553 ANDROID_ADB_SERVER_PORT="$HARNESS_M2_ADB_SERVER_PORT" ANDROID_SERIAL="$HARNESS_M2_SERIAL" ./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.harnessapk.ui.project.ProjectRemoteBindingSheetTest`
 
 Expected: PASS；完整 URL/Token 不在语义树，主按钮 48dp。
 
-- [ ] **Step 5: 提交 Binding**
+- [x] **Step 5: 提交 Binding**
 
 ```bash
 git add remote/internal/workspace \
@@ -815,7 +815,7 @@ git commit -m "功能：绑定项目与Mac工作区"
 - Create: `app/src/main/java/com/harnessapk/ui/activity/RunDetailScreen.kt`
 - Create: `app/src/androidTest/java/com/harnessapk/remote/RemoteRunStartInstrumentedTest.kt`
 
-- [ ] **Step 1: 写重复 start、离线排队、fingerprint 变化和半完成恢复测试**
+- [x] **Step 1: 写重复 start、离线排队、fingerprint 变化和半完成恢复测试**
 
 ```go
 func TestRunStartCreatesAtMostOneTurnForDuplicateCommand(t *testing.T)
@@ -823,7 +823,7 @@ func TestFingerprintMismatchStopsBeforeThreadStart(t *testing.T)
 func TestUnknownTurnStartReconcilesWithoutAutomaticReplay(t *testing.T)
 ```
 
-- [ ] **Step 2: 运行 G3 测试并确认失败**
+- [x] **Step 2: 运行 G3 测试并确认失败**
 
 Run: `cd remote && go test ./internal/run`
 
@@ -831,15 +831,15 @@ Run: `./gradlew :app:compileDebugAndroidTestKotlin`
 
 Expected: FAIL，缺少 coordinator/Run Detail。
 
-- [ ] **Step 3: 实现第 6.3 节固定编排和 100ms 本地 QUEUED**
+- [x] **Step 3: 实现第 6.3 节固定编排和 100ms 本地 QUEUED**
 
 Android 点击发送必须在一个 Room 事务创建 Run + `run.start` Outbox，导航只依赖本地 runId；不能等待 WebSocket/app-server。
 
-- [ ] **Step 4: 运行 Android fake Bridge + Go fake app-server 验收**
+- [x] **Step 4: 运行 Android fake Bridge + Go fake app-server 验收**
 
 Expected: 同一个 command 发两次只有一次 `turn/start`；App 离线时 Run 为 QUEUED；成功后 threadId/turnId 写回同一个 Run。
 
-- [ ] **Step 5: 提交纵向切片**
+- [x] **Step 5: 提交纵向切片**
 
 ```bash
 git add remote/internal/run \
@@ -1176,3 +1176,14 @@ git worktree add -b codex/m2-cross-device-run \
 - adapter 证据：app-server stdout 只有一个 reader；并发 `Call` 由 future 关联且不阻塞通知；route 在 WebSocket/Bridge 重载后恢复；process epoch 变化将旧 server request 标为 `STALE`；`requestUserInput` 独立建模，不再伪装为 approval。
 - 设备隔离：G2 为纯 Go Gate，不启动模拟器、不连接 ADB；默认 5037 设备未被操作。
 - 已知限制：尚未接通真实 `run.start` 纵向链路，命令账本与 route 的完整编排在 G3；Logical ACK/resume/snapshot 的端到端恢复在 G4。
+
+### 2026-08-09 / G3
+
+- 状态：`DONE`
+- Commit：`adcae43 功能：绑定项目与Mac工作区`；`a1c0891 功能：从项目原子发起远程任务`
+- RED：Go Workspace inspect 与 Coordinator API 缺失而编译失败；Android WorkspaceCandidate/绑定判断与 Run Launcher API 缺失而编译失败。
+- GREEN：Android 全量 unit `994/0/0/0`；隔离设备 `ProjectRemoteBindingSheetTest 2/2`、`RemoteProjectLifecycleTest 2/2`、`RemoteRunStartInstrumentedTest 3/3`；Go `test ./...`、`vet ./...`、Bridge/Relay build 全部退出 0；G3 Go race 定向测试退出 0。
+- Binding 证据：symlink cwd 规范化；HTTPS userinfo/query/fragment 与 scp user 被剥离；Git/非 Git 指纹稳定；detached HEAD 显示短 SHA；候选仅来自最近 Thread 与 Bridge CLI 注册目录；Android 无路径输入，空候选固定提示；项目解绑/删除均保留历史 Run 快照。
+- Run 证据：Android 在同一 Room 事务写入 `QUEUED` Run 与完整 canonical Outbox；重复本地 launch 重建同一 payload/hash；离线 flush 保持 PENDING/QUEUED；写 Outbox 失败回滚 Run。Bridge 重查 workspaceId/fingerprint、保存 Git baseline 与 route，再调用 `turn/start(clientUserMessageId=commandId)`；重复命令只调用一次 `turn/start`；崩溃遗留 `IN_FLIGHT -> UNKNOWN` 后不自动重放。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。5039 验收时只保留 `emulator-15662`；未操作默认 5037 设备。
+- 已知限制：Logical Event 已写加密 Journal，但 Android 的 resume/replay/contiguous ACK 与 Snapshot 尚未接入，进入 G4；真实 Relay + Codex app-server 黄金链路留到 G7 真机验收。
