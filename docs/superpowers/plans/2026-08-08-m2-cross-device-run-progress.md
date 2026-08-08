@@ -959,7 +959,7 @@ git commit -m "功能：统一任务活动与远程审批"
 - Modify: `app/src/main/java/com/harnessapk/ui/activity/RunDetailScreen.kt`
 - Create: `app/src/androidTest/java/com/harnessapk/ui/activity/RunDetailScreenTest.kt`
 
-- [ ] **Step 1: 写事件压缩、测试分类、Git 基线和未验证测试**
+- [x] **Step 1: 写事件压缩、测试分类、Git 基线和未验证测试**
 
 ```go
 func TestAgentClaimDoesNotBecomePassedTestEvidence(t *testing.T)
@@ -975,7 +975,7 @@ func TestCommittedChangesRemainVisibleWhenWorkingTreeIsClean(t *testing.T)
 @Test fun stopRemainsPendingUntilInterruptResultOrSnapshotArrives()
 ```
 
-- [ ] **Step 2: 运行 Go/Kotlin 测试确认当前 raw JSON 展示失败**
+- [x] **Step 2: 运行 Go/Kotlin 测试确认当前 raw JSON 展示失败**
 
 Run: `cd remote && go test ./internal/completion`
 
@@ -983,15 +983,15 @@ Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.RemoteComp
 
 Expected: FAIL。
 
-- [ ] **Step 3: 实现结构化 evidence 和最近 100 条分页 UI**
+- [x] **Step 3: 实现结构化 evidence 和最近 100 条分页 UI**
 
 时间线不可压缩：原目标、steer、审批决定、停止、完成。可压缩：同 item started/completed、连续 phase、Agent delta。转向和停止都先持久化 Outbox；按钮本地只进入“发送中”，不得在 Bridge 确认前把 Run 乐观改成已转向或已停止。
 
-- [ ] **Step 4: 执行 320dp/字体 1.3/TalkBack/10k event 验收**
+- [x] **Step 4: 执行 320dp/字体 1.3/TalkBack/10k event 验收**
 
 Expected: 首屏 p95 < 200ms；长命令只在展开证据区横向滚动；完成卡文件/测试/Git/遗留均有明确值或“未验证”。
 
-- [ ] **Step 5: 提交完成体验**
+- [x] **Step 5: 提交完成体验**
 
 ```bash
 git add remote/internal/completion \
@@ -1202,11 +1202,24 @@ git worktree add -b codex/m2-cross-device-run \
 ### 2026-08-09 / G5
 
 - 状态：`DONE`
-- Commit：`2af4bae 功能：统一任务活动与远程审批`
+- Commit：`2af4bae 功能：统一任务活动与远程审批`；`aeebfc7 修复：限制远程审批通知动作`
 - RED：Activity 读模型、审批安全策略、通知计划/Receiver 和 Compose 分组 API 缺失导致测试编译失败；Bridge `approval.respond` 未接命令账本且审批仍只发旧内存 Event。首轮全量测试另发现旧 `homeTopBarOnlyReservesTheStatusBarInset` 与 M2 “Life/Work 顶栏共享 Activity 入口”产品契约冲突，已按新 source-of-truth 升级断言。
 - GREEN：Android 全量 unit `1006/0/0/0` 与 assembleDebug 退出 0；隔离设备 `ActivityScreenTest`、`RemoteApprovalActionInstrumentedTest`、`RemoteEventReducerInstrumentedTest` 合计 `5/5`，补充审批终结回归 `1/1`；Go 全量 test/vet/build 与 `commandcache/journal/run/bridge` race 全部退出 0。
 - Activity 证据：只读取本地 ChatExecution 与远程 Run/Approval，不复制执行行；需要处理、进行中、最近 7 天/最多 50 条完成三组互斥；Life/Work 顶栏使用同一入口，徽标语义为“n 个待处理任务”，点击项按原始 conversationId/runId 精确路由。
-- 审批证据：Bridge 将 app-server Approval 转成持久 Logical Event，Snapshot 账本保留已脱敏动作/目标/风险；Android 在 Room 入库前递归脱敏 token、URL query 和敏感 JSON key。高风险通知没有“允许一次”，详情页要求设备解锁并二次确认；Gap 期间按钮禁用。
+- 审批证据：Bridge 将 app-server Approval 转成持久 Logical Event，Snapshot 账本保留已脱敏动作/目标/风险；Android 在 Room 入库前递归脱敏 token、URL query 和敏感 JSON key。所有风险级别的通知都只提供“查看/拒绝”，不显示命令正文且不能批准；允许一次必须解锁后进入详情页，高风险再二次确认；Gap 期间按钮禁用。
 - 幂等证据：通知/详情页只写稳定 `approval.respond` Outbox，不乐观删除或解决 Approval；重复拒绝生成同一 commandId 和一条 Outbox。Bridge 命令账本只调用一次 app-server Respond、只发一个结果 Event；结果 Event 或 Snapshot 才把 Approval/Outbox 置为终态。
 - 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。模拟器意外退出时，首次设备命令因 5039 空列表安全停止，未安装到其他设备；随后只重启同一 M2 AVD/端口完成测试，未操作默认 5037。
 - 已知限制：阿里云 Push、通知锁屏/后台限制和目标荣耀真机解锁仍需 G7 真机证据；旧 Remote Control 只保留兼容路径，M2 新审批以 Room Activity/Run Detail 为权威入口。
+
+### 2026-08-09 / G6
+
+- 状态：`DONE`
+- Commit：`0c37b7e 功能：提供手机可读时间线与完成证据`
+- RED：Go completion API 缺失导致三条证据测试编译失败；Android completion parser、timeline presentation 和 Run command coordinator 缺失导致对应测试编译失败。通知聚焦测试首次被 G6 RED source-set 编译阻断，补齐最小协调器后恢复正常验证，没有隐藏或删除 RED 测试。
+- GREEN：Android 全量 unit `1015/0/0/0` 与 assembleDebug 退出 0；隔离设备 Run Detail/Reducer 合计 `7/7`，分页补丁后 Run Detail `2/2` 再次通过；Go 全量 test/vet/build 退出 0。Bridge control/completion/workspace 定向测试全部退出 0。
+- 时间线证据：Bridge 将 started/completed、Agent delta、structured user input 翻译为脱敏 Logical Event；同 item upsert、连续 Agent delta 压缩，原目标/steer/审批决定/停止/完成保持独立。Android 首屏 Room 查询仅最近 100 条，并提供每次 100 条的向上分页；未知 Item 显示“正在处理”且只在展开诊断区显示脱敏 payload。
+- 命令证据：steer/interrupt 先进入 Room Outbox，同类型并发点击在 Mutex 内复用单一 commandId；Bridge 按 command cache 只调用一次 `turn/steer` 或 `turn/interrupt`。发送成功只产生 Logical result，不乐观改变 Run 终态；interrupt 保持 `ACCEPTED`，直至 `run.cancelled/run.completed/run.failed` 或 Snapshot 才终结；不确定结果转 `UNKNOWN + RECONCILING` 且不重放可能有副作用的命令。
+- 完成证据：文件来自 `fileChange`、Git HEAD diff 与新增 status 记录；测试只接受 allowlist 命令且以 exit code 判定；Git 基于 Bridge 只读 inspect；summary/unresolved 优先结构化 output。Agent 自述不能生成绿色测试，任何缺项显示“未验证”；Logical Event、Run completion 与 Snapshot completion 入 Room 前递归脱敏。
+- 性能/移动端证据：独立 AVD 上 10,000 条 Event 查询最近 100 条的 10 次样本为 `[9, 5, 6, 6, 6, 6, 6, 6, 5, 6]ms`，p95=`9ms`；320dp、字体 1.3 下未知事件、完成卡和 48dp 操作按钮通过 Compose 断言；长命令只在展开诊断区横向滚动；完成卡具备 TalkBack 内容描述。M2 不展示不可用的“沉淀到项目”按钮。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。每次 connected test 前 5039 均只列出 `emulator-15662`，未操作默认 5037 或 USB 真机。
+- 已知限制：模拟器不能替代目标荣耀真机的 Push、锁屏、后台限制和 10 分钟真实断网验收；真实 Relay + Mac Bridge + Codex app-server 黄金链路、Bridge 升级/回滚演练归 G7。
