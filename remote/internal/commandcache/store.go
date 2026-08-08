@@ -135,6 +135,22 @@ func (s *Store) Fail(commandID string, cause error) (Record, error) {
 	return clone(*record), nil
 }
 
+func (s *Store) MarkUnknown(commandID string, cause error) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.data.Records[commandID]
+	if record == nil {
+		return Record{}, errors.New("command not found")
+	}
+	record.Status = StatusUnknown
+	record.LastError = cause.Error()
+	record.UpdatedAt = time.Now().UnixMilli()
+	if err := s.saveLocked(); err != nil {
+		return Record{}, err
+	}
+	return clone(*record), nil
+}
+
 func (s *Store) Lookup(commandID string) (Record, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/harnessapk/remote/internal/commandcache"
+	runstate "github.com/harnessapk/remote/internal/run"
 )
 
 func TestDuplicateRunStartReturnsCachedResultWithoutCallingAppServer(t *testing.T) {
@@ -33,7 +34,14 @@ func TestDuplicateRunStartReturnsCachedResultWithoutCallingAppServer(t *testing.
 }
 
 func TestEventTargetsOnlyThreadOwner(t *testing.T) {
-	bridge := &bridge{threadOwners: map[string]string{"thread-a": "phone-a"}}
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{RunID: "run-a", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-a"}); err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{routes: routes}
 	params := json.RawMessage(`{"threadId":"thread-a","turn":{"id":"turn-a"}}`)
 
 	if got := bridge.eventTargets(params); !reflect.DeepEqual(got, []string{"phone-a"}) {
@@ -42,7 +50,14 @@ func TestEventTargetsOnlyThreadOwner(t *testing.T) {
 }
 
 func TestUnownedEventIsNotBroadcast(t *testing.T) {
-	bridge := &bridge{threadOwners: map[string]string{"thread-a": "phone-a"}}
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{RunID: "run-a", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-a"}); err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{routes: routes}
 
 	if got := bridge.eventTargets(json.RawMessage(`{"threadId":"thread-b"}`)); len(got) != 0 {
 		t.Fatalf("targets = %#v", got)

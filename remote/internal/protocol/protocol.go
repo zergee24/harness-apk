@@ -42,6 +42,8 @@ type Command struct {
 	CommandID                 string          `json:"commandId,omitempty"`
 	RequestID                 string          `json:"requestId"`
 	RunID                     string          `json:"runId,omitempty"`
+	ApprovalID                string          `json:"approvalId,omitempty"`
+	ProcessEpoch              string          `json:"processEpoch,omitempty"`
 	BindingID                 string          `json:"bindingId,omitempty"`
 	WorkspaceID               string          `json:"workspaceId,omitempty"`
 	ThreadID                  string          `json:"threadId,omitempty"`

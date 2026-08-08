@@ -1,10 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -21,9 +22,11 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	appserverrpc "github.com/harnessapk/remote/internal/appserver"
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/journal"
 	"github.com/harnessapk/remote/internal/protocol"
+	runstate "github.com/harnessapk/remote/internal/run"
 	bridgestate "github.com/harnessapk/remote/internal/state"
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -36,24 +39,18 @@ type bridge struct {
 	state        bridgeState
 	path         string
 	conn         *websocket.Conn
-	app          *appServer
+	app          *appProcess
 	journal      *journal.Store
 	commandCache *commandcache.Store
+	routes       *runstate.RouteStore
 	seen         map[string]time.Time
-	threadOwners map[string]string
 }
 
-type appServer struct {
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	scanner   *bufio.Scanner
-	writeMu   sync.Mutex
-	requestMu sync.Mutex
-	nextID    int64
-	pending   map[string]pendingRequest
+type appProcess struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	client *appserverrpc.Client
 }
-
-type pendingRequest struct{ DeviceID, RequestID string }
 
 func main() {
 	statePath := defaultStatePath()
@@ -198,9 +195,22 @@ func runServe(defaultPath string, args []string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		routeStore, err := runstate.OpenRoutes(filepath.Join(filepath.Dir(*statePath), "routes.json"))
+		if err != nil {
+			log.Printf("open run routes: %v", err)
+			app.close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		if err := routeStore.BeginProcessEpoch(app.client.ProcessEpoch()); err != nil {
+			log.Printf("start app-server process epoch: %v", err)
+			app.close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
 		b := &bridge{
-			state: state, path: *statePath, app: app, journal: journalStore, commandCache: commandStore,
-			seen: map[string]time.Time{}, threadOwners: map[string]string{},
+			state: state, path: *statePath, app: app, journal: journalStore,
+			commandCache: commandStore, routes: routeStore, seen: map[string]time.Time{},
 		}
 		if err := b.run(context.Background()); err != nil {
 			log.Printf("bridge disconnected: %v", err)
@@ -246,15 +256,12 @@ func (b *bridge) run(ctx context.Context) error {
 	if err := b.resendPending(ctx); err != nil {
 		return err
 	}
-	lines := make(chan []byte, 64)
 	errorsCh := make(chan error, 2)
-	go func() {
-		for b.app.scanner.Scan() {
-			raw := append([]byte(nil), b.app.scanner.Bytes()...)
-			lines <- raw
-		}
-		errorsCh <- b.app.scanner.Err()
-	}()
+	b.app.client.SetNotificationHandler(func(message appserverrpc.Message) {
+		b.handleAppServer(ctx, message)
+	})
+	b.app.client.Start(ctx)
+	go func() { errorsCh <- <-b.app.client.Done() }()
 	go func() {
 		for {
 			_, raw, err := conn.Read(ctx)
@@ -267,13 +274,20 @@ func (b *bridge) run(ctx context.Context) error {
 			}
 		}
 	}()
-	if err := b.app.initialize(); err != nil {
+	initializeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if _, err := b.app.client.Call(initializeCtx, "initialize", map[string]any{
+		"clientInfo": map[string]string{
+			"name": "harness_remote_bridge", "title": "Harness Remote Bridge", "version": "0.2.0",
+		},
+	}); err != nil {
+		return err
+	}
+	if err := b.app.client.Notify("initialized", map[string]any{}); err != nil {
 		return err
 	}
 	for {
 		select {
-		case raw := <-lines:
-			b.handleAppServer(ctx, raw)
 		case err := <-errorsCh:
 			return err
 		case <-ctx.Done():
@@ -339,28 +353,35 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	case "host.status":
 		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "host.status", RequestID: command.RequestID, Message: "online", CreatedAt: time.Now().UnixMilli()}, "")
 	case "thread.list":
-		return b.app.request(deviceID, command.RequestID, "thread/list", json.RawMessage(`{"limit":50,"sortKey":"updated_at","sortDirection":"desc","sourceKinds":["cli","vscode","exec","appServer"]}`))
+		return b.requestAppServer(ctx, deviceID, command, "thread/list", map[string]any{
+			"limit": 50, "sortKey": "updated_at", "sortDirection": "desc",
+			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
+		})
 	case "thread.read":
-		return b.app.request(deviceID, command.RequestID, "thread/read", mustJSON(map[string]any{"threadId": command.ThreadID, "includeTurns": true}))
+		return b.requestAppServer(ctx, deviceID, command, "thread/read", map[string]any{"threadId": command.ThreadID, "includeTurns": true})
 	case "thread.start":
-		return b.app.request(deviceID, command.RequestID, "thread/start", mustJSON(map[string]any{"cwd": command.CWD}))
+		return b.requestAppServer(ctx, deviceID, command, "thread/start", map[string]any{"cwd": command.CWD})
 	case "turn.start":
-		b.claimThread(command.ThreadID, deviceID)
-		return b.app.request(deviceID, command.RequestID, "turn/start", mustJSON(map[string]any{"threadId": command.ThreadID, "input": []map[string]string{{"type": "text", "text": command.Text}}}))
+		if err := b.claimThread(command, deviceID); err != nil {
+			return err
+		}
+		return b.requestAppServer(ctx, deviceID, command, "turn/start", map[string]any{"threadId": command.ThreadID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
 	case "turn.steer":
-		b.claimThread(command.ThreadID, deviceID)
-		return b.app.request(deviceID, command.RequestID, "turn/steer", mustJSON(map[string]any{"threadId": command.ThreadID, "expectedTurnId": command.ExpectedTurnID, "input": []map[string]string{{"type": "text", "text": command.Text}}}))
+		if err := b.claimThread(command, deviceID); err != nil {
+			return err
+		}
+		return b.requestAppServer(ctx, deviceID, command, "turn/steer", map[string]any{"threadId": command.ThreadID, "expectedTurnId": command.ExpectedTurnID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
 	case "turn.interrupt":
-		return b.app.request(deviceID, command.RequestID, "turn/interrupt", mustJSON(map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID}))
+		return b.requestAppServer(ctx, deviceID, command, "turn/interrupt", map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID})
 	case "approval.respond":
-		return b.app.response(command.ServerRequestID, map[string]string{"decision": command.Decision})
+		return b.respondApproval(command)
 	case "event.ack":
 		if b.journal == nil {
 			return errors.New("logical journal is unavailable")
 		}
 		return b.journal.Ack(b.state.HostID, deviceID, command.HighestContiguousSequence)
 	case "rpc":
-		return b.app.request(deviceID, command.RequestID, command.Method, command.Params)
+		return b.requestAppServer(ctx, deviceID, command, command.Method, decodeRaw(command.Params))
 	default:
 		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "error", RequestID: command.RequestID, Message: "unsupported command: " + command.Type, CreatedAt: time.Now().UnixMilli()}, "")
 	}
@@ -399,58 +420,133 @@ func (b *bridge) sendLogicalEvent(ctx context.Context, event protocol.LogicalEve
 	return b.conn.Write(ctx, websocket.MessageText, raw)
 }
 
-func (b *bridge) handleAppServer(ctx context.Context, raw []byte) {
-	var message struct {
-		ID     json.RawMessage `json:"id"`
-		Method string          `json:"method"`
-		Params json.RawMessage `json:"params"`
-		Result json.RawMessage `json:"result"`
-		Error  json.RawMessage `json:"error"`
+func (b *bridge) requestAppServer(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	method string,
+	params any,
+) error {
+	if method == "" {
+		return errors.New("app-server method is required")
 	}
-	if json.Unmarshal(raw, &message) != nil {
-		return
-	}
-	if len(message.ID) > 0 && string(message.ID) != "null" {
-		key := string(message.ID)
-		b.app.requestMu.Lock()
-		pending, exists := b.app.pending[key]
-		if exists {
-			delete(b.app.pending, key)
-		}
-		b.app.requestMu.Unlock()
-		if exists {
-			_ = b.sendEvent(ctx, pending.DeviceID, protocol.Event{Type: "rpc.response", RequestID: pending.RequestID, Payload: raw, CreatedAt: time.Now().UnixMilli()}, "")
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		result, err := b.app.client.Call(callCtx, method, params)
+		if err != nil {
+			if command.CommandID != "" && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+				_, _ = b.commandCache.MarkUnknown(command.CommandID, err)
+			}
+			_ = b.sendEvent(ctx, deviceID, protocol.Event{
+				Type: "rpc.response", RequestID: command.RequestID,
+				Payload: mustJSON(map[string]any{"error": err.Error()}), CreatedAt: time.Now().UnixMilli(),
+			}, "")
 			return
 		}
+		_ = b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "rpc.response", RequestID: command.RequestID,
+			Payload: mustJSON(map[string]any{"result": json.RawMessage(result)}), CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}()
+	return nil
+}
+
+func (b *bridge) respondApproval(command protocol.Command) error {
+	epoch := command.ProcessEpoch
+	if epoch == "" {
+		epoch = b.app.client.ProcessEpoch()
 	}
+	if command.ApprovalID != "" {
+		if err := b.routes.ValidateResponse(command.ApprovalID, epoch, command.ServerRequestID); err != nil {
+			return err
+		}
+	}
+	return b.app.client.Respond(appserverrpc.ServerRequestRef{
+		ID: command.ServerRequestID, ProcessEpoch: epoch,
+	}, map[string]string{"decision": command.Decision})
+}
+
+func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Message) {
 	if message.Method == "" {
 		return
 	}
+	if message.Method == "serverRequest/resolved" {
+		var params struct {
+			RequestID json.RawMessage `json:"requestId"`
+		}
+		if json.Unmarshal(message.Params, &params) == nil && len(params.RequestID) > 0 {
+			_, _, _ = b.routes.MarkServerRequestResolved(b.app.client.ProcessEpoch(), params.RequestID)
+		}
+	}
 	eventType, pushKind := "codex.event", ""
-	if strings.Contains(message.Method, "requestApproval") || strings.Contains(message.Method, "requestUserInput") {
+	approvalID := ""
+	if message.Method == "item/commandExecution/requestApproval" ||
+		message.Method == "item/fileChange/requestApproval" ||
+		message.Method == "item/permissions/requestApproval" {
 		eventType, pushKind = "approval.request", "approval"
+		approvalID = stableApprovalID(b.app.client.ProcessEpoch(), message.ID)
+		if route, ok := b.routeForParams(message.Params); ok {
+			_ = b.routes.PutApproval(runstate.Approval{
+				ApprovalID: approvalID, RunID: route.RunID,
+				ProcessEpoch: b.app.client.ProcessEpoch(), ServerRequestID: message.ID,
+				Status: runstate.ApprovalPending,
+			})
+		}
+	}
+	if message.Method == "item/tool/requestUserInput" {
+		eventType, pushKind = "user_input.request", "approval"
 	}
 	if message.Method == "turn/completed" {
 		pushKind = "completion"
+	}
+	envelope := map[string]any{
+		"id": message.ID, "method": message.Method, "params": json.RawMessage(message.Params),
+		"processEpoch": b.app.client.ProcessEpoch(),
+	}
+	if approvalID != "" {
+		envelope["approvalId"] = approvalID
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		return
 	}
 	for _, deviceID := range b.eventTargets(message.Params) {
 		_ = b.sendEvent(ctx, deviceID, protocol.Event{Type: eventType, Method: message.Method, Payload: raw, CreatedAt: time.Now().UnixMilli()}, pushKind)
 	}
 }
 
-func (b *bridge) claimThread(threadID, deviceID string) {
-	if threadID == "" || deviceID == "" {
-		return
+func (b *bridge) routeForParams(params json.RawMessage) (runstate.Route, bool) {
+	threadID := threadIDFromParams(params)
+	if threadID == "" || b.routes == nil {
+		return runstate.Route{}, false
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.threadOwners == nil {
-		b.threadOwners = map[string]string{}
+	return b.routes.ByThread(threadID)
+}
+
+func (b *bridge) claimThread(command protocol.Command, deviceID string) error {
+	if command.ThreadID == "" || deviceID == "" {
+		return errors.New("thread and device are required")
 	}
-	b.threadOwners[threadID] = deviceID
+	runID := command.RunID
+	if runID == "" {
+		runID = "legacy:" + command.ThreadID
+	}
+	return b.routes.Put(runstate.Route{
+		RunID: runID, BindingID: command.BindingID, WorkspaceID: command.WorkspaceID,
+		HostID: b.state.HostID, DeviceID: deviceID, ThreadID: command.ThreadID, TurnID: command.TurnID,
+	})
 }
 
 func (b *bridge) eventTargets(params json.RawMessage) []string {
+	route, ok := b.routeForParams(params)
+	if !ok || route.DeviceID == "" {
+		return nil
+	}
+	return []string{route.DeviceID}
+}
+
+func threadIDFromParams(params json.RawMessage) string {
 	var envelope struct {
 		ThreadID string `json:"threadId"`
 		Thread   struct {
@@ -458,19 +554,17 @@ func (b *bridge) eventTargets(params json.RawMessage) []string {
 		} `json:"thread"`
 	}
 	if json.Unmarshal(params, &envelope) != nil {
-		return nil
+		return ""
 	}
-	threadID := envelope.ThreadID
-	if threadID == "" {
-		threadID = envelope.Thread.ID
+	if envelope.ThreadID != "" {
+		return envelope.ThreadID
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	deviceID := b.threadOwners[threadID]
-	if deviceID == "" {
-		return nil
-	}
-	return []string{deviceID}
+	return envelope.Thread.ID
+}
+
+func stableApprovalID(epoch string, serverRequestID json.RawMessage) string {
+	digest := sha256.Sum256(append(append([]byte(epoch), 0), serverRequestID...))
+	return "approval-" + hex.EncodeToString(digest[:16])
 }
 
 func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.Event, pushKind string) error {
@@ -553,7 +647,7 @@ func (b *bridge) deviceSecrets() map[string]string {
 	return result
 }
 
-func startAppServer(codex string) (*appServer, error) {
+func startAppServer(codex string) (*appProcess, error) {
 	cmd := exec.Command(codex, "app-server", "--listen", "stdio://")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -567,49 +661,17 @@ func startAppServer(codex string) (*appServer, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64<<10), 4<<20)
-	return &appServer{cmd: cmd, stdin: stdin, scanner: scanner, nextID: 100, pending: map[string]pendingRequest{}}, nil
-}
-
-func (a *appServer) initialize() error {
-	if err := a.write(map[string]any{"method": "initialize", "id": 1, "params": map[string]any{"clientInfo": map[string]string{"name": "harness_remote_bridge", "title": "Harness Remote Bridge", "version": "0.1.0"}}}); err != nil {
-		return err
-	}
-	return a.write(map[string]any{"method": "initialized", "params": map[string]any{}})
-}
-
-func (a *appServer) request(deviceID, requestID, method string, params json.RawMessage) error {
-	a.requestMu.Lock()
-	a.nextID++
-	id := a.nextID
-	a.pending[fmt.Sprint(id)] = pendingRequest{DeviceID: deviceID, RequestID: requestID}
-	a.requestMu.Unlock()
-	var decoded any = map[string]any{}
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &decoded)
-	}
-	return a.write(map[string]any{"method": method, "id": id, "params": decoded})
-}
-
-func (a *appServer) response(id json.RawMessage, result any) error {
-	var decoded any
-	if json.Unmarshal(id, &decoded) != nil {
-		return errors.New("invalid server request id")
-	}
-	return a.write(map[string]any{"id": decoded, "result": result})
-}
-func (a *appServer) write(value any) error {
-	raw, err := json.Marshal(value)
+	epoch, err := protocol.NewID()
 	if err != nil {
-		return err
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, err
 	}
-	a.writeMu.Lock()
-	defer a.writeMu.Unlock()
-	_, err = a.stdin.Write(append(raw, '\n'))
-	return err
+	return &appProcess{cmd: cmd, stdin: stdin, client: appserverrpc.NewClient(stdout, stdin, epoch)}, nil
 }
-func (a *appServer) close() {
+
+func (a *appProcess) close() {
 	_ = a.stdin.Close()
 	if a.cmd.Process != nil {
 		_ = a.cmd.Process.Kill()
@@ -659,6 +721,13 @@ func relayWebSocketURL(relayURL, role, id string) (string, error) {
 	return parsed.String(), nil
 }
 func mustJSON(value any) json.RawMessage { raw, _ := json.Marshal(value); return raw }
+func decodeRaw(raw json.RawMessage) any {
+	var value any = map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &value)
+	}
+	return value
+}
 func defaultStatePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
