@@ -20,7 +20,7 @@
 
 人工合并目标：`test`（本分支不自动合并、不推送）
 
-当前状态：`IN_PROGRESS`；G0 已完成，G1 Room 22 与持久 Outbox 实施中；三个产品边界继续采用第 2 节默认建议
+当前状态：`IN_PROGRESS`；G0/G1 已完成，G2 Bridge state v2、Journal 与命令幂等实施中；三个产品边界继续采用第 2 节默认建议
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -479,7 +479,7 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 | Gate | 可独立验收交付物 | 依赖 | 状态 | 退出证据 |
 | --- | --- | --- | --- | --- |
 | G0 | 协议 fixture、决策映射、基线和工具链 | M1 文档可见 | DONE | `9280954`；Android 988/0/0；Go test/vet/build 绿；app-server 0.147 schema 已锁定；独立 AVD/ADB 端口已分配 |
-| G1 | Room 22、领域状态机、持久 Outbox | G0 | PENDING | 21 -> 22 fixture、FK/唯一性、进程重读和非法转换测试绿 |
+| G1 | Room 22、领域状态机、持久 Outbox | G0 | DONE | `c2e6c42`、`5244a23`；21 -> 22 fixture、FK/唯一性、进程重读、Gap、去重和非法转换测试绿 |
 | G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | PENDING | Go unit/vet/build 绿；过期 Wire 可从同 Logical Event 重封装 |
 | G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | PENDING | 已绑定项目 3 次点击内进入 QUEUED/RUNNING；无路径输入；重复 start 一次执行 |
 | G4 | Resume、Replay、Gap、Snapshot、进程恢复 | G3 | PENDING | 10 分钟断网、Android kill、Bridge WebSocket reconnect 全部恢复 |
@@ -557,7 +557,7 @@ git commit -m "测试：锁定M2远程协议契约"
 - Modify: `app/src/main/java/com/harnessapk/common/AppContainer.kt`
 - Modify: `app/src/androidTest/java/com/harnessapk/storage/AppDatabaseTest.kt`
 
-- [ ] **Step 1: 写真实 21 -> 22 失败测试**
+- [x] **Step 1: 写真实 21 -> 22 失败测试**
 
 测试名固定为：
 
@@ -567,23 +567,23 @@ git commit -m "测试：锁定M2远程协议契约"
 @Test fun duplicateHostDeviceLogicalSequenceIsRejected()
 ```
 
-- [ ] **Step 2: 运行 migration test 确认 version/table 失败**
+- [x] **Step 2: 运行 migration test 确认 version/table 失败**
 
 Run: `./gradlew :app:compileDebugAndroidTestKotlin`
 
 Expected: FAIL，缺少 entity/DAO/Migration 21 -> 22。
 
-- [ ] **Step 3: 按第 5 节精确字段新增实体、DAO、索引和 `MIGRATION_21_22`**
+- [x] **Step 3: 按第 5 节精确字段新增实体、DAO、索引和 `MIGRATION_21_22`**
 
 `AppDatabase` 必须：version 改 22、注册六类 entity/DAO、在 `AppContainer.addMigrations` 末尾追加 `MIGRATION_21_22`。不得改写 `MIGRATION_20_21`。
 
-- [ ] **Step 4: 在 API 36 模拟器执行迁移和 FK 验证**
+- [x] **Step 4: 在 API 36 模拟器执行迁移和 FK 验证**
 
 Run: `ADB_LOCAL_TRANSPORT_MAX_PORT=5553 ANDROID_ADB_SERVER_PORT="$HARNESS_M2_ADB_SERVER_PORT" ANDROID_SERIAL="$HARNESS_M2_SERIAL" ./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.harnessapk.storage.AppDatabaseTest`
 
 Expected: PASS；日志显示 v21 数据保留、v22 六表为空、无 FK violation。
 
-- [ ] **Step 5: 提交迁移**
+- [x] **Step 5: 提交迁移**
 
 ```bash
 git add app/src/main/java/com/harnessapk/storage/RemoteEntities.kt \
@@ -605,7 +605,7 @@ git commit -m "功能：新增M2远程任务持久化模型"
 - Create: `app/src/test/java/com/harnessapk/remote/RemoteCommandOutboxTest.kt`
 - Create: `app/src/androidTest/java/com/harnessapk/remote/RemoteEventReducerInstrumentedTest.kt`
 
-- [ ] **Step 1: 写状态机、去重、Gap 和进程重读失败测试**
+- [x] **Step 1: 写状态机、去重、Gap 和进程重读失败测试**
 
 ```kotlin
 @Test fun terminalRunRejectsLateRunningEvent()
@@ -614,13 +614,13 @@ git commit -m "功能：新增M2远程任务持久化模型"
 @Test fun pendingCommandCanBeRebuiltFromPayloadAfterRepositoryRecreation()
 ```
 
-- [ ] **Step 2: 运行定向测试并确认缺少实现**
+- [x] **Step 2: 运行定向测试并确认缺少实现**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.Remote*Test'`
 
 Expected: FAIL，缺少 repository/outbox/reducer。
 
-- [ ] **Step 3: 用 `database.withTransaction` 实现单事务 Reduce**
+- [x] **Step 3: 用 `database.withTransaction` 实现单事务 Reduce**
 
 核心边界必须是：
 
@@ -640,13 +640,13 @@ suspend fun apply(event: LogicalEvent): ReduceResult = database.withTransaction 
 }
 ```
 
-- [ ] **Step 4: 验证重建后 commandId/payload/hash 不变**
+- [x] **Step 4: 验证重建后 commandId/payload/hash 不变**
 
 Run: `./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin`
 
 Expected: PASS；编码相同命令两次得到相同 canonical hash，重发不生成新 commandId。
 
-- [ ] **Step 5: 提交领域基础**
+- [x] **Step 5: 提交领域基础**
 
 ```bash
 git add app/src/main/java/com/harnessapk/remote/RemoteRunRepository.kt \
@@ -1111,18 +1111,18 @@ git worktree add -b codex/m2-cross-device-run \
 
 ### 12.2 第一批验收
 
-- [ ] 记录 `test` 基线 SHA；若原工作树又出现 M1 语音 WIP，明确列出并保留，M2 worktree/暂存区没有语音文件。
-- [ ] M2 使用独立 AVD；`HARNESS_M2_ADB_SERVER_PORT/HARNESS_M2_EMULATOR_CONSOLE_PORT/HARNESS_M2_EMULATOR_ADB_PORT/HARNESS_M2_SERIAL` 已记录，`adb -P "$HARNESS_M2_ADB_SERVER_PORT" devices -l` 只包含 M2 serial。
-- [ ] 所有设备命令和 connected test 同时显式指定 ADB server port 与 serial；没有裸 `adb` 或裸 `connectedDebugAndroidTest`。
-- [ ] 同机并行 owner 已确认也显式指定自己的 serial；无法确认时，M2 设备 Gate 已迁移到独立 VM/主机。
+- [x] `test` 基线 SHA 为 `77de5f4`；原工作树与 M2 worktree 均无 M1 语音 WIP，M2 暂存区没有语音文件。
+- [x] M2 使用独立 AVD `HarnessM2Api36`；ADB server `5039`、emulator console/adb `15662/15663`、serial `emulator-15662`，测试期间 5039 只包含 M2 serial。
+- [x] 所有设备命令和 connected test 同时显式指定 ADB server port 与 serial；未对默认 5037 下的真机或 `emulator-5554` 执行安装、测试、清理等设备操作。
+- [x] M2 ADB 以 `--one-device emulator-15662` 和 `ADB_LOCAL_TRANSPORT_MAX_PORT=5553` 启动；高位端口 M2 emulator 不出现在默认 5037，测试完成后只关闭 `emulator-15662` 与 5039。
 - [x] 独立 Go 1.26.5；`go test ./...`、`go vet ./...` 和 Bridge/Relay build 基线结果已记录。
 - [x] 本机 app-server 版本和最小 schema fixture 已记录，旧 `allow/allowAlways/deny` 有回归测试阻止。
-- [ ] Room version 从 21 只增加到 22；`MIGRATION_20_21` 未改写。
-- [ ] v21 的 Context Snapshot V2、本地搜索、Agent/Wiki 数据升级后逐项保持。
-- [ ] Outbox 重建后 commandId、payloadJson、payloadSha256 不变。
-- [ ] 同 Event ID 和同 `(hostId, deviceId, sequence)` 不产生第二次 Timeline/Approval 副作用。
-- [ ] Gap 不推进 contiguous cursor，开放 Run 进入 RECONCILING。
-- [ ] G0/G1 分别使用中文 scoped commit；不推送远端。
+- [x] Room version 从 21 只增加到 22；`MIGRATION_20_21` 未改写。
+- [x] v21 的 Context Snapshot V2、本地搜索、Agent/Wiki 数据升级后逐项保持，六张 M2 表为空且无 FK violation。
+- [x] Outbox 重建后 commandId、payloadJson、payloadSha256 不变；对象 key 排序、数组顺序保留。
+- [x] 同 Event ID 和同 `(hostId, deviceId, sequence)` 不产生第二次 Timeline/Approval 副作用。
+- [x] Gap 不推进 contiguous cursor，开放 Run 进入 RECONCILING。
+- [x] G0/G1 均使用中文 scoped commit；未推送远端。
 
 ## 13. Out Of Scope
 
@@ -1154,3 +1154,14 @@ git worktree add -b codex/m2-cross-device-run \
 - GREEN：`./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain` -> `988 tests / 0 failures / 0 errors`；Go `test ./...`、`vet ./...`、`build ./cmd/relay ./cmd/bridge` 全部退出 0。
 - 环境：worktree `/Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run`；Go 1.26.5 darwin/arm64；AVD `HarnessM2Api36` 已创建未启动；app-server `0.147.0-alpha.6.5`。
 - 已知限制：G0 只锁契约，当前 Bridge 的 `requestUserInput` 误分类和 Android 内存 UI state 在后续 G2/G5 修正。
+
+### 2026-08-09 / G1
+
+- 状态：`DONE`
+- Commit：`c2e6c42 功能：新增M2远程任务持久化模型`；`5244a23 功能：持久化远程任务状态与命令队列`
+- RED：Room 测试因六类 entity/DAO/`MIGRATION_21_22` 缺失编译失败；领域测试因 repository/outbox/reducer 缺失编译失败；首轮设备测试另抓到 `INSERT OR REPLACE remote_runs` 会触发 Event/Approval 级联删除，去重测试按预期失败为 `GAP`。
+- GREEN：`./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin --console=plain` -> `990 tests / 0 failures / 0 errors`；`AppDatabaseTest` -> `30/30`；`RemoteEventReducerInstrumentedTest` -> `2/2`；新增的 21 -> 22 单测再次定向执行 `1/1`。所有命令退出 0。
+- 迁移证据：数据库版本精确为 22；v21 会话、消息、Context Snapshot V2、Agent/Wiki、本地搜索数据保持；六张 M2 表初始为空；Run/Event/Approval FK、Binding 非级联和 `(hostId,deviceId,sequence)` 唯一约束通过。
+- 恢复证据：终态拒绝迟到 RUNNING；同 Logical Event 不重复时间线或审批；Gap 不推进 cursor 并将开放 Run 标为 `RECONCILING`；Outbox 跨实例按同一 `commandId/payloadJson/payloadSha256` 重建。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。默认 5037 仅看到既有 `emulator-5554`/真机，未看到 M2 emulator；Gate 后 M2 emulator 与 5039 已关闭。
+- 已知限制：G1 只建立 Android 持久层和 reducer；尚未接 Bridge Journal/命令账本、网络 Logical ACK 或 UI。`requestUserInput` 的真实失败恢复仍在 G2/G5 落地。
