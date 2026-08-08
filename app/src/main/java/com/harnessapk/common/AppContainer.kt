@@ -57,6 +57,7 @@ import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderCapabilityCatalogClient
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.security.ApiKeyCipher
+import com.harnessapk.voice.VoiceCredentialStore
 import com.harnessapk.search.LocalSearchRepository
 import com.harnessapk.session.PromptOptimizerUseCase
 import com.harnessapk.session.MarkdownNotebookRepository
@@ -130,6 +131,10 @@ class AppContainer(
     ).addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
+    val voiceCredentialStore = VoiceCredentialStore(
+        appContext,
+        ApiKeyCipher("harness_apk_voice_keys"),
+    )
     val gitCredentialStore = GitCredentialStore(appContext, apiKeyCipher)
     val json: Json = Json {
         ignoreUnknownKeys = true

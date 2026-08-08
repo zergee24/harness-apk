@@ -13,6 +13,8 @@ import com.harnessapk.skills.BundledSkills
 import com.harnessapk.skills.SkillActivationSettings
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.voice.VoiceProviderType
+import com.harnessapk.voice.DEFAULT_SILICON_FLOW_SPEECH_MODEL
+import com.harnessapk.voice.decodeVoiceProviderType
 import com.harnessapk.websearch.WebSearchSettings
 import com.harnessapk.websearch.normalizeWebSearchMaxResults
 import kotlinx.coroutines.flow.Flow
@@ -61,11 +63,10 @@ class AppSettingsStore(private val context: Context) {
     val voiceSettings: Flow<VoiceSettings> = context.appSettingsDataStore.data.map {
         VoiceSettings(
             speechInputEnabled = it[VOICE_SPEECH_INPUT_ENABLED] ?: false,
-            defaultSpeechProvider = it[VOICE_SPEECH_PROVIDER]
-                ?.let { value -> runCatching { VoiceProviderType.valueOf(value) }.getOrNull() }
-                ?: VoiceProviderType.ANDROID_SYSTEM,
-            cloudSpeechProviderId = it[VOICE_CLOUD_SPEECH_PROVIDER_ID]?.takeIf(String::isNotBlank),
-            cloudSpeechModel = it[VOICE_CLOUD_SPEECH_MODEL]?.takeIf(String::isNotBlank) ?: "whisper-1",
+            defaultSpeechProvider = decodeVoiceProviderType(it[VOICE_SPEECH_PROVIDER]),
+            siliconFlowSpeechModel = it[VOICE_SILICON_FLOW_SPEECH_MODEL]
+                ?.takeIf(String::isNotBlank)
+                ?: DEFAULT_SILICON_FLOW_SPEECH_MODEL,
             defaultTranscriptionLanguage = it[VOICE_TRANSCRIPTION_LANGUAGE] ?: "system",
             autoPunctuation = it[VOICE_AUTO_PUNCTUATION] ?: true,
             autoFillInput = it[VOICE_AUTO_FILL_INPUT] ?: true,
@@ -144,12 +145,12 @@ class AppSettingsStore(private val context: Context) {
         context.appSettingsDataStore.edit { it[VOICE_SPEECH_PROVIDER] = value.name }
     }
 
-    suspend fun setCloudSpeechConfiguration(providerId: String?, model: String) {
+    suspend fun setSiliconFlowSpeechModel(model: String) {
         context.appSettingsDataStore.edit {
-            providerId?.trim()?.takeIf(String::isNotBlank)?.let { value ->
-                it[VOICE_CLOUD_SPEECH_PROVIDER_ID] = value
-            } ?: it.remove(VOICE_CLOUD_SPEECH_PROVIDER_ID)
-            it[VOICE_CLOUD_SPEECH_MODEL] = model.trim().ifBlank { "whisper-1" }
+            val supportedModel = model.trim().takeIf { candidate ->
+                candidate == DEFAULT_SILICON_FLOW_SPEECH_MODEL || candidate == "TeleAI/TeleSpeechASR"
+            } ?: DEFAULT_SILICON_FLOW_SPEECH_MODEL
+            it[VOICE_SILICON_FLOW_SPEECH_MODEL] = supportedModel
         }
     }
 
@@ -211,8 +212,7 @@ class AppSettingsStore(private val context: Context) {
         private val ENABLED_SKILL_IDS = stringSetPreferencesKey("enabled_skill_ids")
         private val VOICE_SPEECH_INPUT_ENABLED = booleanPreferencesKey("voice_speech_input_enabled")
         private val VOICE_SPEECH_PROVIDER = stringPreferencesKey("voice_speech_provider")
-        private val VOICE_CLOUD_SPEECH_PROVIDER_ID = stringPreferencesKey("voice_cloud_speech_provider_id")
-        private val VOICE_CLOUD_SPEECH_MODEL = stringPreferencesKey("voice_cloud_speech_model")
+        private val VOICE_SILICON_FLOW_SPEECH_MODEL = stringPreferencesKey("voice_silicon_flow_speech_model")
         private val VOICE_TRANSCRIPTION_LANGUAGE = stringPreferencesKey("voice_transcription_language")
         private val VOICE_AUTO_PUNCTUATION = booleanPreferencesKey("voice_auto_punctuation")
         private val VOICE_AUTO_FILL_INPUT = booleanPreferencesKey("voice_auto_fill_input")

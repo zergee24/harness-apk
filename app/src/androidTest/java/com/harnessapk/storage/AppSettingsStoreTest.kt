@@ -28,18 +28,17 @@ class AppSettingsStoreTest {
     }
 
     @Test
-    fun persistsCloudSpeechProviderAndModel() = runBlocking {
+    fun persistsSiliconFlowSpeechProviderAndModel() = runBlocking {
         val store = AppSettingsStore(ApplicationProvider.getApplicationContext<Context>())
 
-        store.setDefaultSpeechProvider(VoiceProviderType.CLOUD)
-        store.setCloudSpeechConfiguration(providerId = "provider-voice", model = "whisper-1")
+        store.setDefaultSpeechProvider(VoiceProviderType.SILICON_FLOW)
+        store.setSiliconFlowSpeechModel("TeleAI/TeleSpeechASR")
 
         val settings = store.voiceSettings.first()
-        assertEquals(VoiceProviderType.CLOUD, settings.defaultSpeechProvider)
-        assertEquals("provider-voice", settings.cloudSpeechProviderId)
-        assertEquals("whisper-1", settings.cloudSpeechModel)
+        assertEquals(VoiceProviderType.SILICON_FLOW, settings.defaultSpeechProvider)
+        assertEquals("TeleAI/TeleSpeechASR", settings.siliconFlowSpeechModel)
 
         store.setDefaultSpeechProvider(VoiceProviderType.ANDROID_SYSTEM)
-        store.setCloudSpeechConfiguration(providerId = null, model = "whisper-1")
+        store.setSiliconFlowSpeechModel("FunAudioLLM/SenseVoiceSmall")
     }
 }

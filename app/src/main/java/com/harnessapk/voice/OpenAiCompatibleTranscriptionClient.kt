@@ -21,7 +21,10 @@ data class CloudTranscriptionRequest(
     val customHeaders: Map<String, String> = emptyMap(),
 )
 
-class CloudTranscriptionException(message: String) : Exception(message)
+class CloudTranscriptionException(
+    message: String,
+    val statusCode: Int? = null,
+) : Exception(message)
 
 class OpenAiCompatibleTranscriptionClient(
     private val httpClient: OkHttpClient,
@@ -68,7 +71,10 @@ class OpenAiCompatibleTranscriptionClient(
         httpClient.newCall(httpRequest).execute().use { response ->
             val responseBody = response.body.string()
             if (!response.isSuccessful) {
-                throw CloudTranscriptionException("语音转写请求失败（HTTP ${response.code}）")
+                throw CloudTranscriptionException(
+                    message = "语音转写请求失败（HTTP ${response.code}）",
+                    statusCode = response.code,
+                )
             }
             val transcript = runCatching {
                 json.parseToJsonElement(responseBody).jsonObject["text"]?.jsonPrimitive?.contentOrNull
@@ -77,6 +83,15 @@ class OpenAiCompatibleTranscriptionClient(
             transcript
         }
     }
+}
+
+fun siliconFlowTranscriptionError(error: Throwable): String = when (
+    (error as? CloudTranscriptionException)?.statusCode
+) {
+    401, 403 -> "硅基流动 API Key 无效，请重新配置"
+    429 -> "硅基流动请求过于频繁，请稍后重试"
+    503, 504 -> "硅基流动语音服务繁忙，请稍后重试"
+    else -> error.message ?: "硅基流动语音转写失败，请重试"
 }
 
 internal fun transcriptionEndpoint(baseUrl: String): String {

@@ -23,30 +23,57 @@ class VoiceSettingsTest {
     }
 
     @Test
-    fun defaultSystemVoiceSettingsDoNotRequireCloudConfiguration() {
-        assertFalse(VoiceSettings().requiresCloudConfiguration())
-        assertTrue(
-            VoiceSettings(defaultSpeechProvider = VoiceProviderType.CLOUD)
-                .requiresCloudConfiguration(),
-        )
-        assertTrue(
-            VoiceSettings(defaultTtsProvider = VoiceProviderType.CLOUD)
-                .requiresCloudConfiguration(),
+    fun siliconFlowSpeechDefaultsToSenseVoiceSmall() {
+        val settings = VoiceSettings()
+
+        assertEquals("FunAudioLLM/SenseVoiceSmall", settings.siliconFlowSpeechModel)
+        assertEquals(
+            listOf(
+                SiliconFlowSpeechModel(
+                    id = "FunAudioLLM/SenseVoiceSmall",
+                    label = "SenseVoice Small",
+                    recommended = true,
+                ),
+                SiliconFlowSpeechModel(
+                    id = "TeleAI/TeleSpeechASR",
+                    label = "TeleSpeech ASR",
+                    recommended = false,
+                ),
+            ),
+            siliconFlowSpeechModels(),
         )
     }
 
     @Test
-    fun cloudSpeechUsesAnEncryptedProviderProfileAndExplicitModel() {
+    fun systemVoiceDoesNotRequireApiConfiguration() {
+        assertFalse(VoiceSettings().requiresApiConfiguration())
+        assertTrue(
+            VoiceSettings(defaultSpeechProvider = VoiceProviderType.SILICON_FLOW)
+                .requiresApiConfiguration(),
+        )
+        assertTrue(
+            VoiceSettings(defaultTtsProvider = VoiceProviderType.SILICON_FLOW)
+                .requiresApiConfiguration(),
+        )
+    }
+
+    @Test
+    fun siliconFlowSpeechRequiresSavedKeyAndExplicitModel() {
         val settings = VoiceSettings(
-            defaultSpeechProvider = VoiceProviderType.CLOUD,
-            cloudSpeechProviderId = "provider-1",
-            cloudSpeechModel = "whisper-1",
+            defaultSpeechProvider = VoiceProviderType.SILICON_FLOW,
+            siliconFlowSpeechModel = "TeleAI/TeleSpeechASR",
         )
 
-        assertTrue(settings.requiresCloudConfiguration())
-        assertTrue(settings.cloudSpeechReady())
-        assertEquals("provider-1", settings.cloudSpeechProviderId)
-        assertEquals("whisper-1", settings.cloudSpeechModel)
+        assertTrue(settings.siliconFlowSpeechReady(hasApiKey = true))
+        assertFalse(settings.siliconFlowSpeechReady(hasApiKey = false))
+        assertEquals("TeleAI/TeleSpeechASR", settings.siliconFlowSpeechModel)
+    }
+
+    @Test
+    fun legacyCloudProviderMigratesToSiliconFlow() {
+        assertEquals(VoiceProviderType.SILICON_FLOW, decodeVoiceProviderType("CLOUD"))
+        assertEquals(VoiceProviderType.SILICON_FLOW, decodeVoiceProviderType("SILICON_FLOW"))
+        assertEquals(VoiceProviderType.ANDROID_SYSTEM, decodeVoiceProviderType("unknown"))
     }
 
     @Test

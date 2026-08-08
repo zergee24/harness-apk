@@ -32,12 +32,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.harnessapk.common.AppContainer
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.voice.VoiceProviderType
+import com.harnessapk.voice.siliconFlowSpeechModels
 import com.harnessapk.voice.transcriptionLanguageOptions
 import kotlinx.coroutines.launch
 
@@ -47,12 +50,11 @@ fun VoiceSettingsScreen(
     contentPadding: PaddingValues,
 ) {
     val settings by container.settingsStore.voiceSettings.collectAsState(initial = VoiceSettings())
-    val providers by container.providerRepository.observeEnabled().collectAsState(initial = emptyList())
+    val credentialState by container.voiceCredentialStore.state.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    var cloudSpeechModelInput by remember(settings.cloudSpeechModel) {
-        mutableStateOf(settings.cloudSpeechModel)
-    }
+    val uriHandler = LocalUriHandler.current
+    var siliconFlowApiKeyInput by remember { mutableStateOf("") }
     var permissionGranted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -85,77 +87,88 @@ fun VoiceSettingsScreen(
                     label = { Text("系统语音") },
                 )
                 FilterChip(
-                    selected = settings.defaultSpeechProvider == VoiceProviderType.CLOUD,
+                    selected = settings.defaultSpeechProvider == VoiceProviderType.SILICON_FLOW,
                     onClick = {
                         scope.launch {
-                            container.settingsStore.setDefaultSpeechProvider(VoiceProviderType.CLOUD)
-                            if (settings.cloudSpeechProviderId == null) {
-                                container.settingsStore.setCloudSpeechConfiguration(
-                                    providerId = providers.firstOrNull()?.id,
-                                    model = settings.cloudSpeechModel,
-                                )
-                            }
+                            container.settingsStore.setDefaultSpeechProvider(VoiceProviderType.SILICON_FLOW)
                         }
                     },
-                    label = { Text("API 转写") },
+                    label = { Text("硅基流动") },
                 )
             }
-            if (settings.defaultSpeechProvider == VoiceProviderType.CLOUD) {
+            if (settings.defaultSpeechProvider == VoiceProviderType.SILICON_FLOW) {
                 Text(
-                    text = "API Key 复用“模型配置”中已加密保存的服务；录音转写完成后立即从本机删除。",
+                    text = if (credentialState.hasSiliconFlowApiKey) {
+                        "API Key 已加密保存。录音转写完成后立即从本机删除。"
+                    } else {
+                        "配置 API Key 后即可使用，不依赖手机内置语音服务。"
+                    },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (providers.isEmpty()) {
-                    Text("请先在模型配置中添加支持 /audio/transcriptions 的服务。")
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        providers.forEach { provider ->
-                            FilterChip(
-                                selected = settings.cloudSpeechProviderId == provider.id,
-                                onClick = {
-                                    scope.launch {
-                                        container.settingsStore.setCloudSpeechConfiguration(
-                                            providerId = provider.id,
-                                            model = settings.cloudSpeechModel,
-                                        )
-                                    }
-                                },
-                                label = { Text(provider.name) },
-                            )
-                        }
-                    }
-                }
                 OutlinedTextField(
                     modifier = Modifier.fillMaxWidth(),
-                    value = cloudSpeechModelInput,
+                    value = siliconFlowApiKeyInput,
                     onValueChange = { value ->
-                        cloudSpeechModelInput = value
-                        scope.launch {
-                            container.settingsStore.setCloudSpeechConfiguration(
-                                providerId = settings.cloudSpeechProviderId,
-                                model = value,
-                            )
-                        }
+                        siliconFlowApiKeyInput = value
                     },
                     singleLine = true,
-                    label = { Text("转写模型") },
-                    placeholder = { Text("whisper-1") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    label = { Text("硅基流动 API Key") },
+                    placeholder = {
+                        Text(if (credentialState.hasSiliconFlowApiKey) "已保存，留空不修改" else "sk-...")
+                    },
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        enabled = siliconFlowApiKeyInput.isNotBlank(),
+                        onClick = {
+                            container.voiceCredentialStore.saveSiliconFlowApiKey(siliconFlowApiKeyInput)
+                            siliconFlowApiKeyInput = ""
+                            scope.launch {
+                                container.settingsStore.setDefaultSpeechProvider(VoiceProviderType.SILICON_FLOW)
+                            }
+                        },
+                    ) {
+                        Text(if (credentialState.hasSiliconFlowApiKey) "更新 Key" else "保存 Key")
+                    }
+                    if (credentialState.hasSiliconFlowApiKey) {
+                        TextButton(onClick = container.voiceCredentialStore::clearSiliconFlowApiKey) {
+                            Text("删除 Key")
+                        }
+                    }
+                    TextButton(onClick = { uriHandler.openUri("https://cloud.siliconflow.cn/account/ak") }) {
+                        Text("获取 Key")
+                    }
+                }
+                Text("转写模型", fontWeight = FontWeight.SemiBold)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    siliconFlowSpeechModels().forEach { model ->
+                        FilterChip(
+                            selected = settings.siliconFlowSpeechModel == model.id,
+                            onClick = {
+                                scope.launch { container.settingsStore.setSiliconFlowSpeechModel(model.id) }
+                            },
+                            label = {
+                                Text(if (model.recommended) "${model.label}（默认）" else model.label)
+                            },
+                        )
+                    }
+                }
             } else {
                 Text(
                     text = "音频由设备当前的系统语音服务处理，系统服务可能联网。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                transcriptionLanguageOptions().forEach { language ->
-                    FilterChip(
-                        selected = settings.defaultTranscriptionLanguage == language.value,
-                        onClick = {
-                            scope.launch { container.settingsStore.setDefaultTranscriptionLanguage(language.value) }
-                        },
-                        label = { Text(language.label) },
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    transcriptionLanguageOptions().forEach { language ->
+                        FilterChip(
+                            selected = settings.defaultTranscriptionLanguage == language.value,
+                            onClick = {
+                                scope.launch { container.settingsStore.setDefaultTranscriptionLanguage(language.value) }
+                            },
+                            label = { Text(language.label) },
+                        )
+                    }
                 }
             }
         }

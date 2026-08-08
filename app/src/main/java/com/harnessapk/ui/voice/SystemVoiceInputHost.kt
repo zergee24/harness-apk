@@ -23,10 +23,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.harnessapk.common.AppContainer
-import com.harnessapk.provider.ProviderWithKey
 import com.harnessapk.voice.CloudTranscriptionRequest
 import com.harnessapk.voice.M4aVoiceRecorder
 import com.harnessapk.voice.OpenAiCompatibleTranscriptionClient
+import com.harnessapk.voice.SILICON_FLOW_BASE_URL
 import com.harnessapk.voice.SpeechRecognitionBackend
 import com.harnessapk.voice.SystemSpeechRecognizer
 import com.harnessapk.voice.VoiceInputEvent
@@ -35,6 +35,7 @@ import com.harnessapk.voice.VoiceInputState
 import com.harnessapk.voice.VoiceProviderType
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.voice.reduceVoiceInputState
+import com.harnessapk.voice.siliconFlowTranscriptionError
 import com.harnessapk.voice.systemSpeechRecognitionIntent
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,7 +58,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
     var pendingLanguage by remember { mutableStateOf("system") }
     var embeddedRecognizerActive by remember { mutableStateOf(false) }
     var activeProviderType by remember { mutableStateOf<VoiceProviderType?>(null) }
-    var activeCloudProvider by remember { mutableStateOf<ProviderWithKey?>(null) }
+    var activeSiliconFlowApiKey by remember { mutableStateOf<String?>(null) }
     val latestState by rememberUpdatedState(state)
     val latestEmbeddedRecognizerActive by rememberUpdatedState(embeddedRecognizerActive)
     val latestActiveProviderType by rememberUpdatedState(activeProviderType)
@@ -73,7 +74,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
             event == VoiceInputEvent.CancelRequested
         ) {
             activeProviderType = null
-            activeCloudProvider = null
+            activeSiliconFlowApiKey = null
         }
         state = reduceVoiceInputState(state, event)
     }
@@ -100,26 +101,22 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
         )
     }
 
-    fun beginCloudRecognition() {
-        val providerId = settings.cloudSpeechProviderId
-        if (providerId.isNullOrBlank() || settings.cloudSpeechModel.isBlank()) {
-            dispatch(VoiceInputEvent.Failed("请先在语音能力中配置 API 转写服务", preservePartial = false))
-            return
-        }
+    fun beginSiliconFlowRecognition() {
         scope.launch {
-            val provider = runCatching {
+            val apiKey = runCatching {
                 withContext(container.dispatchers.io) {
-                    container.providerRepository.providerWithKey(providerId)
+                    container.voiceCredentialStore.siliconFlowApiKey()
                 }
-            }.getOrElse {
-                dispatch(VoiceInputEvent.Failed("API 转写服务不可用，请检查模型配置", preservePartial = false))
+            }.getOrNull()
+            if (apiKey.isNullOrBlank()) {
+                dispatch(VoiceInputEvent.Failed("请先在语音能力中配置硅基流动 API Key", preservePartial = false))
                 return@launch
             }
             if (state.phase != VoiceInputPhase.REQUESTING_PERMISSION) return@launch
             runCatching { recorder.start() }
                 .onSuccess {
-                    activeCloudProvider = provider
-                    activeProviderType = VoiceProviderType.CLOUD
+                    activeSiliconFlowApiKey = apiKey
+                    activeProviderType = VoiceProviderType.SILICON_FLOW
                     dispatch(VoiceInputEvent.PermissionGranted)
                 }
                 .onFailure { error ->
@@ -148,7 +145,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
             }
             SpeechRecognitionBackend.UNAVAILABLE -> dispatch(
                 VoiceInputEvent.Failed(
-                    message = "此设备没有可用的系统语音识别，可在语音能力中选择 API 转写",
+                    message = "此设备没有可用的系统语音识别，可在语音能力中选择硅基流动",
                     preservePartial = false,
                 ),
             )
@@ -158,7 +155,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
     fun beginRecognition() {
         when (settings.defaultSpeechProvider) {
             VoiceProviderType.ANDROID_SYSTEM -> beginSystemRecognition()
-            VoiceProviderType.CLOUD -> beginCloudRecognition()
+            VoiceProviderType.SILICON_FLOW -> beginSiliconFlowRecognition()
         }
     }
 
@@ -185,7 +182,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
         val observer = LifecycleEventObserver { _, event ->
             if (
                 event == Lifecycle.Event.ON_STOP &&
-                (latestEmbeddedRecognizerActive || latestActiveProviderType == VoiceProviderType.CLOUD) &&
+                (latestEmbeddedRecognizerActive || latestActiveProviderType == VoiceProviderType.SILICON_FLOW) &&
                 latestState.active
             ) {
                 recognizer.cancel()
@@ -220,8 +217,8 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
         stop = {
             if (state.phase == VoiceInputPhase.LISTENING) {
                 dispatch(VoiceInputEvent.StopRequested)
-                if (activeProviderType == VoiceProviderType.CLOUD) {
-                    val provider = activeCloudProvider
+                if (activeProviderType == VoiceProviderType.SILICON_FLOW) {
+                    val apiKey = activeSiliconFlowApiKey
                     val audioFile = runCatching { recorder.stop() }.getOrElse { error ->
                         dispatch(
                             VoiceInputEvent.Failed(
@@ -234,14 +231,13 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
                     activeProviderType = null
                     scope.launch {
                         try {
-                            val resolvedProvider = checkNotNull(provider)
+                            val resolvedApiKey = checkNotNull(apiKey)
                             val transcript = transcriptionClient.transcribe(
                                 request = CloudTranscriptionRequest(
-                                    baseUrl = resolvedProvider.profile.baseUrl,
-                                    apiKey = resolvedProvider.apiKey,
-                                    model = settings.cloudSpeechModel,
-                                    language = pendingLanguage,
-                                    customHeaders = resolvedProvider.profile.customHeaders,
+                                    baseUrl = SILICON_FLOW_BASE_URL,
+                                    apiKey = resolvedApiKey,
+                                    model = settings.siliconFlowSpeechModel,
+                                    language = "system",
                                 ),
                                 audioFile = audioFile,
                             )
@@ -249,7 +245,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
                         } catch (error: Exception) {
                             dispatch(
                                 VoiceInputEvent.Failed(
-                                    error.message ?: "API 语音转写失败，请重试",
+                                    siliconFlowTranscriptionError(error),
                                     preservePartial = false,
                                 ),
                             )

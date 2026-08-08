@@ -13,6 +13,14 @@ import org.junit.Test
 
 class OpenAiCompatibleTranscriptionClientTest {
     @Test
+    fun siliconFlowUsesTheOpenAiCompatibleTranscriptionEndpoint() {
+        assertEquals(
+            "https://api.siliconflow.cn/v1/audio/transcriptions",
+            transcriptionEndpoint(SILICON_FLOW_BASE_URL),
+        )
+    }
+
+    @Test
     fun transcribeUploadsTemporaryAudioToOpenAiCompatibleEndpoint() = runTest {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(200).setBody("""{"text":"荣耀手机语音"}"""))
@@ -26,7 +34,7 @@ class OpenAiCompatibleTranscriptionClientTest {
                 request = CloudTranscriptionRequest(
                     baseUrl = server.url("/v1").toString().trimEnd('/'),
                     apiKey = "voice-secret",
-                    model = "whisper-1",
+                    model = DEFAULT_SILICON_FLOW_SPEECH_MODEL,
                     language = "zh-CN",
                     customHeaders = mapOf(
                         "X-Tenant" to "mobile",
@@ -45,7 +53,7 @@ class OpenAiCompatibleTranscriptionClientTest {
             assertTrue(recorded.getHeader("Content-Type").orEmpty().startsWith("multipart/form-data"))
             val body = recorded.body.readUtf8()
             assertTrue(body.contains("name=\"model\""))
-            assertTrue(body.contains("whisper-1"))
+            assertTrue(body.contains(DEFAULT_SILICON_FLOW_SPEECH_MODEL))
             assertTrue(body.contains("name=\"language\""))
             assertTrue(body.contains("zh"))
             assertTrue(body.contains("filename=\"voice-input.m4a\""))
@@ -68,7 +76,7 @@ class OpenAiCompatibleTranscriptionClientTest {
                         CloudTranscriptionRequest(
                             baseUrl = server.url("/v1").toString().trimEnd('/'),
                             apiKey = "voice-secret",
-                            model = "whisper-1",
+                            model = DEFAULT_SILICON_FLOW_SPEECH_MODEL,
                             language = "system",
                         ),
                         audio,
@@ -81,5 +89,21 @@ class OpenAiCompatibleTranscriptionClientTest {
             audio.delete()
             server.shutdown()
         }
+    }
+
+    @Test
+    fun siliconFlowFailuresHaveActionableChineseMessages() {
+        assertEquals(
+            "硅基流动 API Key 无效，请重新配置",
+            siliconFlowTranscriptionError(CloudTranscriptionException("unauthorized", statusCode = 401)),
+        )
+        assertEquals(
+            "硅基流动请求过于频繁，请稍后重试",
+            siliconFlowTranscriptionError(CloudTranscriptionException("limited", statusCode = 429)),
+        )
+        assertEquals(
+            "硅基流动语音服务繁忙，请稍后重试",
+            siliconFlowTranscriptionError(CloudTranscriptionException("busy", statusCode = 503)),
+        )
     }
 }

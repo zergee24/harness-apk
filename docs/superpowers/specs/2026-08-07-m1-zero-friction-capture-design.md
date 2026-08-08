@@ -55,7 +55,7 @@ M1 只解决一件事：用户拿起手机后，可以在十几秒内把语音�
 ### 3.2 删除或隐藏
 
 - 不要求先去“我的 -> 语音能力”启用语音，首次点击麦克风即处理权限。
-- 云端 STT 只复用已有加密 Provider，录音仅作单次转写并立即删除；不提供保存原始音频或自动发送。
+- 云端 STT 首期固定接入硅基流动，API Key 使用独立 Android Keystore 密钥加密；录音仅作单次转写并立即删除，不提供保存原始音频或自动发送。
 - 转写始终先进入输入框，M1 不提供自动发送开关。
 - 不创建“收件箱”Tab、分享历史页或独立捕获模式。
 - 不为项目、Agent、Wiki 和模型各放一个常驻 Chip。
@@ -205,8 +205,9 @@ LISTENING -> CANCELLED -> IDLE
 
 - 优先使用 `SpeechRecognizer`，启用 partial results，并传入当前语言。
 - `SpeechRecognizer.isRecognitionAvailable` 为 false 时，降级到系统 `RecognizerIntent` Activity。
-- 对荣耀等缺少可用 Google 语音服务的设备，允许用户选择“API 转写”，复用已有 Provider 的加密 API Key 和 OpenAI 兼容 `/audio/transcriptions` 接口。
+- 对荣耀等缺少可用 Google 语音服务的设备，允许用户选择“硅基流动”，调用固定的 `https://api.siliconflow.cn/v1/audio/transcriptions` 接口。
 - API 转写直接录制临时 M4A；停止后上传，成功、失败、取消、切后台或页面销毁均删除临时音频，不自动发送。
+- 硅基流动默认模型为 `FunAudioLLM/SenseVoiceSmall`，可切换 `TeleAI/TeleSpeechASR`；语种由服务自动识别。
 - 系统与 API 转写都不可用时，麦克风点击显示可操作错误并保留原草稿。
 - 系统语音服务可能联网。首次权限说明明确“音频由设备当前系统语音服务处理”，不承诺离线。
 
@@ -215,11 +216,11 @@ LISTENING -> CANCELLED -> IDLE
 “语音能力”页 M1 只保留：
 
 - 转写语言：跟随系统 / 中文 / English。
-- 转写方式：系统语音 / API 转写；API 模式选择已有 Provider 和转写模型。
+- 转写方式：系统语音 / 硅基流动；硅基流动模式内配置独立 API Key，并从受支持模型列表单选转写模型。
 - 回复朗读开关与语速。
 - 麦克风权限状态。
 
-已有 `speechInputEnabled`、`autoFillInput`、`autoSendAfterTranscription` 和 `saveOriginalAudio` 字段保留兼容读取，但不再作为主链路前置条件；M1 固定为“可用即显示、填入输入框、不自动发送、不保存音频”。API Key 继续由现有 Provider 加密仓储管理。
+已有 `speechInputEnabled`、`autoFillInput`、`autoSendAfterTranscription` 和 `saveOriginalAudio` 字段保留兼容读取，但不再作为主链路前置条件；M1 固定为“可用即显示、填入输入框、不自动发送、不保存音频”。硅基流动 API Key 不与模型 Provider 混用，使用独立别名的 Android Keystore 加密仓储管理，设置页只展示是否已配置，不回显明文。
 
 ## 7. Android 分享入口
 
@@ -498,7 +499,7 @@ LISTENING -> CANCELLED -> IDLE
 
 ## 15. 完成定义
 
-- 不进入设置即可使用系统语音；无可用系统服务时可选择 API 转写，且两种方式都永不自动发送。
+- 不进入设置即可使用系统语音；无可用系统服务时可在语音能力中配置硅基流动 Key，默认模型已选中，且两种方式都永不自动发送。
 - 分享文字到发送正常路径不超过两次确认，分享文件到最近项目只需一次确认。
 - 外部 URI 权限消失、网络失败和进程重建均不丢草稿。
 - 输入区没有横向滚动的配置 Chip，320dp 下仍可一眼看懂当前范围。
