@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -33,7 +34,7 @@ class HarnessApkAppNavigationTest {
         composeRule.onNodeWithText("智能体包").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
 
-        composeRule.onNodeWithText("我的").assertIsDisplayed()
+        assertSettingsHome()
     }
 
     @Test
@@ -49,7 +50,7 @@ class HarnessApkAppNavigationTest {
         composeRule.onNodeWithText("Wiki 知识库").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
 
-        composeRule.onNodeWithText("我的").assertIsDisplayed()
+        assertSettingsHome()
     }
 
     @Test
@@ -74,7 +75,7 @@ class HarnessApkAppNavigationTest {
 
         composeRule.onNodeWithText("智能体包").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
-        composeRule.onNodeWithText("我的").assertIsDisplayed()
+        assertSettingsHome()
     }
 
     @Test
@@ -99,7 +100,7 @@ class HarnessApkAppNavigationTest {
 
         composeRule.onNodeWithText("Wiki 知识库").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
-        composeRule.onNodeWithText("我的").assertIsDisplayed()
+        assertSettingsHome()
     }
 
     @Test
@@ -113,6 +114,10 @@ class HarnessApkAppNavigationTest {
     private fun openSettings() {
         composeRule.onNodeWithTag("nav-ME").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("我的").assertIsDisplayed()
+        assertSettingsHome()
+    }
+
+    private fun assertSettingsHome() {
+        composeRule.onNodeWithTag("nav-ME").assertIsDisplayed().assertIsSelected()
     }
 }
