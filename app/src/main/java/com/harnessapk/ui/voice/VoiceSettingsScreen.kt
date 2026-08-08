@@ -7,6 +7,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,6 +41,7 @@ import androidx.core.content.ContextCompat
 import com.harnessapk.common.AppContainer
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.voice.VoiceProviderType
+import com.harnessapk.voice.DEFAULT_ALIYUN_SPEECH_MODEL
 import com.harnessapk.voice.siliconFlowSpeechModels
 import com.harnessapk.voice.transcriptionLanguageOptions
 import kotlinx.coroutines.launch
@@ -55,6 +57,7 @@ fun VoiceSettingsScreen(
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     var siliconFlowApiKeyInput by remember { mutableStateOf("") }
+    var aliyunApiKeyInput by remember { mutableStateOf("") }
     var permissionGranted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -78,7 +81,10 @@ fun VoiceSettingsScreen(
                 text = "转写结果只填入输入框，不会自动发送。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 FilterChip(
                     selected = settings.defaultSpeechProvider == VoiceProviderType.ANDROID_SYSTEM,
                     onClick = {
@@ -94,6 +100,13 @@ fun VoiceSettingsScreen(
                         }
                     },
                     label = { Text("硅基流动") },
+                )
+                FilterChip(
+                    selected = settings.defaultSpeechProvider == VoiceProviderType.ALIYUN,
+                    onClick = {
+                        scope.launch { container.settingsStore.setDefaultSpeechProvider(VoiceProviderType.ALIYUN) }
+                    },
+                    label = { Text("阿里云实时") },
                 )
             }
             if (settings.defaultSpeechProvider == VoiceProviderType.SILICON_FLOW) {
@@ -118,7 +131,10 @@ fun VoiceSettingsScreen(
                         Text(if (credentialState.hasSiliconFlowApiKey) "已保存，留空不修改" else "sk-...")
                     },
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     TextButton(
                         enabled = siliconFlowApiKeyInput.isNotBlank(),
                         onClick = {
@@ -151,6 +167,79 @@ fun VoiceSettingsScreen(
                             label = {
                                 Text(if (model.recommended) "${model.label}（默认）" else model.label)
                             },
+                        )
+                    }
+                }
+            } else if (settings.defaultSpeechProvider == VoiceProviderType.ALIYUN) {
+                Text(
+                    text = if (credentialState.hasAliyunApiKey) {
+                        "API Key 已加密保存。语音会实时上传并逐句返回转写结果。"
+                    } else {
+                        "配置百炼 API Key 后即可边说边出字。"
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = aliyunApiKeyInput,
+                    onValueChange = { aliyunApiKeyInput = it },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    label = { Text("阿里云百炼 API Key") },
+                    placeholder = {
+                        Text(if (credentialState.hasAliyunApiKey) "已保存，留空不修改" else "sk-...")
+                    },
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    TextButton(
+                        enabled = aliyunApiKeyInput.isNotBlank(),
+                        onClick = {
+                            container.voiceCredentialStore.saveAliyunApiKey(aliyunApiKeyInput)
+                            aliyunApiKeyInput = ""
+                            scope.launch {
+                                container.settingsStore.setDefaultSpeechProvider(VoiceProviderType.ALIYUN)
+                            }
+                        },
+                    ) {
+                        Text(if (credentialState.hasAliyunApiKey) "更新 Key" else "保存 Key")
+                    }
+                    if (credentialState.hasAliyunApiKey) {
+                        TextButton(onClick = container.voiceCredentialStore::clearAliyunApiKey) {
+                            Text("删除 Key")
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            uriHandler.openUri("https://bailian.console.aliyun.com/?apiKey=1#/api-key")
+                        },
+                    ) {
+                        Text("获取 Key")
+                    }
+                }
+                Text("实时模型", fontWeight = FontWeight.SemiBold)
+                FilterChip(
+                    selected = settings.aliyunSpeechModel == DEFAULT_ALIYUN_SPEECH_MODEL,
+                    onClick = {
+                        scope.launch {
+                            container.settingsStore.setAliyunSpeechModel(DEFAULT_ALIYUN_SPEECH_MODEL)
+                        }
+                    },
+                    label = { Text("Paraformer Realtime V2（默认）") },
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    transcriptionLanguageOptions().forEach { language ->
+                        FilterChip(
+                            selected = settings.defaultTranscriptionLanguage == language.value,
+                            onClick = {
+                                scope.launch { container.settingsStore.setDefaultTranscriptionLanguage(language.value) }
+                            },
+                            label = { Text(language.label) },
                         )
                     }
                 }

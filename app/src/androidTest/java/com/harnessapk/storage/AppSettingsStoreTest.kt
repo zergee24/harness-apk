@@ -41,4 +41,18 @@ class AppSettingsStoreTest {
         store.setDefaultSpeechProvider(VoiceProviderType.ANDROID_SYSTEM)
         store.setSiliconFlowSpeechModel("FunAudioLLM/SenseVoiceSmall")
     }
+
+    @Test
+    fun persistsAliyunRealtimeSpeechProviderAndModel() = runBlocking {
+        val store = AppSettingsStore(ApplicationProvider.getApplicationContext<Context>())
+
+        store.setDefaultSpeechProvider(VoiceProviderType.ALIYUN)
+        store.setAliyunSpeechModel("paraformer-realtime-v2")
+
+        val settings = store.voiceSettings.first()
+        assertEquals(VoiceProviderType.ALIYUN, settings.defaultSpeechProvider)
+        assertEquals("paraformer-realtime-v2", settings.aliyunSpeechModel)
+
+        store.setDefaultSpeechProvider(VoiceProviderType.ANDROID_SYSTEM)
+    }
 }

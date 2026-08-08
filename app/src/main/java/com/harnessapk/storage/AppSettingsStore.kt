@@ -14,6 +14,7 @@ import com.harnessapk.skills.SkillActivationSettings
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.voice.VoiceProviderType
 import com.harnessapk.voice.DEFAULT_SILICON_FLOW_SPEECH_MODEL
+import com.harnessapk.voice.DEFAULT_ALIYUN_SPEECH_MODEL
 import com.harnessapk.voice.decodeVoiceProviderType
 import com.harnessapk.websearch.WebSearchSettings
 import com.harnessapk.websearch.normalizeWebSearchMaxResults
@@ -67,6 +68,9 @@ class AppSettingsStore(private val context: Context) {
             siliconFlowSpeechModel = it[VOICE_SILICON_FLOW_SPEECH_MODEL]
                 ?.takeIf(String::isNotBlank)
                 ?: DEFAULT_SILICON_FLOW_SPEECH_MODEL,
+            aliyunSpeechModel = it[VOICE_ALIYUN_SPEECH_MODEL]
+                ?.takeIf(String::isNotBlank)
+                ?: DEFAULT_ALIYUN_SPEECH_MODEL,
             defaultTranscriptionLanguage = it[VOICE_TRANSCRIPTION_LANGUAGE] ?: "system",
             autoPunctuation = it[VOICE_AUTO_PUNCTUATION] ?: true,
             autoFillInput = it[VOICE_AUTO_FILL_INPUT] ?: true,
@@ -154,6 +158,14 @@ class AppSettingsStore(private val context: Context) {
         }
     }
 
+    suspend fun setAliyunSpeechModel(model: String) {
+        context.appSettingsDataStore.edit {
+            it[VOICE_ALIYUN_SPEECH_MODEL] = model.trim()
+                .takeIf { candidate -> candidate == DEFAULT_ALIYUN_SPEECH_MODEL }
+                ?: DEFAULT_ALIYUN_SPEECH_MODEL
+        }
+    }
+
     suspend fun setDefaultTranscriptionLanguage(value: String) {
         context.appSettingsDataStore.edit { it[VOICE_TRANSCRIPTION_LANGUAGE] = value.trim().ifBlank { "system" } }
     }
@@ -213,6 +225,7 @@ class AppSettingsStore(private val context: Context) {
         private val VOICE_SPEECH_INPUT_ENABLED = booleanPreferencesKey("voice_speech_input_enabled")
         private val VOICE_SPEECH_PROVIDER = stringPreferencesKey("voice_speech_provider")
         private val VOICE_SILICON_FLOW_SPEECH_MODEL = stringPreferencesKey("voice_silicon_flow_speech_model")
+        private val VOICE_ALIYUN_SPEECH_MODEL = stringPreferencesKey("voice_aliyun_speech_model")
         private val VOICE_TRANSCRIPTION_LANGUAGE = stringPreferencesKey("voice_transcription_language")
         private val VOICE_AUTO_PUNCTUATION = booleanPreferencesKey("voice_auto_punctuation")
         private val VOICE_AUTO_FILL_INPUT = booleanPreferencesKey("voice_auto_fill_input")

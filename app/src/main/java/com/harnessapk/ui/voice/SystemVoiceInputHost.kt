@@ -24,8 +24,13 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.harnessapk.common.AppContainer
 import com.harnessapk.voice.CloudTranscriptionRequest
+import com.harnessapk.voice.AliyunRealtimeRequest
+import com.harnessapk.voice.AliyunRealtimeTranscriptionClient
+import com.harnessapk.voice.AliyunRealtimeTranscriptionListener
+import com.harnessapk.voice.AliyunRealtimeTranscriptionSession
 import com.harnessapk.voice.M4aVoiceRecorder
 import com.harnessapk.voice.OpenAiCompatibleTranscriptionClient
+import com.harnessapk.voice.PcmVoiceRecorder
 import com.harnessapk.voice.SILICON_FLOW_BASE_URL
 import com.harnessapk.voice.SpeechRecognitionBackend
 import com.harnessapk.voice.SystemSpeechRecognizer
@@ -35,6 +40,7 @@ import com.harnessapk.voice.VoiceInputState
 import com.harnessapk.voice.VoiceProviderType
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.voice.reduceVoiceInputState
+import com.harnessapk.voice.aliyunRealtimeTranscriptionError
 import com.harnessapk.voice.siliconFlowTranscriptionError
 import com.harnessapk.voice.systemSpeechRecognitionIntent
 import kotlinx.coroutines.launch
@@ -59,12 +65,17 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
     var embeddedRecognizerActive by remember { mutableStateOf(false) }
     var activeProviderType by remember { mutableStateOf<VoiceProviderType?>(null) }
     var activeSiliconFlowApiKey by remember { mutableStateOf<String?>(null) }
+    var activeAliyunSession by remember { mutableStateOf<AliyunRealtimeTranscriptionSession?>(null) }
     val latestState by rememberUpdatedState(state)
     val latestEmbeddedRecognizerActive by rememberUpdatedState(embeddedRecognizerActive)
     val latestActiveProviderType by rememberUpdatedState(activeProviderType)
     val recorder = remember(context.applicationContext) { M4aVoiceRecorder(context.applicationContext) }
+    val pcmRecorder = remember { PcmVoiceRecorder() }
     val transcriptionClient = remember(container) {
         OpenAiCompatibleTranscriptionClient(container.chatHttpClient, container.json)
+    }
+    val aliyunTranscriptionClient = remember(container) {
+        AliyunRealtimeTranscriptionClient(container.chatHttpClient, container.json)
     }
 
     fun dispatch(event: VoiceInputEvent) {
@@ -145,10 +156,108 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
             }
             SpeechRecognitionBackend.UNAVAILABLE -> dispatch(
                 VoiceInputEvent.Failed(
-                    message = "此设备没有可用的系统语音识别，可在语音能力中选择硅基流动",
+                    message = "此设备没有可用的系统语音识别，可在语音能力中选择阿里云实时或硅基流动",
                     preservePartial = false,
                 ),
             )
+        }
+    }
+
+    fun beginAliyunRecognition() {
+        scope.launch {
+            val apiKey = runCatching {
+                withContext(container.dispatchers.io) {
+                    container.voiceCredentialStore.aliyunApiKey()
+                }
+            }.getOrNull()
+            if (apiKey.isNullOrBlank()) {
+                dispatch(VoiceInputEvent.Failed("请先在语音能力中配置阿里云百炼 API Key", preservePartial = false))
+                return@launch
+            }
+            if (state.phase != VoiceInputPhase.REQUESTING_PERMISSION) return@launch
+
+            activeProviderType = VoiceProviderType.ALIYUN
+            lateinit var session: AliyunRealtimeTranscriptionSession
+            session = runCatching {
+                aliyunTranscriptionClient.start(
+                    request = AliyunRealtimeRequest(
+                        apiKey = apiKey,
+                        model = settings.aliyunSpeechModel,
+                        language = pendingLanguage,
+                        autoPunctuation = settings.autoPunctuation,
+                    ),
+                    listener = object : AliyunRealtimeTranscriptionListener {
+                        override fun onReady() {
+                            scope.launch {
+                                if (state.phase != VoiceInputPhase.REQUESTING_PERMISSION) return@launch
+                                runCatching {
+                                    pcmRecorder.start(
+                                        onAudioChunk = { audio -> session.sendAudio(audio) },
+                                        onFailure = { error ->
+                                            scope.launch {
+                                                session.cancel()
+                                                activeAliyunSession = null
+                                                dispatch(
+                                                    VoiceInputEvent.Failed(
+                                                        error.message ?: "实时录音失败，请重试",
+                                                        preservePartial = true,
+                                                    ),
+                                                )
+                                            }
+                                        },
+                                    )
+                                }.onSuccess {
+                                    dispatch(VoiceInputEvent.PermissionGranted)
+                                }.onFailure { error ->
+                                    session.cancel()
+                                    activeAliyunSession = null
+                                    dispatch(
+                                        VoiceInputEvent.Failed(
+                                            error.message ?: "无法开始实时录音，请重试",
+                                            preservePartial = false,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+
+                        override fun onPartialResult(transcript: String) {
+                            scope.launch { dispatch(VoiceInputEvent.PartialResult(transcript)) }
+                        }
+
+                        override fun onFinalResult(transcript: String) {
+                            scope.launch {
+                                pcmRecorder.stop()
+                                activeAliyunSession = null
+                                dispatch(VoiceInputEvent.FinalResult(transcript))
+                            }
+                        }
+
+                        override fun onFailure(error: Throwable) {
+                            scope.launch {
+                                pcmRecorder.cancel()
+                                activeAliyunSession = null
+                                dispatch(
+                                    VoiceInputEvent.Failed(
+                                        aliyunRealtimeTranscriptionError(error),
+                                        preservePartial = true,
+                                    ),
+                                )
+                            }
+                        }
+                    },
+                )
+            }.getOrElse { error ->
+                activeProviderType = null
+                dispatch(
+                    VoiceInputEvent.Failed(
+                        aliyunRealtimeTranscriptionError(error),
+                        preservePartial = false,
+                    ),
+                )
+                return@launch
+            }
+            activeAliyunSession = session
         }
     }
 
@@ -156,6 +265,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
         when (settings.defaultSpeechProvider) {
             VoiceProviderType.ANDROID_SYSTEM -> beginSystemRecognition()
             VoiceProviderType.SILICON_FLOW -> beginSiliconFlowRecognition()
+            VoiceProviderType.ALIYUN -> beginAliyunRecognition()
         }
     }
 
@@ -182,11 +292,18 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
         val observer = LifecycleEventObserver { _, event ->
             if (
                 event == Lifecycle.Event.ON_STOP &&
-                (latestEmbeddedRecognizerActive || latestActiveProviderType == VoiceProviderType.SILICON_FLOW) &&
+                (
+                    latestEmbeddedRecognizerActive ||
+                        latestActiveProviderType == VoiceProviderType.SILICON_FLOW ||
+                        latestActiveProviderType == VoiceProviderType.ALIYUN
+                    ) &&
                 latestState.active
             ) {
                 recognizer.cancel()
                 recorder.cancel()
+                pcmRecorder.cancel()
+                activeAliyunSession?.cancel()
+                activeAliyunSession = null
                 embeddedRecognizerActive = false
                 dispatch(VoiceInputEvent.CancelRequested)
             }
@@ -197,6 +314,8 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
             recognizer.cancel()
             recognizer.destroy()
             recorder.cancel()
+            pcmRecorder.cancel()
+            activeAliyunSession?.cancel()
         }
     }
 
@@ -253,14 +372,26 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
                             audioFile.delete()
                         }
                     }
+                } else if (activeProviderType == VoiceProviderType.ALIYUN) {
+                    pcmRecorder.stop()
+                    activeAliyunSession?.finish()
+                    activeProviderType = null
                 } else {
                     recognizer.stop()
                 }
+            } else if (state.phase == VoiceInputPhase.REQUESTING_PERMISSION) {
+                activeAliyunSession?.cancel()
+                activeAliyunSession = null
+                pcmRecorder.cancel()
+                dispatch(VoiceInputEvent.CancelRequested)
             }
         },
         cancel = {
             recognizer.cancel()
             recorder.cancel()
+            pcmRecorder.cancel()
+            activeAliyunSession?.cancel()
+            activeAliyunSession = null
             embeddedRecognizerActive = false
             dispatch(VoiceInputEvent.CancelRequested)
         },

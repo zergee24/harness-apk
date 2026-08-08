@@ -70,9 +70,20 @@ class VoiceSettingsTest {
     }
 
     @Test
+    fun aliyunSpeechDefaultsToRealtimeParaformerAndRequiresSavedKey() {
+        val settings = VoiceSettings(defaultSpeechProvider = VoiceProviderType.ALIYUN)
+
+        assertEquals("paraformer-realtime-v2", settings.aliyunSpeechModel)
+        assertTrue(settings.requiresApiConfiguration())
+        assertTrue(settings.aliyunSpeechReady(hasApiKey = true))
+        assertFalse(settings.aliyunSpeechReady(hasApiKey = false))
+    }
+
+    @Test
     fun legacyCloudProviderMigratesToSiliconFlow() {
         assertEquals(VoiceProviderType.SILICON_FLOW, decodeVoiceProviderType("CLOUD"))
         assertEquals(VoiceProviderType.SILICON_FLOW, decodeVoiceProviderType("SILICON_FLOW"))
+        assertEquals(VoiceProviderType.ALIYUN, decodeVoiceProviderType("ALIYUN"))
         assertEquals(VoiceProviderType.ANDROID_SYSTEM, decodeVoiceProviderType("unknown"))
     }
 
