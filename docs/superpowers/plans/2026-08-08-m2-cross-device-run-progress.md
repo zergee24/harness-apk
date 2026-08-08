@@ -20,7 +20,7 @@
 
 人工合并目标：`test`（本分支不自动合并、不推送）
 
-当前状态：`IN_PROGRESS`；G0/G1 已完成，G2 Bridge state v2、Journal 与命令幂等实施中；三个产品边界继续采用第 2 节默认建议
+当前状态：`IN_PROGRESS`；G0/G1/G2 已完成，G3 Workspace Binding 与原子 Run 启动实施中；三个产品边界继续采用第 2 节默认建议
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -480,7 +480,7 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 | --- | --- | --- | --- | --- |
 | G0 | 协议 fixture、决策映射、基线和工具链 | M1 文档可见 | DONE | `9280954`；Android 988/0/0；Go test/vet/build 绿；app-server 0.147 schema 已锁定；独立 AVD/ADB 端口已分配 |
 | G1 | Room 22、领域状态机、持久 Outbox | G0 | DONE | `c2e6c42`、`5244a23`；21 -> 22 fixture、FK/唯一性、进程重读、Gap、去重和非法转换测试绿 |
-| G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | PENDING | Go unit/vet/build 绿；过期 Wire 可从同 Logical Event 重封装 |
+| G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | DONE | `71dd536`、`fbdd639`；Go unit/vet/build/race 绿；同 Logical Event 重封装、旧 IN_FLIGHT 变 UNKNOWN、route/epoch 恢复通过 |
 | G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | PENDING | 已绑定项目 3 次点击内进入 QUEUED/RUNNING；无路径输入；重复 start 一次执行 |
 | G4 | Resume、Replay、Gap、Snapshot、进程恢复 | G3 | PENDING | 10 分钟断网、Android kill、Bridge WebSocket reconnect 全部恢复 |
 | G5 | Activity、审批、通知精确深链 | G4 | PENDING | 同一 Pending Approval 从通知/Activity 到同一记录；重复点击一次生效 |
@@ -672,7 +672,7 @@ git commit -m "功能：持久化远程任务状态与命令队列"
 - Modify: `remote/cmd/bridge/main_test.go`
 - Create: `remote/cmd/relay/main_test.go`
 
-- [ ] **Step 1: 写“先 Journal 后发送”、重封装和命令重复测试**
+- [x] **Step 1: 写“先 Journal 后发送”、重封装和命令重复测试**
 
 ```go
 func TestReplayKeepsLogicalIdentityAndRefreshesWireEnvelope(t *testing.T)
@@ -683,23 +683,23 @@ func TestStateV1ToV2PreservesCredentialsAndForcesInitialGapSnapshot(t *testing.T
 func TestRelayRemainsOpaqueAndKeepsWireV1TTLBehavior(t *testing.T)
 ```
 
-- [ ] **Step 2: 运行并确认旧 PendingOutbound 行为失败**
+- [x] **Step 2: 运行并确认旧 PendingOutbound 行为失败**
 
 Run: `cd remote && go test ./internal/journal ./internal/commandcache ./cmd/bridge`
 
 Expected: FAIL，包/接口不存在。
 
-- [ ] **Step 3: 实现加密 append log、ACK/compact 和命令账本**
+- [x] **Step 3: 实现加密 append log、ACK/compact 和命令账本**
 
 写盘顺序固定：临时文件/append -> `Sync` -> rename/state update -> 网络发送。所有重复结果返回第一次的 result Logical Event ID；不能重新构造第二个业务结果。state v1 -> v2 原位升级保留 Host/Device credential 和 transport sequence；旧 `PendingOutbound` 因没有逻辑身份只触发一次 `Gap + Snapshot`，不猜测重放。Relay 仍只看加密 Wire，不新增 Run 明文状态。
 
-- [ ] **Step 4: 运行 Go 完整门禁**
+- [x] **Step 4: 运行 Go 完整门禁**
 
 Run: `cd remote && go test ./... && go vet ./... && go build ./cmd/relay ./cmd/bridge`
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交 Bridge 持久层**
+- [x] **Step 5: 提交 Bridge 持久层**
 
 ```bash
 git add remote/internal/journal remote/internal/commandcache \
@@ -718,7 +718,7 @@ git commit -m "功能：持久化Bridge事件与命令幂等"
 - Create: `remote/internal/run/routes_test.go`
 - Modify: `remote/cmd/bridge/main.go`
 
-- [ ] **Step 1: 写 request future、epoch 和路由恢复失败测试**
+- [x] **Step 1: 写 request future、epoch 和路由恢复失败测试**
 
 ```go
 func TestCallCorrelatesResponseWithoutBlockingEventDispatch(t *testing.T)
@@ -727,23 +727,23 @@ func TestRouteSurvivesWebSocketReconnectAndBridgeStateReload(t *testing.T)
 func TestNewProcessEpochInvalidatesOldServerRequestIDs(t *testing.T)
 ```
 
-- [ ] **Step 2: 运行定向 Go 测试**
+- [x] **Step 2: 运行定向 Go 测试**
 
 Run: `cd remote && go test ./internal/appserver ./internal/run`
 
 Expected: FAIL，旧 appServer/pending/threadOwners 都只在 `main.go` 内存中。
 
-- [ ] **Step 3: 实现并发安全 `Call`、通知分发和 route store**
+- [x] **Step 3: 实现并发安全 `Call`、通知分发和 route store**
 
 app-server stdout 只有一个 reader；response 投递 pending future，notification 同时送 Run Coordinator。任何 future 超时都写命令 `UNKNOWN`，不能用新 request ID 静默重试。
 
-- [ ] **Step 4: 运行 race detector**
+- [x] **Step 4: 运行 race detector**
 
 Run: `cd remote && go test -race ./internal/appserver ./internal/run ./cmd/bridge`
 
 Expected: PASS，无 map race、goroutine leak。
 
-- [ ] **Step 5: 提交 adapter**
+- [x] **Step 5: 提交 adapter**
 
 ```bash
 git add remote/internal/appserver remote/internal/run remote/cmd/bridge/main.go
@@ -1165,3 +1165,14 @@ git worktree add -b codex/m2-cross-device-run \
 - 恢复证据：终态拒绝迟到 RUNNING；同 Logical Event 不重复时间线或审批；Gap 不推进 cursor 并将开放 Run 标为 `RECONCILING`；Outbox 跨实例按同一 `commandId/payloadJson/payloadSha256` 重建。
 - 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。默认 5037 仅看到既有 `emulator-5554`/真机，未看到 M2 emulator；Gate 后 M2 emulator 与 5039 已关闭。
 - 已知限制：G1 只建立 Android 持久层和 reducer；尚未接 Bridge Journal/命令账本、网络 Logical ACK 或 UI。`requestUserInput` 的真实失败恢复仍在 G2/G5 落地。
+
+### 2026-08-09 / G2
+
+- 状态：`DONE`
+- Commit：`71dd536 功能：持久化Bridge事件与命令幂等`；`fbdd639 重构：隔离Codex协议适配与任务路由`
+- RED：Journal、命令账本、Logical Event 与 state v1 -> v2 升级接口缺失；app-server 单 reader/future、持久 route、process epoch 接口缺失，定向测试均先编译失败。
+- GREEN：`go test ./... && go vet ./... && go build ./cmd/relay ./cmd/bridge` 全部退出 0；`go test -race ./internal/appserver ./internal/run ./cmd/bridge` 退出 0。
+- 恢复证据：加密 Journal 写盘后才可发送，文件中不出现事件明文；同 Logical Event 重放时业务身份稳定且 Wire ID/nonce/transport sequence/TTL 刷新；compact 丢弃未 ACK 记录前先落 Gap；state v1 -> v2 保留 credential/sequence，对无逻辑身份的旧 PendingOutbound 只触发 Gap + Snapshot；旧 `IN_FLIGHT` 命令重启后转 `UNKNOWN`，重复命令返回首次缓存结果。
+- adapter 证据：app-server stdout 只有一个 reader；并发 `Call` 由 future 关联且不阻塞通知；route 在 WebSocket/Bridge 重载后恢复；process epoch 变化将旧 server request 标为 `STALE`；`requestUserInput` 独立建模，不再伪装为 approval。
+- 设备隔离：G2 为纯 Go Gate，不启动模拟器、不连接 ADB；默认 5037 设备未被操作。
+- 已知限制：尚未接通真实 `run.start` 纵向链路，命令账本与 route 的完整编排在 G3；Logical ACK/resume/snapshot 的端到端恢复在 G4。
