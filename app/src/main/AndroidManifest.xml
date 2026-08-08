@@ -63,6 +63,10 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".remote.RemoteNotificationActionReceiver"
+            android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -87,8 +87,9 @@ class RemoteSyncCoordinator(
         )
     }
 
-    suspend fun onLogicalEvent(event: RemoteLogicalEvent) {
-        when (state.apply(event)) {
+    suspend fun onLogicalEvent(event: RemoteLogicalEvent): ReduceResult {
+        val result = state.apply(event)
+        when (result) {
             ReduceResult.APPLIED, ReduceResult.DUPLICATE -> {
                 val position = state.position(event.hostId, event.deviceId)
                 if (position.gapFromSequence == null) {
@@ -103,6 +104,7 @@ class RemoteSyncCoordinator(
             }
             ReduceResult.GAP -> requestSnapshot(event.hostId)
         }
+        return result
     }
 
     suspend fun onGap(hostId: String) {
@@ -188,6 +190,21 @@ class RoomRemoteSyncState(
                         else -> remote.status
                     }
                     dao.upsertApproval(local.copy(status = nextStatus))
+                    if (nextStatus != "PENDING") {
+                        local.responseCommandId?.let { commandId ->
+                            dao.command(commandId)?.let { command ->
+                                dao.upsertCommand(
+                                    command.copy(
+                                        status = RemoteCommandStatus.SUCCEEDED.name,
+                                        acknowledgedAt = command.acknowledgedAt ?: System.currentTimeMillis(),
+                                        completedAt = System.currentTimeMillis(),
+                                        nextAttemptAt = Long.MAX_VALUE,
+                                        updatedAt = System.currentTimeMillis(),
+                                    ),
+                                )
+                            }
+                        }
+                    }
                 }
                 authoritative.values.forEach { remote ->
                     val existing = dao.approval(remote.approvalId)
@@ -261,7 +278,13 @@ internal fun parseRemoteRunSnapshot(payload: JsonObject): RemoteRunSnapshotEnvel
         )
     }
     val approvals = (payload["approvals"] as? JsonArray).orEmpty().map { element ->
-        val approval = element.jsonObject
+        val approval = sanitizeRemoteApprovalJson(element.jsonObject) as JsonObject
+        val actionType = approval.string("actionType") ?: "UNKNOWN"
+        val target = approval.string("target").orEmpty()
+        val risk = maxRemoteApprovalRisk(
+            parseRemoteApprovalRisk(approval.string("risk").orEmpty()),
+            classifyRemoteApprovalRisk(target, actionType),
+        )
         RemoteApprovalSnapshot(
             approvalId = approval.required("approvalId"),
             runId = approval.required("runId"),
@@ -271,12 +294,12 @@ internal fun parseRemoteRunSnapshot(payload: JsonObject): RemoteRunSnapshotEnvel
             serverRequestIdJson = approval["serverRequestId"]?.toString() ?: "null",
             method = approval.string("method") ?: "item/commandExecution/requestApproval",
             itemId = approval.string("itemId"),
-            actionType = approval.string("actionType") ?: "UNKNOWN",
-            target = approval.string("target").orEmpty(),
+            actionType = actionType,
+            target = target,
             commandPreview = approval.string("commandPreview"),
             detailsJson = approval["details"]?.toString() ?: "{}",
             availableDecisionsJson = approval["availableDecisions"]?.toString() ?: "[]",
-            risk = approval.string("risk") ?: "UNKNOWN",
+            risk = risk.name,
             requestedAt = approval.long("requestedAt") ?: 0L,
         )
     }

@@ -43,6 +43,14 @@ type Approval struct {
 	RunID           string          `json:"runId"`
 	ProcessEpoch    string          `json:"processEpoch"`
 	ServerRequestID json.RawMessage `json:"serverRequestId"`
+	Method          string          `json:"method,omitempty"`
+	ItemID          string          `json:"itemId,omitempty"`
+	ActionType      string          `json:"actionType,omitempty"`
+	Target          string          `json:"target,omitempty"`
+	CommandPreview  string          `json:"commandPreview,omitempty"`
+	DetailsJSON     string          `json:"detailsJson,omitempty"`
+	Risk            string          `json:"risk,omitempty"`
+	RequestedAt     int64           `json:"requestedAt,omitempty"`
 	Status          ApprovalStatus  `json:"status"`
 }
 
@@ -216,6 +224,17 @@ func (s *RouteStore) ValidateResponse(approvalID, epoch string, requestID json.R
 		return errors.New("server request id does not match approval")
 	}
 	return nil
+}
+
+func (s *RouteStore) MarkApprovalResolved(approvalID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	approval := s.data.Approvals[approvalID]
+	if approval == nil {
+		return errors.New("approval not found")
+	}
+	approval.Status = ApprovalResolved
+	return s.saveLocked()
 }
 
 func (s *RouteStore) saveLocked() error {

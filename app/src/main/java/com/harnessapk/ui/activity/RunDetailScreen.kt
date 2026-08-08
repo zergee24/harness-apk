@@ -1,5 +1,6 @@
 package com.harnessapk.ui.activity
 
+import android.app.KeyguardManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -12,12 +13,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -25,12 +28,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.harnessapk.common.AppContainer
+import com.harnessapk.remote.ApprovalDecision
+import com.harnessapk.remote.RemoteApprovalRisk
+import com.harnessapk.remote.RemoteConnectionService
+import com.harnessapk.remote.RemoteSyncPosition
+import com.harnessapk.remote.isRemoteApprovalActionEnabled
+import com.harnessapk.remote.parseRemoteApprovalRisk
+import com.harnessapk.remote.remoteApprovalPolicy
+import com.harnessapk.storage.RemoteApprovalEntity
 import com.harnessapk.ui.theme.HarnessSpacing
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,6 +56,41 @@ fun RunDetailScreen(
     onBack: () -> Unit,
 ) {
     val run by container.database.remoteDao().observeRun(runId).collectAsState(initial = null)
+    val approvals by container.database.remoteDao().observeApprovalsForRun(runId).collectAsState(initial = emptyList())
+    val profile by container.remoteProfileStore.profile.collectAsState()
+    val cursor by container.database.remoteDao().observeCursor(
+        hostId = run?.hostId.orEmpty(),
+        deviceId = profile?.deviceId.orEmpty(),
+    ).collectAsState(initial = null)
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var confirmingApproval by remember { mutableStateOf<RemoteApprovalEntity?>(null) }
+    var actionError by remember { mutableStateOf<String?>(null) }
+    fun enqueue(approval: RemoteApprovalEntity, decision: ApprovalDecision) {
+        scope.launch {
+            actionError = null
+            runCatching {
+                container.remoteApprovalCommandCoordinator.enqueue(approval, decision)
+                RemoteConnectionService.start(context)
+            }.onFailure { actionError = it.message ?: "审批命令入队失败" }
+        }
+    }
+    confirmingApproval?.let { approval ->
+        AlertDialog(
+            onDismissRequest = { confirmingApproval = null },
+            title = { Text("确认高风险操作") },
+            text = { Text(approval.target) },
+            confirmButton = {
+                Button(onClick = {
+                    confirmingApproval = null
+                    enqueue(approval, ApprovalDecision.ALLOW_ONCE)
+                }) { Text("确认允许一次") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { confirmingApproval = null }) { Text("取消") }
+            },
+        )
+    }
     Scaffold(
         modifier = Modifier.padding(contentPadding),
         topBar = {
@@ -77,7 +127,71 @@ fun RunDetailScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                approvals.filter { it.status == "PENDING" }.forEach { approval ->
+                    val position = RemoteSyncPosition(
+                        highestContiguousSequence = cursor?.lastContiguousSequence ?: 0L,
+                        gapFromSequence = cursor?.gapFromSequence,
+                        reconciliationState = cursor?.reconciliationState ?: "IN_SYNC",
+                    )
+                    val risk = parseRemoteApprovalRisk(approval.risk)
+                    val deviceLocked = context.getSystemService(KeyguardManager::class.java)?.isDeviceLocked == true
+                    val policy = remoteApprovalPolicy(risk, deviceLocked)
+                    val enabled = approval.responseCommandId == null &&
+                        isRemoteApprovalActionEnabled(approval.status, position)
+                    ApprovalDetailCard(
+                        approval = approval,
+                        enabled = enabled,
+                        allowEnabled = enabled && policy.canApproveNow,
+                        onAllow = {
+                            if (policy.requiresDetailConfirmation) confirmingApproval = approval
+                            else enqueue(approval, ApprovalDecision.ALLOW_ONCE)
+                        },
+                        onDecline = { enqueue(approval, ApprovalDecision.DENY) },
+                    )
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun ApprovalDetailCard(
+    approval: RemoteApprovalEntity,
+    enabled: Boolean,
+    allowEnabled: Boolean,
+    onAllow: () -> Unit,
+    onDecline: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("等待审批", style = MaterialTheme.typography.titleMedium)
+        Text(approval.target, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            when (parseRemoteApprovalRisk(approval.risk)) {
+                RemoteApprovalRisk.HIGH -> "高风险 · 需在详情页确认"
+                RemoteApprovalRisk.MEDIUM -> "中风险"
+                RemoteApprovalRisk.LOW -> "低风险"
+                RemoteApprovalRisk.UNKNOWN -> "风险待确认"
+            },
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        androidx.compose.foundation.layout.Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            OutlinedButton(
+                onClick = onDecline,
+                enabled = enabled,
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+            ) { Text(if (approval.responseCommandId == null) "拒绝" else "发送中") }
+            Button(
+                onClick = onAllow,
+                enabled = allowEnabled,
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+            ) { Text(if (!allowEnabled && enabled) "请先解锁" else "允许一次") }
         }
     }
 }

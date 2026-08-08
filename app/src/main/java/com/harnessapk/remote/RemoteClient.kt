@@ -228,10 +228,41 @@ class RemoteRepository(
         if (root["schemaVersion"] != null && root["eventId"] != null) {
             val event = parseRemoteLogicalEvent(plain)
             syncCoordinator?.let { coordinator ->
-                scope.launch { coordinator.onLogicalEvent(event) }
+                scope.launch {
+                    if (coordinator.onLogicalEvent(event) == ReduceResult.APPLIED) {
+                        notifyLogicalEvent(event)
+                    }
+                }
             }
         } else {
             handleEvent(parseRemoteEvent(plain))
+        }
+    }
+
+    private fun notifyLogicalEvent(event: RemoteLogicalEvent) {
+        val payload = event.payload as? JsonObject ?: JsonObject(emptyMap())
+        when (event.type) {
+            "run.approval.requested" -> _notifications.tryEmit(
+                RemoteNotification(
+                    title = "Codex 等待审批",
+                    message = payload.string("target")?.let(::redactRemoteSensitiveText) ?: "Mac 上的任务需要你的确认",
+                    runId = event.runId,
+                    approvalId = payload.string("approvalId"),
+                    risk = maxRemoteApprovalRisk(
+                        parseRemoteApprovalRisk(payload.string("risk").orEmpty()),
+                        classifyRemoteApprovalRisk(
+                            payload.string("target").orEmpty(),
+                            payload.string("actionType").orEmpty(),
+                        ),
+                    ),
+                ),
+            )
+            "run.completed" -> _notifications.tryEmit(
+                RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果", runId = event.runId),
+            )
+            "run.failed" -> _notifications.tryEmit(
+                RemoteNotification("Codex 任务失败", "打开 Harness 查看失败详情", runId = event.runId),
+            )
         }
     }
 

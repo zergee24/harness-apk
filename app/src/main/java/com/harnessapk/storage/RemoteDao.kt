@@ -42,6 +42,18 @@ interface RemoteDao {
     @Query("SELECT * FROM remote_runs WHERE hostId = :hostId AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')")
     suspend fun openRunsForHost(hostId: String): List<RemoteRunEntity>
 
+    @Query("SELECT * FROM remote_runs WHERE status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') ORDER BY updatedAt DESC")
+    fun observeOpenRuns(): Flow<List<RemoteRunEntity>>
+
+    @Query(
+        """
+        SELECT * FROM remote_runs
+        WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED') AND updatedAt >= :since
+        ORDER BY updatedAt DESC LIMIT :limit
+        """,
+    )
+    fun observeRecentTerminalRuns(since: Long, limit: Int): Flow<List<RemoteRunEntity>>
+
     @Query("DELETE FROM remote_runs WHERE id = :runId")
     suspend fun deleteRunById(runId: String)
 
@@ -66,6 +78,12 @@ interface RemoteDao {
     @Query("SELECT * FROM remote_approvals WHERE runId = :runId ORDER BY requestedAt")
     suspend fun approvalsForRun(runId: String): List<RemoteApprovalEntity>
 
+    @Query("SELECT * FROM remote_approvals WHERE runId = :runId ORDER BY requestedAt")
+    fun observeApprovalsForRun(runId: String): Flow<List<RemoteApprovalEntity>>
+
+    @Query("SELECT * FROM remote_approvals WHERE status = 'PENDING' ORDER BY requestedAt DESC")
+    fun observePendingApprovals(): Flow<List<RemoteApprovalEntity>>
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertCommand(command: RemoteCommandOutboxEntity)
 
@@ -83,6 +101,9 @@ interface RemoteDao {
 
     @Query("SELECT * FROM remote_sync_cursors WHERE hostId = :hostId AND deviceId = :deviceId LIMIT 1")
     suspend fun cursor(hostId: String, deviceId: String): RemoteSyncCursorEntity?
+
+    @Query("SELECT * FROM remote_sync_cursors WHERE hostId = :hostId AND deviceId = :deviceId LIMIT 1")
+    fun observeCursor(hostId: String, deviceId: String): Flow<RemoteSyncCursorEntity?>
 
     @Query(
         """

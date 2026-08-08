@@ -4,6 +4,8 @@ import android.content.Context
 import android.os.StatFs
 import androidx.room.Room
 import androidx.room.withTransaction
+import com.harnessapk.activity.ActivityRepository
+import com.harnessapk.activity.RoomActivityFeedSource
 import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentContextAssembler
 import com.harnessapk.agent.AgentLifecycleCoordinator
@@ -92,10 +94,12 @@ import kotlinx.serialization.json.Json
 import com.harnessapk.remote.AliyunPushManager
 import com.harnessapk.remote.RemoteEnrollmentClient
 import com.harnessapk.remote.RemoteBindingRepository
+import com.harnessapk.remote.RemoteApprovalCommandCoordinator
 import com.harnessapk.remote.RemoteCommandOutbox
 import com.harnessapk.remote.RemoteRunLauncher
 import com.harnessapk.remote.RemoteTransport
 import com.harnessapk.remote.RoomRemoteCommandStore
+import com.harnessapk.remote.RoomApprovalResponseWriter
 import com.harnessapk.remote.RemoteEventReducer
 import com.harnessapk.remote.RemoteSyncCoordinator
 import com.harnessapk.remote.RoomRemoteSyncState
@@ -161,6 +165,10 @@ class AppContainer(
     val remoteRepository = RemoteRepository(remoteProfileStore, remoteHttpClient, applicationScope)
     val remoteBindingRepository = RemoteBindingRepository(database.remoteDao())
     val remoteCommandOutbox = RemoteCommandOutbox(RoomRemoteCommandStore(database.remoteDao()))
+    val remoteApprovalCommandCoordinator = RemoteApprovalCommandCoordinator(
+        remoteCommandOutbox,
+        RoomApprovalResponseWriter(database.remoteDao()),
+    )
     val remoteRunLauncher = RemoteRunLauncher(database, remoteCommandOutbox)
     val remoteTransport = RemoteTransport(remoteCommandOutbox, remoteRepository)
     val remoteEventReducer = RemoteEventReducer(database)
@@ -168,6 +176,7 @@ class AppContainer(
         RoomRemoteSyncState(database, remoteEventReducer),
         remoteRepository,
     )
+    val activityRepository = ActivityRepository(RoomActivityFeedSource(database))
     init {
         remoteRepository.attachSyncCoordinator(remoteSyncCoordinator)
         remoteRepository.attachConnectedHandler { _, _ -> remoteTransport.flush() }

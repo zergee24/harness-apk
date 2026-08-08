@@ -72,6 +72,32 @@ class RemoteEventReducer(
         if (event.type == "run.approval.requested" && !isTerminal) {
             dao.insertApproval(event.toApprovalEntity(payload))
         }
+        if (event.type == "run.approval.resolved") {
+            payload.string("approvalId")?.let { approvalId ->
+                dao.approval(approvalId)?.let { approval ->
+                    dao.upsertApproval(
+                        approval.copy(
+                            status = payload.string("status") ?: "RESOLVED",
+                            resolvedAt = event.createdAt,
+                        ),
+                    )
+                }
+            }
+            payload.string("commandId")?.let { commandId ->
+                dao.command(commandId)?.let { command ->
+                    dao.upsertCommand(
+                        command.copy(
+                            status = RemoteCommandStatus.SUCCEEDED.name,
+                            acknowledgedAt = command.acknowledgedAt ?: event.createdAt,
+                            completedAt = event.createdAt,
+                            resultJson = canonicalJson(payload),
+                            nextAttemptAt = Long.MAX_VALUE,
+                            updatedAt = event.createdAt,
+                        ),
+                    )
+                }
+            }
+        }
         val completedAt = if (isTerminal) run.completedAt ?: event.createdAt else run.completedAt
         dao.upsertRun(
             run.copy(
@@ -131,25 +157,32 @@ private fun RemoteLogicalEvent.toEntity() = RemoteRunEventEntity(
 )
 
 private fun RemoteLogicalEvent.toApprovalEntity(payload: JsonObject): RemoteApprovalEntity {
-    val method = requireNotNull(payload.string("method")) { "approval method is required" }
+    val sanitized = sanitizeRemoteApprovalJson(payload) as JsonObject
+    val method = requireNotNull(sanitized.string("method")) { "approval method is required" }
     require(isRemoteApprovalMethod(method)) { "unsupported approval method $method" }
-    val logicalDecisions = payload["availableDecisions"] as? JsonArray ?: JsonArray(emptyList())
+    val logicalDecisions = sanitized["availableDecisions"] as? JsonArray ?: JsonArray(emptyList())
+    val actionType = requireNotNull(sanitized.string("actionType")) { "actionType is required" }
+    val target = requireNotNull(sanitized.string("target")) { "target is required" }
+    val risk = maxRemoteApprovalRisk(
+        parseRemoteApprovalRisk(sanitized.string("risk").orEmpty()),
+        classifyRemoteApprovalRisk(target, actionType),
+    )
     return RemoteApprovalEntity(
-        id = requireNotNull(payload.string("approvalId")) { "approvalId is required" },
+        id = requireNotNull(sanitized.string("approvalId")) { "approvalId is required" },
         runId = runId,
         logicalEventId = eventId,
-        serverRequestIdJson = requireNotNull(payload["serverRequestId"]) {
+        serverRequestIdJson = requireNotNull(sanitized["serverRequestId"]) {
             "serverRequestId is required"
         }.toString(),
-        processEpoch = requireNotNull(payload.string("processEpoch")) { "processEpoch is required" },
+        processEpoch = requireNotNull(sanitized.string("processEpoch")) { "processEpoch is required" },
         method = method,
-        itemId = payload.string("itemId"),
-        actionType = requireNotNull(payload.string("actionType")) { "actionType is required" },
-        target = requireNotNull(payload.string("target")) { "target is required" },
-        commandPreview = payload.string("commandPreview"),
-        detailsJson = payload["details"]?.let(::canonicalJson) ?: "{}",
+        itemId = sanitized.string("itemId"),
+        actionType = actionType,
+        target = target,
+        commandPreview = sanitized.string("commandPreview"),
+        detailsJson = sanitized["details"]?.let(::canonicalJson) ?: "{}",
         availableDecisionsJson = canonicalJson(logicalDecisions),
-        risk = payload.string("risk") ?: "UNKNOWN",
+        risk = risk.name,
         status = "PENDING",
         responseCommandId = null,
         requestedAt = createdAt,

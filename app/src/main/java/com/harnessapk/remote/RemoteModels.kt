@@ -237,7 +237,13 @@ data class RemoteApproval(
 
 enum class RemoteConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
-data class RemoteNotification(val title: String, val message: String)
+data class RemoteNotification(
+    val title: String,
+    val message: String,
+    val runId: String? = null,
+    val approvalId: String? = null,
+    val risk: RemoteApprovalRisk = RemoteApprovalRisk.UNKNOWN,
+)
 
 data class RemoteUiState(
     val connectionStatus: RemoteConnectionStatus = RemoteConnectionStatus.DISCONNECTED,

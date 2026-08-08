@@ -462,7 +462,7 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	case "turn.interrupt":
 		return b.requestAppServer(ctx, deviceID, command, "turn/interrupt", map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID})
 	case "approval.respond":
-		return b.respondApproval(command)
+		return b.respondApproval(ctx, deviceID, command)
 	case "event.ack":
 		if b.journal == nil {
 			return errors.New("logical journal is unavailable")
@@ -686,6 +686,12 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 		approvals = append(approvals, map[string]any{
 			"approvalId": approval.ApprovalID, "runId": approval.RunID,
 			"processEpoch": approval.ProcessEpoch, "serverRequestId": approval.ServerRequestID,
+			"method": approval.Method, "itemId": approval.ItemID,
+			"actionType": approval.ActionType, "target": approval.Target,
+			"commandPreview":     approval.CommandPreview,
+			"details":            decodeRaw(json.RawMessage(approval.DetailsJSON)),
+			"availableDecisions": appserverrpc.MobileApprovalDecisions(),
+			"risk":               approval.Risk, "requestedAt": approval.RequestedAt,
 			"status": approval.Status,
 		})
 	}
@@ -821,19 +827,88 @@ func (b *bridge) requestAppServer(
 	return nil
 }
 
-func (b *bridge) respondApproval(command protocol.Command) error {
+func (b *bridge) respondApproval(ctx context.Context, deviceID string, command protocol.Command) error {
+	if command.CommandID == "" || command.RunID == "" || command.ApprovalID == "" {
+		return errors.New("approval response stable identity is required")
+	}
 	epoch := command.ProcessEpoch
 	if epoch == "" {
 		epoch = b.app.client.ProcessEpoch()
 	}
-	if command.ApprovalID != "" {
-		if err := b.routes.ValidateResponse(command.ApprovalID, epoch, command.ServerRequestID); err != nil {
-			return err
+	return executeApprovalCommand(
+		ctx, b.commandCache, command,
+		func() error {
+			approval, ok := b.routes.Approval(command.ApprovalID)
+			if !ok || approval.RunID != command.RunID {
+				return errors.New("approval does not belong to run")
+			}
+			return b.routes.ValidateResponse(command.ApprovalID, epoch, command.ServerRequestID)
+		},
+		func() error {
+			return b.app.client.Respond(appserverrpc.ServerRequestRef{
+				ID: command.ServerRequestID, ProcessEpoch: epoch,
+			}, map[string]string{"decision": command.Decision})
+		},
+		func(ctx context.Context, ignoredDeviceID, runID, eventType string, payload json.RawMessage) (string, error) {
+			eventID, err := b.emitLogicalEvent(ctx, deviceID, runID, eventType, payload)
+			if err == nil {
+				err = b.routes.MarkApprovalResolved(command.ApprovalID)
+			}
+			return eventID, err
+		},
+	)
+}
+
+type logicalEventEmitter func(context.Context, string, string, string, json.RawMessage) (string, error)
+
+func executeApprovalCommand(
+	ctx context.Context,
+	cache *commandcache.Store,
+	command protocol.Command,
+	validate func() error,
+	respond func() error,
+	emit logicalEventEmitter,
+) error {
+	if command.Decision != "accept" && command.Decision != "decline" {
+		return errors.New("unsupported mobile approval decision")
+	}
+	raw, _ := json.Marshal(command)
+	digest := sha256.Sum256(raw)
+	record, execute, err := cache.Begin(command.CommandID, command.Type, hex.EncodeToString(digest[:]))
+	if err != nil {
+		return err
+	}
+	if !execute {
+		switch record.Status {
+		case commandcache.StatusSucceeded, commandcache.StatusInFlight:
+			return nil
+		case commandcache.StatusUnknown:
+			return errors.New("approval response outcome is unknown; snapshot required")
+		default:
+			return errors.New(record.LastError)
 		}
 	}
-	return b.app.client.Respond(appserverrpc.ServerRequestRef{
-		ID: command.ServerRequestID, ProcessEpoch: epoch,
-	}, map[string]string{"decision": command.Decision})
+	if err := validate(); err != nil {
+		_, _ = cache.Fail(command.CommandID, err)
+		return err
+	}
+	if err := respond(); err != nil {
+		_, _ = cache.MarkUnknown(command.CommandID, err)
+		return err
+	}
+	payload := mustJSON(map[string]any{
+		"approvalId": command.ApprovalID, "decision": command.Decision,
+		"commandId": command.CommandID, "status": "RESOLVED",
+		"latestLine": "审批已提交，任务继续运行",
+	})
+	eventID, err := emit(ctx, "", command.RunID, "run.approval.resolved", payload)
+	if err != nil {
+		_, _ = cache.MarkUnknown(command.CommandID, err)
+		return err
+	}
+	result := mustJSON(map[string]string{"approvalId": command.ApprovalID, "eventId": eventID})
+	_, err = cache.Complete(command.CommandID, eventID, result)
+	return err
 }
 
 func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Message) {
@@ -845,7 +920,15 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 			RequestID json.RawMessage `json:"requestId"`
 		}
 		if json.Unmarshal(message.Params, &params) == nil && len(params.RequestID) > 0 {
-			_, _, _ = b.routes.MarkServerRequestResolved(b.app.client.ProcessEpoch(), params.RequestID)
+			if approval, found, _ := b.routes.MarkServerRequestResolved(b.app.client.ProcessEpoch(), params.RequestID); found {
+				if route, ok := b.routes.ByRun(approval.RunID); ok {
+					payload := mustJSON(map[string]string{
+						"approvalId": approval.ApprovalID, "status": "STALE",
+						"latestLine": "审批已在其他位置解决",
+					})
+					_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.approval.resolved", payload)
+				}
+			}
 		}
 	}
 	eventType, pushKind := "codex.event", ""
@@ -856,11 +939,27 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 		eventType, pushKind = "approval.request", "approval"
 		approvalID = stableApprovalID(b.app.client.ProcessEpoch(), message.ID)
 		if route, ok := b.routeForParams(message.Params); ok {
+			payload := approvalLogicalPayload(message, approvalID, b.app.client.ProcessEpoch())
+			var ledger struct {
+				Method         string `json:"method"`
+				ItemID         string `json:"itemId"`
+				ActionType     string `json:"actionType"`
+				Target         string `json:"target"`
+				CommandPreview string `json:"commandPreview"`
+				Risk           string `json:"risk"`
+			}
+			_ = json.Unmarshal(payload, &ledger)
 			_ = b.routes.PutApproval(runstate.Approval{
 				ApprovalID: approvalID, RunID: route.RunID,
 				ProcessEpoch: b.app.client.ProcessEpoch(), ServerRequestID: message.ID,
+				Method: ledger.Method, ItemID: ledger.ItemID, ActionType: ledger.ActionType,
+				Target: ledger.Target, CommandPreview: ledger.CommandPreview,
+				DetailsJSON: "{}", Risk: ledger.Risk, RequestedAt: time.Now().UnixMilli(),
 				Status: runstate.ApprovalPending,
 			})
+			if _, err := b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.approval.requested", payload); err == nil {
+				return
+			}
 		}
 	}
 	if message.Method == "item/tool/requestUserInput" {
@@ -883,6 +982,113 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 	for _, deviceID := range b.eventTargets(message.Params) {
 		_ = b.sendEvent(ctx, deviceID, protocol.Event{Type: eventType, Method: message.Method, Payload: raw, CreatedAt: time.Now().UnixMilli()}, pushKind)
 	}
+}
+
+func approvalLogicalPayload(message appserverrpc.Message, approvalID, processEpoch string) json.RawMessage {
+	var params map[string]any
+	if json.Unmarshal(message.Params, &params) != nil {
+		params = map[string]any{}
+	}
+	actionType := "UNKNOWN"
+	switch message.Method {
+	case "item/commandExecution/requestApproval":
+		actionType = "COMMAND_EXECUTION"
+	case "item/fileChange/requestApproval":
+		actionType = "FILE_CHANGE"
+	case "item/permissions/requestApproval":
+		actionType = "PERMISSIONS"
+	}
+	target := redactApprovalText(approvalTarget(params))
+	return mustJSON(map[string]any{
+		"approvalId": approvalID, "serverRequestId": message.ID,
+		"processEpoch": processEpoch, "method": message.Method,
+		"itemId": params["itemId"], "actionType": actionType,
+		"target": target, "commandPreview": target, "details": sanitizeApprovalDetails(params),
+		"availableDecisions": appserverrpc.MobileApprovalDecisions(),
+		"risk":               approvalRisk(target, actionType), "latestLine": "等待手机审批",
+	})
+}
+
+func sanitizeApprovalDetails(value any) any {
+	switch current := value.(type) {
+	case map[string]any:
+		clean := make(map[string]any, len(current))
+		for key, child := range current {
+			lower := strings.ToLower(key)
+			if strings.Contains(lower, "token") || strings.Contains(lower, "secret") ||
+				strings.Contains(lower, "password") || strings.Contains(lower, "api_key") ||
+				strings.Contains(lower, "apikey") || strings.Contains(lower, "authorization") {
+				clean[key] = "[REDACTED]"
+			} else {
+				clean[key] = sanitizeApprovalDetails(child)
+			}
+		}
+		return clean
+	case []any:
+		clean := make([]any, len(current))
+		for index, child := range current {
+			clean[index] = sanitizeApprovalDetails(child)
+		}
+		return clean
+	case string:
+		return redactApprovalText(current)
+	default:
+		return current
+	}
+}
+
+func redactApprovalText(value string) string {
+	words := strings.Fields(value)
+	for index, word := range words {
+		if index > 0 && strings.EqualFold(words[index-1], "bearer") {
+			words[index] = "[REDACTED]"
+			continue
+		}
+		lower := strings.ToLower(word)
+		for _, marker := range []string{"access_token=", "token=", "api_key=", "secret=", "password="} {
+			if offset := strings.Index(lower, marker); offset >= 0 {
+				end := strings.IndexAny(word[offset:], "&'\"")
+				if end < 0 {
+					end = len(word) - offset
+				}
+				word = word[:offset+len(marker)] + "[REDACTED]" + word[offset+end:]
+				lower = strings.ToLower(word)
+			}
+		}
+		words[index] = word
+	}
+	return strings.Join(words, " ")
+}
+
+func approvalRisk(target, actionType string) string {
+	normalized := strings.ToLower(actionType + " " + target)
+	if actionType == "PERMISSIONS" || strings.Contains(normalized, "sudo ") ||
+		strings.Contains(normalized, "rm -rf") || strings.Contains(normalized, "--force") {
+		return "HIGH"
+	}
+	if actionType == "FILE_CHANGE" || strings.Contains(normalized, "git push") ||
+		strings.Contains(normalized, "curl ") || strings.Contains(normalized, "wget ") {
+		return "MEDIUM"
+	}
+	if target == "" {
+		return "UNKNOWN"
+	}
+	return "LOW"
+}
+
+func approvalTarget(params map[string]any) string {
+	for _, key := range []string{"command", "reason", "path", "cwd"} {
+		if value := params[key]; value != nil {
+			if text, ok := value.(string); ok && text != "" {
+				return text
+			}
+			raw, _ := json.Marshal(value)
+			if len(raw) > 0 && string(raw) != "null" {
+				return string(raw)
+			}
+		}
+	}
+	return "Codex 请求执行受保护操作"
 }
 
 func (b *bridge) routeForParams(params json.RawMessage) (runstate.Route, bool) {

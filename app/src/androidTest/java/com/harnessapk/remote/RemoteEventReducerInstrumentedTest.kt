@@ -11,6 +11,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -48,6 +49,39 @@ class RemoteEventReducerInstrumentedTest {
         assertEquals(1L, cursor?.gapFromSequence)
         assertEquals("GAP", cursor?.reconciliationState)
         assertNull(db.remoteDao().approval("approval-1"))
+        db.close()
+    }
+
+    @Test
+    fun approvalSecretsAreRedactedBeforeRoomPersistence() = runBlocking {
+        val db = database()
+        db.remoteDao().insertRun(run())
+        val event = approvalEvent(sequence = 1L).copy(
+            payload = buildJsonObject {
+                put("approvalId", "approval-1")
+                put("serverRequestId", 7)
+                put("processEpoch", "epoch-1")
+                put("method", "item/commandExecution/requestApproval")
+                put("itemId", "item-1")
+                put("actionType", "COMMAND_EXECUTION")
+                put("target", "curl https://api.example.com?access_token=url-secret")
+                put("commandPreview", "Authorization: Bearer header-secret")
+                put("details", buildJsonObject { put("apiKey", "json-secret") })
+                put("availableDecisions", kotlinx.serialization.json.buildJsonArray {
+                    add(kotlinx.serialization.json.JsonPrimitive("accept"))
+                    add(kotlinx.serialization.json.JsonPrimitive("decline"))
+                })
+                put("risk", "LOW")
+            },
+        )
+
+        assertEquals(ReduceResult.APPLIED, RemoteEventReducer(db).apply(event))
+
+        val stored = requireNotNull(db.remoteDao().approval("approval-1"))
+        val persisted = listOf(stored.target, stored.commandPreview, stored.detailsJson).joinToString()
+        listOf("url-secret", "header-secret", "json-secret").forEach { secret ->
+            assertFalse(persisted.contains(secret))
+        }
         db.close()
     }
 

@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private var incomingAgentBundleUri by mutableStateOf<String?>(null)
     private var incomingWikiPackageUri by mutableStateOf<String?>(null)
+    private var incomingRemoteRunId by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,6 +39,8 @@ class MainActivity : ComponentActivity() {
                     onIncomingAgentBundleUriConsumed = { incomingAgentBundleUri = null },
                     incomingWikiPackageUri = incomingWikiPackageUri?.let(Uri::parse),
                     onIncomingWikiPackageUriConsumed = { incomingWikiPackageUri = null },
+                    incomingRemoteRunId = incomingRemoteRunId,
+                    onIncomingRemoteRunConsumed = { incomingRemoteRunId = null },
                 )
             }
         }
@@ -60,6 +63,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun acceptIncomingIntent(intent: Intent) {
+        incomingRemoteRunId = intent.getStringExtra(EXTRA_REMOTE_RUN_ID)?.takeIf(String::isNotBlank)
         incomingAgentBundleUri = null
         incomingWikiPackageUri = null
         val packageUri = intent.wikiPackageUri()
@@ -107,6 +111,10 @@ class MainActivity : ComponentActivity() {
             runCatching { contentResolver.takePersistableUriPermission(uri, permissionFlags) }
         }
         incomingWikiPackageUri = uri.toString()
+    }
+
+    companion object {
+        const val EXTRA_REMOTE_RUN_ID = "com.harnessapk.extra.REMOTE_RUN_ID"
     }
 }
 
