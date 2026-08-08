@@ -49,7 +49,7 @@ class ConversationIdentityController(
         }
         _state.value = _state.value.copy(selectionPending = true, failure = null)
         check(requests.trySend(IdentitySelectionRequest(generation, agentId)).isSuccess) {
-            "身份选择队列已关闭"
+            "智能体选择队列已关闭"
         }
     }
 

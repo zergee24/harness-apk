@@ -4,8 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -13,6 +13,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Button
@@ -26,7 +29,12 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -143,14 +151,24 @@ internal fun ConversationContextSheet(
     onCompressContext: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var projectExpanded by remember { mutableStateOf(false) }
+    var agentExpanded by remember { mutableStateOf(false) }
+    val selectedProjectName = projects.firstOrNull { it.id == selectedProjectId }?.name ?: "临时会话"
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        sheetGesturesEnabled = false,
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 640.dp)
+                .fillMaxHeight(0.9f)
                 .verticalScroll(rememberScrollState())
                 .imePadding()
-                .padding(bottom = 24.dp),
+                .padding(bottom = 24.dp)
+                .testTag("conversation_context_sheet_content"),
         ) {
             Text(
                 text = "会话上下文",
@@ -164,20 +182,34 @@ internal fun ConversationContextSheet(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             )
             HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
-            SectionLabel("项目")
-            ProjectOptionRow(
-                name = "临时会话",
-                selected = selectedProjectId == null,
-                locked = projectLocked && selectedProjectId != null,
-                onClick = { onSelectProject(null) },
-            )
-            projects.forEach { project ->
-                ProjectOptionRow(
-                    name = project.name,
-                    selected = selectedProjectId == project.id,
-                    locked = projectLocked && selectedProjectId != project.id,
-                    onClick = { onSelectProject(project.id) },
-                )
+            ContextDropdownRow(
+                modifier = Modifier.testTag("context_project_selector"),
+                title = "项目",
+                value = selectedProjectName,
+                expanded = projectExpanded,
+                leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
+                onExpandedChange = { projectExpanded = it },
+            ) {
+                listOf(ContextProjectOption("", "临时会话"))
+                    .plus(projects)
+                    .forEach { project ->
+                        val projectId = project.id.takeIf(String::isNotBlank)
+                        ListItem(
+                            modifier = Modifier.clickable {
+                                projectExpanded = false
+                                onSelectProject(projectId)
+                            },
+                            headlineContent = { Text(project.name) },
+                            supportingContent = if (projectLocked && projectId != selectedProjectId) {
+                                { Text("在此项目继续") }
+                            } else {
+                                null
+                            },
+                            trailingContent = {
+                                RadioButton(selected = selectedProjectId == projectId, onClick = null)
+                            },
+                        )
+                    }
             }
             if (projectLocked) {
                 Text(
@@ -188,24 +220,41 @@ internal fun ConversationContextSheet(
                 )
             }
             HorizontalDivider()
-            SectionLabel("身份")
-            identityState.options.forEach { option ->
-                ListItem(
-                    modifier = Modifier.clickable(
-                        enabled = identityState.mutable,
-                        onClick = { onSelectIdentity(option.agentId) },
-                    ),
-                    headlineContent = { Text(option.name) },
-                    supportingContent = option.version?.let { version -> ({ Text("版本 $version") }) },
-                    leadingContent = { Icon(Icons.Outlined.Person, contentDescription = null) },
-                    trailingContent = {
-                        RadioButton(
-                            selected = identityState.selectedAgentId == option.agentId,
-                            enabled = identityState.mutable,
-                            onClick = null,
-                        )
-                    },
-                )
+            ContextDropdownRow(
+                modifier = Modifier.testTag("context_agent_selector"),
+                title = "智能体",
+                value = if (identityState.mutable) {
+                    identityState.selectedName
+                } else {
+                    "${identityState.selectedName} · 当前会话已锁定"
+                },
+                expanded = agentExpanded,
+                enabled = identityState.mutable,
+                leadingIcon = { Icon(Icons.Outlined.Person, contentDescription = null) },
+                onExpandedChange = { agentExpanded = it },
+            ) {
+                identityState.options.forEach { option ->
+                    ListItem(
+                        modifier = Modifier.clickable {
+                            agentExpanded = false
+                            onSelectIdentity(option.agentId)
+                        },
+                        headlineContent = {
+                            Text(
+                                buildString {
+                                    append(option.name)
+                                    option.version?.let { append(" · v$it") }
+                                },
+                            )
+                        },
+                        trailingContent = {
+                            RadioButton(
+                                selected = identityState.selectedAgentId == option.agentId,
+                                onClick = null,
+                            )
+                        },
+                    )
+                }
             }
             HorizontalDivider()
             ContextActionRow("Wiki", wikiLabel, onOpenWiki)
@@ -241,28 +290,55 @@ internal fun ConversationContextSheet(
 }
 
 @Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleSmall,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-    )
-}
-
-@Composable
-private fun ProjectOptionRow(
-    name: String,
-    selected: Boolean,
-    locked: Boolean,
-    onClick: () -> Unit,
+private fun ContextDropdownRow(
+    title: String,
+    value: String,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    leadingIcon: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable () -> Unit,
 ) {
-    ListItem(
-        modifier = Modifier.clickable(onClick = onClick),
-        headlineContent = { Text(name) },
-        supportingContent = if (locked) ({ Text("在此项目继续") }) else null,
-        leadingContent = { Icon(Icons.Outlined.Folder, contentDescription = null) },
-        trailingContent = { RadioButton(selected = selected, onClick = null) },
-    )
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Surface(
+            modifier = modifier
+                .fillMaxWidth(),
+            enabled = enabled,
+            color = MaterialTheme.colorScheme.surface,
+            onClick = { onExpandedChange(!expanded) },
+        ) {
+            ListItem(
+                headlineContent = { Text(title) },
+                supportingContent = {
+                    Text(value, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                },
+                leadingContent = leadingIcon,
+                trailingContent = {
+                    Icon(
+                        imageVector = when {
+                            !enabled -> Icons.Outlined.Lock
+                            expanded -> Icons.Outlined.KeyboardArrowUp
+                            else -> Icons.Outlined.KeyboardArrowDown
+                        },
+                        contentDescription = when {
+                            !enabled -> "$title 已锁定"
+                            expanded -> "收起$title"
+                            else -> "选择$title"
+                        },
+                    )
+                },
+            )
+        }
+        if (expanded) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+            ) {
+                Column { content() }
+            }
+        }
+    }
 }
 
 @Composable
