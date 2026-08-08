@@ -1,0 +1,30 @@
+{
+  "id": 21,
+  "result": {
+    "thread": {
+      "id": "thread-1",
+      "cwd": "/workspace/harness-apk",
+      "turns": [
+        {
+          "id": "turn-1",
+          "status": "completed",
+          "items": [
+            {
+              "id": "item-1",
+              "type": "commandExecution",
+              "command": "./gradlew testDebugUnitTest",
+              "cwd": "/workspace/harness-apk",
+              "status": "completed",
+              "exitCode": 0,
+              "futureField": {
+                "ignored": true
+              }
+            }
+          ],
+          "futureField": "ignored"
+        }
+      ],
+      "futureField": "ignored"
+    }
+  }
+}

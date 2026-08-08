@@ -1,0 +1,23 @@
+{
+  "id": "request-23",
+  "method": "item/tool/requestUserInput",
+  "params": {
+    "threadId": "thread-1",
+    "turnId": "turn-1",
+    "itemId": "item-2",
+    "isBlocking": true,
+    "questions": [
+      {
+        "id": "scope",
+        "header": "Scope",
+        "question": "Which workspace should be used?",
+        "options": [
+          {
+            "label": "Current workspace",
+            "description": "Continue in the bound project."
+          }
+        ]
+      }
+    ]
+  }
+}

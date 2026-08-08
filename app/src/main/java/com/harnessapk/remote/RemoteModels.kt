@@ -61,6 +61,113 @@ data class RemoteCommand(
     val params: JsonElement? = null,
 )
 
+enum class ApprovalDecision {
+    ALLOW_ONCE,
+    DENY,
+}
+
+internal fun approvalDecisionForWire(decision: ApprovalDecision): String = when (decision) {
+    ApprovalDecision.ALLOW_ONCE -> "accept"
+    ApprovalDecision.DENY -> "decline"
+}
+
+sealed interface RemoteM2Command {
+    val commandId: String
+    val runId: String
+
+    data class Steer(
+        override val commandId: String,
+        override val runId: String,
+        val expectedTurnId: String,
+        val text: String,
+    ) : RemoteM2Command {
+        init {
+            require(commandId.isNotBlank()) { "commandId is required" }
+            require(runId.isNotBlank()) { "runId is required" }
+            require(expectedTurnId.isNotBlank()) { "expectedTurnId is required" }
+            require(text.isNotBlank()) { "steer text is required" }
+        }
+
+        fun toJson(): JsonObject = buildJsonObject {
+            put("type", JsonPrimitive("run.steer"))
+            put("commandId", JsonPrimitive(commandId))
+            put("requestId", JsonPrimitive(commandId))
+            put("runId", JsonPrimitive(runId))
+            put("expectedTurnId", JsonPrimitive(expectedTurnId))
+            put("text", JsonPrimitive(text))
+        }
+    }
+}
+
+enum class RemoteServerInteractionKind {
+    APPROVAL,
+    USER_INPUT,
+    OTHER,
+}
+
+private val remoteApprovalMethods = setOf(
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+)
+
+internal fun isRemoteApprovalMethod(method: String): Boolean = method in remoteApprovalMethods
+
+internal fun remoteServerInteractionKind(method: String): RemoteServerInteractionKind = when {
+    isRemoteApprovalMethod(method) -> RemoteServerInteractionKind.APPROVAL
+    method == "item/tool/requestUserInput" -> RemoteServerInteractionKind.USER_INPUT
+    else -> RemoteServerInteractionKind.OTHER
+}
+
+data class RemoteFeatureAvailability(
+    val canStartM2Run: Boolean,
+    val canOpenLegacyHistory: Boolean,
+)
+
+private val requiredM2RunCapabilities = setOf(
+    "workspace.candidates.v1",
+    "run.lifecycle.v1",
+    "logical-replay.v1",
+)
+
+internal fun remoteFeatureAvailability(capabilities: Set<String>): RemoteFeatureAvailability =
+    RemoteFeatureAvailability(
+        canStartM2Run = capabilities.containsAll(requiredM2RunCapabilities),
+        canOpenLegacyHistory = true,
+    )
+
+data class RemoteLogicalEvent(
+    val schemaVersion: Int,
+    val eventId: String,
+    val hostId: String,
+    val deviceId: String,
+    val runId: String,
+    val sequence: Long,
+    val type: String,
+    val payload: JsonElement?,
+    val createdAt: Long,
+)
+
+internal fun parseRemoteLogicalEvent(raw: String): RemoteLogicalEvent {
+    val root = Json.parseToJsonElement(raw).jsonObject
+    val schemaVersion = root.long("schemaVersion")?.toInt()
+        ?: throw IllegalArgumentException("schemaVersion is required")
+    require(schemaVersion == 1) { "unsupported logical event schema $schemaVersion" }
+    val sequence = root.long("sequence") ?: throw IllegalArgumentException("sequence is required")
+    require(sequence > 0) { "sequence must be positive" }
+    return RemoteLogicalEvent(
+        schemaVersion = schemaVersion,
+        eventId = root.requiredString("eventId"),
+        hostId = root.requiredString("hostId"),
+        deviceId = root.requiredString("deviceId"),
+        runId = root.requiredString("runId"),
+        sequence = sequence,
+        type = root.requiredString("type"),
+        payload = root["payload"]?.takeUnless { it is JsonNull },
+        createdAt = root.long("createdAt") ?: throw IllegalArgumentException("createdAt is required"),
+    )
+}
+
 data class RemoteEvent(
     val type: String,
     val requestId: String? = null,
@@ -167,3 +274,6 @@ internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
 internal fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
 internal fun JsonObject.long(key: String): Long? = string(key)?.toLongOrNull()
 internal fun JsonObject.array(key: String): JsonArray = this[key]?.jsonArray ?: JsonArray(emptyList())
+
+private fun JsonObject.requiredString(key: String): String =
+    requireNotNull(string(key)?.takeIf { it.isNotBlank() }) { "$key is required" }
