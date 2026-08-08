@@ -20,7 +20,7 @@
 
 人工合并目标：`test`（本分支不自动合并、不推送）
 
-当前状态：`IN_PROGRESS`；G0/G1/G2/G3 已完成，G4 Resume、Replay、Gap 与 Snapshot 恢复实施中；三个产品边界继续采用第 2 节默认建议
+当前状态：`IN_PROGRESS`；G0/G1/G2/G3/G4 已完成，G5 统一 Activity、审批与安全通知实施中；三个产品边界继续采用第 2 节默认建议
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -482,7 +482,7 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 | G1 | Room 22、领域状态机、持久 Outbox | G0 | DONE | `c2e6c42`、`5244a23`；21 -> 22 fixture、FK/唯一性、进程重读、Gap、去重和非法转换测试绿 |
 | G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | DONE | `71dd536`、`fbdd639`；Go unit/vet/build/race 绿；同 Logical Event 重封装、旧 IN_FLIGHT 变 UNKNOWN、route/epoch 恢复通过 |
 | G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | DONE | `adcae43`、`a1c0891`；项目页无路径输入；Run + Outbox 单事务；重复 start 仅一次 `turn/start`；隔离设备 7/7 |
-| G4 | Resume、Replay、Gap、Snapshot、进程恢复 | G3 | PENDING | 10 分钟断网、Android kill、Bridge WebSocket reconnect 全部恢复 |
+| G4 | Resume、Replay、Gap、Snapshot、进程恢复 | G3 | DONE | `6504845`；10 分钟旧事件重新封装、Room 重开、重复事件、Gap/Snapshot、旧 epoch 审批与重连 Outbox 恢复测试绿 |
 | G5 | Activity、审批、通知精确深链 | G4 | PENDING | 同一 Pending Approval 从通知/Activity 到同一记录；重复点击一次生效 |
 | G6 | 手机时间线、完成卡、测试/Git 证据 | G5 | PENDING | 10k event 分页、未测试显示未验证、窄屏/字体 1.3 通过 |
 | G7 | 七条故障黄金链路与 test 发布候选 | G6 | PENDING | JVM/Instrumentation/Go/真机证据、迁移与回滚说明齐全 |
@@ -859,11 +859,11 @@ git commit -m "功能：从项目原子发起远程任务"
 - Modify: `remote/internal/journal/store.go`
 - Modify: `remote/internal/run/coordinator.go`
 
-- [ ] **Step 1: 写 10 分钟断网、kill、乱序、Gap 和 Snapshot 测试**
+- [x] **Step 1: 写 10 分钟断网、kill、乱序、Gap 和 Snapshot 测试**
 
 Snapshot fixture 必须同时覆盖：运行中、待审批、已完成但缺一段时间线、旧 process epoch 审批。
 
-- [ ] **Step 2: 运行测试确认当前 Wire TTL 会丢事件**
+- [x] **Step 2: 运行测试确认当前 Wire TTL 会丢事件**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.RemoteSyncCoordinatorTest'`
 
@@ -871,15 +871,15 @@ Run: `cd remote && go test ./internal/journal ./internal/run`
 
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 resume -> replay -> contiguous ACK -> gap snapshot**
+- [x] **Step 3: 实现 resume -> replay -> contiguous ACK -> gap snapshot**
 
 页面恢复顺序：Room 旧状态立即渲染 -> `正在核对` 辅助状态 -> 后台 resume；不能先清空列表。
 
-- [ ] **Step 4: 执行进程死亡 instrumentation**
+- [x] **Step 4: 执行进程死亡 instrumentation**
 
 Expected: kill/relaunch 后首屏仍显示原 Run/Approval；同 Event 不重复 Timeline/通知；Gap 期间审批按钮禁用。
 
-- [ ] **Step 5: 提交恢复链路**
+- [x] **Step 5: 提交恢复链路**
 
 ```bash
 git add app/src/main/java/com/harnessapk/remote/RemoteSyncCoordinator.kt \
@@ -1187,3 +1187,14 @@ git worktree add -b codex/m2-cross-device-run \
 - Run 证据：Android 在同一 Room 事务写入 `QUEUED` Run 与完整 canonical Outbox；重复本地 launch 重建同一 payload/hash；离线 flush 保持 PENDING/QUEUED；写 Outbox 失败回滚 Run。Bridge 重查 workspaceId/fingerprint、保存 Git baseline 与 route，再调用 `turn/start(clientUserMessageId=commandId)`；重复命令只调用一次 `turn/start`；崩溃遗留 `IN_FLIGHT -> UNKNOWN` 后不自动重放。
 - 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。5039 验收时只保留 `emulator-15662`；未操作默认 5037 设备。
 - 已知限制：Logical Event 已写加密 Journal，但 Android 的 resume/replay/contiguous ACK 与 Snapshot 尚未接入，进入 G4；真实 Relay + Codex app-server 黄金链路留到 G7 真机验收。
+
+### 2026-08-09 / G4
+
+- 状态：`DONE`
+- Commit：`6504845 功能：恢复跨端任务与逻辑事件`
+- RED：Android 缺少 `RemoteSyncCoordinator`、Snapshot model 与恢复测试而编译失败；Bridge 缺少 Journal head/gap 判断、`sync.resume` 与 `run.snapshot` 分支。
+- GREEN：Android 全量 unit `999/0/0/0` 与 assembleDebug 退出 0；隔离设备 `RemoteRunRecoveryInstrumentedTest 1/1`；Go `go test` 与 `go test -race` 定向覆盖 `internal/journal`、`internal/run`、`cmd/bridge`，全部退出 0。
+- 恢复证据：10 分钟前的 Logical Event 使用相同业务 Event ID 和新 Wire TTL/nonce/transport sequence 重放；Android 只在 Room 事务提交后发送 contiguous ACK；乱序进入 Gap 且不越过缺口 ACK；Snapshot 恢复运行中、待审批和已完成 Run，缺失时间线不伪造；旧 process epoch 审批转 `STALE`。文件型 Room 关闭重开后 Run/Approval 立即可读，同 Event 重放无重复副作用；WebSocket 重连先 resume 再冲刷持久化 Outbox。
+- 边界保护：Bridge 将设备上报 cursor 限制在 Journal head，设备 cursor 超前时强制 Snapshot；Gap 期间 Pending Approval 动作统一禁用。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。测试前 5039 仅列出 `emulator-15662`；未对默认 5037 或其他设备执行命令。
+- 已知限制：本 Gate 使用持久层重开和协议 fixture 验证恢复语义；真实 Relay 断网 10 分钟、Bridge 进程重启和目标荣耀真机通知/后台限制仍归 G7 黄金链路，不以模拟器替代。
