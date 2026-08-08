@@ -1013,11 +1013,11 @@ git commit -m "功能：提供手机可读时间线与完成证据"
 - Modify: `remote/deploy/com.harnessapk.remote-bridge.plist`
 - Create: `docs/releases/0.3.0.md`
 
-- [ ] **Step 1: 建立七条故障黄金链路的可重复脚本/fixture**
+- [x] **Step 1: 建立七条故障黄金链路的可重复脚本/fixture**
 
 见第 11 节；每条记录设备、Android、Bridge/Codex 版本、命令、结果、截图/日志路径和 commit SHA。
 
-- [ ] **Step 2: 运行完整自动化**
+- [x] **Step 2: 运行完整自动化**
 
 ```bash
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
@@ -1031,11 +1031,11 @@ Expected: 全绿；若唯一失败仍来自并行 M1，必须由 M1 owner 给出
 
 至少使用目标荣耀真机 + Mac Bridge；模拟器不能替代 Push、后台限制、10 分钟断网和通知解锁验收。
 
-- [ ] **Step 4: 更新 Bridge state v1 -> v2 升级/备份/回滚文档**
+- [x] **Step 4: 更新 Bridge state v1 -> v2 升级/备份/回滚文档**
 
 升级前备份 `~/.harness-remote`；验证权限、Journal 恢复、旧 Remote Screen 只读兼容；回滚使用兼容 state v2 的 Bridge build，不删除 state 文件。
 
-- [ ] **Step 5: 提交验收台账，不推送**
+- [x] **Step 5: 提交验收台账，不推送**
 
 ```bash
 git add docs/superpowers/plans/2026-09-08-m2-acceptance-checklist.md \
@@ -1223,3 +1223,14 @@ git worktree add -b codex/m2-cross-device-run \
 - 性能/移动端证据：独立 AVD 上 10,000 条 Event 查询最近 100 条的 10 次样本为 `[9, 5, 6, 6, 6, 6, 6, 6, 5, 6]ms`，p95=`9ms`；320dp、字体 1.3 下未知事件、完成卡和 48dp 操作按钮通过 Compose 断言；长命令只在展开诊断区横向滚动；完成卡具备 TalkBack 内容描述。M2 不展示不可用的“沉淀到项目”按钮。
 - 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。每次 connected test 前 5039 均只列出 `emulator-15662`，未操作默认 5037 或 USB 真机。
 - 已知限制：模拟器不能替代目标荣耀真机的 Push、锁屏、后台限制和 10 分钟真实断网验收；真实 Relay + Mac Bridge + Codex app-server 黄金链路、Bridge 升级/回滚演练归 G7。
+
+### 2026-08-09 / G7
+
+- 状态：`IN_PROGRESS`（实现与自动化 `DONE`；目标荣耀真机 + 真实 Relay/Mac Bridge 人工验收 `PENDING`）
+- Commit：`bedf209 测试：建立M2发布验收门禁`
+- 门禁资产：新增 `remote/scripts/m2-automated-acceptance.sh` 与 `remote/testdata/m2-fault-matrix.json`；脚本拒绝默认 5037、拒绝非 emulator serial，并要求独立 ADB server 恰好只有声明设备。新增 0.3.0 RC 说明、Bridge state v1 -> v2 完整目录备份/兼容回滚文档，并为 launchd 增加 restrictive umask、restart throttle、Background/Aqua session 与最小 PATH。
+- 自动化：脚本最终退出码 0。Android JVM `1015/0/0/0`，assembleDebug 成功；独立设备全量 `210/0/0/0`，总时长 3m12s；Go `test -race ./...`、`vet ./...`、Relay/Bridge build 全部退出 0；shell/JSON/plist/diff 静态检查全部退出 0。
+- 调试记录：首次全量设备套件只有 `HarnessApkAppNavigationTest` 4 项失败，根因是 `onNodeWithText("我的")` 同时匹配顶部标题和底部 Tab。未修改产品 UI；将导航验收收紧为唯一 `nav-ME` 节点可见且 selected 后，测试类 `5/5`、完整套件 `210/210`。
+- 性能：全量套件的 10,000 Event 最近 100 条查询样本 `[6, 6, 6, 5, 5, 5, 5, 4, 5, 5]ms`，p95=`6ms`；仍提供每次 100 条向上分页。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。完整 210 项套件只在该 serial 上运行，未访问默认 5037 或 USB 真机。
+- 人工 PENDING：M2-GOLD-1/2/3/5 仍需目标荣耀真机和真实 Relay + Mac Bridge + 当前 Codex app-server，覆盖三次点击、真实十分钟断网、Push/OEM 后台/锁屏解锁、WebSocket 重连时 PID/process epoch。执行清单与独立 ADB 5040 建议见 `docs/superpowers/plans/2026-09-08-m2-acceptance-checklist.md`；完成前 G7 和 0.3.0 正式发布不得标 `DONE`。
