@@ -20,7 +20,7 @@
 
 人工合并目标：`test`（本分支不自动合并、不推送）
 
-当前状态：`IN_PROGRESS`；G0/G1/G2/G3/G4 已完成，G5 统一 Activity、审批与安全通知实施中；三个产品边界继续采用第 2 节默认建议
+当前状态：`IN_PROGRESS`；G0/G1/G2/G3/G4/G5 已完成，G6 手机时间线、控制命令与完成证据实施中；三个产品边界继续采用第 2 节默认建议
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -483,7 +483,7 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 | G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | DONE | `71dd536`、`fbdd639`；Go unit/vet/build/race 绿；同 Logical Event 重封装、旧 IN_FLIGHT 变 UNKNOWN、route/epoch 恢复通过 |
 | G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | DONE | `adcae43`、`a1c0891`；项目页无路径输入；Run + Outbox 单事务；重复 start 仅一次 `turn/start`；隔离设备 7/7 |
 | G4 | Resume、Replay、Gap、Snapshot、进程恢复 | G3 | DONE | `6504845`；10 分钟旧事件重新封装、Room 重开、重复事件、Gap/Snapshot、旧 epoch 审批与重连 Outbox 恢复测试绿 |
-| G5 | Activity、审批、通知精确深链 | G4 | PENDING | 同一 Pending Approval 从通知/Activity 到同一记录；重复点击一次生效 |
+| G5 | Activity、审批、通知精确深链 | G4 | DONE | `2af4bae`；同一 Pending Approval 从通知/Activity 到同一记录；重复点击只入一条 Outbox 且 Bridge 只响应一次 |
 | G6 | 手机时间线、完成卡、测试/Git 证据 | G5 | PENDING | 10k event 分页、未测试显示未验证、窄屏/字体 1.3 通过 |
 | G7 | 七条故障黄金链路与 test 发布候选 | G6 | PENDING | JVM/Instrumentation/Go/真机证据、迁移与回滚说明齐全 |
 
@@ -907,7 +907,7 @@ git commit -m "功能：恢复跨端任务与逻辑事件"
 - Modify: `app/src/main/AndroidManifest.xml`
 - Modify: `app/src/main/java/com/harnessapk/ui/HarnessApkApp.kt`
 
-- [ ] **Step 1: 写 Activity 分组、风险、脱敏、深链和重复通知动作测试**
+- [x] **Step 1: 写 Activity 分组、风险、脱敏、深链和重复通知动作测试**
 
 ```kotlin
 @Test fun pendingApprovalAppearsOnceInNeedsAction()
@@ -918,21 +918,21 @@ git commit -m "功能：恢复跨端任务与逻辑事件"
 @Test fun lockedDeviceRequiresUnlockBeforeHighRiskApproval()
 ```
 
-- [ ] **Step 2: 运行测试确认现通知只能打开根页面**
+- [x] **Step 2: 运行测试确认现通知只能打开根页面**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.activity.*' --tests 'com.harnessapk.remote.Remote*'`
 
 Expected: FAIL。
 
-- [ ] **Step 3: 实现合并 Flow、精确 PendingIntent 和 Receiver 入队**
+- [x] **Step 3: 实现合并 Flow、精确 PendingIntent 和 Receiver 入队**
 
 Activity 只查询：需要处理、进行中、7 天/50 条最近完成；本地 ChatExecution 与远程 Run 只在读模型合流，不复制或改写原执行行。通知 Receiver 只向 Outbox 插命令；只有 command.result/Snapshot 能改审批状态。高风险审批即使由通知进入，也必须解锁后在 Approval Detail 确认。
 
-- [ ] **Step 4: Compose/通知验收**
+- [x] **Step 4: Compose/通知验收**
 
 Expected: Life/Work 顶栏都能打开同一 Activity；徽标语义为“2 个待处理任务”；通知“查看”直达 runId；重复拒绝只生效一次。
 
-- [ ] **Step 5: 提交 Activity/Approval**
+- [x] **Step 5: 提交 Activity/Approval**
 
 ```bash
 git add app/src/main/java/com/harnessapk/activity \
@@ -1198,3 +1198,15 @@ git worktree add -b codex/m2-cross-device-run \
 - 边界保护：Bridge 将设备上报 cursor 限制在 Journal head，设备 cursor 超前时强制 Snapshot；Gap 期间 Pending Approval 动作统一禁用。
 - 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。测试前 5039 仅列出 `emulator-15662`；未对默认 5037 或其他设备执行命令。
 - 已知限制：本 Gate 使用持久层重开和协议 fixture 验证恢复语义；真实 Relay 断网 10 分钟、Bridge 进程重启和目标荣耀真机通知/后台限制仍归 G7 黄金链路，不以模拟器替代。
+
+### 2026-08-09 / G5
+
+- 状态：`DONE`
+- Commit：`2af4bae 功能：统一任务活动与远程审批`
+- RED：Activity 读模型、审批安全策略、通知计划/Receiver 和 Compose 分组 API 缺失导致测试编译失败；Bridge `approval.respond` 未接命令账本且审批仍只发旧内存 Event。首轮全量测试另发现旧 `homeTopBarOnlyReservesTheStatusBarInset` 与 M2 “Life/Work 顶栏共享 Activity 入口”产品契约冲突，已按新 source-of-truth 升级断言。
+- GREEN：Android 全量 unit `1006/0/0/0` 与 assembleDebug 退出 0；隔离设备 `ActivityScreenTest`、`RemoteApprovalActionInstrumentedTest`、`RemoteEventReducerInstrumentedTest` 合计 `5/5`，补充审批终结回归 `1/1`；Go 全量 test/vet/build 与 `commandcache/journal/run/bridge` race 全部退出 0。
+- Activity 证据：只读取本地 ChatExecution 与远程 Run/Approval，不复制执行行；需要处理、进行中、最近 7 天/最多 50 条完成三组互斥；Life/Work 顶栏使用同一入口，徽标语义为“n 个待处理任务”，点击项按原始 conversationId/runId 精确路由。
+- 审批证据：Bridge 将 app-server Approval 转成持久 Logical Event，Snapshot 账本保留已脱敏动作/目标/风险；Android 在 Room 入库前递归脱敏 token、URL query 和敏感 JSON key。高风险通知没有“允许一次”，详情页要求设备解锁并二次确认；Gap 期间按钮禁用。
+- 幂等证据：通知/详情页只写稳定 `approval.respond` Outbox，不乐观删除或解决 Approval；重复拒绝生成同一 commandId 和一条 Outbox。Bridge 命令账本只调用一次 app-server Respond、只发一个结果 Event；结果 Event 或 Snapshot 才把 Approval/Outbox 置为终态。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。模拟器意外退出时，首次设备命令因 5039 空列表安全停止，未安装到其他设备；随后只重启同一 M2 AVD/端口完成测试，未操作默认 5037。
+- 已知限制：阿里云 Push、通知锁屏/后台限制和目标荣耀真机解锁仍需 G7 真机证据；旧 Remote Control 只保留兼容路径，M2 新审批以 Room Activity/Run Detail 为权威入口。
