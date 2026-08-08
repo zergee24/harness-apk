@@ -45,6 +45,7 @@ type bridge struct {
 	journal      *journal.Store
 	commandCache *commandcache.Store
 	routes       *runstate.RouteStore
+	workspaces   *workspace.Registry
 	seen         map[string]time.Time
 }
 
@@ -279,9 +280,17 @@ func runServe(defaultPath string, args []string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		workspaceRegistry, err := workspace.OpenRegistry(filepath.Join(filepath.Dir(*statePath), "workspaces.json"))
+		if err != nil {
+			log.Printf("open workspace registry: %v", err)
+			app.close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
 		b := &bridge{
 			state: state, path: *statePath, app: app, journal: journalStore,
-			commandCache: commandStore, routes: routeStore, seen: map[string]time.Time{},
+			commandCache: commandStore, routes: routeStore, workspaces: workspaceRegistry,
+			seen: map[string]time.Time{},
 		}
 		if err := b.run(context.Background()); err != nil {
 			log.Printf("bridge disconnected: %v", err)
@@ -430,6 +439,8 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		})
 	case "workspace.list":
 		return b.requestWorkspaceCandidates(ctx, deviceID, command)
+	case "run.start":
+		return b.startRun(ctx, deviceID, command)
 	case "thread.read":
 		return b.requestAppServer(ctx, deviceID, command, "thread/read", map[string]any{"threadId": command.ThreadID, "includeTurns": true})
 	case "thread.start":
@@ -510,6 +521,13 @@ func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string
 			}, "")
 			return
 		}
+		if err := b.workspaces.PutCandidates(deviceID, candidates); err != nil {
+			_ = b.sendEvent(ctx, deviceID, protocol.Event{
+				Type: "error", RequestID: command.RequestID,
+				Message: "保存 Mac 工作区候选失败", CreatedAt: time.Now().UnixMilli(),
+			}, "")
+			return
+		}
 		_ = b.sendEvent(ctx, deviceID, protocol.Event{
 			Type: "workspace.candidates", RequestID: command.RequestID,
 			Payload: mustJSON(candidates), CreatedAt: time.Now().UnixMilli(),
@@ -518,11 +536,92 @@ func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string
 	return nil
 }
 
+func (b *bridge) startRun(ctx context.Context, deviceID string, command protocol.Command) error {
+	if command.CommandID == "" || command.RequestID == "" || command.RunID == "" {
+		return errors.New("run.start command identity is required")
+	}
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		b.mu.Lock()
+		secretEncoded := b.state.DeviceSecrets[deviceID]
+		b.mu.Unlock()
+		secret, err := protocol.DecodeSecret(secretEncoded)
+		if err != nil {
+			return
+		}
+		coordinator := runstate.Coordinator{
+			Cache: b.commandCache, Routes: b.routes, App: b.app.client, HostID: b.state.HostID,
+			ResolveWorkspace: b.workspaces.Resolve,
+			InspectWorkspace: func(cwd string) (workspace.Candidate, error) {
+				return workspace.Inspect(secret, cwd, time.Now().UnixMilli())
+			},
+			CaptureBaseline: workspace.CaptureBaseline,
+			Emit:            b.emitLogicalEvent,
+		}
+		_, startErr := coordinator.Start(callCtx, runstate.StartCommand{
+			CommandID: command.CommandID, RunID: command.RunID, BindingID: command.BindingID,
+			WorkspaceID: command.WorkspaceID, DeviceID: deviceID,
+			RepositoryFingerprint: command.RepositoryFingerprint, Objective: command.Objective,
+		})
+		if startErr == nil || errors.Is(startErr, runstate.ErrCommandInFlight) {
+			return
+		}
+		if existing, ok := b.commandCache.Lookup(command.CommandID); ok && existing.ResultEventID != "" {
+			return
+		}
+		eventType := "run.failed"
+		latestLine := "Mac 未能启动任务"
+		code := "RUN_START_FAILED"
+		if errors.Is(startErr, runstate.ErrBindingMismatch) {
+			latestLine = "Mac 工作区已变化，请重新绑定"
+			code = "BINDING_MISMATCH"
+		} else if errors.Is(startErr, runstate.ErrCommandUnknown) {
+			eventType = "run.reconciling"
+			latestLine = "正在核对 Mac 是否已启动任务"
+			code = "START_OUTCOME_UNKNOWN"
+		}
+		payload := mustJSON(map[string]string{"code": code, "latestLine": latestLine})
+		eventID, emitErr := b.emitLogicalEvent(ctx, deviceID, command.RunID, eventType, payload)
+		if emitErr == nil {
+			_, _ = b.commandCache.AttachResult(command.CommandID, eventID, payload)
+		}
+	}()
+	return nil
+}
+
+func (b *bridge) emitLogicalEvent(
+	ctx context.Context,
+	deviceID, runID, eventType string,
+	payload json.RawMessage,
+) (string, error) {
+	eventID, err := protocol.NewID()
+	if err != nil {
+		return "", err
+	}
+	event := protocol.LogicalEvent{
+		SchemaVersion: 1, EventID: eventID, HostID: b.state.HostID, DeviceID: deviceID,
+		RunID: runID, Type: eventType, Payload: payload, CreatedAt: time.Now().UnixMilli(),
+	}
+	err = b.sendLogicalEvent(ctx, event)
+	if err != nil && b.journal.Has(eventID) {
+		log.Printf("logical event %s journaled for replay after send failure: %v", eventID, err)
+		return eventID, nil
+	}
+	return eventID, err
+}
+
 func (b *bridge) sendLogicalEvent(ctx context.Context, event protocol.LogicalEvent) error {
 	if b.journal == nil {
 		return errors.New("logical journal is unavailable")
 	}
-	if err := b.journal.Append(event); err != nil {
+	if event.Sequence == 0 {
+		stored, err := b.journal.AppendNext(event)
+		if err != nil {
+			return err
+		}
+		event = stored
+	} else if err := b.journal.Append(event); err != nil {
 		return err
 	}
 	b.mu.Lock()

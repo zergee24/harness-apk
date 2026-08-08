@@ -92,6 +92,10 @@ import kotlinx.serialization.json.Json
 import com.harnessapk.remote.AliyunPushManager
 import com.harnessapk.remote.RemoteEnrollmentClient
 import com.harnessapk.remote.RemoteBindingRepository
+import com.harnessapk.remote.RemoteCommandOutbox
+import com.harnessapk.remote.RemoteRunLauncher
+import com.harnessapk.remote.RemoteTransport
+import com.harnessapk.remote.RoomRemoteCommandStore
 import com.harnessapk.remote.RemoteProfileStore
 import com.harnessapk.remote.RemoteRepository
 import com.harnessapk.ui.HomeModeStore
@@ -153,6 +157,9 @@ class AppContainer(
     val aliyunPushManager = AliyunPushManager(appContext)
     val remoteRepository = RemoteRepository(remoteProfileStore, remoteHttpClient, applicationScope)
     val remoteBindingRepository = RemoteBindingRepository(database.remoteDao())
+    val remoteCommandOutbox = RemoteCommandOutbox(RoomRemoteCommandStore(database.remoteDao()))
+    val remoteRunLauncher = RemoteRunLauncher(database, remoteCommandOutbox)
+    val remoteTransport = RemoteTransport(remoteCommandOutbox, remoteRepository)
     val gitEngine = JGitEngine()
     val providerRepository = ProviderRepository(
         dao = database.providerProfileDao(),

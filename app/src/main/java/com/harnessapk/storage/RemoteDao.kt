@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Upsert
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface RemoteDao {
@@ -31,6 +32,12 @@ interface RemoteDao {
 
     @Query("SELECT * FROM remote_runs WHERE id = :runId LIMIT 1")
     suspend fun run(runId: String): RemoteRunEntity?
+
+    @Query("SELECT * FROM remote_runs WHERE id = :runId LIMIT 1")
+    fun observeRun(runId: String): Flow<RemoteRunEntity?>
+
+    @Query("SELECT * FROM remote_runs WHERE projectId = :projectId AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') ORDER BY updatedAt DESC LIMIT 1")
+    suspend fun latestOpenRunForProject(projectId: String): RemoteRunEntity?
 
     @Query("SELECT * FROM remote_runs WHERE hostId = :hostId AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')")
     suspend fun openRunsForHost(hostId: String): List<RemoteRunEntity>

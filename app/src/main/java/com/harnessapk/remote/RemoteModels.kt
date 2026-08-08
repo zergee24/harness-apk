@@ -75,6 +75,37 @@ sealed interface RemoteM2Command {
     val commandId: String
     val runId: String
 
+    data class Start(
+        override val commandId: String,
+        override val runId: String,
+        val bindingId: String,
+        val workspaceId: String,
+        val repositoryFingerprint: String,
+        val objective: String,
+        val contextSnapshot: JsonObject,
+    ) : RemoteM2Command {
+        init {
+            require(commandId.isNotBlank()) { "commandId is required" }
+            require(runId.isNotBlank()) { "runId is required" }
+            require(bindingId.isNotBlank()) { "bindingId is required" }
+            require(workspaceId.isNotBlank()) { "workspaceId is required" }
+            require(repositoryFingerprint.isNotBlank()) { "repositoryFingerprint is required" }
+            require(objective.isNotBlank()) { "objective is required" }
+        }
+
+        fun toJson(): JsonObject = buildJsonObject {
+            put("type", JsonPrimitive("run.start"))
+            put("commandId", JsonPrimitive(commandId))
+            put("requestId", JsonPrimitive(commandId))
+            put("runId", JsonPrimitive(runId))
+            put("bindingId", JsonPrimitive(bindingId))
+            put("workspaceId", JsonPrimitive(workspaceId))
+            put("repositoryFingerprint", JsonPrimitive(repositoryFingerprint))
+            put("objective", JsonPrimitive(objective))
+            put("contextSnapshot", contextSnapshot)
+        }
+    }
+
     data class Steer(
         override val commandId: String,
         override val runId: String,

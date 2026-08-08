@@ -18,13 +18,24 @@ const (
 )
 
 type Route struct {
-	RunID       string `json:"runId"`
-	BindingID   string `json:"bindingId"`
-	WorkspaceID string `json:"workspaceId"`
-	HostID      string `json:"hostId"`
-	DeviceID    string `json:"deviceId"`
-	ThreadID    string `json:"threadId"`
-	TurnID      string `json:"turnId"`
+	RunID        string `json:"runId"`
+	BindingID    string `json:"bindingId"`
+	WorkspaceID  string `json:"workspaceId"`
+	HostID       string `json:"hostId"`
+	DeviceID     string `json:"deviceId"`
+	ThreadID     string `json:"threadId"`
+	TurnID       string `json:"turnId"`
+	BaselineJSON string `json:"baselineJson,omitempty"`
+}
+
+type WorkspaceBaseline struct {
+	CWD                   string   `json:"cwd"`
+	RepositoryFingerprint string   `json:"repositoryFingerprint"`
+	IsGit                 bool     `json:"isGit"`
+	Head                  string   `json:"head,omitempty"`
+	Branch                string   `json:"branch,omitempty"`
+	PorcelainV2Z          []string `json:"porcelainV2Z,omitempty"`
+	CapturedAt            int64    `json:"capturedAt"`
 }
 
 type Approval struct {

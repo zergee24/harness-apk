@@ -90,6 +90,34 @@ func Open(path string, key []byte, maxRecords int) (*Store, error) {
 func (s *Store) Append(event protocol.LogicalEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.appendLocked(event)
+}
+
+func (s *Store) AppendNext(event protocol.LogicalEvent) (protocol.LogicalEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := streamKey{event.HostID, event.DeviceID}
+	sequence := s.ackedThrough[key]
+	for _, id := range s.streams[key] {
+		if current := s.events[id].Sequence; current > sequence {
+			sequence = current
+		}
+	}
+	event.Sequence = sequence + 1
+	if err := s.appendLocked(event); err != nil {
+		return protocol.LogicalEvent{}, err
+	}
+	return cloneEvent(event), nil
+}
+
+func (s *Store) Has(eventID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, exists := s.events[eventID]
+	return exists
+}
+
+func (s *Store) appendLocked(event protocol.LogicalEvent) error {
 	if err := validateEvent(event); err != nil {
 		return err
 	}

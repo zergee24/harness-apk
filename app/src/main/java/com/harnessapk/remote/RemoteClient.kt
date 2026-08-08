@@ -30,7 +30,7 @@ class RemoteRepository(
     private val profileStore: RemoteProfileProvider,
     private val httpClient: OkHttpClient,
     private val scope: CoroutineScope,
-) {
+) : RemoteCommandSender {
     private val _state = MutableStateFlow(RemoteUiState())
     val state: StateFlow<RemoteUiState> = _state.asStateFlow()
     private val _notifications = MutableSharedFlow<RemoteNotification>(extraBufferCapacity = 8)
@@ -102,14 +102,21 @@ class RemoteRepository(
     private fun requestId(kind: String): String = "$kind:${UUID.randomUUID()}".also { pendingCommands[it] = kind }
 
     private fun send(command: RemoteCommand): Boolean {
+        return sendPayload(command.requestId, command.toJson())
+    }
+
+    override fun send(command: RebuiltRemoteCommand): Boolean =
+        sendPayload(command.commandId, command.payload)
+
+    private fun sendPayload(requestId: String, payload: JsonObject): Boolean {
         val profile = profileStore.profile.value
         if (profile == null) {
-            pendingCommands.remove(command.requestId)
+            pendingCommands.remove(requestId)
             return false
         }
         val activeSocket = socket
         if (activeSocket == null) {
-            pendingCommands.remove(command.requestId)
+            pendingCommands.remove(requestId)
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
             return false
         }
@@ -119,9 +126,9 @@ class RemoteRepository(
             pairingTicket = profile.pairingTicket.takeIf(String::isNotBlank), sequence = outgoingSequence.incrementAndGet(),
             expiresAt = now + 5 * 60_000L, nonce = "", ciphertext = "",
         )
-        val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, command.toJson())
+        val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, payload)
         if (!activeSocket.send(encrypted.toJson().toString())) {
-            pendingCommands.remove(command.requestId)
+            pendingCommands.remove(requestId)
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
             return false
         }

@@ -46,6 +46,9 @@ type Command struct {
 	ProcessEpoch              string          `json:"processEpoch,omitempty"`
 	BindingID                 string          `json:"bindingId,omitempty"`
 	WorkspaceID               string          `json:"workspaceId,omitempty"`
+	RepositoryFingerprint     string          `json:"repositoryFingerprint,omitempty"`
+	Objective                 string          `json:"objective,omitempty"`
+	ContextSnapshot           json.RawMessage `json:"contextSnapshot,omitempty"`
 	ThreadID                  string          `json:"threadId,omitempty"`
 	TurnID                    string          `json:"turnId,omitempty"`
 	Text                      string          `json:"text,omitempty"`

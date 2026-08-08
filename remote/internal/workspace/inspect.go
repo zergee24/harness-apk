@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 )
 
 type Source struct {
@@ -29,6 +30,43 @@ type Candidate struct {
 	Branch                string `json:"branch,omitempty"`
 	RepositoryFingerprint string `json:"repositoryFingerprint"`
 	LastUsedAt            int64  `json:"lastUsedAt"`
+}
+
+type Baseline struct {
+	IsGit        bool     `json:"isGit"`
+	Head         string   `json:"head,omitempty"`
+	Branch       string   `json:"branch,omitempty"`
+	PorcelainV2Z []string `json:"porcelainV2Z,omitempty"`
+	CapturedAt   int64    `json:"capturedAt"`
+}
+
+func CaptureBaseline(cwd string) (Baseline, error) {
+	canonical, err := canonicalDirectory(cwd)
+	if err != nil {
+		return Baseline{}, err
+	}
+	baseline := Baseline{CapturedAt: time.Now().UnixMilli()}
+	if _, err := gitOutput(canonical, "rev-parse", "--show-toplevel"); err != nil {
+		return baseline, nil
+	}
+	baseline.IsGit = true
+	baseline.Head, _ = gitOutput(canonical, "rev-parse", "HEAD")
+	if branch, err := gitOutput(canonical, "symbolic-ref", "--quiet", "--short", "HEAD"); err == nil {
+		baseline.Branch = branch
+	} else {
+		baseline.Branch, _ = gitOutput(canonical, "rev-parse", "--short=8", "HEAD")
+	}
+	command := exec.Command("git", "-C", canonical, "status", "--porcelain=v2", "-z", "--branch")
+	status, err := command.Output()
+	if err != nil {
+		return Baseline{}, err
+	}
+	for _, record := range strings.Split(string(status), "\x00") {
+		if record != "" {
+			baseline.PorcelainV2Z = append(baseline.PorcelainV2Z, record)
+		}
+	}
+	return baseline, nil
 }
 
 func InspectCandidates(pairingSecret []byte, recent []Source, registered []string) ([]Candidate, error) {

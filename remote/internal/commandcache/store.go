@@ -151,6 +151,28 @@ func (s *Store) MarkUnknown(commandID string, cause error) (Record, error) {
 	return clone(*record), nil
 }
 
+func (s *Store) AttachResult(commandID, resultEventID string, result json.RawMessage) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.data.Records[commandID]
+	if record == nil {
+		return Record{}, errors.New("command not found")
+	}
+	if resultEventID == "" {
+		return Record{}, errors.New("result event id is required")
+	}
+	if record.ResultEventID != "" {
+		return clone(*record), nil
+	}
+	record.ResultEventID = resultEventID
+	record.ResultJSON = append(json.RawMessage(nil), result...)
+	record.UpdatedAt = time.Now().UnixMilli()
+	if err := s.saveLocked(); err != nil {
+		return Record{}, err
+	}
+	return clone(*record), nil
+}
+
 func (s *Store) Lookup(commandID string) (Record, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

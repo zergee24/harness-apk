@@ -61,6 +61,8 @@ import com.harnessapk.project.Project
 import com.harnessapk.ui.capture.CaptureDestinationSheet
 import com.harnessapk.ui.capture.CaptureTransferOverlay
 import com.harnessapk.ui.agent.AgentPackagesScreen
+import com.harnessapk.ui.activity.RemoteRunObjectiveSheet
+import com.harnessapk.ui.activity.RunDetailScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.chat.ConversationWikiTopBarAction
 import com.harnessapk.ui.conversation.ConversationListScreen
@@ -106,6 +108,7 @@ object Routes {
     const val Updates = "updates"
     const val RemoteSettings = "remote-settings"
     const val RemoteControl = "remote-control"
+    const val RemoteRunPattern = "remote-run/{runId}"
     const val ChatPattern =
         "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}"
 
@@ -126,6 +129,8 @@ object Routes {
             ),
         )
     }
+
+    fun remoteRun(runId: String): String = "remote-run/${Uri.encode(runId)}"
 }
 
 internal fun chatRouteQuery(
@@ -179,6 +184,9 @@ fun HarnessApkApp(
     var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
+    var remoteProjectToStart by remember { mutableStateOf<Project?>(null) }
+    var remoteRunStartBusy by remember { mutableStateOf(false) }
+    var remoteRunStartError by remember { mutableStateOf<String?>(null) }
     val isHomeRoute = route == Routes.Conversations || route == null
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
     val homeModeStore = container.homeModeStore
@@ -509,6 +517,11 @@ fun HarnessApkApp(
                             onOpenSession = { conversationId ->
                                 navController.navigate(Routes.chat(conversationId = conversationId))
                             },
+                            onStartRemoteRun = { project ->
+                                remoteRunStartError = null
+                                remoteProjectToStart = project
+                            },
+                            onOpenRemoteRun = { runId -> navController.navigate(Routes.remoteRun(runId)) },
                             onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                             modifier = Modifier.weight(1f),
                         )
@@ -762,6 +775,17 @@ fun HarnessApkApp(
             composable(Routes.RemoteControl) {
                 RemoteScreen(container = container, contentPadding = padding)
             }
+            composable(
+                route = Routes.RemoteRunPattern,
+                arguments = listOf(navArgument("runId") { type = NavType.StringType }),
+            ) { entry ->
+                RunDetailScreen(
+                    container = container,
+                    runId = entry.arguments?.getString("runId").orEmpty(),
+                    contentPadding = padding,
+                    onBack = navController::popBackStack,
+                )
+            }
             composable(Routes.GlobalSearch) {
                 GlobalSearchScreen(
                     container = container,
@@ -788,6 +812,39 @@ fun HarnessApkApp(
         state = captureTransferState,
         onDismissError = container.captureImportCoordinator::clearTransferError,
     )
+    remoteProjectToStart?.let { project ->
+        RemoteRunObjectiveSheet(
+            projectName = project.name,
+            busy = remoteRunStartBusy,
+            errorMessage = remoteRunStartError,
+            onDismiss = {
+                if (!remoteRunStartBusy) remoteProjectToStart = null
+            },
+            onSend = { objective ->
+                scope.launch {
+                    remoteRunStartBusy = true
+                    remoteRunStartError = null
+                    runCatching {
+                        val binding = withContext(container.dispatchers.io) {
+                            requireNotNull(container.remoteBindingRepository.bindingForProject(project.id)) {
+                                "项目尚未绑定 Mac 工作区"
+                            }
+                        }
+                        container.remoteRunLauncher.launch(project, binding, objective)
+                    }.onSuccess { launched ->
+                        remoteProjectToStart = null
+                        navController.navigate(Routes.remoteRun(launched.run.id))
+                        scope.launch(container.dispatchers.io) {
+                            container.remoteTransport.flush()
+                        }
+                    }.onFailure { error ->
+                        remoteRunStartError = error.message ?: "任务排队失败"
+                    }
+                    remoteRunStartBusy = false
+                }
+            },
+        )
+    }
     captureDraft?.let { draft ->
         CaptureDestinationSheet(
             draft = draft,

@@ -89,6 +89,8 @@ import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.Project
 import com.harnessapk.project.ProjectDeliverable
 import com.harnessapk.storage.ProjectRemoteBindingEntity
+import com.harnessapk.storage.RemoteRunEntity
+import com.harnessapk.ui.activity.remoteRunStatusLabel
 import com.harnessapk.ui.components.ActionableEmptyState
 import com.harnessapk.ui.components.ComfortListRow
 import com.harnessapk.ui.components.InlineStatusMessage
@@ -265,6 +267,7 @@ internal fun ProjectScreen(
     onCreateSession: (Project) -> Unit,
     onOpenSession: (String) -> Unit,
     onStartRemoteRun: (Project) -> Unit = {},
+    onOpenRemoteRun: (String) -> Unit = {},
     onOpenGlobalSearch: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -303,6 +306,7 @@ internal fun ProjectScreen(
     var gitStatus by remember { mutableStateOf<GitStatusSummary?>(null) }
     var gitBranches by remember { mutableStateOf<List<GitBranchSummary>>(emptyList()) }
     var remoteBinding by remember { mutableStateOf<ProjectRemoteBindingEntity?>(null) }
+    var openRemoteRun by remember { mutableStateOf<RemoteRunEntity?>(null) }
     var showRemoteBindingSheet by rememberSaveable { mutableStateOf(false) }
 
     val selectedProject = projects.firstOrNull { it.id == selectedProjectId }
@@ -811,10 +815,17 @@ internal fun ProjectScreen(
     }
 
     LaunchedEffect(selectedProjectId) {
-        remoteBinding = selectedProjectId?.let { projectId ->
-            withContext(container.dispatchers.io) {
-                container.remoteBindingRepository.bindingForProject(projectId)
+        val projectId = selectedProjectId
+        if (projectId == null) {
+            remoteBinding = null
+            openRemoteRun = null
+        } else {
+            val remoteState = withContext(container.dispatchers.io) {
+                container.remoteBindingRepository.bindingForProject(projectId) to
+                    container.database.remoteDao().latestOpenRunForProject(projectId)
             }
+            remoteBinding = remoteState.first
+            openRemoteRun = remoteState.second
         }
     }
 
@@ -991,11 +1002,15 @@ internal fun ProjectScreen(
                     }
                 },
                 remoteActionLabel = remoteProfile?.let {
-                    if (hasActiveRemoteBinding) "交给 Mac" else "在 Mac 上继续"
+                    openRemoteRun?.let { run -> remoteRunStatusLabel(run.status) }
+                        ?: if (hasActiveRemoteBinding) "交给 Mac" else "在 Mac 上继续"
                 },
                 onRemoteAction = {
                     selectedProject?.let { project ->
-                        if (!hasActiveRemoteBinding) {
+                        val run = openRemoteRun
+                        if (run != null) {
+                            onOpenRemoteRun(run.id)
+                        } else if (!hasActiveRemoteBinding) {
                             showRemoteBindingSheet = true
                             container.remoteRepository.requestWorkspaceCandidates()
                         } else {

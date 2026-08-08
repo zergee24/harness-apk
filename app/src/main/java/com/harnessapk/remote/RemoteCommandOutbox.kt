@@ -93,6 +93,46 @@ class RemoteCommandOutbox(
     suspend fun retryable(now: Long): List<RebuiltRemoteCommand> =
         store.retryable(now).map(::rebuild)
 
+    suspend fun markSent(commandId: String, now: Long, retryAt: Long): RebuiltRemoteCommand {
+        val current = requireNotNull(store.find(commandId)) { "command not found" }
+        val updated = current.copy(
+            status = RemoteCommandStatus.SENT.name,
+            attemptCount = current.attemptCount + 1,
+            nextAttemptAt = retryAt,
+            lastAttemptAt = now,
+            lastError = null,
+            updatedAt = now,
+        )
+        store.upsert(updated)
+        return rebuild(updated)
+    }
+
+    suspend fun markDeliveryDeferred(commandId: String, now: Long, retryAt: Long, reason: String) {
+        val current = requireNotNull(store.find(commandId)) { "command not found" }
+        store.upsert(
+            current.copy(
+                nextAttemptAt = retryAt,
+                lastAttemptAt = now,
+                lastError = reason,
+                updatedAt = now,
+            ),
+        )
+    }
+
+    suspend fun markSucceeded(commandId: String, now: Long, resultJson: String?) {
+        val current = requireNotNull(store.find(commandId)) { "command not found" }
+        store.upsert(
+            current.copy(
+                status = RemoteCommandStatus.SUCCEEDED.name,
+                acknowledgedAt = current.acknowledgedAt ?: now,
+                completedAt = now,
+                resultJson = resultJson,
+                nextAttemptAt = Long.MAX_VALUE,
+                updatedAt = now,
+            ),
+        )
+    }
+
     private fun rebuild(entity: RemoteCommandOutboxEntity): RebuiltRemoteCommand {
         require(sha256(entity.payloadJson) == entity.payloadSha256) {
             "stored command payload hash mismatch for ${entity.commandId}"
