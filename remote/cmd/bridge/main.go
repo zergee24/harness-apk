@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,20 +21,14 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/harnessapk/remote/internal/commandcache"
+	"github.com/harnessapk/remote/internal/journal"
 	"github.com/harnessapk/remote/internal/protocol"
+	bridgestate "github.com/harnessapk/remote/internal/state"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
-type bridgeState struct {
-	RelayURL        string                       `json:"relayUrl"`
-	HostID          string                       `json:"hostId"`
-	HostName        string                       `json:"hostName"`
-	HostToken       string                       `json:"hostToken"`
-	Pending         map[string]string            `json:"pendingPairingSecrets"`
-	DeviceSecrets   map[string]string            `json:"deviceSecrets"`
-	Sequences       map[string]uint64            `json:"sequences"`
-	PendingOutbound map[string]map[string]string `json:"pendingOutbound,omitempty"`
-}
+type bridgeState = bridgestate.BridgeData
 
 type bridge struct {
 	mu           sync.Mutex
@@ -42,6 +37,8 @@ type bridge struct {
 	path         string
 	conn         *websocket.Conn
 	app          *appServer
+	journal      *journal.Store
+	commandCache *commandcache.Store
 	seen         map[string]time.Time
 	threadOwners map[string]string
 }
@@ -180,8 +177,29 @@ func runServe(defaultPath string, args []string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		journalKey, err := base64.RawURLEncoding.DecodeString(state.JournalKey)
+		if err != nil {
+			log.Printf("decode journal key: %v", err)
+			app.close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		journalStore, err := journal.Open(filepath.Join(filepath.Dir(*statePath), "logical-events.log"), journalKey, 10_000)
+		if err != nil {
+			log.Printf("open logical journal: %v", err)
+			app.close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		commandStore, err := commandcache.Open(filepath.Join(filepath.Dir(*statePath), "commands.json"))
+		if err != nil {
+			log.Printf("open command cache: %v", err)
+			app.close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
 		b := &bridge{
-			state: state, path: *statePath, app: app,
+			state: state, path: *statePath, app: app, journal: journalStore, commandCache: commandStore,
 			seen: map[string]time.Time{}, threadOwners: map[string]string{},
 		}
 		if err := b.run(context.Background()); err != nil {
@@ -191,6 +209,26 @@ func runServe(defaultPath string, args []string) {
 		state, _ = loadBridgeState(*statePath)
 		time.Sleep(3 * time.Second)
 	}
+}
+
+func executeCachedCommand(
+	cache *commandcache.Store,
+	commandID, commandType, payloadSHA256 string,
+	call func() (string, json.RawMessage, error),
+) (commandcache.Record, error) {
+	record, execute, err := cache.Begin(commandID, commandType, payloadSHA256)
+	if err != nil || !execute {
+		return record, err
+	}
+	eventID, result, err := call()
+	if err != nil {
+		_, persistErr := cache.Fail(commandID, err)
+		if persistErr != nil {
+			return commandcache.Record{}, errors.Join(err, persistErr)
+		}
+		return commandcache.Record{}, err
+	}
+	return cache.Complete(commandID, eventID, result)
 }
 
 func (b *bridge) run(ctx context.Context) error {
@@ -316,11 +354,49 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		return b.app.request(deviceID, command.RequestID, "turn/interrupt", mustJSON(map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID}))
 	case "approval.respond":
 		return b.app.response(command.ServerRequestID, map[string]string{"decision": command.Decision})
+	case "event.ack":
+		if b.journal == nil {
+			return errors.New("logical journal is unavailable")
+		}
+		return b.journal.Ack(b.state.HostID, deviceID, command.HighestContiguousSequence)
 	case "rpc":
 		return b.app.request(deviceID, command.RequestID, command.Method, command.Params)
 	default:
 		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "error", RequestID: command.RequestID, Message: "unsupported command: " + command.Type, CreatedAt: time.Now().UnixMilli()}, "")
 	}
+}
+
+func (b *bridge) sendLogicalEvent(ctx context.Context, event protocol.LogicalEvent) error {
+	if b.journal == nil {
+		return errors.New("logical journal is unavailable")
+	}
+	if err := b.journal.Append(event); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	encoded := b.state.DeviceSecrets[event.DeviceID]
+	b.state.Sequences[event.DeviceID]++
+	transportSequence := b.state.Sequences[event.DeviceID]
+	stateErr := saveBridgeState(b.path, b.state)
+	b.mu.Unlock()
+	if stateErr != nil {
+		return stateErr
+	}
+	secret, err := protocol.DecodeSecret(encoded)
+	if err != nil {
+		return err
+	}
+	wire, err := b.journal.Replay(event.EventID, secret, transportSequence)
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		return err
+	}
+	b.writeMu.Lock()
+	defer b.writeMu.Unlock()
+	return b.conn.Write(ctx, websocket.MessageText, raw)
 }
 
 func (b *bridge) handleAppServer(ctx context.Context, raw []byte) {
@@ -541,41 +617,8 @@ func (a *appServer) close() {
 	_ = a.cmd.Wait()
 }
 
-func loadBridgeState(path string) (bridgeState, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return bridgeState{}, err
-	}
-	var s bridgeState
-	err = json.Unmarshal(raw, &s)
-	if s.Pending == nil {
-		s.Pending = map[string]string{}
-	}
-	if s.DeviceSecrets == nil {
-		s.DeviceSecrets = map[string]string{}
-	}
-	if s.Sequences == nil {
-		s.Sequences = map[string]uint64{}
-	}
-	if s.PendingOutbound == nil {
-		s.PendingOutbound = map[string]map[string]string{}
-	}
-	return s, err
-}
-func saveBridgeState(path string, s bridgeState) error {
-	raw, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err = os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
+func loadBridgeState(path string) (bridgeState, error) { return bridgestate.LoadBridge(path) }
+func saveBridgeState(path string, s bridgeState) error { return bridgestate.SaveBridge(path, s) }
 func postJSON(ctx context.Context, endpoint, token, hostID string, requestBody, responseBody any) error {
 	raw, _ := json.Marshal(requestBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))

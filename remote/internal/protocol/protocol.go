@@ -38,17 +38,35 @@ type WireMessage struct {
 }
 
 type Command struct {
-	Type            string          `json:"type"`
-	RequestID       string          `json:"requestId"`
-	ThreadID        string          `json:"threadId,omitempty"`
-	TurnID          string          `json:"turnId,omitempty"`
-	Text            string          `json:"text,omitempty"`
-	CWD             string          `json:"cwd,omitempty"`
-	ExpectedTurnID  string          `json:"expectedTurnId,omitempty"`
-	ServerRequestID json.RawMessage `json:"serverRequestId,omitempty"`
-	Decision        string          `json:"decision,omitempty"`
-	Method          string          `json:"method,omitempty"`
-	Params          json.RawMessage `json:"params,omitempty"`
+	Type                      string          `json:"type"`
+	CommandID                 string          `json:"commandId,omitempty"`
+	RequestID                 string          `json:"requestId"`
+	RunID                     string          `json:"runId,omitempty"`
+	BindingID                 string          `json:"bindingId,omitempty"`
+	WorkspaceID               string          `json:"workspaceId,omitempty"`
+	ThreadID                  string          `json:"threadId,omitempty"`
+	TurnID                    string          `json:"turnId,omitempty"`
+	Text                      string          `json:"text,omitempty"`
+	CWD                       string          `json:"cwd,omitempty"`
+	ExpectedTurnID            string          `json:"expectedTurnId,omitempty"`
+	ServerRequestID           json.RawMessage `json:"serverRequestId,omitempty"`
+	Decision                  string          `json:"decision,omitempty"`
+	Method                    string          `json:"method,omitempty"`
+	Params                    json.RawMessage `json:"params,omitempty"`
+	HighestContiguousSequence uint64          `json:"highestContiguousSequence,omitempty"`
+	OpenRunIDs                []string        `json:"openRunIds,omitempty"`
+}
+
+type LogicalEvent struct {
+	SchemaVersion int             `json:"schemaVersion"`
+	EventID       string          `json:"eventId"`
+	HostID        string          `json:"hostId"`
+	DeviceID      string          `json:"deviceId"`
+	RunID         string          `json:"runId"`
+	Sequence      uint64          `json:"sequence"`
+	Type          string          `json:"type"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
+	CreatedAt     int64           `json:"createdAt"`
 }
 
 type Event struct {
