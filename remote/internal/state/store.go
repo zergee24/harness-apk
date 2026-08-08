@@ -66,6 +66,7 @@ type BridgeData struct {
 	PendingOutbound         map[string]map[string]string `json:"pendingOutbound,omitempty"`
 	NeedsInitialGapSnapshot bool                         `json:"needsInitialGapSnapshot,omitempty"`
 	JournalKey              string                       `json:"journalKey"`
+	RegisteredWorkspaces    []string                     `json:"registeredWorkspaces,omitempty"`
 }
 
 func LoadBridge(path string) (BridgeData, error) {

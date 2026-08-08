@@ -64,6 +64,10 @@ class RemoteRepository(
     }
 
     fun refreshThreads() = send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))
+    fun requestWorkspaceCandidates() {
+        _state.value = _state.value.copy(workspaceCandidates = emptyList(), workspaceCandidatesLoaded = false)
+        send(RemoteCommand(type = "workspace.list", requestId = requestId("workspace.list")))
+    }
     fun selectThread(threadId: String) {
         _state.value = _state.value.copy(selectedThreadId = threadId, timeline = emptyList(), approvals = emptyList())
         send(RemoteCommand(type = "thread.read", requestId = requestId("thread.read"), threadId = threadId))
@@ -203,6 +207,10 @@ class RemoteRepository(
                 _notifications.tryEmit(RemoteNotification("Codex 任务失败", message))
             }
             "rpc.response" -> handleRpcResponse(event)
+            "workspace.candidates" -> _state.value = _state.value.copy(
+                workspaceCandidates = parseWorkspaceCandidates(event),
+                workspaceCandidatesLoaded = true,
+            )
             "approval.request" -> handleApproval(event)
             "codex.event" -> handleCodexEvent(event)
         }

@@ -88,6 +88,7 @@ import com.harnessapk.markdownpdf.AndroidMarkdownPdfWriter
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.Project
 import com.harnessapk.project.ProjectDeliverable
+import com.harnessapk.storage.ProjectRemoteBindingEntity
 import com.harnessapk.ui.components.ActionableEmptyState
 import com.harnessapk.ui.components.ComfortListRow
 import com.harnessapk.ui.components.InlineStatusMessage
@@ -263,6 +264,7 @@ internal fun ProjectScreen(
     onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
     onOpenSession: (String) -> Unit,
+    onStartRemoteRun: (Project) -> Unit = {},
     onOpenGlobalSearch: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -270,6 +272,8 @@ internal fun ProjectScreen(
     val scope = rememberCoroutineScope()
     val markdownPdfWriter = remember { AndroidMarkdownPdfWriter() }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
+    val remoteProfile by container.remoteProfileStore.profile.collectAsState()
+    val remoteState by container.remoteRepository.state.collectAsState()
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
     var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
@@ -298,10 +302,13 @@ internal fun ProjectScreen(
     var projectToRename by remember { mutableStateOf<Project?>(null) }
     var gitStatus by remember { mutableStateOf<GitStatusSummary?>(null) }
     var gitBranches by remember { mutableStateOf<List<GitBranchSummary>>(emptyList()) }
+    var remoteBinding by remember { mutableStateOf<ProjectRemoteBindingEntity?>(null) }
+    var showRemoteBindingSheet by rememberSaveable { mutableStateOf(false) }
 
     val selectedProject = projects.firstOrNull { it.id == selectedProjectId }
     val pendingCommitPaths = appliedProjectPaths[selectedProject?.id].orEmpty()
         .filter { path -> gitStatus?.files?.any { it.path == path } == true }
+    val hasActiveRemoteBinding = remoteBinding?.hostId == remoteProfile?.hostId
     val visibleDeliverables = filterProjectArtifacts(deliverables, artifactFilter)
     val artifactTree = remember(visibleDeliverables) { buildProjectArtifactTree(visibleDeliverables) }
     val visibleTreeItems = remember(artifactTree, collapsedDirectoryPaths) {
@@ -803,6 +810,14 @@ internal fun ProjectScreen(
         publishDeliverableRefresh(ordinaryRefresh)
     }
 
+    LaunchedEffect(selectedProjectId) {
+        remoteBinding = selectedProjectId?.let { projectId ->
+            withContext(container.dispatchers.io) {
+                container.remoteBindingRepository.bindingForProject(projectId)
+            }
+        }
+    }
+
     LaunchedEffect(selectedProject, selectedTab) {
         if (shouldRefreshGitForProjectSelection(selectedTab, selectedProject?.id)) {
             refreshGitState(selectedProject)
@@ -917,6 +932,39 @@ internal fun ProjectScreen(
         )
     }
 
+    val bindingProject = selectedProject
+    val bindingProfile = remoteProfile
+    if (showRemoteBindingSheet && bindingProject != null && bindingProfile != null) {
+        ProjectRemoteBindingSheet(
+            projectName = bindingProject.name,
+            hostName = bindingProfile.hostName,
+            candidates = remoteState.workspaceCandidates,
+            candidatesLoaded = remoteState.workspaceCandidatesLoaded,
+            existingBinding = remoteBinding,
+            onDismiss = { showRemoteBindingSheet = false },
+            onBind = { candidate, confirmed ->
+                scope.launch {
+                    runCatching {
+                        withContext(container.dispatchers.io) {
+                            container.remoteBindingRepository.bind(
+                                projectId = bindingProject.id,
+                                hostId = bindingProfile.hostId,
+                                candidate = candidate,
+                                confirmFingerprintChange = confirmed,
+                            )
+                        }
+                    }.onSuccess { binding ->
+                        remoteBinding = binding
+                        showRemoteBindingSheet = false
+                        onStartRemoteRun(bindingProject)
+                    }.onFailure { error ->
+                        statusText = error.toUserMessage()
+                    }
+                }
+            },
+        )
+    }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -940,6 +988,19 @@ internal fun ProjectScreen(
                 onCreateSession = {
                     selectedProject?.let { project ->
                         onCreateSession(project)
+                    }
+                },
+                remoteActionLabel = remoteProfile?.let {
+                    if (hasActiveRemoteBinding) "交给 Mac" else "在 Mac 上继续"
+                },
+                onRemoteAction = {
+                    selectedProject?.let { project ->
+                        if (!hasActiveRemoteBinding) {
+                            showRemoteBindingSheet = true
+                            container.remoteRepository.requestWorkspaceCandidates()
+                        } else {
+                            onStartRemoteRun(project)
+                        }
                     }
                 },
                 onImportProjectPackage = {
@@ -1214,6 +1275,8 @@ private fun ProjectHeader(
     onOpenGlobalSearch: () -> Unit,
     onCloneRepository: () -> Unit,
     onCreateSession: () -> Unit,
+    remoteActionLabel: String?,
+    onRemoteAction: () -> Unit,
     onImportProjectPackage: () -> Unit,
     onExportProjectPackage: () -> Unit,
     onShareProjectPackage: () -> Unit,
@@ -1353,6 +1416,8 @@ private fun ProjectHeader(
                     overview = overview,
                     onSelectProject = { projectMenuExpanded = true },
                     onCreateSession = onCreateSession,
+                    remoteActionLabel = remoteActionLabel,
+                    onRemoteAction = onRemoteAction,
                     overflowContent = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = onOpenGlobalSearch) {
@@ -1388,6 +1453,8 @@ internal fun ProjectWorkbenchHeader(
     overview: ProjectWorkbenchOverview,
     onSelectProject: () -> Unit,
     onCreateSession: () -> Unit,
+    remoteActionLabel: String? = null,
+    onRemoteAction: () -> Unit = {},
     overflowContent: @Composable () -> Unit,
 ) {
     Column(
@@ -1454,6 +1521,16 @@ internal fun ProjectWorkbenchHeader(
         ) {
             Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
             Text("新建项目会话")
+        }
+        if (remoteActionLabel != null) {
+            OutlinedButton(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = HarnessSpacing.primaryControlHeight),
+                onClick = onRemoteAction,
+            ) {
+                Text(remoteActionLabel)
+            }
         }
     }
 }

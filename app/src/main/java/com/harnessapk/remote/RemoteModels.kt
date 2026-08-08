@@ -217,6 +217,8 @@ data class RemoteUiState(
     val timeline: List<RemoteTimelineItem> = emptyList(),
     val approvals: List<RemoteApproval> = emptyList(),
     val isWorking: Boolean = false,
+    val workspaceCandidates: List<WorkspaceCandidate> = emptyList(),
+    val workspaceCandidatesLoaded: Boolean = false,
 )
 
 internal fun parsePairingPayload(raw: String, now: Long = System.currentTimeMillis()): RemotePairingPayload {
@@ -267,6 +269,25 @@ internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
             preview = item.string("preview").orEmpty(), cwd = item.string("cwd"),
             updatedAt = (item.long("updatedAt") ?: 0L) * 1000L,
             status = item["status"]?.jsonObject?.string("type").orEmpty(),
+        )
+    }
+}
+
+internal fun parseWorkspaceCandidates(event: RemoteEvent): List<WorkspaceCandidate> {
+    val data = event.payload as? JsonArray ?: return emptyList()
+    return data.mapNotNull { element ->
+        val item = element as? JsonObject ?: return@mapNotNull null
+        val workspaceId = item.string("workspaceId")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        val cwd = item.string("cwd")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        val fingerprint = item.string("repositoryFingerprint")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        WorkspaceCandidate(
+            workspaceId = workspaceId,
+            displayName = item.string("displayName").orEmpty().ifBlank { cwd.substringAfterLast('/') },
+            cwd = cwd,
+            repositoryLabel = item.string("repositoryLabel"),
+            branch = item.string("branch"),
+            repositoryFingerprint = fingerprint,
+            lastUsedAt = item.long("lastUsedAt") ?: 0L,
         )
     }
 }

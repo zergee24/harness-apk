@@ -20,6 +20,9 @@ interface RemoteDao {
     @Query("DELETE FROM project_remote_bindings WHERE id = :bindingId")
     suspend fun deleteBindingById(bindingId: String)
 
+    @Query("DELETE FROM project_remote_bindings WHERE projectId = :projectId")
+    suspend fun deleteBindingByProject(projectId: String)
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertRun(run: RemoteRunEntity)
 

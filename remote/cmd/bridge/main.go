@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/harnessapk/remote/internal/protocol"
 	runstate "github.com/harnessapk/remote/internal/run"
 	bridgestate "github.com/harnessapk/remote/internal/state"
+	"github.com/harnessapk/remote/internal/workspace"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -67,6 +69,8 @@ func main() {
 		runPair(statePath, os.Args[2:])
 	case "serve":
 		runServe(statePath, os.Args[2:])
+	case "workspace":
+		runWorkspace(statePath, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -156,6 +160,73 @@ func runPair(defaultPath string, args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Pairing QR written to %s\n", output)
+}
+
+func runWorkspace(defaultPath string, args []string) {
+	flags := flag.NewFlagSet("workspace", flag.ExitOnError)
+	statePath := flags.String("state", defaultPath, "bridge state file")
+	_ = flags.Parse(args)
+	remaining := flags.Args()
+	if len(remaining) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: harness-bridge workspace [--state path] <add|remove|list> [directory]")
+		return
+	}
+	state, err := loadBridgeState(*statePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	switch remaining[0] {
+	case "list":
+		for _, cwd := range state.RegisteredWorkspaces {
+			fmt.Println(cwd)
+		}
+	case "add", "remove":
+		if len(remaining) != 2 {
+			log.Fatal("workspace add/remove requires one directory")
+		}
+		cwd, err := canonicalWorkspaceDirectory(remaining[1])
+		if err != nil {
+			log.Fatal(err)
+		}
+		paths := make(map[string]struct{}, len(state.RegisteredWorkspaces)+1)
+		for _, registered := range state.RegisteredWorkspaces {
+			paths[registered] = struct{}{}
+		}
+		if remaining[0] == "add" {
+			paths[cwd] = struct{}{}
+		} else {
+			delete(paths, cwd)
+		}
+		state.RegisteredWorkspaces = state.RegisteredWorkspaces[:0]
+		for registered := range paths {
+			state.RegisteredWorkspaces = append(state.RegisteredWorkspaces, registered)
+		}
+		sort.Strings(state.RegisteredWorkspaces)
+		if err := saveBridgeState(*statePath, state); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("unsupported workspace action %q", remaining[0])
+	}
+}
+
+func canonicalWorkspaceDirectory(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("workspace path is not a directory")
+	}
+	return filepath.Clean(canonical), nil
 }
 
 func runServe(defaultPath string, args []string) {
@@ -357,6 +428,8 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 			"limit": 50, "sortKey": "updated_at", "sortDirection": "desc",
 			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
 		})
+	case "workspace.list":
+		return b.requestWorkspaceCandidates(ctx, deviceID, command)
 	case "thread.read":
 		return b.requestAppServer(ctx, deviceID, command, "thread/read", map[string]any{"threadId": command.ThreadID, "includeTurns": true})
 	case "thread.start":
@@ -385,6 +458,64 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	default:
 		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "error", RequestID: command.RequestID, Message: "unsupported command: " + command.Type, CreatedAt: time.Now().UnixMilli()}, "")
 	}
+}
+
+func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string, command protocol.Command) error {
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		result, err := b.app.client.Call(callCtx, "thread/list", map[string]any{
+			"limit": 50, "sortKey": "updated_at", "sortDirection": "desc",
+			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
+		})
+		if err != nil {
+			_ = b.sendEvent(ctx, deviceID, protocol.Event{
+				Type: "error", RequestID: command.RequestID,
+				Message: "读取 Mac 工作区失败", CreatedAt: time.Now().UnixMilli(),
+			}, "")
+			return
+		}
+		var response struct {
+			Data []struct {
+				CWD       string `json:"cwd"`
+				UpdatedAt int64  `json:"updatedAt"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(result, &response); err != nil {
+			_ = b.sendEvent(ctx, deviceID, protocol.Event{
+				Type: "error", RequestID: command.RequestID,
+				Message: "Mac 工作区响应格式无效", CreatedAt: time.Now().UnixMilli(),
+			}, "")
+			return
+		}
+		b.mu.Lock()
+		secretEncoded := b.state.DeviceSecrets[deviceID]
+		registered := append([]string(nil), b.state.RegisteredWorkspaces...)
+		b.mu.Unlock()
+		secret, err := protocol.DecodeSecret(secretEncoded)
+		if err != nil {
+			return
+		}
+		sources := make([]workspace.Source, 0, len(response.Data))
+		for _, thread := range response.Data {
+			if thread.CWD != "" {
+				sources = append(sources, workspace.Source{CWD: thread.CWD, LastUsedAt: thread.UpdatedAt})
+			}
+		}
+		candidates, err := workspace.InspectCandidates(secret, sources, registered)
+		if err != nil {
+			_ = b.sendEvent(ctx, deviceID, protocol.Event{
+				Type: "error", RequestID: command.RequestID,
+				Message: "检查 Mac 工作区失败", CreatedAt: time.Now().UnixMilli(),
+			}, "")
+			return
+		}
+		_ = b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "workspace.candidates", RequestID: command.RequestID,
+			Payload: mustJSON(candidates), CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}()
+	return nil
 }
 
 func (b *bridge) sendLogicalEvent(ctx context.Context, event protocol.LogicalEvent) error {
@@ -736,4 +867,6 @@ func defaultStatePath() string {
 	return filepath.Join(home, ".harness-remote", "bridge.json")
 }
 func hostname() string { name, _ := os.Hostname(); return name }
-func usage()           { fmt.Fprintln(os.Stderr, "usage: harness-bridge <init|recover|pair|serve> [options]") }
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: harness-bridge <init|recover|pair|workspace|serve> [options]")
+}
