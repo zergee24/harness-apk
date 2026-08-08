@@ -2,6 +2,7 @@ package com.harnessapk.voice
 
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -33,5 +34,71 @@ class SystemSpeechRecognizerInstrumentedTest {
             "未获得麦克风权限",
             speechRecognitionErrorMessage(SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS),
         )
+    }
+
+    @Test
+    fun serviceFailureBeforeTranscriptionFallsBackToRecognizerIntent() {
+        assertTrue(
+            shouldFallbackToRecognizerIntent(
+                error = SpeechRecognizer.ERROR_NETWORK,
+                recognitionActive = true,
+                hasPartialResult = false,
+                intentAvailable = true,
+            ),
+        )
+        assertTrue(
+            shouldFallbackToRecognizerIntent(
+                error = SpeechRecognizer.ERROR_SERVER,
+                recognitionActive = true,
+                hasPartialResult = false,
+                intentAvailable = true,
+            ),
+        )
+        assertFalse(
+            shouldFallbackToRecognizerIntent(
+                error = SpeechRecognizer.ERROR_SERVER,
+                recognitionActive = true,
+                hasPartialResult = true,
+                intentAvailable = true,
+            ),
+        )
+        assertFalse(
+            shouldFallbackToRecognizerIntent(
+                error = SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS,
+                recognitionActive = true,
+                hasPartialResult = false,
+                intentAvailable = true,
+            ),
+        )
+        assertFalse(
+            shouldFallbackToRecognizerIntent(
+                error = SpeechRecognizer.ERROR_NETWORK,
+                recognitionActive = true,
+                hasPartialResult = false,
+                intentAvailable = false,
+            ),
+        )
+        assertFalse(
+            shouldFallbackToRecognizerIntent(
+                error = SpeechRecognizer.ERROR_NETWORK,
+                recognitionActive = false,
+                hasPartialResult = false,
+                intentAvailable = true,
+            ),
+        )
+    }
+
+    @Test
+    fun errorCallbackAfterCancellationIsIgnored() {
+        val events = mutableListOf<VoiceInputEvent>()
+        val recognizer = SystemSpeechRecognizer(
+            context = ApplicationProvider.getApplicationContext(),
+            onEvent = events::add,
+        )
+
+        recognizer.cancel()
+        recognizer.onError(SpeechRecognizer.ERROR_CLIENT)
+
+        assertTrue(events.isEmpty())
     }
 }

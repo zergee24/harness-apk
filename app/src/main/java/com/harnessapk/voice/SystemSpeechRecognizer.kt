@@ -38,6 +38,17 @@ fun shouldPreservePartialForSpeechError(error: Int): Boolean = error in setOf(
     SpeechRecognizer.ERROR_SERVER,
 )
 
+fun shouldFallbackToRecognizerIntent(
+    error: Int,
+    recognitionActive: Boolean,
+    hasPartialResult: Boolean,
+    intentAvailable: Boolean,
+): Boolean = recognitionActive && intentAvailable && !hasPartialResult && error in setOf(
+    SpeechRecognizer.ERROR_NETWORK,
+    SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+    SpeechRecognizer.ERROR_SERVER,
+)
+
 fun speechRecognitionErrorMessage(error: Int): String = when (error) {
     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "未获得麦克风权限"
     SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "语音识别超时，可继续说"
@@ -53,9 +64,13 @@ fun speechRecognitionErrorMessage(error: Int): String = when (error) {
 class SystemSpeechRecognizer(
     context: Context,
     private val onEvent: (VoiceInputEvent) -> Unit,
+    private val onFallbackRequired: (language: String) -> Unit = {},
 ) : RecognitionListener {
     private val appContext = context.applicationContext
     private var recognizer: SpeechRecognizer? = null
+    private var activeLanguage = "system"
+    private var recognitionActive = false
+    private var hasPartialResult = false
 
     fun backend(): SpeechRecognitionBackend = chooseSpeechRecognitionBackend(
         recognizerAvailable = SpeechRecognizer.isRecognitionAvailable(appContext),
@@ -65,6 +80,9 @@ class SystemSpeechRecognizer(
     fun start(language: String): SpeechRecognitionBackend {
         val backend = backend()
         if (backend == SpeechRecognitionBackend.SPEECH_RECOGNIZER) {
+            activeLanguage = language
+            recognitionActive = true
+            hasPartialResult = false
             val engine = recognizer ?: SpeechRecognizer.createSpeechRecognizer(appContext).also {
                 it.setRecognitionListener(this)
                 recognizer = it
@@ -79,23 +97,44 @@ class SystemSpeechRecognizer(
     }
 
     fun cancel() {
+        recognitionActive = false
         recognizer?.cancel()
     }
 
     fun destroy() {
+        recognitionActive = false
         recognizer?.destroy()
         recognizer = null
     }
 
     override fun onPartialResults(partialResults: Bundle?) {
-        partialResults.firstRecognitionResult()?.let { onEvent(VoiceInputEvent.PartialResult(it)) }
+        partialResults.firstRecognitionResult()?.let {
+            hasPartialResult = true
+            onEvent(VoiceInputEvent.PartialResult(it))
+        }
     }
 
     override fun onResults(results: Bundle?) {
+        recognitionActive = false
         onEvent(VoiceInputEvent.FinalResult(results.firstRecognitionResult().orEmpty()))
     }
 
     override fun onError(error: Int) {
+        if (!recognitionActive) return
+        if (
+            shouldFallbackToRecognizerIntent(
+                error = error,
+                recognitionActive = recognitionActive,
+                hasPartialResult = hasPartialResult,
+                intentAvailable = systemSpeechRecognitionIntent(activeLanguage)
+                    .resolveActivity(appContext.packageManager) != null,
+            )
+        ) {
+            recognitionActive = false
+            onFallbackRequired(activeLanguage)
+            return
+        }
+        recognitionActive = false
         onEvent(
             VoiceInputEvent.Failed(
                 message = speechRecognitionErrorMessage(error),

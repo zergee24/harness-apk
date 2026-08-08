@@ -49,9 +49,6 @@ fun rememberSystemVoiceInput(): SystemVoiceInputBinding {
         state = reduceVoiceInputState(state, event)
     }
 
-    val recognizer = remember(context.applicationContext) {
-        SystemSpeechRecognizer(context.applicationContext, ::dispatch)
-    }
     val fallbackLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val transcript = result.data
             ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
@@ -62,6 +59,16 @@ fun rememberSystemVoiceInput(): SystemVoiceInputBinding {
         } else {
             dispatch(VoiceInputEvent.CancelRequested)
         }
+    }
+    val recognizer = remember(context.applicationContext) {
+        SystemSpeechRecognizer(
+            context = context.applicationContext,
+            onEvent = ::dispatch,
+            onFallbackRequired = { language ->
+                embeddedRecognizerActive = false
+                fallbackLauncher.launch(systemSpeechRecognitionIntent(language))
+            },
+        )
     }
 
     fun beginRecognition() {
