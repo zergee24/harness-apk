@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -36,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.harnessapk.common.AppContainer
 import com.harnessapk.voice.VoiceSettings
+import com.harnessapk.voice.VoiceProviderType
 import com.harnessapk.voice.transcriptionLanguageOptions
 import kotlinx.coroutines.launch
 
@@ -45,8 +47,12 @@ fun VoiceSettingsScreen(
     contentPadding: PaddingValues,
 ) {
     val settings by container.settingsStore.voiceSettings.collectAsState(initial = VoiceSettings())
+    val providers by container.providerRepository.observeEnabled().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    var cloudSpeechModelInput by remember(settings.cloudSpeechModel) {
+        mutableStateOf(settings.cloudSpeechModel)
+    }
     var permissionGranted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -65,11 +71,82 @@ fun VoiceSettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        SettingsSection(title = "转写语言") {
+        SettingsSection(title = "语音转写") {
             Text(
-                text = "音频由设备当前的系统语音服务处理，系统服务可能联网；转写结果只填入输入框，不会自动发送。",
+                text = "转写结果只填入输入框，不会自动发送。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = settings.defaultSpeechProvider == VoiceProviderType.ANDROID_SYSTEM,
+                    onClick = {
+                        scope.launch { container.settingsStore.setDefaultSpeechProvider(VoiceProviderType.ANDROID_SYSTEM) }
+                    },
+                    label = { Text("系统语音") },
+                )
+                FilterChip(
+                    selected = settings.defaultSpeechProvider == VoiceProviderType.CLOUD,
+                    onClick = {
+                        scope.launch {
+                            container.settingsStore.setDefaultSpeechProvider(VoiceProviderType.CLOUD)
+                            if (settings.cloudSpeechProviderId == null) {
+                                container.settingsStore.setCloudSpeechConfiguration(
+                                    providerId = providers.firstOrNull()?.id,
+                                    model = settings.cloudSpeechModel,
+                                )
+                            }
+                        }
+                    },
+                    label = { Text("API 转写") },
+                )
+            }
+            if (settings.defaultSpeechProvider == VoiceProviderType.CLOUD) {
+                Text(
+                    text = "API Key 复用“模型配置”中已加密保存的服务；录音转写完成后立即从本机删除。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (providers.isEmpty()) {
+                    Text("请先在模型配置中添加支持 /audio/transcriptions 的服务。")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        providers.forEach { provider ->
+                            FilterChip(
+                                selected = settings.cloudSpeechProviderId == provider.id,
+                                onClick = {
+                                    scope.launch {
+                                        container.settingsStore.setCloudSpeechConfiguration(
+                                            providerId = provider.id,
+                                            model = settings.cloudSpeechModel,
+                                        )
+                                    }
+                                },
+                                label = { Text(provider.name) },
+                            )
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = cloudSpeechModelInput,
+                    onValueChange = { value ->
+                        cloudSpeechModelInput = value
+                        scope.launch {
+                            container.settingsStore.setCloudSpeechConfiguration(
+                                providerId = settings.cloudSpeechProviderId,
+                                model = value,
+                            )
+                        }
+                    },
+                    singleLine = true,
+                    label = { Text("转写模型") },
+                    placeholder = { Text("whisper-1") },
+                )
+            } else {
+                Text(
+                    text = "音频由设备当前的系统语音服务处理，系统服务可能联网。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 transcriptionLanguageOptions().forEach { language ->
                     FilterChip(

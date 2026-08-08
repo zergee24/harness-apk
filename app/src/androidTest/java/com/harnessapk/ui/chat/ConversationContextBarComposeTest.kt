@@ -32,6 +32,7 @@ class ConversationContextBarComposeTest {
             identityName = "家庭健康顾问",
             enabledWikiCount = 2,
             model = "gpt-5.6-terra",
+            reasoningEffortLabel = "超高",
             webSearchEnabled = true,
             contextPercent = 18,
         )

@@ -565,12 +565,11 @@ class ChatUiStateTest {
         assertTrue(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
         assertFalse(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = true))
 
-        assertEquals(ChatInputTrailingAction.VOICE, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false, isVoiceActive = false))
-        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "你好", hasSelectedImage = false, isBusy = false, isVoiceActive = false))
-        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = true, isBusy = false, isVoiceActive = false))
-        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false, isVoiceActive = true))
-        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true, isVoiceActive = false))
-        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "下一轮", hasSelectedImage = false, isBusy = true, isVoiceActive = false))
+        assertEquals(ChatInputTrailingAction.ATTACH, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false))
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "你好", hasSelectedImage = false, isBusy = false))
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = true, isBusy = false))
+        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true))
+        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "下一轮", hasSelectedImage = false, isBusy = true))
 
         assertFalse(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.QUEUED))))
         assertFalse(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.SUCCEEDED))))
@@ -754,11 +753,11 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun chatInputExposesSystemVoiceAsTheEmptyPrimaryAction() {
+    fun chatInputKeepsVoiceInsideTheTextField() {
         val source = java.io.File("src/main/java/com/harnessapk/ui/chat/ChatScreen.kt").readText()
 
-        assertTrue(source.contains("contentDescription = \"开始语音输入\""))
-        assertFalse(source.contains("contentDescription = \"语音输入\""))
+        assertTrue(source.contains("trailingIcon ="))
+        assertTrue(source.contains("ChatInputVoiceAction("))
     }
 
     @Test

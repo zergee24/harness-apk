@@ -8,6 +8,8 @@ enum class VoiceProviderType {
 data class VoiceSettings(
     val speechInputEnabled: Boolean = false,
     val defaultSpeechProvider: VoiceProviderType = VoiceProviderType.ANDROID_SYSTEM,
+    val cloudSpeechProviderId: String? = null,
+    val cloudSpeechModel: String = "whisper-1",
     val defaultTranscriptionLanguage: String = "system",
     val autoPunctuation: Boolean = true,
     val autoFillInput: Boolean = true,
@@ -20,6 +22,11 @@ data class VoiceSettings(
 
 fun VoiceSettings.requiresCloudConfiguration(): Boolean =
     defaultSpeechProvider == VoiceProviderType.CLOUD || defaultTtsProvider == VoiceProviderType.CLOUD
+
+fun VoiceSettings.cloudSpeechReady(): Boolean =
+    defaultSpeechProvider == VoiceProviderType.CLOUD &&
+        !cloudSpeechProviderId.isNullOrBlank() &&
+        cloudSpeechModel.isNotBlank()
 
 fun mergeTranscriptIntoInput(currentText: String, transcript: String): String {
     val cleanTranscript = transcript.trim()

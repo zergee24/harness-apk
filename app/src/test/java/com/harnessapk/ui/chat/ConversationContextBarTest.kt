@@ -11,12 +11,29 @@ class ConversationContextBarTest {
             identityName = "营养顾问",
             enabledWikiCount = 2,
             model = "gpt-5.6-terra",
+            reasoningEffortLabel = "超高",
             webSearchEnabled = true,
             contextPercent = 18,
         )
 
-        assertEquals("健康计划 · 营养顾问 · Wiki 2 · gpt-5.6-terra", summary.primaryText())
-        assertEquals("联网 · 上下文 18%", summary.secondaryText())
+        assertEquals("gpt-5.6-terra · 超高", summary.primaryText())
+        assertEquals("健康计划 · 营养顾问 · Wiki 2 · 联网", summary.secondaryText())
+    }
+
+    @Test
+    fun defaultEmptyContextDoesNotShowPlaceholderMetadataOrContextUsage() {
+        val summary = ConversationContextSummary(
+            projectName = null,
+            identityName = "普通助手",
+            enabledWikiCount = 0,
+            model = "gpt-5.6-terra",
+            reasoningEffortLabel = "超高",
+            webSearchEnabled = false,
+            contextPercent = 0,
+        )
+
+        assertEquals("gpt-5.6-terra · 超高", summary.primaryText())
+        assertEquals("", summary.secondaryText())
     }
 
     @Test

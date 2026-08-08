@@ -14,22 +14,18 @@ class ChatVoiceInputTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun voiceAndStopActionsUseTheSinglePrimaryButton() {
+    fun voiceAndStopActionsUseTheSmallInputAction() {
         var starts = 0
         var stops = 0
-        val action = mutableStateOf(ChatInputTrailingAction.VOICE)
         val voiceActive = mutableStateOf(false)
 
         composeRule.setContent {
             HarnessApkTheme {
-                ChatInputPrimaryAction(
-                    action = action.value,
-                    canSend = false,
+                ChatInputVoiceAction(
                     voiceActive = voiceActive.value,
-                    onVoice = { starts++ },
-                    onSend = {},
-                    onStopVoice = { stops++ },
-                    onStopGeneration = {},
+                    enabled = true,
+                    onStart = { starts++ },
+                    onStop = { stops++ },
                 )
             }
         }
@@ -37,7 +33,6 @@ class ChatVoiceInputTest {
         assertEquals(1, starts)
 
         composeRule.runOnIdle {
-            action.value = ChatInputTrailingAction.STOP
             voiceActive.value = true
         }
         composeRule.onNodeWithContentDescription("停止语音输入").performClick()

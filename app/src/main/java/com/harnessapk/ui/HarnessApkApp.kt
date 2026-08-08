@@ -79,7 +79,7 @@ import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
 import com.harnessapk.ui.updater.startupUpdateAction
 import com.harnessapk.ui.voice.VoiceSettingsScreen
-import com.harnessapk.ui.voice.rememberSystemVoiceInput
+import com.harnessapk.ui.voice.rememberVoiceInput
 import com.harnessapk.ui.wiki.WikiLibraryScreen
 import com.harnessapk.ui.wiki.WikiBrowserScreen
 import com.harnessapk.ui.wiki.WikiCitationSourceScreen
@@ -551,7 +551,7 @@ fun HarnessApkApp(
                     },
                 ),
             ) { entry ->
-                val voiceInput = rememberSystemVoiceInput()
+                val voiceInput = rememberVoiceInput(container)
                 ChatScreen(
                     container = container,
                     conversationId = entry.arguments?.getString("conversationId").orEmpty(),

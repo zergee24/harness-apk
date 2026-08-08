@@ -1934,6 +1934,7 @@ fun ChatScreen(
             identityName = identityState.selectedName,
             enabledWikiCount = wikiScopeState.options.count { it.enabled && !it.unavailable },
             model = selectedModel,
+            reasoningEffortLabel = selectedReasoningEffort.label,
             webSearchEnabled = webSearchEnabled,
             contextPercent = contextWindowUsagePercent(contextStatus),
         )
@@ -2282,6 +2283,7 @@ fun ChatScreen(
                     identityName = identityState.selectedName,
                     enabledWikiCount = wikiScopeState.options.count { it.enabled && !it.unavailable },
                     model = selectedModel,
+                    reasoningEffortLabel = selectedReasoningEffort.label,
                     webSearchEnabled = webSearchEnabled,
                     contextPercent = contextWindowUsagePercent(contextStatus),
                 ),
@@ -2602,7 +2604,7 @@ internal fun sendButtonContentDescription(isBusy: Boolean): String =
     if (isBusy) "暂停生成" else "发送"
 
 internal enum class ChatInputTrailingAction {
-    VOICE,
+    ATTACH,
     SEND,
     STOP,
 }
@@ -2616,13 +2618,11 @@ internal fun chatInputTrailingAction(
     text: String,
     hasSelectedImage: Boolean,
     isBusy: Boolean,
-    isVoiceActive: Boolean = false,
 ): ChatInputTrailingAction =
     when {
-        isVoiceActive -> ChatInputTrailingAction.STOP
         isBusy -> ChatInputTrailingAction.STOP
         text.isNotBlank() || hasSelectedImage -> ChatInputTrailingAction.SEND
-        else -> ChatInputTrailingAction.VOICE
+        else -> ChatInputTrailingAction.ATTACH
     }
 
 internal fun executionStatusLabel(status: ChatExecutionStatus): String? = when (status) {
@@ -4431,8 +4431,8 @@ private fun ChatInputBar(
         text = text,
         hasSelectedImage = selectedImages.isNotEmpty(),
         isBusy = isBusy,
-        isVoiceActive = isVoiceInputActive,
     )
+    var showImageSourceSheet by remember { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier
@@ -4470,10 +4470,6 @@ private fun ChatInputBar(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                ChatImageSourceEntryMenu(
-                    onTakePhoto = onTakePhoto,
-                    onPickFromAlbum = onPickFromAlbum,
-                )
                 OutlinedTextField(
                     modifier = Modifier
                         .weight(1f)
@@ -4507,15 +4503,35 @@ private fun ChatInputBar(
                             }
                         },
                     ),
+                    trailingIcon = {
+                        ChatInputVoiceAction(
+                            voiceActive = isVoiceInputActive,
+                            enabled = !isBusy,
+                            onStart = onStartVoiceTranscription,
+                            onStop = onStopVoiceTranscription,
+                        )
+                    },
                 )
                 ChatInputPrimaryAction(
                     action = trailingAction,
                     canSend = canSend,
                     voiceActive = isVoiceInputActive,
-                    onVoice = onStartVoiceTranscription,
+                    onAttach = { showImageSourceSheet = true },
                     onSend = onSend,
-                    onStopVoice = onStopVoiceTranscription,
                     onStopGeneration = onStop,
+                )
+            }
+            if (showImageSourceSheet) {
+                ChatImageSourceSheet(
+                    onDismiss = { showImageSourceSheet = false },
+                    onTakePhoto = {
+                        showImageSourceSheet = false
+                        onTakePhoto()
+                    },
+                    onPickFromAlbum = {
+                        showImageSourceSheet = false
+                        onPickFromAlbum()
+                    },
                 )
             }
         }
@@ -4527,24 +4543,23 @@ internal fun ChatInputPrimaryAction(
     action: ChatInputTrailingAction,
     canSend: Boolean,
     voiceActive: Boolean,
-    onVoice: () -> Unit,
+    onAttach: () -> Unit,
     onSend: () -> Unit,
-    onStopVoice: () -> Unit,
     onStopGeneration: () -> Unit,
 ) {
     FilledIconButton(
         modifier = Modifier.size(48.dp),
-        enabled = action != ChatInputTrailingAction.SEND || canSend,
+        enabled = !voiceActive && (action != ChatInputTrailingAction.SEND || canSend),
         onClick = when (action) {
-            ChatInputTrailingAction.VOICE -> onVoice
+            ChatInputTrailingAction.ATTACH -> onAttach
             ChatInputTrailingAction.SEND -> onSend
-            ChatInputTrailingAction.STOP -> if (voiceActive) onStopVoice else onStopGeneration
+            ChatInputTrailingAction.STOP -> onStopGeneration
         },
     ) {
         when (action) {
-            ChatInputTrailingAction.VOICE -> Icon(
-                imageVector = Icons.Outlined.Mic,
-                contentDescription = "开始语音输入",
+            ChatInputTrailingAction.ATTACH -> Icon(
+                imageVector = Icons.Outlined.Add,
+                contentDescription = "添加图片",
             )
             ChatInputTrailingAction.SEND -> Icon(
                 imageVector = Icons.AutoMirrored.Filled.Send,
@@ -4552,9 +4567,28 @@ internal fun ChatInputPrimaryAction(
             )
             ChatInputTrailingAction.STOP -> Icon(
                 imageVector = Icons.Filled.Stop,
-                contentDescription = if (voiceActive) "停止语音输入" else sendButtonContentDescription(isBusy = true),
+                contentDescription = sendButtonContentDescription(isBusy = true),
             )
         }
+    }
+}
+
+@Composable
+internal fun ChatInputVoiceAction(
+    voiceActive: Boolean,
+    enabled: Boolean,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+) {
+    IconButton(
+        modifier = Modifier.size(40.dp),
+        enabled = enabled,
+        onClick = if (voiceActive) onStop else onStart,
+    ) {
+        Icon(
+            imageVector = if (voiceActive) Icons.Filled.Stop else Icons.Outlined.Mic,
+            contentDescription = if (voiceActive) "停止语音输入" else "开始语音输入",
+        )
     }
 }
 
@@ -4607,34 +4641,48 @@ internal fun ChatImageSourceEntryMenu(
     }
 
     if (showImageSourceSheet) {
-        ModalBottomSheet(onDismissRequest = { showImageSourceSheet = false }) {
-            Column(
+        ChatImageSourceSheet(
+            onDismiss = { showImageSourceSheet = false },
+            onTakePhoto = {
+                showImageSourceSheet = false
+                onTakePhoto()
+            },
+            onPickFromAlbum = {
+                showImageSourceSheet = false
+                onPickFromAlbum()
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatImageSourceSheet(
+    onDismiss: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onPickFromAlbum: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 8.dp),
+        ) {
+            TextButton(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 8.dp),
+                    .heightIn(min = 56.dp),
+                onClick = onTakePhoto,
             ) {
-                TextButton(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 56.dp),
-                    onClick = {
-                        showImageSourceSheet = false
-                        onTakePhoto()
-                    },
-                ) {
-                    Text("拍照")
-                }
-                TextButton(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 56.dp),
-                    onClick = {
-                        showImageSourceSheet = false
-                        onPickFromAlbum()
-                    },
-                ) {
-                    Text("从相册选择")
-                }
+                Text("拍照")
+            }
+            TextButton(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 56.dp),
+                onClick = onPickFromAlbum,
+            ) {
+                Text("从相册选择")
             }
         }
     }

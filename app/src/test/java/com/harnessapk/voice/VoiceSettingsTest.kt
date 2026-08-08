@@ -36,6 +36,20 @@ class VoiceSettingsTest {
     }
 
     @Test
+    fun cloudSpeechUsesAnEncryptedProviderProfileAndExplicitModel() {
+        val settings = VoiceSettings(
+            defaultSpeechProvider = VoiceProviderType.CLOUD,
+            cloudSpeechProviderId = "provider-1",
+            cloudSpeechModel = "whisper-1",
+        )
+
+        assertTrue(settings.requiresCloudConfiguration())
+        assertTrue(settings.cloudSpeechReady())
+        assertEquals("provider-1", settings.cloudSpeechProviderId)
+        assertEquals("whisper-1", settings.cloudSpeechModel)
+    }
+
+    @Test
     fun transcriptMergePreservesExistingInputAndIgnoresBlankTranscript() {
         assertEquals("帮我总结这段话", mergeTranscriptIntoInput("", "帮我总结这段话"))
         assertEquals("已有草稿\n补充语音", mergeTranscriptIntoInput("已有草稿", "补充语音"))

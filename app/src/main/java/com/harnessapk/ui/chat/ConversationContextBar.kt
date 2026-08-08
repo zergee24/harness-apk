@@ -38,19 +38,20 @@ internal data class ConversationContextSummary(
     val identityName: String,
     val enabledWikiCount: Int,
     val model: String,
+    val reasoningEffortLabel: String,
     val webSearchEnabled: Boolean,
     val contextPercent: Int,
 ) {
-    fun primaryText(): String = listOf(
-        projectName ?: "临时会话",
-        identityName,
-        if (enabledWikiCount > 0) "Wiki $enabledWikiCount" else "无 Wiki",
-        model.ifBlank { "未配置模型" },
-    ).joinToString(" · ")
+    fun primaryText(): String = buildList {
+        add(model.ifBlank { "未配置模型" })
+        reasoningEffortLabel.takeIf(String::isNotBlank)?.let(::add)
+    }.joinToString(" · ")
 
     fun secondaryText(): String = buildList {
+        projectName?.takeIf(String::isNotBlank)?.let(::add)
+        identityName.takeIf { it.isNotBlank() && it != "普通助手" }?.let(::add)
+        if (enabledWikiCount > 0) add("Wiki $enabledWikiCount")
         if (webSearchEnabled) add("联网")
-        add("上下文 ${contextPercent.coerceIn(0, 100)}%")
     }.joinToString(" · ")
 }
 
@@ -103,13 +104,15 @@ internal fun ConversationContextBar(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    text = summary.secondaryText(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                summary.secondaryText().takeIf(String::isNotBlank)?.let { secondary ->
+                    Text(
+                        text = secondary,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             Icon(
                 imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
