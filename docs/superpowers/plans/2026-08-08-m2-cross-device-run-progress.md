@@ -12,11 +12,15 @@
 
 日期：2026-08-08
 
+最近更新：2026-08-09
+
 实施周期：2026-09-08 至 2026-10-07
 
-目标分支：`test`
+实施分支：`codex/m2-cross-device-run`
 
-当前状态：`PLANNING_DONE`；G0 fixture 与 G1 migration 测试可启动，G0 退出/G2 前需补齐 Go 1.23 工具链，三个产品边界在第 2 节集中确认
+人工合并目标：`test`（本分支不自动合并、不推送）
+
+当前状态：`IN_PROGRESS`；G0 已完成，G1 Room 22 与持久 Outbox 实施中；三个产品边界继续采用第 2 节默认建议
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -30,7 +34,7 @@
 
 冲突处理：产品目标和不可协商原则优先；本文件对实现细节的收敛优先于 Spec 中仅有概念、没有可重试数据或协议字段的示例。若要改变“项目是唯一长期归属”“不自动写文件/Commit/Push”“不新增任务 Tab”，必须先更新产品计划和 Spec，不能在实现中静默扩大。
 
-本轮只新增本计划文档，不修改功能代码，尤其不修改当前正在进行的 M1 阿里云实时语音文件。
+实施只在 `/Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run` 和 `codex/m2-cross-device-run` 进行；不修改主工作树中的 M1 阿里云实时语音文件，不自动合并回 `test`。
 
 并行隔离是硬约束：M2 实施必须同时使用独立 Git worktree/分支、独立 AVD、独占 emulator console/adb 端口和独立 ADB server port。禁止复用 M1 的模拟器数据目录、`emulator-5554`、默认 5037 ADB 会话或任何未显式声明 owner 的真机。
 
@@ -108,7 +112,7 @@
 - Relay 只保存最多 100 个未过期 Wire 包；Drain 后删除，不承担任务事实存储。
 - Bridge `bridge.json` 已持久化 Host/Device Secret、Transport Sequence 和加密后的 Pending Wire，但过期包会被删除。
 - `threadOwners`、app-server pending request 和重复消息缓存都在内存。
-- 当前环境 PATH 没有 Go；`go test ./...`、`go vet ./...` 和 `go build` 尚未得到本轮新证据。G2 前必须提供 Go 1.23+。
+- 系统 PATH 没有 Go；M2 已在 `/Users/tony/.local/share/harness-apk-m2/go1.26.5` 安装并校验独立 Go 1.26.5 ARM64 工具链，不改系统级 PATH。`go test ./...`、`go vet ./...` 和 `go build ./cmd/relay ./cmd/bridge` 基线通过。
 
 ### 3.4 Codex app-server 实测契约
 
@@ -140,6 +144,8 @@ export ANDROID_ADB_SERVER_PORT="$HARNESS_M2_ADB_SERVER_PORT"
 export ANDROID_SERIAL="$HARNESS_M2_SERIAL"
 export ADB_LOCAL_TRANSPORT_MAX_PORT=5553
 ```
+
+当前实施已创建独立 AVD `HarnessM2Api36`，尚未启动；设备 Gate 启动前仍必须按下述规则验证 5039 server 只列出 M2 serial。
 
 隔离规则：
 
@@ -472,7 +478,7 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 
 | Gate | 可独立验收交付物 | 依赖 | 状态 | 退出证据 |
 | --- | --- | --- | --- | --- |
-| G0 | 协议 fixture、决策映射、基线和工具链 | M1 文档可见 | PENDING | Android contract tests 绿；Go 1.23 可用；记录 app-server version/schema；独立 AVD/ADB 端口已分配 |
+| G0 | 协议 fixture、决策映射、基线和工具链 | M1 文档可见 | DONE | `9280954`；Android 988/0/0；Go test/vet/build 绿；app-server 0.147 schema 已锁定；独立 AVD/ADB 端口已分配 |
 | G1 | Room 22、领域状态机、持久 Outbox | G0 | PENDING | 21 -> 22 fixture、FK/唯一性、进程重读和非法转换测试绿 |
 | G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | PENDING | Go unit/vet/build 绿；过期 Wire 可从同 Logical Event 重封装 |
 | G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | PENDING | 已绑定项目 3 次点击内进入 QUEUED/RUNNING；无路径输入；重复 start 一次执行 |
@@ -495,7 +501,7 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 - Create: `app/src/test/java/com/harnessapk/remote/RemoteProtocolContractTest.kt`
 - Modify: `app/src/main/java/com/harnessapk/remote/RemoteModels.kt`
 
-- [ ] **Step 1: 写失败的 Android 决策和必填字段测试**
+- [x] **Step 1: 写失败的 Android 决策和必填字段测试**
 
 ```kotlin
 @Test fun approvalWireUsesCurrentAppServerDecisionNames() {
@@ -514,17 +520,17 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 @Test fun unsupportedBridgeCapabilitiesDisableRunStartButKeepLegacyHistory()
 ```
 
-- [ ] **Step 2: 运行测试并确认旧 `allow/deny` 映射失败**
+- [x] **Step 2: 运行测试并确认旧 `allow/deny` 映射失败**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.RemoteProtocolContractTest'`
 
 Expected: FAIL，`approvalDecisionForWire` 或 `RemoteM2Command` 尚不存在。
 
-- [ ] **Step 3: 增加最小 DTO、显式枚举和 tolerant decoder**
+- [x] **Step 3: 增加最小 DTO、显式枚举和 tolerant decoder**
 
 生产 decoder 必须忽略未知 Item 字段，但对 `commandId/runId/sequence/eventId` 缺失直接拒绝。Go fixture 只保留 M2 消费的字段；不复制完整生成 schema。能力矩阵必须覆盖 M2 App + 旧 Bridge、旧 App + M2 Bridge、未知 app-server Item 三组组合；旧 Bridge 只能保留历史 Remote Screen，不能显示可发起 M2 Run 的假入口。
 
-- [ ] **Step 4: 运行 Android + Go contract tests**
+- [x] **Step 4: 运行 Android + Go contract tests**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.*'`
 
@@ -532,7 +538,7 @@ Run: `cd remote && go test ./internal/appserver ./internal/protocol`
 
 Expected: PASS；Go 命令若不存在则 G0 保持 BLOCKED，不以静态阅读替代。
 
-- [ ] **Step 5: 提交 G0**
+- [x] **Step 5: 提交 G0**
 
 ```bash
 git add app/src/main/java/com/harnessapk/remote/RemoteModels.kt \
@@ -1081,7 +1087,7 @@ git commit -m "测试：完成M2跨端任务验收"
 
 ### 12.1 执行顺序
 
-1. 记录原工作树的 M1 实时语音 dirty 文件与当前 `test` SHA；从已提交的 `test` 创建 `/Users/tony/.codex/worktrees/m2-cross-device-run-harness-apk` + `codex/m2-cross-device-run`，新 worktree 必须 clean，禁止带入语音改动。
+1. 记录原工作树的 M1 实时语音 dirty 文件与当前 `test` SHA；从已提交的 `test` 创建 `/Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run` + `codex/m2-cross-device-run`，新 worktree 必须 clean，禁止带入语音改动。
 2. 若 `HarnessM2Api36` 不存在，使用已安装的 `system-images;android-36;google_apis;arm64-v8a` 创建独立 AVD；按第 3.5 节分配 emulator console/bridge port、ADB server port 和 serial。确认 M2 server 只看到 M2 设备，并确认所有同机并行任务都显式选 serial；否则切到独立 VM/主机。
 3. 补齐 Go 1.23+，执行 `go version`，再跑 Remote baseline。
 4. 执行 Task 1：锁定 app-server fixture 与 approval decision mapping。
@@ -1093,7 +1099,7 @@ git commit -m "测试：完成M2跨端任务验收"
 
 ```bash
 git worktree add -b codex/m2-cross-device-run \
-  /Users/tony/.codex/worktrees/m2-cross-device-run-harness-apk test
+  /Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run test
 
 /Users/tony/Library/Android/sdk/cmdline-tools/latest/bin/avdmanager create avd \
   --name HarnessM2Api36 \
@@ -1109,8 +1115,8 @@ git worktree add -b codex/m2-cross-device-run \
 - [ ] M2 使用独立 AVD；`HARNESS_M2_ADB_SERVER_PORT/HARNESS_M2_EMULATOR_CONSOLE_PORT/HARNESS_M2_EMULATOR_ADB_PORT/HARNESS_M2_SERIAL` 已记录，`adb -P "$HARNESS_M2_ADB_SERVER_PORT" devices -l` 只包含 M2 serial。
 - [ ] 所有设备命令和 connected test 同时显式指定 ADB server port 与 serial；没有裸 `adb` 或裸 `connectedDebugAndroidTest`。
 - [ ] 同机并行 owner 已确认也显式指定自己的 serial；无法确认时，M2 设备 Gate 已迁移到独立 VM/主机。
-- [ ] `go version` >= 1.23；`go test ./...` 基线结果已记录。
-- [ ] 本机 app-server 版本和最小 schema fixture 已记录，旧 `allow/allowAlways/deny` 有回归测试阻止。
+- [x] 独立 Go 1.26.5；`go test ./...`、`go vet ./...` 和 Bridge/Relay build 基线结果已记录。
+- [x] 本机 app-server 版本和最小 schema fixture 已记录，旧 `allow/allowAlways/deny` 有回归测试阻止。
 - [ ] Room version 从 21 只增加到 22；`MIGRATION_20_21` 未改写。
 - [ ] v21 的 Context Snapshot V2、本地搜索、Agent/Wiki 数据升级后逐项保持。
 - [ ] Outbox 重建后 commandId、payloadJson、payloadSha256 不变。
@@ -1137,3 +1143,14 @@ git worktree add -b codex/m2-cross-device-run \
 - 遇到并行 Room migration，M2 使用下一个可用版本并补完整链式迁移，禁止改写已进入 `test` 的 migration。
 - 遇到 app-server schema 变化，先更新 G0 fixture/mapper，再改生产解析；不能在 UI 层临时兼容字符串。
 - 若 G4 恢复黄金链路未通过，按产品计划范围熔断：顺延时间线视觉优化和丰富完成卡，不牺牲 Binding、Run 持久化或审批可达。
+
+## 15. Gate 进度台账
+
+### 2026-08-09 / G0
+
+- 状态：`DONE`
+- Commit：`9280954 测试：锁定M2远程协议契约`
+- RED：Android 因 `ApprovalDecision/RemoteM2Command/LogicalEvent` API 缺失编译失败；Go 因 `DecodeThreadRead/DecodeServerRequest` 缺失编译失败；稳定身份测试在旧宽松 decoder 上按预期失败。
+- GREEN：`./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain` -> `988 tests / 0 failures / 0 errors`；Go `test ./...`、`vet ./...`、`build ./cmd/relay ./cmd/bridge` 全部退出 0。
+- 环境：worktree `/Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run`；Go 1.26.5 darwin/arm64；AVD `HarnessM2Api36` 已创建未启动；app-server `0.147.0-alpha.6.5`。
+- 已知限制：G0 只锁契约，当前 Bridge 的 `requestUserInput` 误分类和 Android 内存 UI state 在后续 G2/G5 修正。
