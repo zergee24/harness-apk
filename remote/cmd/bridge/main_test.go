@@ -126,3 +126,27 @@ func TestSnapshotStatusMapsAuthoritativeTurnState(t *testing.T) {
 		t.Fatalf("running=%q", running)
 	}
 }
+
+func TestTimelineLogicalPayloadTranslatesUnknownItemAndRedactsSecrets(t *testing.T) {
+	eventType, payload, ok := timelineLogicalPayload(
+		"item/completed",
+		json.RawMessage(`{"threadId":"thread-1","item":{"id":"item-1","type":"futureTool","token":"top-secret","status":"completed"}}`),
+	)
+	if !ok || eventType != "run.timeline" || !bytes.Contains(payload, []byte(`"presentationKind":"STATUS"`)) {
+		t.Fatalf("type=%q payload=%s ok=%v", eventType, payload, ok)
+	}
+	if bytes.Contains(payload, []byte("top-secret")) {
+		t.Fatalf("timeline payload leaked secret: %s", payload)
+	}
+}
+
+func TestTurnSnapshotExtractsStructuredCompletionAndLastAgentMessage(t *testing.T) {
+	turn, ok := turnSnapshot(json.RawMessage(`{"thread":{"turns":[{
+		"id":"turn-1","status":{"type":"completed"},
+		"items":[{"type":"agentMessage","text":"真实摘要"}],
+		"structuredOutput":{"summary":"结构化摘要","unresolved":[]}
+	}]}}`), "turn-1")
+	if !ok || turn.LastAgentMessage != "真实摘要" || !bytes.Contains(turn.StructuredOutput, []byte("结构化摘要")) {
+		t.Fatalf("turn=%#v ok=%v", turn, ok)
+	}
+}

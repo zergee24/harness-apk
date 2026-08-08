@@ -128,6 +128,26 @@ sealed interface RemoteM2Command {
             put("text", JsonPrimitive(text))
         }
     }
+
+    data class Interrupt(
+        override val commandId: String,
+        override val runId: String,
+        val expectedTurnId: String,
+    ) : RemoteM2Command {
+        init {
+            require(commandId.isNotBlank()) { "commandId is required" }
+            require(runId.isNotBlank()) { "runId is required" }
+            require(expectedTurnId.isNotBlank()) { "expectedTurnId is required" }
+        }
+
+        fun toJson(): JsonObject = buildJsonObject {
+            put("type", JsonPrimitive("run.interrupt"))
+            put("commandId", JsonPrimitive(commandId))
+            put("requestId", JsonPrimitive(commandId))
+            put("runId", JsonPrimitive(runId))
+            put("expectedTurnId", JsonPrimitive(expectedTurnId))
+        }
+    }
 }
 
 enum class RemoteServerInteractionKind {

@@ -114,6 +114,18 @@ func TestInspectCandidatesDropsMissingPathsAndSortsNewestFirst(t *testing.T) {
 	}
 }
 
+func TestChangedFilesFromStatusOnlyReturnsNewChanges(t *testing.T) {
+	before := []string{"1 .M N... 100644 100644 100644 abc abc existing file.kt"}
+	after := []string{
+		"1 .M N... 100644 100644 100644 abc abc existing file.kt",
+		"? new file.kt",
+	}
+	files := ChangedFilesFromStatus(before, after)
+	if len(files) != 1 || files[0] != "new file.kt" {
+		t.Fatalf("files=%#v", files)
+	}
+}
+
 func mustGit(t *testing.T, args ...string) string {
 	t.Helper()
 	command := exec.Command("git", args...)

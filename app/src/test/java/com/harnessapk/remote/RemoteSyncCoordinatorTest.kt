@@ -2,6 +2,8 @@ package com.harnessapk.remote
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -98,6 +100,28 @@ class RemoteSyncCoordinatorTest {
                 position = RemoteSyncPosition(9L, null, "IN_SYNC"),
             ),
         )
+    }
+
+    @Test
+    fun snapshotCompletionIsRedactedBeforeRoomCanPersistIt() {
+        val snapshot = parseRemoteRunSnapshot(
+            Json.parseToJsonElement(
+                """
+                {
+                  "hostId":"host-1","deviceId":"device-1","journalHead":1,"processEpoch":"epoch-1",
+                  "runs":[{
+                    "runId":"run-1","status":"COMPLETED","latestLine":"token=url-secret",
+                    "completion":{"summary":"done","apiKey":"json-secret","changedFiles":[],"tests":[],"unresolved":[],"completedAt":1}
+                  }],
+                  "approvals":[]
+                }
+                """.trimIndent(),
+            ).jsonObject,
+        )
+
+        val run = snapshot.runs.single()
+        assertFalse(run.latestLine.contains("url-secret"))
+        assertFalse(requireNotNull(run.completionJson).contains("json-secret"))
     }
 
     private fun logicalEvent(sequence: Long) = RemoteLogicalEvent(

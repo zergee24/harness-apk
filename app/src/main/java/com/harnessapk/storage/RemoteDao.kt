@@ -60,11 +60,26 @@ interface RemoteDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertEvent(event: RemoteRunEventEntity)
 
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertEvents(events: List<RemoteRunEventEntity>)
+
     @Query("SELECT EXISTS(SELECT 1 FROM remote_run_events WHERE logicalEventId = :logicalEventId)")
     suspend fun eventExists(logicalEventId: String): Boolean
 
     @Query("SELECT * FROM remote_run_events WHERE runId = :runId ORDER BY sequence, createdAt")
     suspend fun eventsForRun(runId: String): List<RemoteRunEventEntity>
+
+    @Query("SELECT * FROM remote_run_events WHERE runId = :runId ORDER BY sequence DESC, createdAt DESC LIMIT :limit")
+    fun observeRecentEvents(runId: String, limit: Int): Flow<List<RemoteRunEventEntity>>
+
+    @Query(
+        """
+        SELECT * FROM remote_run_events
+        WHERE runId = :runId AND sequence < :beforeSequence
+        ORDER BY sequence DESC, createdAt DESC LIMIT :limit
+        """,
+    )
+    suspend fun eventsBefore(runId: String, beforeSequence: Long, limit: Int): List<RemoteRunEventEntity>
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertApproval(approval: RemoteApprovalEntity)
@@ -92,6 +107,33 @@ interface RemoteDao {
 
     @Query("SELECT * FROM remote_command_outbox WHERE commandId = :commandId LIMIT 1")
     suspend fun command(commandId: String): RemoteCommandOutboxEntity?
+
+    @Query(
+        """
+        SELECT commandId FROM remote_command_outbox
+        WHERE runId = :runId AND type = :type AND status IN ('PENDING', 'SENT', 'ACCEPTED')
+        ORDER BY createdAt LIMIT 1
+        """,
+    )
+    suspend fun pendingCommandId(runId: String, type: String): String?
+
+    @Query(
+        """
+        SELECT * FROM remote_command_outbox
+        WHERE runId = :runId AND status IN ('PENDING', 'SENT', 'ACCEPTED')
+        ORDER BY createdAt
+        """,
+    )
+    fun observeOpenCommandsForRun(runId: String): Flow<List<RemoteCommandOutboxEntity>>
+
+    @Query(
+        """
+        SELECT * FROM remote_command_outbox
+        WHERE runId = :runId AND type = :type AND status IN ('PENDING', 'SENT', 'ACCEPTED')
+        ORDER BY createdAt
+        """,
+    )
+    suspend fun openCommandsForRun(runId: String, type: String): List<RemoteCommandOutboxEntity>
 
     @Query("SELECT * FROM remote_command_outbox WHERE status IN ('PENDING', 'SENT') AND nextAttemptAt <= :now ORDER BY nextAttemptAt, createdAt")
     suspend fun retryableCommands(now: Long): List<RemoteCommandOutboxEntity>

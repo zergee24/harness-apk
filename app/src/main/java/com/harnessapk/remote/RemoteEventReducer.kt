@@ -60,7 +60,7 @@ class RemoteEventReducer(
     }
 
     private suspend fun reduceDomainState(run: RemoteRunEntity, event: RemoteLogicalEvent) {
-        val payload = event.payload as? JsonObject ?: buildJsonObject {}
+        val payload = sanitizeRemoteApprovalJson(event.payload as? JsonObject ?: buildJsonObject {}) as JsonObject
         val currentStatus = remoteRunStatus(run.status)
         val incomingStatus = statusFor(event.type, payload, currentStatus)
         val reducedStatus = RemoteRunRepository.reduceStatus(currentStatus, incomingStatus)
@@ -98,6 +98,34 @@ class RemoteEventReducer(
                 }
             }
         }
+        when (event.type) {
+            "run.steered" -> payload.string("commandId")?.let { commandId ->
+                completeCommand(commandId, event.createdAt, payload, RemoteCommandStatus.SUCCEEDED)
+            }
+            "run.interrupt.accepted" -> payload.string("commandId")?.let { commandId ->
+                completeCommand(commandId, event.createdAt, payload, RemoteCommandStatus.ACCEPTED)
+            }
+            "run.control.failed" -> payload.string("commandId")?.let { commandId ->
+                completeCommand(commandId, event.createdAt, payload, RemoteCommandStatus.FAILED)
+            }
+            "run.control.unknown" -> payload.string("commandId")?.let { commandId ->
+                completeCommand(commandId, event.createdAt, payload, RemoteCommandStatus.UNKNOWN)
+            }
+        }
+        if (event.type in setOf("run.completed", "run.failed", "run.cancelled")) {
+            dao.openCommandsForRun(run.id, "run.interrupt").forEach { command ->
+                dao.upsertCommand(
+                    command.copy(
+                        status = RemoteCommandStatus.SUCCEEDED.name,
+                        acknowledgedAt = command.acknowledgedAt ?: event.createdAt,
+                        completedAt = event.createdAt,
+                        resultJson = canonicalJson(payload),
+                        nextAttemptAt = Long.MAX_VALUE,
+                        updatedAt = event.createdAt,
+                    ),
+                )
+            }
+        }
         val completedAt = if (isTerminal) run.completedAt ?: event.createdAt else run.completedAt
         dao.upsertRun(
             run.copy(
@@ -115,16 +143,41 @@ class RemoteEventReducer(
         )
     }
 
+    private suspend fun completeCommand(
+        commandId: String,
+        now: Long,
+        payload: JsonObject,
+        status: RemoteCommandStatus,
+    ) {
+        dao.command(commandId)?.let { command ->
+            dao.upsertCommand(
+                command.copy(
+                    status = status.name,
+                    acknowledgedAt = command.acknowledgedAt ?: now,
+                    completedAt = if (status in setOf(RemoteCommandStatus.SUCCEEDED, RemoteCommandStatus.FAILED)) now else null,
+                    resultJson = canonicalJson(payload),
+                    nextAttemptAt = Long.MAX_VALUE,
+                    lastError = if (status == RemoteCommandStatus.FAILED) payload.string("errorMessage") else null,
+                    updatedAt = now,
+                ),
+            )
+        }
+    }
+
     private fun statusFor(
         type: String,
         payload: JsonObject,
         current: RemoteRunStatus,
     ): RemoteRunStatus = when (type) {
         "run.starting" -> RemoteRunStatus.STARTING
-        "run.started", "run.running", "run.approval.resolved" -> RemoteRunStatus.RUNNING
+        "run.started", "run.running", "run.approval.resolved", "run.steered",
+        "run.interrupt.accepted", "run.timeline", "run.agent.delta" -> current.takeIf {
+            it in setOf(RemoteRunStatus.WAITING_APPROVAL, RemoteRunStatus.WAITING_USER, RemoteRunStatus.RECONCILING)
+        } ?: RemoteRunStatus.RUNNING
         "run.approval.requested" -> RemoteRunStatus.WAITING_APPROVAL
         "run.user_input.requested" -> RemoteRunStatus.WAITING_USER
         "run.reconciling" -> RemoteRunStatus.RECONCILING
+        "run.control.unknown" -> RemoteRunStatus.RECONCILING
         "run.completed" -> RemoteRunStatus.COMPLETED
         "run.failed" -> RemoteRunStatus.FAILED
         "run.cancelled" -> RemoteRunStatus.CANCELLED
@@ -152,7 +205,7 @@ private fun RemoteLogicalEvent.toEntity() = RemoteRunEventEntity(
     type = type,
     itemId = (payload as? JsonObject)?.string("itemId"),
     presentationKind = (payload as? JsonObject)?.string("presentationKind") ?: "STATUS",
-    payloadJson = payload?.let(::canonicalJson) ?: "null",
+    payloadJson = payload?.let(::sanitizeRemoteApprovalJson)?.let(::canonicalJson) ?: "null",
     createdAt = createdAt,
 )
 

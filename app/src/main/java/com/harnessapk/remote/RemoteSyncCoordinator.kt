@@ -178,6 +178,19 @@ class RoomRemoteSyncState(
                         errorMessage = remote.errorMessage ?: local.errorMessage,
                     ),
                 )
+                if (reconciledStatus in terminalRunStatuses) {
+                    dao.openCommandsForRun(remote.runId, "run.interrupt").forEach { command ->
+                        dao.upsertCommand(
+                            command.copy(
+                                status = RemoteCommandStatus.SUCCEEDED.name,
+                                acknowledgedAt = command.acknowledgedAt ?: System.currentTimeMillis(),
+                                completedAt = command.completedAt ?: System.currentTimeMillis(),
+                                nextAttemptAt = Long.MAX_VALUE,
+                                updatedAt = System.currentTimeMillis(),
+                            ),
+                        )
+                    }
+                }
             }
             val approvalsByRun = snapshot.approvals.groupBy { it.runId }
             snapshot.runs.forEach { run ->
@@ -272,9 +285,10 @@ internal fun parseRemoteRunSnapshot(payload: JsonObject): RemoteRunSnapshotEnvel
             status = run.required("status"),
             threadId = run.string("threadId"),
             turnId = run.string("turnId"),
-            latestLine = run.string("latestLine").orEmpty(),
-            completionJson = run["completion"]?.takeUnless { it is JsonNull }?.toString(),
-            errorMessage = run.string("errorMessage"),
+            latestLine = redactRemoteSensitiveText(run.string("latestLine").orEmpty()),
+            completionJson = run["completion"]?.takeUnless { it is JsonNull }
+                ?.let(::sanitizeRemoteApprovalJson)?.toString(),
+            errorMessage = run.string("errorMessage")?.let(::redactRemoteSensitiveText),
         )
     }
     val approvals = (payload["approvals"] as? JsonArray).orEmpty().map { element ->

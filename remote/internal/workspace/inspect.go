@@ -69,6 +69,77 @@ func CaptureBaseline(cwd string) (Baseline, error) {
 	return baseline, nil
 }
 
+func ChangedFilesBetween(cwd, beforeHead, afterHead string) ([]string, error) {
+	if beforeHead == "" || afterHead == "" || beforeHead == afterHead {
+		return nil, nil
+	}
+	canonical, err := canonicalDirectory(cwd)
+	if err != nil {
+		return nil, err
+	}
+	command := exec.Command("git", "-C", canonical, "diff", "--name-only", "-z", beforeHead, afterHead)
+	raw, err := command.Output()
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0)
+	for _, path := range strings.Split(string(raw), "\x00") {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func ChangedFilesFromStatus(before, after []string) []string {
+	beforeSet := make(map[string]struct{}, len(before))
+	for _, record := range before {
+		beforeSet[record] = struct{}{}
+	}
+	paths := make(map[string]struct{})
+	for _, record := range after {
+		if _, existed := beforeSet[record]; existed {
+			continue
+		}
+		if path := porcelainPath(record); path != "" {
+			paths[path] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(paths))
+	for path := range paths {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func porcelainPath(record string) string {
+	if len(record) < 3 {
+		return ""
+	}
+	switch record[0] {
+	case '?', '!':
+		return strings.TrimSpace(record[2:])
+	case '1':
+		parts := strings.SplitN(record, " ", 9)
+		if len(parts) == 9 {
+			return strings.TrimSpace(parts[8])
+		}
+	case '2':
+		parts := strings.SplitN(record, " ", 10)
+		if len(parts) == 10 {
+			return strings.TrimSpace(strings.SplitN(parts[9], "\t", 2)[0])
+		}
+	case 'u':
+		parts := strings.SplitN(record, " ", 11)
+		if len(parts) == 11 {
+			return strings.TrimSpace(parts[10])
+		}
+	}
+	return ""
+}
+
 func InspectCandidates(pairingSecret []byte, recent []Source, registered []string) ([]Candidate, error) {
 	if len(pairingSecret) == 0 {
 		return nil, errors.New("pairing secret is required")

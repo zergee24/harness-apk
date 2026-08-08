@@ -4,16 +4,23 @@ import android.app.KeyguardManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -23,6 +30,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -34,16 +42,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.harnessapk.common.AppContainer
 import com.harnessapk.remote.ApprovalDecision
 import com.harnessapk.remote.RemoteApprovalRisk
 import com.harnessapk.remote.RemoteConnectionService
+import com.harnessapk.remote.RemoteCompletionEvidence
 import com.harnessapk.remote.RemoteSyncPosition
+import com.harnessapk.remote.RemoteTimelinePresentation
+import com.harnessapk.remote.collapseRemoteTimeline
 import com.harnessapk.remote.isRemoteApprovalActionEnabled
+import com.harnessapk.remote.parseRemoteCompletionEvidence
 import com.harnessapk.remote.parseRemoteApprovalRisk
 import com.harnessapk.remote.remoteApprovalPolicy
 import com.harnessapk.storage.RemoteApprovalEntity
+import com.harnessapk.storage.RemoteRunEventEntity
 import com.harnessapk.ui.theme.HarnessSpacing
 import kotlinx.coroutines.launch
 
@@ -57,6 +72,8 @@ fun RunDetailScreen(
 ) {
     val run by container.database.remoteDao().observeRun(runId).collectAsState(initial = null)
     val approvals by container.database.remoteDao().observeApprovalsForRun(runId).collectAsState(initial = emptyList())
+    val recentEvents by container.database.remoteDao().observeRecentEvents(runId, 100).collectAsState(initial = emptyList())
+    val openCommands by container.database.remoteDao().observeOpenCommandsForRun(runId).collectAsState(initial = emptyList())
     val profile by container.remoteProfileStore.profile.collectAsState()
     val cursor by container.database.remoteDao().observeCursor(
         hostId = run?.hostId.orEmpty(),
@@ -65,6 +82,11 @@ fun RunDetailScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var confirmingApproval by remember { mutableStateOf<RemoteApprovalEntity?>(null) }
+    var confirmingStop by rememberSaveable { mutableStateOf(false) }
+    var steerText by rememberSaveable { mutableStateOf("") }
+    var olderEvents by remember(runId) { mutableStateOf<List<RemoteRunEventEntity>>(emptyList()) }
+    var loadingOlder by rememberSaveable(runId) { mutableStateOf(false) }
+    var reachedTimelineStart by rememberSaveable(runId) { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
     fun enqueue(approval: RemoteApprovalEntity, decision: ApprovalDecision) {
         scope.launch {
@@ -91,6 +113,28 @@ fun RunDetailScreen(
             },
         )
     }
+    if (confirmingStop) {
+        AlertDialog(
+            onDismissRequest = { confirmingStop = false },
+            title = { Text("停止这个任务？") },
+            text = { Text("已完成的工作会保留；Mac 确认停止前，任务仍显示为运行中。") },
+            confirmButton = {
+                Button(onClick = {
+                    confirmingStop = false
+                    scope.launch {
+                        actionError = null
+                        runCatching {
+                            container.remoteRunCommandCoordinator.interrupt(runId)
+                            RemoteConnectionService.start(context)
+                        }.onFailure { actionError = it.message ?: "停止命令入队失败" }
+                    }
+                }) { Text("停止任务") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { confirmingStop = false }) { Text("继续运行") }
+            },
+        )
+    }
     Scaffold(
         modifier = Modifier.padding(contentPadding),
         topBar = {
@@ -99,6 +143,20 @@ fun RunDetailScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    val active = run?.status in setOf("RUNNING", "WAITING_APPROVAL", "WAITING_USER", "RECONCILING")
+                    if (active) {
+                        IconButton(
+                            onClick = { confirmingStop = true },
+                            enabled = openCommands.none { it.type == "run.interrupt" },
+                            modifier = Modifier.semantics {
+                                contentDescription = if (openCommands.any { it.type == "run.interrupt" }) "正在停止任务" else "停止任务"
+                            },
+                        ) {
+                            Icon(Icons.Outlined.StopCircle, contentDescription = null)
+                        }
                     }
                 },
             )
@@ -127,6 +185,38 @@ fun RunDetailScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                val timeline = remember(recentEvents, olderEvents) {
+                    collapseRemoteTimeline(
+                        (olderEvents + recentEvents.asReversed()).distinctBy { it.logicalEventId },
+                    )
+                }
+                if (timeline.isNotEmpty()) {
+                    val earliestSequence = olderEvents.firstOrNull()?.sequence
+                        ?: recentEvents.lastOrNull()?.sequence
+                    RemoteTimelineSection(
+                        items = timeline,
+                        canLoadEarlier = !reachedTimelineStart && earliestSequence != null,
+                        loadingEarlier = loadingOlder,
+                        onLoadEarlier = {
+                            val before = earliestSequence ?: return@RemoteTimelineSection
+                            scope.launch {
+                                loadingOlder = true
+                                runCatching {
+                                    container.database.remoteDao().eventsBefore(runId, before, 100)
+                                }.onSuccess { page ->
+                                    val chronological = page.asReversed()
+                                    olderEvents = (chronological + olderEvents).distinctBy { it.logicalEventId }
+                                    reachedTimelineStart = page.size < 100
+                                }.onFailure { actionError = it.message ?: "加载更早进展失败" }
+                                loadingOlder = false
+                            }
+                        },
+                    )
+                }
+                val completion = remember(current.completionJson) {
+                    current.completionJson?.let { raw -> runCatching { parseRemoteCompletionEvidence(raw) }.getOrNull() }
+                }
+                completion?.let { RemoteCompletionCard(it) }
                 actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 approvals.filter { it.status == "PENDING" }.forEach { approval ->
                     val position = RemoteSyncPosition(
@@ -150,8 +240,135 @@ fun RunDetailScreen(
                         onDecline = { enqueue(approval, ApprovalDecision.DENY) },
                     )
                 }
+                if (current.status == "RUNNING") {
+                    val sending = openCommands.any { it.type == "run.steer" }
+                    OutlinedTextField(
+                        modifier = Modifier.fillMaxWidth(),
+                        value = steerText,
+                        onValueChange = { steerText = it },
+                        label = { Text("补充方向") },
+                        enabled = !sending,
+                        minLines = 2,
+                    )
+                    Button(
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        enabled = steerText.isNotBlank() && !sending,
+                        onClick = {
+                            val text = steerText
+                            scope.launch {
+                                actionError = null
+                                runCatching {
+                                    container.remoteRunCommandCoordinator.steer(runId, text)
+                                    RemoteConnectionService.start(context)
+                                }.onSuccess { steerText = "" }
+                                    .onFailure { actionError = it.message ?: "补充方向入队失败" }
+                            }
+                        },
+                    ) { Text(if (sending) "发送中…" else "发送补充方向") }
+                }
             }
         }
+    }
+}
+
+@Composable
+internal fun RemoteTimelineSection(
+    items: List<RemoteTimelinePresentation>,
+    canLoadEarlier: Boolean = false,
+    loadingEarlier: Boolean = false,
+    onLoadEarlier: () -> Unit = {},
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("任务进展", style = MaterialTheme.typography.titleMedium)
+        if (canLoadEarlier) {
+            TextButton(
+                onClick = onLoadEarlier,
+                enabled = !loadingEarlier,
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) { Text(if (loadingEarlier) "加载中…" else "加载更早进展") }
+        }
+        items.forEach { item ->
+            var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(item.title, style = MaterialTheme.typography.labelLarge)
+                    if (item.detail.isNotBlank()) {
+                        Text(item.detail, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    TextButton(
+                        onClick = { expanded = !expanded },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        Text(if (expanded) "收起诊断信息" else "查看诊断信息")
+                    }
+                    if (expanded) {
+                        Text(
+                            item.diagnosticPayload,
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun RemoteCompletionCard(evidence: RemoteCompletionEvidence) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Card(
+        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "任务完成证据" },
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("已完成", style = MaterialTheme.typography.titleLarge)
+            Text(evidence.summary, style = MaterialTheme.typography.bodyLarge)
+            CompletionEvidenceRow("文件", evidence.fileSummary)
+            CompletionEvidenceRow("测试", evidence.testSummary)
+            CompletionEvidenceRow("Git", evidence.gitSummary)
+            CompletionEvidenceRow(
+                "遗留",
+                if (evidence.unresolved.isEmpty()) "0 项" else "${evidence.unresolved.size} 项",
+            )
+            TextButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) { Text(if (expanded) "收起结果" else "查看结果") }
+            if (expanded) {
+                if (evidence.changedFiles.isNotEmpty()) {
+                    Text(evidence.changedFiles.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
+                }
+                evidence.tests.forEach { test ->
+                    Text("${test.status} · ${test.command}", style = MaterialTheme.typography.bodySmall)
+                }
+                evidence.unresolved.forEach { item ->
+                    Text("遗留 · $item", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompletionEvidenceRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(16.dp))
+        Text(value)
     }
 }
 

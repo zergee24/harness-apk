@@ -25,6 +25,7 @@ import (
 	"github.com/coder/websocket"
 	appserverrpc "github.com/harnessapk/remote/internal/appserver"
 	"github.com/harnessapk/remote/internal/commandcache"
+	"github.com/harnessapk/remote/internal/completion"
 	"github.com/harnessapk/remote/internal/journal"
 	"github.com/harnessapk/remote/internal/protocol"
 	runstate "github.com/harnessapk/remote/internal/run"
@@ -441,6 +442,8 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		return b.requestWorkspaceCandidates(ctx, deviceID, command)
 	case "run.start":
 		return b.startRun(ctx, deviceID, command)
+	case "run.steer", "run.interrupt":
+		return b.controlRun(ctx, deviceID, command)
 	case "sync.resume":
 		return b.resumeLogicalEvents(ctx, deviceID, command)
 	case "run.snapshot":
@@ -594,6 +597,37 @@ func (b *bridge) startRun(ctx context.Context, deviceID string, command protocol
 	return nil
 }
 
+func (b *bridge) controlRun(ctx context.Context, deviceID string, command protocol.Command) error {
+	if command.CommandID == "" || command.RequestID == "" || command.RunID == "" {
+		return errors.New("run control command identity is required")
+	}
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		coordinator := runstate.ControlCoordinator{
+			Cache: b.commandCache, Routes: b.routes, App: b.app.client, Emit: b.emitLogicalEvent,
+		}
+		err := coordinator.Execute(callCtx, runstate.ControlCommand{
+			Type: command.Type, CommandID: command.CommandID, RunID: command.RunID,
+			DeviceID: deviceID, ExpectedTurnID: command.ExpectedTurnID, Text: command.Text,
+		})
+		if errors.Is(err, runstate.ErrControlOutcomeUnknown) {
+			payload := mustJSON(map[string]string{
+				"commandId": command.CommandID, "latestLine": "正在核对手机指令结果",
+			})
+			_, _ = b.emitLogicalEvent(ctx, deviceID, command.RunID, "run.control.unknown", payload)
+			return
+		}
+		if err != nil {
+			payload := mustJSON(map[string]string{
+				"commandId": command.CommandID, "latestLine": "Mac 未能处理手机指令", "errorMessage": err.Error(),
+			})
+			_, _ = b.emitLogicalEvent(ctx, deviceID, command.RunID, "run.control.failed", payload)
+		}
+	}()
+	return nil
+}
+
 func (b *bridge) emitLogicalEvent(
 	ctx context.Context,
 	deviceID, runID, eventType string,
@@ -677,6 +711,12 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 			cancel()
 			if err == nil {
 				snapshot.Status, snapshot.LatestLine = snapshotStatus(result, route.TurnID)
+				if snapshot.Status == "COMPLETED" {
+					if turn, found := turnSnapshot(result, route.TurnID); found {
+						evidence := buildCompletionEvidence(route, turn)
+						snapshot.CompletionJSON = mustJSON(evidence)
+					}
+				}
 			}
 		}
 		runs = append(runs, snapshot)
@@ -964,9 +1004,22 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 	}
 	if message.Method == "item/tool/requestUserInput" {
 		eventType, pushKind = "user_input.request", "approval"
+		if route, ok := b.routeForParams(message.Params); ok {
+			_, _ = b.emitLogicalEvent(
+				ctx, route.DeviceID, route.RunID, "run.user_input.requested", userInputLogicalPayload(message.Params),
+			)
+		}
 	}
 	if message.Method == "turn/completed" {
 		pushKind = "completion"
+		if route, ok := b.routeForParams(message.Params); ok {
+			go b.completeRun(ctx, route, message.Params)
+		}
+	}
+	if route, ok := b.routeForParams(message.Params); ok {
+		if logicalType, payload, translated := timelineLogicalPayload(message.Method, message.Params); translated {
+			_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, logicalType, payload)
+		}
 	}
 	envelope := map[string]any{
 		"id": message.ID, "method": message.Method, "params": json.RawMessage(message.Params),
@@ -982,6 +1035,221 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 	for _, deviceID := range b.eventTargets(message.Params) {
 		_ = b.sendEvent(ctx, deviceID, protocol.Event{Type: eventType, Method: message.Method, Payload: raw, CreatedAt: time.Now().UnixMilli()}, pushKind)
 	}
+}
+
+func timelineLogicalPayload(method string, raw json.RawMessage) (string, json.RawMessage, bool) {
+	var params map[string]any
+	if json.Unmarshal(raw, &params) != nil {
+		return "", nil, false
+	}
+	if method == "item/agentMessage/delta" {
+		itemID, _ := params["itemId"].(string)
+		delta, _ := params["delta"].(string)
+		return "run.agent.delta", mustJSON(map[string]any{
+			"itemId": itemID, "delta": redactApprovalText(delta),
+			"presentationKind": "AGENT_DELTA", "latestLine": "正在整理结果",
+		}), true
+	}
+	if method != "item/started" && method != "item/completed" {
+		return "", nil, false
+	}
+	item, ok := params["item"].(map[string]any)
+	if !ok {
+		return "", nil, false
+	}
+	kind, _ := item["type"].(string)
+	presentation := "STATUS"
+	latestLine := "正在处理"
+	switch kind {
+	case "agentMessage":
+		presentation, latestLine = "RESULT", "正在整理结果"
+	case "commandExecution":
+		presentation, latestLine = "TEST", "正在运行命令或测试"
+	case "fileChange":
+		presentation, latestLine = "FILES", "正在修改文件"
+	case "reasoning":
+		presentation, latestLine = "ANALYZING", "正在分析"
+	case "webSearch":
+		presentation, latestLine = "SEARCHING", "正在查找"
+	}
+	return "run.timeline", mustJSON(map[string]any{
+		"itemId": item["id"], "presentationKind": presentation,
+		"latestLine": latestLine, "detail": itemSummary(kind, item),
+		"diagnostic": sanitizeApprovalDetails(item),
+	}), true
+}
+
+func itemSummary(kind string, item map[string]any) string {
+	for _, key := range []string{"text", "command", "status"} {
+		if value, ok := item[key].(string); ok && value != "" {
+			return redactApprovalText(value)
+		}
+	}
+	if kind == "fileChange" {
+		if changes, ok := item["changes"].([]any); ok {
+			return fmt.Sprintf("%d 个文件变更", len(changes))
+		}
+	}
+	return ""
+}
+
+func userInputLogicalPayload(raw json.RawMessage) json.RawMessage {
+	var params map[string]any
+	if json.Unmarshal(raw, &params) != nil {
+		params = map[string]any{}
+	}
+	question := "需要在 Mac 上补充输入"
+	for _, key := range []string{"question", "prompt", "message"} {
+		if value, ok := params[key].(string); ok && value != "" {
+			question = redactApprovalText(value)
+			break
+		}
+	}
+	return mustJSON(map[string]any{
+		"itemId": params["itemId"], "presentationKind": "RECOVERY",
+		"latestLine": question, "detail": "保留证据后在 Mac UI 重新发起",
+	})
+}
+
+func (b *bridge) completeRun(ctx context.Context, route runstate.Route, params json.RawMessage) {
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	result, err := b.app.client.Call(callCtx, "thread/read", map[string]any{
+		"threadId": route.ThreadID, "includeTurns": true,
+	})
+	if err != nil {
+		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.failed", mustJSON(map[string]string{
+			"latestLine": "读取完成结果失败", "errorMessage": err.Error(),
+		}))
+		return
+	}
+	turn, ok := turnSnapshot(result, route.TurnID)
+	if !ok {
+		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.failed", mustJSON(map[string]string{
+			"latestLine": "完成结果缺少目标 Turn", "errorMessage": "thread/read did not contain the routed turn",
+		}))
+		return
+	}
+	status := completionTurnStatus(params, turn.Status)
+	if status == "interrupted" || status == "cancelled" || status == "canceled" {
+		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.cancelled", mustJSON(map[string]any{
+			"threadId": route.ThreadID, "turnId": route.TurnID,
+			"presentationKind": "CANCELLED", "latestLine": "任务已停止",
+		}))
+		return
+	}
+	if status == "failed" {
+		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.failed", mustJSON(map[string]any{
+			"threadId": route.ThreadID, "turnId": route.TurnID,
+			"presentationKind": "RECOVERY", "latestLine": "任务失败",
+		}))
+		return
+	}
+	evidence := buildCompletionEvidence(route, turn)
+	payload := mustJSON(map[string]any{
+		"threadId": route.ThreadID, "turnId": route.TurnID,
+		"presentationKind": "COMPLETION", "latestLine": "任务已完成", "completion": evidence,
+	})
+	_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.completed", payload)
+}
+
+func buildCompletionEvidence(route runstate.Route, turn completedTurn) completion.RunCompletion {
+	var baseline runstate.WorkspaceBaseline
+	_ = json.Unmarshal([]byte(route.BaselineJSON), &baseline)
+	before := workspace.Baseline{
+		IsGit: baseline.IsGit, Head: baseline.Head, Branch: baseline.Branch,
+		PorcelainV2Z: baseline.PorcelainV2Z, CapturedAt: baseline.CapturedAt,
+	}
+	after, inspectErr := workspace.CaptureBaseline(baseline.CWD)
+	if inspectErr != nil {
+		after = workspace.Baseline{}
+	}
+	committed, _ := workspace.ChangedFilesBetween(baseline.CWD, before.Head, after.Head)
+	observed := workspace.ChangedFilesFromStatus(before.PorcelainV2Z, after.PorcelainV2Z)
+	return completion.Build(completion.Input{
+		Before: before, After: after, CommittedFiles: committed, ObservedFiles: observed,
+		Items: turn.Items, StructuredOutput: turn.StructuredOutput,
+		LastAgentMessage: turn.LastAgentMessage, CompletedAt: time.Now().UnixMilli(),
+	})
+}
+
+type completedTurn struct {
+	Status           json.RawMessage
+	Items            []json.RawMessage
+	StructuredOutput json.RawMessage
+	LastAgentMessage string
+}
+
+func turnSnapshot(raw json.RawMessage, turnID string) (completedTurn, bool) {
+	var result struct {
+		Thread struct {
+			Turns []struct {
+				ID               string            `json:"id"`
+				Status           json.RawMessage   `json:"status"`
+				Items            []json.RawMessage `json:"items"`
+				Output           json.RawMessage   `json:"output"`
+				StructuredOutput json.RawMessage   `json:"structuredOutput"`
+			} `json:"turns"`
+		} `json:"thread"`
+	}
+	if json.Unmarshal(raw, &result) != nil {
+		return completedTurn{}, false
+	}
+	for _, turn := range result.Thread.Turns {
+		if turn.ID != turnID {
+			continue
+		}
+		structured := turn.StructuredOutput
+		if len(structured) == 0 || string(structured) == "null" {
+			structured = turn.Output
+		}
+		lastAgent := ""
+		for _, item := range turn.Items {
+			var decoded struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(item, &decoded) == nil && decoded.Type == "agentMessage" && decoded.Text != "" {
+				lastAgent = decoded.Text
+			}
+		}
+		return completedTurn{
+			Status: turn.Status, Items: turn.Items, StructuredOutput: structured, LastAgentMessage: lastAgent,
+		}, true
+	}
+	return completedTurn{}, false
+}
+
+func completionTurnStatus(params, fallback json.RawMessage) string {
+	for _, raw := range []json.RawMessage{params, fallback} {
+		var direct string
+		if json.Unmarshal(raw, &direct) == nil && direct != "" {
+			return strings.ToLower(direct)
+		}
+		var object map[string]any
+		if json.Unmarshal(raw, &object) != nil {
+			continue
+		}
+		for _, value := range []any{object["status"], object["turn"]} {
+			if nested, ok := value.(map[string]any); ok {
+				value = nested["status"]
+			}
+			switch status := value.(type) {
+			case string:
+				if status != "" {
+					return strings.ToLower(status)
+				}
+			case map[string]any:
+				if kind, _ := status["type"].(string); kind != "" {
+					return strings.ToLower(kind)
+				}
+			}
+		}
+		if kind, _ := object["type"].(string); kind != "" {
+			return strings.ToLower(kind)
+		}
+	}
+	return "completed"
 }
 
 func approvalLogicalPayload(message appserverrpc.Message, approvalID, processEpoch string) json.RawMessage {

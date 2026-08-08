@@ -40,6 +40,20 @@ class RemoteProtocolContractTest {
     }
 
     @Test
+    fun interruptUsesRunCommandContractRatherThanApprovalCancellation() {
+        val payload = RemoteM2Command.Interrupt(
+            commandId = "interrupt-1",
+            runId = "run-1",
+            expectedTurnId = "turn-1",
+        ).toJson()
+
+        assertEquals("run.interrupt", payload.string("type"))
+        assertEquals("interrupt-1", payload.string("requestId"))
+        assertEquals("turn-1", payload.string("expectedTurnId"))
+        assertFalse(payload.containsKey("decision"))
+    }
+
+    @Test
     fun requestUserInputIsNotDecodedAsApproval() {
         assertEquals(
             RemoteServerInteractionKind.USER_INPUT,

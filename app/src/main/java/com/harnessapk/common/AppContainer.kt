@@ -97,8 +97,10 @@ import com.harnessapk.remote.RemoteBindingRepository
 import com.harnessapk.remote.RemoteApprovalCommandCoordinator
 import com.harnessapk.remote.RemoteCommandOutbox
 import com.harnessapk.remote.RemoteRunLauncher
+import com.harnessapk.remote.RemoteRunCommandCoordinator
 import com.harnessapk.remote.RemoteTransport
 import com.harnessapk.remote.RoomRemoteCommandStore
+import com.harnessapk.remote.RoomRemoteRunCommandState
 import com.harnessapk.remote.RoomApprovalResponseWriter
 import com.harnessapk.remote.RemoteEventReducer
 import com.harnessapk.remote.RemoteSyncCoordinator
@@ -170,6 +172,10 @@ class AppContainer(
         RoomApprovalResponseWriter(database.remoteDao()),
     )
     val remoteRunLauncher = RemoteRunLauncher(database, remoteCommandOutbox)
+    val remoteRunCommandCoordinator = RemoteRunCommandCoordinator(
+        remoteCommandOutbox,
+        RoomRemoteRunCommandState(database.remoteDao()),
+    )
     val remoteTransport = RemoteTransport(remoteCommandOutbox, remoteRepository)
     val remoteEventReducer = RemoteEventReducer(database)
     val remoteSyncCoordinator = RemoteSyncCoordinator(

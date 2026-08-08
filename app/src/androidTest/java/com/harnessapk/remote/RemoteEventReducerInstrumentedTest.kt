@@ -85,6 +85,56 @@ class RemoteEventReducerInstrumentedTest {
         db.close()
     }
 
+    @Test
+    fun steerAndInterruptOnlyBecomeTerminalFromLogicalResults() = runBlocking {
+        val db = database()
+        db.remoteDao().insertRun(run())
+        val outbox = RemoteCommandOutbox(RoomRemoteCommandStore(db.remoteDao()))
+        outbox.enqueue(
+            commandId = "steer-1", runId = "run-1", type = "run.steer",
+            payload = RemoteM2Command.Steer("steer-1", "run-1", "turn-1", "补充测试").toJson(),
+            now = 10L,
+        )
+        outbox.enqueue(
+            commandId = "interrupt-1", runId = "run-1", type = "run.interrupt",
+            payload = RemoteM2Command.Interrupt("interrupt-1", "run-1", "turn-1").toJson(),
+            now = 10L,
+        )
+        val reducer = RemoteEventReducer(db)
+
+        reducer.apply(controlEvent(1L, "run.steered", "steer-1"))
+        reducer.apply(controlEvent(2L, "run.interrupt.accepted", "interrupt-1"))
+
+        assertEquals("SUCCEEDED", db.remoteDao().command("steer-1")?.status)
+        assertEquals("ACCEPTED", db.remoteDao().command("interrupt-1")?.status)
+        assertEquals("RUNNING", db.remoteDao().run("run-1")?.status)
+
+        reducer.apply(controlEvent(3L, "run.cancelled", null))
+        assertEquals("SUCCEEDED", db.remoteDao().command("interrupt-1")?.status)
+        assertEquals("CANCELLED", db.remoteDao().run("run-1")?.status)
+        db.close()
+    }
+
+    @Test
+    fun timelineSecretsAreRedactedBeforeRoomPersistence() = runBlocking {
+        val db = database()
+        db.remoteDao().insertRun(run())
+        val event = controlEvent(1L, "run.timeline", null).copy(
+            payload = buildJsonObject {
+                put("presentationKind", "STATUS")
+                put("detail", "curl https://example.invalid?token=url-secret")
+                put("apiKey", "json-secret")
+            },
+        )
+
+        RemoteEventReducer(db).apply(event)
+
+        val persisted = db.remoteDao().eventsForRun("run-1").single().payloadJson
+        assertFalse(persisted.contains("url-secret"))
+        assertFalse(persisted.contains("json-secret"))
+        db.close()
+    }
+
     private fun database(): AppDatabase {
         val context = ApplicationProvider.getApplicationContext<Context>()
         return Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
@@ -135,5 +185,20 @@ class RemoteEventReducerInstrumentedTest {
             put("risk", "LOW")
         },
         createdAt = 20L,
+    )
+
+    private fun controlEvent(sequence: Long, type: String, commandId: String?) = RemoteLogicalEvent(
+        schemaVersion = 1,
+        eventId = "event-$sequence",
+        hostId = "host-1",
+        deviceId = "device-1",
+        runId = "run-1",
+        sequence = sequence,
+        type = type,
+        payload = buildJsonObject {
+            commandId?.let { put("commandId", it) }
+            put("latestLine", if (type == "run.cancelled") "任务已停止" else "命令已确认")
+        },
+        createdAt = 20L + sequence,
     )
 }
