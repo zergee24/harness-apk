@@ -56,7 +56,7 @@ class RemoteConnectionService : Service() {
 
     private fun RemoteNotification.toPlan(): RemoteNotificationPlan =
         if (runId != null && approvalId != null) {
-            notificationCoordinator.approvalPlan(runId, approvalId, risk, message)
+            notificationCoordinator.approvalPlan(runId, approvalId, risk)
         } else if (runId != null) {
             notificationCoordinator.runPlan(runId, title, message)
         } else {

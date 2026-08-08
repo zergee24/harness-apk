@@ -26,7 +26,6 @@ class RemoteNotificationCoordinator {
         runId: String,
         approvalId: String,
         risk: RemoteApprovalRisk,
-        summary: String,
     ): RemoteNotificationPlan {
         val actions = buildList {
             add(RemoteNotificationAction(RemoteNotificationActionKind.VIEW, "查看", null))
@@ -52,7 +51,7 @@ class RemoteNotificationCoordinator {
             runId = runId,
             approvalId = approvalId,
             title = if (risk == RemoteApprovalRisk.HIGH) "高风险操作等待确认" else "Codex 等待审批",
-            summary = redactRemoteSensitiveText(summary),
+            summary = "打开任务详情查看操作范围",
             actions = actions,
         )
     }

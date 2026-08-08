@@ -28,7 +28,9 @@ internal fun remoteApprovalPolicy(
     risk: RemoteApprovalRisk,
     deviceLocked: Boolean,
 ): RemoteApprovalPolicyDecision = RemoteApprovalPolicyDecision(
-    allowFromNotification = risk != RemoteApprovalRisk.HIGH,
+    // App-server only requests approval for protected operations. Mobile notifications never
+    // authorize them; approval requires an unlocked Run Detail surface.
+    allowFromNotification = false,
     requiresDetailConfirmation = risk == RemoteApprovalRisk.HIGH,
     canApproveNow = risk != RemoteApprovalRisk.HIGH || !deviceLocked,
 )

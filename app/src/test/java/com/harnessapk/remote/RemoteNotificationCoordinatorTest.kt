@@ -32,11 +32,21 @@ class RemoteNotificationCoordinatorTest {
             runId = "run-1",
             approvalId = "approval-1",
             risk = RemoteApprovalRisk.HIGH,
-            summary = "sudo rm -rf build",
         )
 
         assertEquals(setOf(RemoteNotificationActionKind.VIEW, RemoteNotificationActionKind.DECLINE), plan.actions.mapTo(mutableSetOf()) { it.kind })
         assertFalse(plan.actions.any { it.kind == RemoteNotificationActionKind.ALLOW_ONCE })
+    }
+
+    @Test
+    fun lowRiskPlanStillRequiresUnlockedRunDetailForAllow() {
+        val plan = RemoteNotificationCoordinator().approvalPlan(
+            runId = "run-1",
+            approvalId = "approval-1",
+            risk = RemoteApprovalRisk.LOW,
+        )
+
+        assertEquals(setOf(RemoteNotificationActionKind.VIEW, RemoteNotificationActionKind.DECLINE), plan.actions.mapTo(mutableSetOf()) { it.kind })
     }
 
     private fun approval(risk: String) = RemoteApprovalEntity(
