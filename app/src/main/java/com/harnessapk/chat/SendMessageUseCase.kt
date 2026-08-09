@@ -21,6 +21,8 @@ import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.provider.ProviderCapabilityCatalog
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderProfile
+import com.harnessapk.projectsearch.ProjectCitationVerifier
+import com.harnessapk.projectsearch.ProjectRuntimeContext
 import com.harnessapk.session.SessionRequestContext
 import com.harnessapk.session.buildSessionOutgoingMessages
 import com.harnessapk.websearch.WebSearchContext
@@ -60,6 +62,12 @@ class SendMessageUseCase(
     private val wikiContextProvider: suspend (conversationId: String, query: String, scope: List<WikiRef>) -> WikiRuntimeContext? =
         { _, _, _ -> null },
     private val wikiSourcePartWriter: WikiSourcePartWriter? = null,
+    private val projectContextProvider:
+        suspend (conversationId: String, executionId: String, assistantMessageId: String, query: String, projectId: String) -> ProjectRuntimeContext? =
+        { _, _, _, _, _ -> null },
+    private val projectSourcePartWriter: ProjectSourcePartWriter? = null,
+    private val projectCitationAuditWriter:
+        suspend (executionId: String, status: String, unknownTokens: List<String>) -> Unit = { _, _, _ -> },
     private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
 ) {
     suspend fun send(
@@ -154,6 +162,7 @@ class SendMessageUseCase(
         var streamClock: TimeMark? = null
         var agentContext: AgentRuntimeContext? = null
         var wikiContext: WikiRuntimeContext? = null
+        var projectContext: ProjectRuntimeContext? = null
         var latestSnapshot: StreamingMessageSnapshot? = null
         var streamCompleted = false
         val traceId = UUID.randomUUID().toString()
@@ -218,6 +227,18 @@ class SendMessageUseCase(
             onAssistantCreated(nextAssistantId)
             assistantId = nextAssistantId
             wikiContext?.let { context -> wikiSourcePartWriter?.persistInitial(nextAssistantId, context) }
+            conversation.projectId?.takeIf(String::isNotBlank)?.let { projectId ->
+                onPhaseChanged(ChatExecutionPhase.RETRIEVING_KNOWLEDGE)
+                projectContext = runCatching {
+                    projectContextProvider(
+                        entry.conversationId,
+                        entry.id,
+                        nextAssistantId,
+                        text,
+                        projectId,
+                    )
+                }.getOrNull()
+            }
             latestSnapshot = StreamingMessageSnapshot(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
@@ -232,6 +253,7 @@ class SendMessageUseCase(
                     webSearchContext = effectiveSearchContexts.webSearchContext,
                     agentSystemContext = agentContext?.systemPrompt,
                     wikiSystemContext = wikiContext?.systemContext,
+                    projectSystemContext = projectContext?.systemContext,
                 ),
                 temperature = temperatureForModel(requestModel),
                 selectedReasoningEffort = entry.reasoningEffort,
@@ -292,6 +314,16 @@ class SendMessageUseCase(
                         }
                 }
             }
+            if (projectContext != null) {
+                lifecycleCoordinator.serialized {
+                    latestSnapshot = persistProjectTerminal(
+                        assistantMessageId = nextAssistantId,
+                        executionId = entry.id,
+                        snapshot = requireNotNull(latestSnapshot),
+                        context = requireNotNull(projectContext),
+                    )
+                }
+            }
             currentCoroutineContext().ensureActive()
             chatRepository.markAssistantSucceeded(nextAssistantId)
             ChatExecutionResult(
@@ -318,12 +350,16 @@ class SendMessageUseCase(
                                 snapshot = cancelledSnapshot,
                                 agentContext = agentContext,
                                 wikiContext = wikiContext,
+                                projectContext = null,
                             )
                             if (agentContext != null && sanitized.hasAgentSources()) {
                                 agentSourcePartWriter?.persist(id, sanitized, agentContext)
                                     ?: chatRepository.replaceMessagePartsFromSnapshot(id, sanitized)
                             } else {
                                 chatRepository.replaceMessagePartsFromSnapshot(id, sanitized)
+                            }
+                            if (projectContext != null) {
+                                persistProjectTerminal(id, entry.id, sanitized, requireNotNull(projectContext))
                             }
                         }
                     }
@@ -349,12 +385,21 @@ class SendMessageUseCase(
                         snapshot = it,
                         agentContext = agentContext,
                         wikiContext = wikiContext,
+                        projectContext = null,
                     )
                     if (agentContext != null && sanitized.hasAgentSources()) {
                         agentSourcePartWriter?.persist(failedAssistantId, sanitized, agentContext)
                             ?: chatRepository.replaceMessagePartsFromSnapshot(failedAssistantId, sanitized)
                     } else {
                         chatRepository.replaceMessagePartsFromSnapshot(failedAssistantId, sanitized)
+                    }
+                    if (projectContext != null) {
+                        persistProjectTerminal(
+                            failedAssistantId,
+                            entry.id,
+                            sanitized,
+                            requireNotNull(projectContext),
+                        )
                     }
                 }
             }
@@ -383,6 +428,29 @@ class SendMessageUseCase(
                 errorMessage = error.toUserMessage(),
                 retryableInterruption = isRetryableTransportFailure(error),
             )
+        }
+    }
+
+    private suspend fun persistProjectTerminal(
+        assistantMessageId: String,
+        executionId: String,
+        snapshot: StreamingMessageSnapshot,
+        context: ProjectRuntimeContext,
+    ): StreamingMessageSnapshot {
+        val verification = verifyProjectSnapshot(snapshot, context)
+        val status = if (verification.unknownTokens.isEmpty()) "PASSED" else "REJECTED_UNKNOWN_TOKENS"
+        return projectSourcePartWriter?.persistTerminal(
+            assistantMessageId = assistantMessageId,
+            executionId = executionId,
+            snapshot = verification.snapshot,
+            evidence = context.evidence,
+            validTokens = verification.validTokens.toSet(),
+            status = status,
+            unknownTokens = verification.unknownTokens,
+        ) ?: verification.snapshot.also { sanitized ->
+            // Safe fallback ordering: visible sanitized content is durable before the audit can say it passed.
+            chatRepository.replaceMessagePartsFromSnapshot(assistantMessageId, sanitized)
+            projectCitationAuditWriter(executionId, status, verification.unknownTokens)
         }
     }
 
@@ -518,9 +586,44 @@ internal fun sanitizeTerminalSnapshot(
     snapshot: StreamingMessageSnapshot,
     agentContext: AgentRuntimeContext?,
     wikiContext: WikiRuntimeContext?,
+    projectContext: ProjectRuntimeContext? = null,
 ): StreamingMessageSnapshot {
     val agentSanitized = sanitizeAgentSnapshotIfNeeded(snapshot, agentContext)
-    return if (wikiContext == null) agentSanitized else agentSanitized.removeWikiCitationTokensForTerminal()
+    val wikiSanitized = if (wikiContext == null) agentSanitized else agentSanitized.removeWikiCitationTokensForTerminal()
+    return if (projectContext == null) wikiSanitized else sanitizeProjectSnapshot(wikiSanitized, projectContext)
+}
+
+internal fun sanitizeProjectSnapshot(
+    snapshot: StreamingMessageSnapshot,
+    context: ProjectRuntimeContext,
+): StreamingMessageSnapshot = verifyProjectSnapshot(snapshot, context).snapshot
+
+internal data class ProjectSnapshotVerification(
+    val snapshot: StreamingMessageSnapshot,
+    val validTokens: List<String>,
+    val unknownTokens: List<String>,
+)
+
+internal fun verifyProjectSnapshot(
+    snapshot: StreamingMessageSnapshot,
+    context: ProjectRuntimeContext,
+): ProjectSnapshotVerification {
+    val allowed = context.evidence.mapTo(linkedSetOf()) { it.token }
+    val valid = linkedSetOf<String>()
+    val unknown = linkedSetOf<String>()
+    val sanitized = snapshot.copy(
+        parts = snapshot.parts.map { part ->
+            if (part.type == UiMessagePartType.TEXT) {
+                val result = ProjectCitationVerifier.verify(part.content, allowed)
+                valid += result.validTokens
+                unknown += result.unknownTokens
+                part.copy(content = result.text)
+            } else {
+                part
+            }
+        },
+    )
+    return ProjectSnapshotVerification(sanitized, valid.toList(), unknown.toList())
 }
 
 internal fun appendVisibleTextPart(

@@ -39,6 +39,9 @@ interface RemoteDao {
     @Query("SELECT * FROM remote_runs WHERE projectId = :projectId AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') ORDER BY updatedAt DESC LIMIT 1")
     suspend fun latestOpenRunForProject(projectId: String): RemoteRunEntity?
 
+    @Query("SELECT * FROM remote_runs WHERE projectId = :projectId AND status = 'COMPLETED' ORDER BY completedAt DESC")
+    suspend fun completedRunsForProject(projectId: String): List<RemoteRunEntity>
+
     @Query("SELECT * FROM remote_runs WHERE hostId = :hostId AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')")
     suspend fun openRunsForHost(hostId: String): List<RemoteRunEntity>
 

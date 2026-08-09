@@ -30,6 +30,7 @@ class ProjectRetrievalGoldenTest {
         var recalledCount = 0
         var leakCount = 0
         var noMatchInjectionCount = 0
+        var unexpectedInjectionCount = 0
 
         fixture.queries.forEach { query ->
             val first = repository.retrieve(query.projectId, query.query)
@@ -38,6 +39,11 @@ class ProjectRetrievalGoldenTest {
             val retrievedKeys = first.evidence.map(ProjectSearchDocument::documentKey).toSet()
             expectedCount += query.expectedKeys.size
             recalledCount += query.expectedKeys.count(retrievedKeys::contains)
+            val unexpected = retrievedKeys - query.expectedKeys.toSet()
+            if (unexpected.isNotEmpty()) {
+                println("M3_RETRIEVAL_UNEXPECTED id=${query.id} keys=${unexpected.sorted()}")
+            }
+            unexpectedInjectionCount += unexpected.size
             leakCount += first.evidence.count { it.projectId != query.projectId }
             if (query.noMatch) {
                 noMatchInjectionCount += first.evidence.size
@@ -49,10 +55,11 @@ class ProjectRetrievalGoldenTest {
         println(
             "M3_RETRIEVAL_GOLDEN queries=${fixture.queries.size} " +
                 "recallAt6=${"%.3f".format(recallAt6)} leaks=$leakCount " +
-                "noMatchInjection=$noMatchInjectionCount",
+                "noMatchInjection=$noMatchInjectionCount unexpectedInjection=$unexpectedInjectionCount",
         )
         assertEquals("cross-project leak count", 0, leakCount)
         assertEquals("No Match injection count", 0, noMatchInjectionCount)
+        assertEquals("retrieval must stay inside each query's allowed source set", 0, unexpectedInjectionCount)
         assertTrue("Recall@6 must cover every allowed golden source: $recallAt6", recallAt6 == 1.0)
     }
 

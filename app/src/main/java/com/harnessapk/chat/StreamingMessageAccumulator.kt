@@ -35,6 +35,7 @@ enum class UiMessagePartType {
     SYSTEM_EVENT,
     AGENT_SOURCES,
     WIKI_SOURCES,
+    PROJECT_SOURCES,
 }
 
 data class UiMessagePartDraft(

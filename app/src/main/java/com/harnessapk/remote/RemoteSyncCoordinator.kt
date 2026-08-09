@@ -162,6 +162,11 @@ class RoomRemoteSyncState(
                 val localStatus = remoteRunStatus(local.status)
                 val snapshotStatus = remoteRunStatus(remote.status)
                 val reconciledStatus = if (localStatus in terminalRunStatuses) localStatus else snapshotStatus
+                val frozenCompletion = remote.completionJson?.let { raw ->
+                    runCatching {
+                        freezeRemoteCompletion(database, remote.runId, raw, System.currentTimeMillis())
+                    }.getOrNull()
+                }
                 dao.upsertRun(
                     local.copy(
                         threadId = remote.threadId ?: local.threadId,
@@ -174,7 +179,7 @@ class RoomRemoteSyncState(
                         } else {
                             local.completedAt
                         },
-                        completionJson = remote.completionJson ?: local.completionJson,
+                        completionJson = frozenCompletion ?: local.completionJson,
                         errorMessage = remote.errorMessage ?: local.errorMessage,
                     ),
                 )

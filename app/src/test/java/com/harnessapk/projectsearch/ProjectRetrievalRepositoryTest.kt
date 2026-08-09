@@ -60,6 +60,32 @@ class ProjectRetrievalRepositoryTest {
     }
 
     @Test
+    fun `equally relevant candidates prefer distinct source types`() {
+        val common = "极光验收门禁已经确认"
+        val candidates = listOf(
+            document("context", path = "context.md", text = common),
+            document("markdown", path = "notes.md", text = common),
+            document(
+                "run",
+                path = "runs/latest.md",
+                text = common,
+                authority = ProjectSourceAuthority.VERIFIED_RUN,
+            ),
+            document(
+                "message",
+                path = null,
+                text = common,
+                authority = ProjectSourceAuthority.USER_STATED,
+            ),
+        )
+
+        val result = ProjectRetrievalRepository(RecordingCandidateSource(candidates))
+            .retrieve("project-a", "极光验收门禁")
+
+        assertEquals(4, result.evidence.map(ProjectSearchDocument::sourceType).distinct().size)
+    }
+
+    @Test
     fun `total injected evidence is capped at 8000 code points`() {
         val candidates = List(6) { index ->
             document(
@@ -74,6 +100,18 @@ class ProjectRetrievalRepositoryTest {
         assertEquals(ProjectRetrievalStatus.MATCH, result.status)
         assertTrue(result.totalCodePoints <= 8_000)
         assertTrue(result.evidence.size < candidates.size)
+    }
+
+    @Test
+    fun `generic status word cannot inject a different topic`() {
+        val result = ProjectRetrievalRepository(
+            RecordingCandidateSource(
+                listOf(document("android", text = "Android 构建进度已经完成。")),
+            ),
+        ).retrieve("project-a", "婚礼预算进度")
+
+        assertEquals(ProjectRetrievalStatus.NO_MATCH, result.status)
+        assertTrue(result.evidence.isEmpty())
     }
 
     @Test
@@ -109,7 +147,12 @@ class ProjectRetrievalRepositoryTest {
     ) = ProjectSearchDocument(
         documentKey = key,
         projectId = projectId,
-        sourceType = if (path == null) ProjectSourceType.PROJECT_MESSAGE else ProjectSourceType.MARKDOWN,
+        sourceType = when {
+            path == null -> ProjectSourceType.PROJECT_MESSAGE
+            authority == ProjectSourceAuthority.VERIFIED_RUN -> ProjectSourceType.RUN_EVIDENCE
+            path.substringAfterLast('/') == "context.md" -> ProjectSourceType.CONTEXT
+            else -> ProjectSourceType.MARKDOWN
+        },
         authority = authority,
         sourceKey = key,
         conversationId = null,

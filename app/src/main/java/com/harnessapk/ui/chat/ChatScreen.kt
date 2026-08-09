@@ -125,7 +125,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -164,12 +163,15 @@ import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.agentmemory.AgentMemory
 import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
+import com.harnessapk.project.ProjectFileRevisionState
+import com.harnessapk.projectsearch.ProjectSourceAuthority
 import com.harnessapk.provider.ProviderProfile
 import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.provider.modelConfigForProvider
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.session.MarkdownBatchApplyResult
+import com.harnessapk.session.ContextFactEvidence
 import com.harnessapk.session.MarkdownFileApplyStatus
 import com.harnessapk.session.MarkdownFileChangeController
 import com.harnessapk.session.MarkdownFileChangeConversationContext
@@ -178,9 +180,12 @@ import com.harnessapk.session.MarkdownFileChangeItem
 import com.harnessapk.session.MarkdownFileChangePlanningException
 import com.harnessapk.session.MarkdownFileChangeState
 import com.harnessapk.session.MarkdownFileChangeStatus
+import com.harnessapk.session.MarkdownDraftOrigin
+import com.harnessapk.session.MarkdownDraftOriginType
+import com.harnessapk.session.stableMarkdownDraftId
+import com.harnessapk.session.MarkdownDraftOwner
 import com.harnessapk.session.MarkdownDeliverable
 import com.harnessapk.session.MarkdownDiffLine
-import com.harnessapk.session.MarkdownDiffLineType
 import com.harnessapk.session.MarkdownSnapshot
 import com.harnessapk.session.MarkdownUpdatePlannerUseCase
 import com.harnessapk.session.MarkdownUpdateOperation
@@ -193,8 +198,11 @@ import com.harnessapk.session.buildMarkdownDiff
 import com.harnessapk.session.markdownReviewSummary
 import com.harnessapk.session.canWriteBackMarkdown
 import com.harnessapk.storage.DefaultModelPreference
+import com.harnessapk.storage.ProjectEvidenceSnapshotEntity
+import com.harnessapk.storage.MarkdownChangeDraftRecord
 import com.harnessapk.storage.ProviderCapabilityCatalogSnapshot
 import com.harnessapk.ui.components.InlineStatusMessage
+import com.harnessapk.ui.components.MarkdownDraftDiff
 import com.harnessapk.ui.components.StatusTone
 import com.harnessapk.ui.agent.AgentMemorySheet
 import com.harnessapk.ui.agent.canOperateAgentMemory
@@ -218,14 +226,17 @@ import com.harnessapk.wiki.WikiRef
 import com.harnessapk.wiki.WikiVersionState
 import com.harnessapk.wiki.MessageWikiCitation
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import java.util.Locale
 import java.util.UUID
+import java.security.MessageDigest
 
 internal enum class ChatImageSourceAction {
     REQUEST_CAMERA_PERMISSION,
@@ -288,6 +299,9 @@ fun ChatScreen(
     }.collectAsState(initial = PersistedMessagesState.Loading)
     val messageState = persistedMessages
     val messages = messageState.messagesOrEmpty()
+    val persistedMarkdownDraftRecords by remember(conversationId) {
+        container.database.markdownChangeDraftDao().observeRecordsForConversation(conversationId)
+    }.collectAsState(initial = emptyList())
     val messagePartsById by remember(conversationId) {
         container.chatRepository.observeMessagePartsForConversation(conversationId)
     }.collectAsState(initial = emptyMap())
@@ -328,6 +342,15 @@ fun ChatScreen(
     var persistentDraftLoaded by remember(conversationId) { mutableStateOf(false) }
     var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var selectedProjectEvidence by remember(conversationId) {
+        mutableStateOf<ProjectEvidenceSnapshotEntity?>(null)
+    }
+    var selectedProjectEvidenceRevision by remember(conversationId) {
+        mutableStateOf(ProjectFileRevisionState.UNAVAILABLE)
+    }
+    var selectedProjectEvidenceConversationId by remember(conversationId) {
+        mutableStateOf<String?>(null)
+    }
     var showModelPicker by remember { mutableStateOf(false) }
     var selectedProviderId by remember { mutableStateOf<String?>(null) }
     var selectedModel by remember { mutableStateOf("") }
@@ -366,6 +389,7 @@ fun ChatScreen(
     var sessionConfigStatus by remember { mutableStateOf<String?>(null) }
     var isOptimizingPrompt by remember { mutableStateOf(false) }
     var pendingWriteBack by remember { mutableStateOf<ChatMessage?>(null) }
+    var pendingDepositProjectSelection by remember { mutableStateOf<ChatMessage?>(null) }
     var pendingSelectionCopy by remember { mutableStateOf<ChatMessage?>(null) }
     var pendingMarkdownReview by remember { mutableStateOf<MarkdownUpdateReviewState?>(null) }
     var pendingMarkdownReviewDraftId by remember { mutableStateOf<String?>(null) }
@@ -382,6 +406,63 @@ fun ChatScreen(
     var streamingAutoScrollEnabled by remember(conversationId) { mutableStateOf(true) }
     var pendingSourceMessageId by remember(conversationId, initialSourceMessageId) {
         mutableStateOf(initialSourceMessageId)
+    }
+
+    LaunchedEffect(conversationId) {
+        val records = container.database.markdownChangeDraftDao().listRecordsForConversation(conversationId)
+        records.filter {
+            it.draft.status == MarkdownFileChangeStatus.PLANNING.name &&
+                !container.isMarkdownDraftPlanning(it.draft.id)
+        }.forEach { record ->
+            container.database.markdownChangeDraftDao().updateDraft(
+                record.draft.copy(
+                    status = MarkdownFileChangeStatus.FAILED.name,
+                    summary = "上次规划被进程中断，可重试",
+                    errorMessage = "规划被进程中断",
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+        records
+            .filter { it.draft.status == MarkdownFileChangeStatus.APPLYING.name }
+            .forEach { record ->
+                val succeeded = record.items.count { it.applyStatus == MarkdownFileApplyStatus.SUCCEEDED.name }
+                record.items.filter { it.retained && it.applyStatus == null }.forEach { item ->
+                    container.database.markdownChangeDraftDao().updateItemApplyResult(
+                        item.id,
+                        MarkdownFileApplyStatus.FAILED.name,
+                        "进程中断，结果未确认，可安全重试",
+                    )
+                }
+                container.database.markdownChangeDraftDao().updateDraft(
+                    record.draft.copy(
+                        status = if (succeeded > 0) {
+                            MarkdownFileChangeStatus.PARTIALLY_APPLIED.name
+                        } else {
+                            MarkdownFileChangeStatus.FAILED.name
+                        },
+                        summary = "上次应用被中断；已保存 $succeeded 个文件结果，可安全重试其余项",
+                        errorMessage = "应用被中断",
+                        updatedAt = System.currentTimeMillis(),
+                    ),
+                )
+            }
+    }
+    LaunchedEffect(persistedMarkdownDraftRecords) {
+        markdownFileChangeStates = persistedMarkdownDraftRecords.mapNotNull { record ->
+            val projectId = record.draft.projectId
+            val snapshots = runCatching {
+                container.projectWorkspaceGateway.listDeliverables(projectId).map { deliverable ->
+                    MarkdownSnapshot(
+                        id = deliverable.id,
+                        title = deliverable.title,
+                        path = deliverable.path,
+                        markdown = container.projectWorkspaceGateway.readDeliverable(projectId, deliverable.id),
+                    )
+                }
+            }.getOrDefault(emptyList())
+            persistedMarkdownFileChangeState(record, snapshots)
+        }
     }
     var sourceLocationConsumed by remember(conversationId, initialSourceMessageId) {
         mutableStateOf(false)
@@ -885,7 +966,7 @@ fun ChatScreen(
         val pendingState = PendingCameraUriState(pendingCameraUriString)
         val uri = pendingState.savedUri?.let(Uri::parse) ?: return
         pendingCameraUriString = pendingState.clear().savedUri
-        scope.launch {
+        container.applicationScope.launch {
             container.chatImageStore.deleteIfManaged(uri)
         }
     }
@@ -1304,6 +1385,19 @@ fun ChatScreen(
             )
         }
 
+    suspend fun frozenContextFactEvidence(projectId: String, messageId: String): List<ContextFactEvidence> =
+        container.database.projectSearchDao().evidenceForMessage(messageId)
+            .filter { it.projectId == projectId }
+            .mapNotNull { evidence ->
+                val authority = runCatching { ProjectSourceAuthority.valueOf(evidence.authority) }.getOrNull()
+                    ?: return@mapNotNull null
+                ContextFactEvidence(
+                    id = evidence.id,
+                    authority = authority,
+                    sourceSha256 = evidence.sourceSha256,
+                )
+            }
+
     fun buildReviewState(
         proposals: List<MarkdownUpdateProposal>,
         snapshots: List<MarkdownSnapshot>,
@@ -1325,6 +1419,43 @@ fun ChatScreen(
             .filterNot { it.draft.id == state.draft.id } + state
     }
 
+    suspend fun persistMarkdownFileChangeState(state: MarkdownFileChangeState) {
+        val dao = container.database.markdownChangeDraftDao()
+        val persistedDraft = dao.findDraft(state.draft.id) ?: return
+        dao.updateDraft(
+            persistedDraft.copy(
+                status = state.draft.status.name,
+                summary = state.draft.summary,
+                updatedAt = state.draft.updatedAt,
+            ),
+        )
+        val failures = state.applyFailures.associateBy { it.proposal.path }
+        val items = dao.listItems(state.draft.id).map { item ->
+            val uiItem = state.items.firstOrNull { it.path == item.relativePath }
+            item.copy(
+                retained = uiItem?.retained ?: item.retained,
+                applyStatus = when {
+                    item.relativePath in state.appliedPaths -> MarkdownFileApplyStatus.SUCCEEDED.name
+                    item.relativePath in failures -> MarkdownFileApplyStatus.FAILED.name
+                    else -> item.applyStatus
+                },
+                applyErrorMessage = failures[item.relativePath]?.errorMessage ?: item.applyErrorMessage,
+            )
+        }
+        dao.replaceItems(state.draft.id, items)
+        when {
+            state.draft.status == MarkdownFileChangeStatus.DISMISSED ->
+                container.markContextFacts(state.draft.id, "DISMISSED")
+            state.appliedPaths.any(::isRootContextMarkdownPath) ->
+                container.markContextFacts(state.draft.id, "APPLIED")
+        }
+    }
+
+    fun upsertAndPersistMarkdownFileChangeState(state: MarkdownFileChangeState) {
+        upsertMarkdownFileChangeState(state)
+        scope.launch { persistMarkdownFileChangeState(state) }
+    }
+
     fun reviewStateForFileChange(state: MarkdownFileChangeState): MarkdownUpdateReviewState =
         MarkdownUpdateReviewState(
             proposals = state.items.map {
@@ -1334,6 +1465,8 @@ fun ChatScreen(
                     title = it.title,
                     reason = it.reason,
                     markdown = it.markdown,
+                    baselineSha256 = it.baselineSha256,
+                    expectedAbsent = it.expectedAbsent,
                 )
             },
             diffs = state.diffs,
@@ -1341,15 +1474,45 @@ fun ChatScreen(
 
     fun generateMarkdownFileChange(state: MarkdownFileChangeState, userRequest: String) {
         val planning = markdownFileChangeController.markPlanning(state)
-        upsertMarkdownFileChangeState(planning)
-        scope.launch {
+        if (!container.beginMarkdownDraftPlanning(planning.draft.id)) return
+        container.applicationScope.launch {
+            try {
+            if (scope.isActive) withContext(container.dispatchers.main) {
+                upsertMarkdownFileChangeState(planning)
+            }
+            val sourceId = planning.draft.sourceUserMessageId ?: planning.draft.id
+            val owner = MarkdownDraftOwner(
+                projectId = planning.draft.projectId,
+                conversationId = planning.draft.conversationId,
+                sourceUserMessageId = planning.draft.sourceUserMessageId,
+            )
+            val origin = MarkdownDraftOrigin(
+                type = MarkdownDraftOriginType.EXPLICIT_CHANGE,
+                sourceId = sourceId,
+                sourceSha256 = markdownOriginSha256(userRequest),
+                sourceProjectId = planning.draft.projectId,
+            )
             runCatching {
+                container.markdownDraftCoordinator.persistPlanning(
+                    owner = owner,
+                    origin = origin,
+                    preferredDraftId = planning.draft.id,
+                )
                 val project = projects.firstOrNull { it.id == planning.draft.projectId }
                 val snapshots = markdownSnapshots(planning.draft.projectId)
                 val conversationContext = markdownFileChangeConversationContext(messages)
                 val wikiContext = loadProjectMarkdownWikiContext(conversationContext.messageIds) { messageIds ->
                     container.wikiMarkdownContextRepository.forMessageIds(messageIds)
                 }
+                val explicitEvidence = planning.draft.sourceUserMessageId?.let { messageId ->
+                    listOf(
+                        ContextFactEvidence(
+                            id = "message:$messageId",
+                            authority = ProjectSourceAuthority.USER_STATED,
+                            sourceSha256 = markdownOriginSha256(userRequest),
+                        ),
+                    )
+                }.orEmpty()
                 val plan = markdownUpdatePlanner.planFromUserRequest(
                     projectName = project?.name.orEmpty(),
                     projectContext = projectContext,
@@ -1360,14 +1523,49 @@ fun ChatScreen(
                     modelOverride = selectedModel,
                     wikiCitations = wikiContext.citations,
                     wikiCoverage = wikiContext.coverage,
+                    allowedEvidence = explicitEvidence,
+                    suppressedContextFactKeys = container.database.projectSearchDao()
+                        .suppressedContextFactKeys(planning.draft.projectId, sourceId)
+                        .toSet(),
                 )
-                markdownFileChangeController.markReady(planning, plan, snapshots)
+                val ready = markdownFileChangeController.markReady(planning, plan, snapshots)
+                container.markdownDraftCoordinator.persistPlan(
+                    owner = owner,
+                    origin = origin,
+                    plan = plan,
+                    snapshots = snapshots,
+                    preferredDraftId = planning.draft.id,
+                )
+                ready
             }.onSuccess { ready ->
-                upsertMarkdownFileChangeState(ready)
+                if (scope.isActive) withContext(container.dispatchers.main) {
+                    upsertMarkdownFileChangeState(ready)
+                }
             }.onFailure { error ->
-                upsertMarkdownFileChangeState(
-                    markdownFileChangeController.markFailed(planning, error.toUserMessage()),
+                if (error is CancellationException) {
+                    withContext(NonCancellable) {
+                        container.markdownDraftCoordinator.persistFailure(
+                            owner = owner,
+                            origin = origin,
+                            errorMessage = "规划已中断，可重试",
+                            preferredDraftId = planning.draft.id,
+                        )
+                    }
+                    throw error
+                }
+                val failed = markdownFileChangeController.markFailed(planning, error.toUserMessage())
+                container.markdownDraftCoordinator.persistFailure(
+                    owner = owner,
+                    origin = origin,
+                    errorMessage = error.toUserMessage(),
+                    preferredDraftId = planning.draft.id,
                 )
+                if (scope.isActive) withContext(container.dispatchers.main) {
+                    upsertMarkdownFileChangeState(failed)
+                }
+            }
+            } finally {
+                container.finishMarkdownDraftPlanning(planning.draft.id)
             }
         }
     }
@@ -1389,21 +1587,33 @@ fun ChatScreen(
         }
 
         val projectId = selectedProjectId ?: return
-        scope.launch {
-            errorText = null
-            val userMessageId = container.chatRepository.insertUserMessage(
-                conversationId = conversationId,
-                content = body,
-                attachments = emptyList(),
-            )
-            text = ""
-            val draftState = markdownFileChangeController.createPlanningDraft(
-                conversationId = conversationId,
-                projectId = projectId,
-                sourceUserMessageId = userMessageId,
-            )
-            upsertMarkdownFileChangeState(draftState)
-            generateMarkdownFileChange(draftState, body)
+        val explicitMessageId = java.util.UUID.randomUUID().toString()
+        errorText = null
+        text = ""
+        container.applicationScope.launch {
+            runCatching {
+                container.chatRepository.insertUserMessage(
+                    conversationId = conversationId,
+                    content = body,
+                    attachments = emptyList(),
+                    messageId = explicitMessageId,
+                )
+                val draftState = markdownFileChangeController.createPlanningDraft(
+                    conversationId = conversationId,
+                    projectId = projectId,
+                    sourceUserMessageId = explicitMessageId,
+                    draftId = stableMarkdownDraftId(
+                        MarkdownDraftOriginType.EXPLICIT_CHANGE,
+                        projectId,
+                        explicitMessageId,
+                    ),
+                )
+                generateMarkdownFileChange(draftState, body)
+            }.onFailure { error ->
+                if (scope.isActive) withContext(container.dispatchers.main) {
+                    errorText = error.toUserMessage()
+                }
+            }
         }
     }
 
@@ -1438,17 +1648,24 @@ fun ChatScreen(
         applyingMarkdownDraftIds = applyingMarkdownDraftIds + state.draft.id
         scope.launch {
             try {
-                val result = container.projectWorkspaceGateway.applyMarkdownUpdates(
+                val selectedPaths = proposals.map { it.path }.toSet()
+                val selectedItemIds = container.database.markdownChangeDraftDao()
+                    .listItems(state.draft.id)
+                    .filter { it.relativePath in selectedPaths }
+                    .map { it.id }
+                    .toSet()
+                val result = container.markdownDraftApplyCoordinator.apply(
+                    draftId = state.draft.id,
                     projectId = state.draft.projectId,
-                    updates = proposals,
+                    selectedItemIds = selectedItemIds,
                 )
-                val latestState = markdownFileChangeStates.firstOrNull { it.draft.id == state.draft.id }
-                if (latestState != state || !markdownDraftApplyController.complete(attempt)) return@launch
+                val appliedState = markdownFileChangeController.markApplyResult(state, result)
+                markdownDraftApplyController.complete(attempt)
 
                 finalizeMarkdownWriteBackBeforeRefresh(
                     finalize = {
                         applyingMarkdownDraftIds = applyingMarkdownDraftIds - state.draft.id
-                        upsertMarkdownFileChangeState(markdownFileChangeController.markApplyResult(state, result))
+                        upsertMarkdownFileChangeState(appliedState)
                         if (pendingMarkdownReviewDraftId == state.draft.id) {
                             pendingMarkdownReview = null
                             pendingMarkdownReviewDraftId = null
@@ -1458,12 +1675,14 @@ fun ChatScreen(
                         errorText = markdownWriteBackResultError(result)
                     },
                     afterFinalize = {
-                        persistMarkdownWriteBackLinks(result) { relativePath ->
-                            container.markdownNotebookRepository.linkMarkdown(
-                                conversationId = conversationId,
-                                projectId = state.draft.projectId,
-                                relativePath = relativePath,
-                            )
+                        if (conversation?.projectId == state.draft.projectId) {
+                            persistMarkdownWriteBackLinks(result) { relativePath ->
+                                container.markdownNotebookRepository.linkMarkdown(
+                                    conversationId = conversationId,
+                                    projectId = state.draft.projectId,
+                                    relativePath = relativePath,
+                                )
+                            }
                         }
                         persistMarkdownWriteBackResultEvent(result) { event ->
                             container.chatRepository.insertSystemEvent(conversationId, event)
@@ -1521,12 +1740,14 @@ fun ChatScreen(
                     title = item.title,
                     reason = item.reason,
                     markdown = item.markdown,
+                    baselineSha256 = item.baselineSha256,
+                    expectedAbsent = item.expectedAbsent,
                 )
             }
         if (retained.isEmpty()) {
             markdownDraftApplyController.invalidate(state.draft.id)
             applyingMarkdownDraftIds = applyingMarkdownDraftIds - state.draft.id
-            upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
+            upsertAndPersistMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
             pendingMarkdownReview = null
             pendingMarkdownReviewDraftId = null
             retainedReviewIndexes = emptySet()
@@ -1535,23 +1756,92 @@ fun ChatScreen(
         applyMarkdownFileChangeProposals(state, retained)
     }
 
-    fun requestMarkdownReview(message: ChatMessage) {
-        val projectId = selectedProjectId
+    fun requestMarkdownReview(message: ChatMessage, targetProjectId: String? = selectedProjectId) {
+        val projectId = targetProjectId
         if (!canWriteBackMarkdown(projectId, null, message.content)) {
-            errorText = "请先选择项目"
+            pendingWriteBack = null
+            pendingDepositProjectSelection = message
             return
         }
-        scope.launch {
-            isPlanningMarkdownUpdates = true
-            sessionStatus = null
-            errorText = null
+        val resolvedProjectId = projectId ?: return
+        markdownFileChangeStates.firstOrNull {
+            it.draft.assistantMessageId == message.id && it.draft.projectId == resolvedProjectId
+        }?.takeIf { it.draft.status != MarkdownFileChangeStatus.FAILED }?.let { existing ->
+            pendingWriteBack = null
+            when (existing.draft.status) {
+                MarkdownFileChangeStatus.READY,
+                MarkdownFileChangeStatus.PARTIALLY_APPLIED,
+                -> showMarkdownFileChangeDiff(existing)
+                else -> sessionStatus = existing.draft.summary
+            }
+            return
+        }
+        val planningId = stableMarkdownDraftId(
+            MarkdownDraftOriginType.ASSISTANT_MESSAGE,
+            resolvedProjectId,
+            message.id,
+        )
+        if (!container.beginMarkdownDraftPlanning(planningId)) return
+        isPlanningMarkdownUpdates = true
+        sessionStatus = null
+        errorText = null
+        container.applicationScope.launch {
+            var persistedDraftId = planningId
+            try {
+            val sourceUserMessageId = sourceUserMessageIdForAssistant(messages, message.id)
+            var planning = markdownFileChangeController.createPlanningDraft(
+                conversationId = conversationId,
+                projectId = resolvedProjectId,
+                sourceUserMessageId = sourceUserMessageId,
+                assistantMessageId = message.id,
+                draftId = planningId,
+            )
+            val owner = MarkdownDraftOwner(
+                projectId = resolvedProjectId,
+                conversationId = conversationId,
+                sourceUserMessageId = sourceUserMessageId,
+                assistantMessageId = message.id,
+            )
+            val origin = MarkdownDraftOrigin(
+                type = MarkdownDraftOriginType.ASSISTANT_MESSAGE,
+                sourceId = message.id,
+                sourceSha256 = markdownOriginSha256(message.content),
+                sourceProjectId = resolvedProjectId,
+            )
             runCatching {
-                val resolvedProjectId = projectId ?: error("请先选择项目")
-                val project = projects.firstOrNull { it.id == resolvedProjectId }
+                val persistedPlanning = container.markdownDraftCoordinator.persistPlanning(
+                    owner = owner,
+                    origin = origin,
+                    preferredDraftId = planning.draft.id,
+                )
+                if (persistedPlanning.draft.id != planning.draft.id) {
+                    persistedDraftId = persistedPlanning.draft.id
+                    container.beginMarkdownDraftPlanning(persistedDraftId)
+                    planning = markdownFileChangeController.createPlanningDraft(
+                        conversationId = conversationId,
+                        projectId = resolvedProjectId,
+                        sourceUserMessageId = sourceUserMessageId,
+                        assistantMessageId = message.id,
+                        draftId = persistedPlanning.draft.id,
+                    )
+                }
                 val snapshots = markdownSnapshots(resolvedProjectId)
+                if (persistedPlanning.draft.status != MarkdownFileChangeStatus.PLANNING.name) {
+                    return@runCatching requireNotNull(
+                        persistedMarkdownFileChangeState(
+                            MarkdownChangeDraftRecord(persistedPlanning.draft, persistedPlanning.items),
+                            snapshots,
+                        ),
+                    )
+                }
+                if (scope.isActive) withContext(container.dispatchers.main) {
+                    upsertMarkdownFileChangeState(planning)
+                }
+                val project = projects.firstOrNull { it.id == resolvedProjectId }
                 val wikiContext = loadProjectMarkdownWikiContext(listOf(message.id)) { messageIds ->
                     container.wikiMarkdownContextRepository.forMessageIds(messageIds)
                 }
+                val allowedEvidence = frozenContextFactEvidence(resolvedProjectId, message.id)
                 val plan = markdownUpdatePlanner.plan(
                     projectName = project?.name.orEmpty(),
                     projectContext = projectContext,
@@ -1561,22 +1851,78 @@ fun ChatScreen(
                     modelOverride = selectedModel,
                     wikiCitations = wikiContext.citations,
                     wikiCoverage = wikiContext.coverage,
+                    allowedEvidence = allowedEvidence,
+                    suppressedContextFactKeys = container.database.projectSearchDao()
+                        .suppressedContextFactKeys(resolvedProjectId, message.id)
+                        .toSet(),
                 )
-                val review = buildReviewState(plan.proposals, snapshots)
-                require(review.proposals.isNotEmpty()) { "LLM 没有生成可审核的 Markdown 更新" }
-                review
-            }.onSuccess { review ->
-                pendingMarkdownReviewDraftId = null
-                pendingLegacyMarkdownReviewToken = legacyMarkdownReviewApplyController.createReviewToken()
-                pendingMarkdownReview = review
-                retainedReviewIndexes = review.proposals.indices.toSet()
-            }.onFailure {
-                val feedback = markdownWriteBackFailureFeedback(it)
-                errorText = feedback.errorText
-                sessionStatus = feedback.statusText
+                val ready = markdownFileChangeController.markReady(planning, plan, snapshots)
+                container.markdownDraftCoordinator.persistPlan(
+                    owner = owner,
+                    origin = origin,
+                    plan = plan,
+                    snapshots = snapshots,
+                    preferredDraftId = planning.draft.id,
+                )
+                ready
+            }.onSuccess { ready ->
+                if (scope.isActive) withContext(container.dispatchers.main) {
+                    upsertMarkdownFileChangeState(ready)
+                    pendingLegacyMarkdownReviewToken = null
+                    if (ready.draft.status == MarkdownFileChangeStatus.NO_CHANGES) {
+                        pendingMarkdownReview = null
+                        pendingMarkdownReviewDraftId = null
+                        retainedReviewIndexes = emptySet()
+                        sessionStatus = ready.draft.summary
+                    } else if (ready.draft.status in setOf(
+                            MarkdownFileChangeStatus.READY,
+                            MarkdownFileChangeStatus.PARTIALLY_APPLIED,
+                        )
+                    ) {
+                        pendingMarkdownReviewDraftId = ready.draft.id
+                        pendingMarkdownReview = reviewStateForFileChange(ready)
+                        retainedReviewIndexes = ready.items.indices.toSet()
+                    } else {
+                        pendingMarkdownReview = null
+                        pendingMarkdownReviewDraftId = null
+                        retainedReviewIndexes = emptySet()
+                        sessionStatus = ready.draft.summary
+                    }
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) {
+                    withContext(NonCancellable) {
+                        container.markdownDraftCoordinator.persistFailure(
+                            owner = owner,
+                            origin = origin,
+                            errorMessage = "规划已中断，可重试",
+                            preferredDraftId = planning.draft.id,
+                        )
+                    }
+                    throw error
+                }
+                val failed = markdownFileChangeController.markFailed(planning, error.toUserMessage())
+                container.markdownDraftCoordinator.persistFailure(
+                    owner = owner,
+                    origin = origin,
+                    errorMessage = error.toUserMessage(),
+                    preferredDraftId = planning.draft.id,
+                )
+                if (scope.isActive) withContext(container.dispatchers.main) {
+                    upsertMarkdownFileChangeState(failed)
+                    val feedback = markdownWriteBackFailureFeedback(error)
+                    errorText = feedback.errorText
+                    sessionStatus = feedback.statusText
+                }
             }
-            isPlanningMarkdownUpdates = false
-            pendingWriteBack = null
+            if (scope.isActive) withContext(container.dispatchers.main) {
+                isPlanningMarkdownUpdates = false
+                pendingWriteBack = null
+            }
+            } finally {
+                container.finishMarkdownDraftPlanning(planningId)
+                if (persistedDraftId != planningId) container.finishMarkdownDraftPlanning(persistedDraftId)
+            }
         }
     }
 
@@ -1728,7 +2074,7 @@ fun ChatScreen(
                 }
                 pendingMarkdownReviewDraftId?.let { draftId ->
                     markdownFileChangeStates.firstOrNull { it.draft.id == draftId }?.let { state ->
-                        upsertMarkdownFileChangeState(
+                        upsertAndPersistMarkdownFileChangeState(
                             markdownFileChangeController.toggleRetained(state, index),
                         )
                     }
@@ -2001,7 +2347,7 @@ fun ChatScreen(
     pendingWriteBack?.let { message ->
         AlertDialog(
             onDismissRequest = { pendingWriteBack = null },
-            title = { Text("生成文件变更") },
+            title = { Text("沉淀到项目") },
             text = {
                 Text(
                     "会先生成 Markdown 更新计划，你可以审核每个文件的 diff，并逐项保留或撤回。",
@@ -2009,12 +2355,79 @@ fun ChatScreen(
             },
             confirmButton = {
                 TextButton(enabled = !isPlanningMarkdownUpdates, onClick = { requestMarkdownReview(message) }) {
-                    Text(if (isPlanningMarkdownUpdates) "生成中..." else "生成文件变更")
+                    Text(if (isPlanningMarkdownUpdates) "生成中..." else "生成沉淀草稿")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { pendingWriteBack = null }) { Text("取消") }
             },
+        )
+    }
+
+    pendingDepositProjectSelection?.let { message ->
+        AlertDialog(
+            onDismissRequest = { pendingDepositProjectSelection = null },
+            title = { Text("选择沉淀项目") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (projects.isEmpty()) {
+                        Text("暂无可用项目，请先创建项目")
+                    } else {
+                        projects.forEach { project ->
+                            TextButton(
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                                onClick = {
+                                    pendingDepositProjectSelection = null
+                                    requestMarkdownReview(message, project.id)
+                                },
+                            ) {
+                                Text(project.name)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { pendingDepositProjectSelection = null }) { Text("取消") }
+            },
+        )
+    }
+
+    selectedProjectEvidence?.let { evidence ->
+        ProjectEvidenceSnapshotSheet(
+            evidence = evidence,
+            revisionState = selectedProjectEvidenceRevision,
+            onOpenCurrent = if (
+                selectedProjectEvidenceRevision !in setOf(
+                    ProjectFileRevisionState.CURRENT,
+                    ProjectFileRevisionState.UPDATED,
+                )
+            ) {
+                null
+            } else if (evidence.relativePath != null) {
+                {
+                    selectedProjectEvidence = null
+                    onOpenProjectFiles(evidence.projectId, evidence.relativePath)
+                }
+            } else {
+                evidence.sourceMessageId?.let { sourceMessageId ->
+                    {
+                        selectedProjectEvidence = null
+                        if (selectedProjectEvidenceConversationId == conversationId) {
+                            messages.indexOfFirst { it.id == sourceMessageId }.takeIf { it >= 0 }?.let { index ->
+                                highlightedMessageId = sourceMessageId
+                                scope.launch { listState.animateScrollToItem(index) }
+                            }
+                        } else {
+                            selectedProjectEvidenceConversationId?.let { sourceConversationId ->
+                                onOpenConversationMessage(sourceConversationId, sourceMessageId)
+                            }
+                        }
+                    }
+                }
+            },
+            onDismiss = { selectedProjectEvidence = null },
         )
     }
 
@@ -2112,7 +2525,7 @@ fun ChatScreen(
                                     isAgentConversation = isAgentConversation,
                                     canWriteBack = message.role == MessageRole.ASSISTANT &&
                                         message.status == MessageStatus.SUCCEEDED &&
-                                        canWriteBackMarkdown(selectedProjectId, null, message.content),
+                                        message.content.isNotBlank(),
                                     onWriteBack = { pendingWriteBack = message },
                                     onCopy = {
                                         clipboard.setText(
@@ -2166,6 +2579,31 @@ fun ChatScreen(
                                         }
                                     },
                                     onOpenWikiCitation = onOpenWikiCitation,
+                                    onOpenProjectSource = { evidenceId ->
+                                        scope.launch {
+                                            container.database.projectSearchDao().evidenceById(evidenceId)?.let { evidence ->
+                                                selectedProjectEvidenceConversationId = null
+                                                selectedProjectEvidenceRevision = evidence.relativePath?.let { path ->
+                                                    container.projectRepository.projectFileRevisionState(
+                                                        projectId = evidence.projectId,
+                                                        relativePath = path,
+                                                        expectedSha256 = evidence.sourceSha256,
+                                                    )
+                                                } ?: evidence.sourceMessageId?.let { sourceMessageId ->
+                                                    val currentMessage = container.database.messageDao().findById(sourceMessageId)
+                                                    selectedProjectEvidenceConversationId = currentMessage?.conversationId
+                                                    when {
+                                                        currentMessage == null -> ProjectFileRevisionState.DELETED
+                                                        markdownOriginSha256(currentMessage.content)
+                                                            .equals(evidence.sourceSha256, ignoreCase = true) ->
+                                                            ProjectFileRevisionState.CURRENT
+                                                        else -> ProjectFileRevisionState.UPDATED
+                                                    }
+                                                } ?: ProjectFileRevisionState.UNAVAILABLE
+                                                selectedProjectEvidence = evidence
+                                            }
+                                        }
+                                    },
                                     reasoningStreaming = message.status == MessageStatus.PENDING ||
                                         message.status == MessageStatus.STREAMING,
                                     highlighted = highlightedMessageId == message.id,
@@ -2186,7 +2624,10 @@ fun ChatScreen(
                                 }
                             }
                             markdownFileChangeStates
-                                .filter { it.draft.sourceUserMessageId == message.id }
+                                .filter { state ->
+                                    state.draft.assistantMessageId?.let { it == message.id }
+                                        ?: (state.draft.sourceUserMessageId == message.id)
+                                }
                                 .forEach { state ->
                                     MarkdownFileChangeCard(
                                         state = state,
@@ -2205,7 +2646,9 @@ fun ChatScreen(
                                         onDismiss = {
                                             markdownDraftApplyController.invalidate(state.draft.id)
                                             applyingMarkdownDraftIds = applyingMarkdownDraftIds - state.draft.id
-                                            upsertMarkdownFileChangeState(markdownFileChangeController.dismiss(state))
+                                            upsertAndPersistMarkdownFileChangeState(
+                                                markdownFileChangeController.dismiss(state),
+                                            )
                                         },
                                         onOpenFiles = {
                                             onOpenProjectFiles(
@@ -2717,14 +3160,94 @@ internal suspend fun loadProjectMarkdownWikiContext(
     throw MarkdownFileChangePlanningException("无法读取本轮引用，未生成文件变更", error)
 }
 
+internal fun markdownOriginSha256(value: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(value.encodeToByteArray())
+    .joinToString("") { byte -> "%02x".format(byte) }
+
+internal fun sourceUserMessageIdForAssistant(messages: List<ChatMessage>, assistantMessageId: String): String? {
+    val assistantIndex = messages.indexOfFirst { it.id == assistantMessageId && it.role == MessageRole.ASSISTANT }
+    if (assistantIndex <= 0) return null
+    return messages.subList(0, assistantIndex).asReversed()
+        .firstOrNull { it.role == MessageRole.USER }
+        ?.id
+}
+
+private fun isRootContextMarkdownPath(path: String): Boolean =
+    path.trim().replace('\\', '/').removePrefix("./").equals("context.md", ignoreCase = true)
+
+internal fun persistedMarkdownFileChangeState(
+    record: MarkdownChangeDraftRecord,
+    snapshots: List<MarkdownSnapshot>,
+): MarkdownFileChangeState? {
+    val conversationId = record.draft.conversationId ?: return null
+    val status = runCatching { MarkdownFileChangeStatus.valueOf(record.draft.status) }.getOrNull() ?: return null
+    val byPath = snapshots.associateBy(MarkdownSnapshot::path)
+    val items = record.items.sortedBy { it.itemIndex }.map { item ->
+        val diff = buildMarkdownDiff(
+            oldMarkdown = byPath[item.relativePath]?.markdown.orEmpty(),
+            newMarkdown = item.proposedMarkdown,
+        )
+        val stats = com.harnessapk.session.markdownDiffStats(diff)
+        MarkdownFileChangeItem(
+            draftId = record.draft.id,
+            operation = MarkdownUpdateOperation.valueOf(item.operation),
+            path = item.relativePath,
+            title = item.title,
+            reason = item.reason,
+            markdown = item.proposedMarkdown,
+            addedLineCount = stats.addedLineCount,
+            removedLineCount = stats.removedLineCount,
+            retained = item.retained,
+            baselineSha256 = item.baselineSha256,
+            expectedAbsent = item.expectedAbsent,
+        )
+    }
+    val failuresByPath = record.items.filter { it.applyStatus == MarkdownFileApplyStatus.FAILED.name }
+    return MarkdownFileChangeState(
+        draft = com.harnessapk.session.MarkdownFileChangeDraft(
+            id = record.draft.id,
+            conversationId = conversationId,
+            projectId = record.draft.projectId,
+            sourceUserMessageId = record.draft.sourceUserMessageId,
+            assistantMessageId = record.draft.assistantMessageId,
+            status = status,
+            summary = record.draft.summary,
+            createdAt = record.draft.createdAt,
+            updatedAt = record.draft.updatedAt,
+        ),
+        items = items,
+        diffs = items.map { item ->
+            buildMarkdownDiff(byPath[item.path]?.markdown.orEmpty(), item.markdown)
+        },
+        appliedPaths = record.items.filter { it.applyStatus == MarkdownFileApplyStatus.SUCCEEDED.name }
+            .map { it.relativePath },
+        applyFailures = failuresByPath.map { item ->
+            MarkdownFileChangeFailure(
+                proposal = MarkdownUpdateProposal(
+                    operation = MarkdownUpdateOperation.valueOf(item.operation),
+                    path = item.relativePath,
+                    title = item.title,
+                    reason = item.reason,
+                    markdown = item.proposedMarkdown,
+                    baselineSha256 = item.baselineSha256,
+                    expectedAbsent = item.expectedAbsent,
+                ),
+                errorMessage = item.applyErrorMessage.orEmpty(),
+            )
+        },
+    )
+}
+
 internal fun markdownFileChangeCardTitle(
     status: MarkdownFileChangeStatus,
     itemCount: Int,
 ): String = when (status) {
     MarkdownFileChangeStatus.PLANNING -> "正在生成 Markdown 文件变更..."
     MarkdownFileChangeStatus.READY -> "已生成 $itemCount 个 Markdown 文件变更"
+    MarkdownFileChangeStatus.APPLYING -> "正在应用所选变更"
     MarkdownFileChangeStatus.APPLIED -> "已写入项目"
     MarkdownFileChangeStatus.PARTIALLY_APPLIED -> "部分文件已写入"
+    MarkdownFileChangeStatus.NO_CHANGES -> "没有需要沉淀的稳定内容"
     MarkdownFileChangeStatus.DISMISSED -> "已撤回 Markdown 文件变更"
     MarkdownFileChangeStatus.FAILED -> "Markdown 文件变更失败"
 }
@@ -2971,39 +3494,9 @@ private fun MarkdownUpdateReviewItem(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                diff.take(MAX_REVIEW_DIFF_LINES).forEach { line ->
-                    MarkdownDiffLineView(line)
-                }
-                if (diff.size > MAX_REVIEW_DIFF_LINES) {
-                    Text(
-                        text = "... 已截断 ${diff.size - MAX_REVIEW_DIFF_LINES} 行",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
+            MarkdownDraftDiff(lines = diff, maxLines = MAX_REVIEW_DIFF_LINES)
         }
     }
-}
-
-@Composable
-private fun MarkdownDiffLineView(line: MarkdownDiffLine) {
-    val prefix = when (line.type) {
-        MarkdownDiffLineType.ADDED -> "+"
-        MarkdownDiffLineType.REMOVED -> "-"
-        MarkdownDiffLineType.CONTEXT -> " "
-    }
-    val color = when (line.type) {
-        MarkdownDiffLineType.ADDED -> MaterialTheme.colorScheme.primary
-        MarkdownDiffLineType.REMOVED -> MaterialTheme.colorScheme.error
-        MarkdownDiffLineType.CONTEXT -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Text(
-        text = "$prefix ${line.text}",
-        color = color,
-        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-    )
 }
 
 @Composable
@@ -3335,7 +3828,9 @@ internal fun MarkdownFileChangeCard(
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
                 when (state.draft.status) {
-                    MarkdownFileChangeStatus.PLANNING -> {
+                    MarkdownFileChangeStatus.PLANNING,
+                    MarkdownFileChangeStatus.APPLYING,
+                    -> {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     }
                     MarkdownFileChangeStatus.READY -> {
@@ -3447,6 +3942,7 @@ internal fun MarkdownFileChangeCard(
                             TextButton(onClick = onDismiss, enabled = !isApplying) { Text("撤回") }
                         }
                     }
+                    MarkdownFileChangeStatus.NO_CHANGES,
                     MarkdownFileChangeStatus.DISMISSED,
                     -> Unit
                 }
@@ -3565,6 +4061,7 @@ private fun MessagePartsColumn(
     hideAgentCitationMarkers: Boolean,
     onLinkClick: (String) -> Unit,
     onOpenWikiCitation: (String) -> Unit,
+    onOpenProjectSource: (String) -> Unit,
     reasoningStreaming: Boolean,
     forceExpandProcess: Boolean,
     executionEntry: ChatExecutionEntry?,
@@ -3572,7 +4069,13 @@ private fun MessagePartsColumn(
     val sourceState = remember(parts, wikiCitations) {
         messageSourcesUiState(parts = parts, citations = wikiCitations)
     }
-    val contentParts = parts.filter { it.type in messageContentPartTypes }
+    val contentParts = parts.filter { it.type in messageContentPartTypes }.map { part ->
+        if (part.type == UiMessagePartType.TEXT) {
+            part.copy(content = linkProjectCitationTokens(part.content, sourceState))
+        } else {
+            part
+        }
+    }
     val processParts = parts.filter { it.type in messageProcessPartTypes }
     var processExpanded by remember { mutableStateOf(reasoningStreaming) }
     LaunchedEffect(reasoningStreaming, forceExpandProcess) {
@@ -3609,7 +4112,11 @@ private fun MessagePartsColumn(
                 }
             }
             sourceState?.let { state ->
-                MessageSourcesPart(state = state, onOpenWikiCitation = onOpenWikiCitation)
+                MessageSourcesPart(
+                    state = state,
+                    onOpenWikiCitation = onOpenWikiCitation,
+                    onOpenProjectSource = onOpenProjectSource,
+                )
             }
         } else if (processParts.isNotEmpty() || sourceState != null) {
             Surface(
@@ -3657,6 +4164,7 @@ private fun MessagePartsColumn(
                             MessageSourcesPart(
                                 state = state,
                                 onOpenWikiCitation = onOpenWikiCitation,
+                                onOpenProjectSource = onOpenProjectSource,
                                 embedded = true,
                                 expandedOverride = true,
                             )
@@ -3770,6 +4278,7 @@ private fun MessagePartView(
         UiMessagePartType.SYSTEM_EVENT -> MetadataPart(label = "系统事件", content = part.content)
         UiMessagePartType.AGENT_SOURCES,
         UiMessagePartType.WIKI_SOURCES,
+        UiMessagePartType.PROJECT_SOURCES,
         -> Unit
     }
 }
@@ -3995,6 +4504,7 @@ private fun MessageBubble(
     onRetryFailed: (() -> Unit)?,
     onOpenBatterySettings: (() -> Unit)?,
     onOpenWikiCitation: (String) -> Unit,
+    onOpenProjectSource: (String) -> Unit,
     reasoningStreaming: Boolean,
     highlighted: Boolean,
 ) {
@@ -4174,6 +4684,7 @@ private fun MessageBubble(
                             onLinkClick = { destination ->
                                 when (val target = markdownLinkTarget(destination)) {
                                     is MarkdownLinkTarget.WikiCitation -> onOpenWikiCitation(target.citationId)
+                                    is MarkdownLinkTarget.ProjectEvidence -> onOpenProjectSource(target.evidenceId)
                                     is MarkdownLinkTarget.ExternalUrl -> runCatching {
                                         uriHandler.openUri(target.url)
                                     }
@@ -4181,6 +4692,7 @@ private fun MessageBubble(
                                 }
                             },
                             onOpenWikiCitation = onOpenWikiCitation,
+                            onOpenProjectSource = onOpenProjectSource,
                             reasoningStreaming = reasoningStreaming,
                             forceExpandProcess = highlighted,
                             executionEntry = executionEntry,
@@ -4282,7 +4794,7 @@ private fun MessageBubble(
                                 }
                                 if (canWriteBack) {
                                     DropdownMenuItem(
-                                        text = { Text("生成文件变更") },
+                                        text = { Text("沉淀到项目") },
                                         onClick = {
                                             actionMenuExpanded = false
                                             onWriteBack()
@@ -4652,6 +5164,59 @@ internal fun ChatImageSourceEntryMenu(
                 onPickFromAlbum()
             },
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProjectEvidenceSnapshotSheet(
+    evidence: ProjectEvidenceSnapshotEntity,
+    revisionState: ProjectFileRevisionState,
+    onOpenCurrent: (() -> Unit)?,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("项目来源 ${evidence.token}", style = MaterialTheme.typography.titleLarge)
+            Text(evidence.title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                listOfNotNull(evidence.relativePath, evidence.locatorLabel).distinct().joinToString(" · "),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                when (revisionState) {
+                    ProjectFileRevisionState.CURRENT -> "来源与回答时版本一致"
+                    ProjectFileRevisionState.UPDATED -> "来源已更新，以下显示回答时快照"
+                    ProjectFileRevisionState.DELETED -> "来源已删除，以下显示回答时快照"
+                    ProjectFileRevisionState.UNAVAILABLE -> "当前来源不可读取，以下显示回答时快照"
+                },
+                color = if (revisionState == ProjectFileRevisionState.CURRENT) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.tertiary
+                },
+            )
+            SelectionContainer {
+                Text(evidence.excerpt, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (onOpenCurrent != null) {
+                Button(
+                    modifier = Modifier.fillMaxWidth().heightIn(min = HarnessSpacing.minimumTouchTarget),
+                    onClick = onOpenCurrent,
+                ) {
+                    Text(if (evidence.relativePath != null) "查看当前文件" else "跳到当前消息")
+                }
+            }
+            Text(
+                "SHA-256 ${evidence.sourceSha256}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.heightIn(min = 12.dp))
+        }
     }
 }
 

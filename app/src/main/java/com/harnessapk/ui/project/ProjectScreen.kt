@@ -88,6 +88,8 @@ import com.harnessapk.markdownpdf.AndroidMarkdownPdfWriter
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.Project
 import com.harnessapk.project.ProjectDeliverable
+import com.harnessapk.remote.RemoteConnectionStatus
+import com.harnessapk.remote.remoteFeatureAvailability
 import com.harnessapk.storage.ProjectRemoteBindingEntity
 import com.harnessapk.storage.RemoteRunEntity
 import com.harnessapk.ui.activity.remoteRunStatusLabel
@@ -277,6 +279,10 @@ internal fun ProjectScreen(
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val remoteProfile by container.remoteProfileStore.profile.collectAsState()
     val remoteState by container.remoteRepository.state.collectAsState()
+    val remoteAvailability = remember(remoteState.capabilities) {
+        remoteFeatureAvailability(remoteState.capabilities)
+    }
+    val remoteRunCapabilityKnown = remoteState.connectionStatus == RemoteConnectionStatus.CONNECTED
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
     var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
@@ -1002,14 +1008,19 @@ internal fun ProjectScreen(
                     }
                 },
                 remoteActionLabel = remoteProfile?.let {
-                    openRemoteRun?.let { run -> remoteRunStatusLabel(run.status) }
-                        ?: if (hasActiveRemoteBinding) "交给 Mac" else "在 Mac 上继续"
+                    openRemoteRun?.let { run -> remoteRunStatusLabel(run.status) } ?: when {
+                        remoteRunCapabilityKnown && !remoteAvailability.canStartM2Run -> "Mac Bridge 需升级"
+                        hasActiveRemoteBinding -> "交给 Mac"
+                        else -> "在 Mac 上继续"
+                    }
                 },
                 onRemoteAction = {
                     selectedProject?.let { project ->
                         val run = openRemoteRun
                         if (run != null) {
                             onOpenRemoteRun(run.id)
+                        } else if (remoteRunCapabilityKnown && !remoteAvailability.canStartM2Run) {
+                            statusText = "当前 Mac Bridge 未声明 Remote Run v1 能力，请升级后重连"
                         } else if (!hasActiveRemoteBinding) {
                             showRemoteBindingSheet = true
                             container.remoteRepository.requestWorkspaceCandidates()

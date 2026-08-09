@@ -17,6 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.security.MessageDigest
 
 class ProjectWorkspaceGatewayAdapterTest {
     @get:Rule
@@ -113,6 +114,72 @@ class ProjectWorkspaceGatewayAdapterTest {
         assertTrue(!secondPath.exists())
     }
 
+    @Test
+    fun applyRejectsUpdateWhenBaselineChangedAndPreservesCurrentFile() = runTest {
+        val repository = FileProjectRepository(temporaryFolder.root, TimeProvider { 1L })
+        val project = repository.createProject("M3 baseline")
+        repository.writeMarkdownFile(project.id, "docs/decision.md", "# 原始\n")
+        val baseline = sha256("# 原始\n")
+        repository.writeMarkdownFile(project.id, "docs/decision.md", "# 外部修改\n")
+
+        val result = ProjectWorkspaceGatewayAdapter(repository).applyMarkdownUpdates(
+            project.id,
+            listOf(
+                proposal("docs/decision.md", "# 助手修改\n").copy(
+                    operation = MarkdownUpdateOperation.UPDATE,
+                    baselineSha256 = baseline,
+                    expectedAbsent = false,
+                ),
+            ),
+        )
+
+        assertEquals(MarkdownFileApplyStatus.FAILED, result.results.single().status)
+        assertTrue(result.results.single().errorMessage.orEmpty().contains("基线"))
+        assertEquals("# 外部修改\n", repository.readDeliverable(project.id, "docs/decision.md"))
+    }
+
+    @Test
+    fun applyRejectsCreateWhenFileAppearedAfterDraft() = runTest {
+        val repository = FileProjectRepository(temporaryFolder.root, TimeProvider { 1L })
+        val project = repository.createProject("M3 expected absent")
+        repository.writeMarkdownFile(project.id, "reports/new.md", "# 他人新建\n")
+
+        val result = ProjectWorkspaceGatewayAdapter(repository).applyMarkdownUpdates(
+            project.id,
+            listOf(
+                proposal("reports/new.md", "# 草稿新建\n").copy(
+                    expectedAbsent = true,
+                ),
+            ),
+        )
+
+        assertEquals(MarkdownFileApplyStatus.FAILED, result.results.single().status)
+        assertTrue(result.results.single().errorMessage.orEmpty().contains("已存在"))
+        assertEquals("# 他人新建\n", repository.readDeliverable(project.id, "reports/new.md"))
+    }
+
+    @Test
+    fun applyRejectsDuplicateNormalizedPathsWithoutWritingEitherProposal() = runTest {
+        val repository = FileProjectRepository(temporaryFolder.root, TimeProvider { 1L })
+        val project = repository.createProject("M3 duplicate path")
+
+        val result = ProjectWorkspaceGatewayAdapter(repository).applyMarkdownUpdates(
+            project.id,
+            listOf(
+                proposal("reports/Same.md", "# first\n"),
+                proposal("reports/same.md", "# second\n"),
+            ),
+        )
+
+        assertEquals(
+            listOf(MarkdownFileApplyStatus.FAILED, MarkdownFileApplyStatus.FAILED),
+            result.results.map { it.status },
+        )
+        assertTrue(result.results.all { it.errorMessage.orEmpty().contains("重复") })
+        assertTrue(!project.rootDirectory.resolve("reports/Same.md").exists())
+        assertTrue(!project.rootDirectory.resolve("reports/same.md").exists())
+    }
+
     private fun proposal(path: String, markdown: String) = MarkdownUpdateProposal(
         operation = MarkdownUpdateOperation.CREATE,
         path = path,
@@ -120,4 +187,8 @@ class ProjectWorkspaceGatewayAdapterTest {
         reason = "测试批量写入",
         markdown = markdown,
     )
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.encodeToByteArray())
+        .joinToString("") { "%02x".format(it) }
 }

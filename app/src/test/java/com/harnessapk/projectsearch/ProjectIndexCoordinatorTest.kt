@@ -71,6 +71,30 @@ class ProjectIndexCoordinatorTest {
     }
 
     @Test
+    fun `file sources without paths and duplicate source keys reject the snapshot`() {
+        val sink = RecordingSink()
+        val dirty = RecordingDirtyStore()
+        val coordinator = ProjectIndexCoordinator(sink = sink, dirtyStore = dirty)
+
+        val missingPath = coordinator.indexProject(
+            projectId = "project-a",
+            sources = listOf(source("missing", null, "不得绕过文件预算")),
+        )
+        val duplicateKeys = coordinator.indexProject(
+            projectId = "project-a",
+            sources = listOf(
+                source("same", "a.md", "a"),
+                source("same", "b.md", "b"),
+            ),
+        )
+
+        assertTrue(missingPath.rejected)
+        assertTrue(duplicateKeys.rejected)
+        assertTrue(sink.values.isEmpty())
+        assertTrue(dirty.current.isEmpty())
+    }
+
+    @Test
     fun `messages and run evidence are indexed without markdown file budgets`() {
         val sink = RecordingSink()
         val coordinator = ProjectIndexCoordinator(

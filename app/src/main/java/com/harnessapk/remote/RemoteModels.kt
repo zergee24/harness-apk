@@ -173,6 +173,7 @@ internal fun remoteServerInteractionKind(method: String): RemoteServerInteractio
 data class RemoteFeatureAvailability(
     val canStartM2Run: Boolean,
     val canOpenLegacyHistory: Boolean,
+    val canUseM3CompletionEvidence: Boolean,
 )
 
 private val requiredM2RunCapabilities = setOf(
@@ -185,7 +186,16 @@ internal fun remoteFeatureAvailability(capabilities: Set<String>): RemoteFeature
     RemoteFeatureAvailability(
         canStartM2Run = capabilities.containsAll(requiredM2RunCapabilities),
         canOpenLegacyHistory = true,
+        canUseM3CompletionEvidence = "completion-evidence.v2" in capabilities,
     )
+
+internal fun parseRemoteHostCapabilities(event: RemoteEvent): Set<String> {
+    val payload = event.payload as? JsonObject ?: return emptySet()
+    if (payload.long("schemaVersion") != 1L) return emptySet()
+    return payload["capabilities"]?.jsonArray.orEmpty()
+        .mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf(String::isNotBlank) }
+        .toSet()
+}
 
 data class RemoteLogicalEvent(
     val schemaVersion: Int,
@@ -276,6 +286,7 @@ data class RemoteUiState(
     val isWorking: Boolean = false,
     val workspaceCandidates: List<WorkspaceCandidate> = emptyList(),
     val workspaceCandidatesLoaded: Boolean = false,
+    val capabilities: Set<String> = emptySet(),
 )
 
 internal fun parsePairingPayload(raw: String, now: Long = System.currentTimeMillis()): RemotePairingPayload {

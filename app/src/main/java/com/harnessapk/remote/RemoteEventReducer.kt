@@ -127,6 +127,10 @@ class RemoteEventReducer(
             }
         }
         val completedAt = if (isTerminal) run.completedAt ?: event.createdAt else run.completedAt
+        val incomingCompletion = payload["completion"]?.takeUnless { it is JsonNull }?.toString()
+        val frozenCompletion = incomingCompletion?.let { raw ->
+            runCatching { freezeRemoteCompletion(database, run.id, raw, event.createdAt) }.getOrNull()
+        }
         dao.upsertRun(
             run.copy(
                 threadId = payload.string("threadId") ?: run.threadId,
@@ -136,8 +140,7 @@ class RemoteEventReducer(
                 lastLogicalSequence = maxOf(run.lastLogicalSequence, event.sequence),
                 updatedAt = maxOf(run.updatedAt, event.createdAt),
                 completedAt = completedAt,
-                completionJson = payload["completion"]?.takeUnless { it is JsonNull }?.toString()
-                    ?: run.completionJson,
+                completionJson = frozenCompletion ?: run.completionJson,
                 errorMessage = payload.string("errorMessage") ?: run.errorMessage,
             ),
         )

@@ -1,12 +1,14 @@
 package com.harnessapk.storage
 
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Relation
 import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
@@ -25,9 +27,9 @@ import kotlinx.coroutines.flow.Flow
 )
 data class MarkdownChangeDraftEntity(
     @androidx.room.PrimaryKey val id: String,
-    val conversationId: String,
+    val conversationId: String?,
     val projectId: String,
-    val sourceUserMessageId: String,
+    val sourceUserMessageId: String?,
     val assistantMessageId: String?,
     val status: String,
     val summary: String,
@@ -66,7 +68,9 @@ data class MarkdownChangeDraftItemEntity(
 )
 
 data class MarkdownChangeDraftRecord(
+    @Embedded
     val draft: MarkdownChangeDraftEntity,
+    @Relation(parentColumn = "id", entityColumn = "draftId")
     val items: List<MarkdownChangeDraftItemEntity>,
 )
 
@@ -74,6 +78,14 @@ data class MarkdownChangeDraftRecord(
 interface MarkdownChangeDraftDao {
     @Query("SELECT * FROM markdown_change_drafts WHERE conversationId = :conversationId ORDER BY createdAt ASC")
     fun observeForConversation(conversationId: String): Flow<List<MarkdownChangeDraftEntity>>
+
+    @Transaction
+    @Query("SELECT * FROM markdown_change_drafts WHERE conversationId = :conversationId ORDER BY createdAt ASC")
+    fun observeRecordsForConversation(conversationId: String): Flow<List<MarkdownChangeDraftRecord>>
+
+    @Transaction
+    @Query("SELECT * FROM markdown_change_drafts WHERE conversationId = :conversationId ORDER BY createdAt ASC")
+    suspend fun listRecordsForConversation(conversationId: String): List<MarkdownChangeDraftRecord>
 
     @Query("SELECT * FROM markdown_change_drafts WHERE id = :draftId LIMIT 1")
     suspend fun findDraft(draftId: String): MarkdownChangeDraftEntity?
@@ -86,6 +98,23 @@ interface MarkdownChangeDraftDao {
 
     @Update
     suspend fun updateDraft(draft: MarkdownChangeDraftEntity)
+
+    @Query(
+        """
+        UPDATE markdown_change_drafts
+        SET status = 'APPLYING', summary = '正在应用所选变更', updatedAt = :updatedAt
+        WHERE id = :draftId AND status IN ('READY', 'FAILED', 'PARTIALLY_APPLIED')
+        """,
+    )
+    suspend fun claimForApply(draftId: String, updatedAt: Long): Int
+
+    @Query("UPDATE markdown_change_draft_items SET retained = :retained WHERE id = :itemId")
+    suspend fun updateItemRetained(itemId: String, retained: Boolean)
+
+    @Query(
+        "UPDATE markdown_change_draft_items SET applyStatus = :status, applyErrorMessage = :errorMessage WHERE id = :itemId",
+    )
+    suspend fun updateItemApplyResult(itemId: String, status: String, errorMessage: String?)
 
     @Query(
         """

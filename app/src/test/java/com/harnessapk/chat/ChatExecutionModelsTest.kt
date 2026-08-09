@@ -111,6 +111,37 @@ class ChatExecutionModelsTest {
     }
 
     @Test
+    fun contextSnapshotV3RoundTripsProjectEvidenceWithoutBreakingV2() {
+        val snapshot = ContextSnapshotV3(
+            schemaVersion = 3,
+            projectId = "project-1",
+            projectName = "M3",
+            projectContextSha256 = "a".repeat(64),
+            agentId = "agent",
+            agentVersion = 3,
+            wikiScope = listOf(WikiRef("project.wiki", 2)),
+            providerId = "openai",
+            model = "gpt-5.6-terra",
+            reasoningEffort = ReasoningEffort.HIGH.name,
+            webSearchEnabled = false,
+            attachments = emptyList(),
+            capturedAt = 2_345L,
+            retrievalRunId = "retrieval-1",
+            projectEvidenceIds = listOf("evidence-1", "evidence-2"),
+            relationshipMemoryIds = listOf("memory-1"),
+        )
+
+        val decoded = decodeExecutionRequestContext(
+            encodeExecutionRequestContext(ChatExecutionRequestContext(contextSnapshot = snapshot)),
+        ).contextSnapshot
+
+        assertEquals(3, decoded?.schemaVersion)
+        assertEquals("retrieval-1", decoded?.retrievalRunId)
+        assertEquals(listOf("evidence-1", "evidence-2"), decoded?.projectEvidenceIds)
+        assertEquals(listOf("memory-1"), decoded?.relationshipMemoryIds)
+    }
+
+    @Test
     fun legacyV1ContextDecodesWithoutInventingV2Snapshot() {
         val decoded = decodeExecutionRequestContext(
             """{"webSearchEnabled":true,"wikiScopeSnapshot":[]}""",

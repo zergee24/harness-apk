@@ -58,11 +58,68 @@ class MessageSourcesUiStateTest {
         assertEquals("引用 1 · 资治通鉴 1 · 人物资料 1", state!!.collapsedSummary)
     }
 
-    private fun sourcePart(type: UiMessagePartType, content: String = "引用") = UiMessagePartDraft(
+    @Test
+    fun projectSourcesLeadUnifiedSummaryWithoutBecomingWikiOrAgentEvidence() {
+        val state = messageSourcesUiState(
+            parts = listOf(
+                sourcePart(
+                    UiMessagePartType.PROJECT_SOURCES,
+                    "依据 1 · context.md · 关键决策\n依据 2 · reports/m3.md · 测试",
+                ),
+                sourcePart(UiMessagePartType.WIKI_SOURCES),
+            ),
+            citations = listOf(citation(1, "工程 Wiki", "Room")),
+        )
+
+        assertEquals("项目依据 2 · 引用 1 · 工程 Wiki 1", state!!.collapsedSummary)
+        assertEquals(2, state.projectSources.size)
+        assertEquals(emptyList<String>(), state.agentSources)
+    }
+
+    @Test
+    fun projectCitationTokensKeepStableOneTapEvidenceMapping() {
+        val state = messageSourcesUiState(
+            parts = listOf(
+                sourcePart(
+                    type = UiMessagePartType.PROJECT_SOURCES,
+                    content = "依据 1 · context.md\n依据 2 · report.md",
+                    metadata = mapOf(
+                        "evidenceIds" to "[\"evidence-1\",\"evidence-2\"]",
+                        "tokens" to "[\"⟦P1⟧\",\"⟦P2⟧\"]",
+                    ),
+                ),
+            ),
+            citations = emptyList(),
+        )
+
+        assertEquals(listOf("⟦P1⟧", "⟦P2⟧"), state!!.projectTokens)
+        assertEquals(listOf("evidence-1", "evidence-2"), state.projectEvidenceIds)
+    }
+
+    @Test
+    fun validProjectCitationTokensBecomeInlineLinksWithoutChangingUnknownTokens() {
+        val state = MessageSourcesUiState(
+            wikiGroups = emptyList(),
+            agentSources = emptyList(),
+            projectEvidenceIds = listOf("evidence-1"),
+            projectTokens = listOf("⟦P1⟧"),
+        )
+
+        assertEquals(
+            "已确认[⟦P1⟧](harness-project://evidence/evidence-1)，未知⟦P9⟧",
+            linkProjectCitationTokens("已确认⟦P1⟧，未知⟦P9⟧", state),
+        )
+    }
+
+    private fun sourcePart(
+        type: UiMessagePartType,
+        content: String = "引用",
+        metadata: Map<String, String> = emptyMap(),
+    ) = UiMessagePartDraft(
         index = 0,
         type = type,
         content = content,
-        metadata = emptyMap(),
+        metadata = metadata,
         stable = true,
     )
 

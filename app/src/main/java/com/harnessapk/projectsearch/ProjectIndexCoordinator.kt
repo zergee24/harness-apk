@@ -51,7 +51,14 @@ class ProjectIndexCoordinator(
 
     fun indexProject(projectId: String, sources: List<ProjectIndexSource>): ProjectIndexResult {
         val normalizedProjectId = projectId.trim()
-        if (normalizedProjectId.isEmpty() || sources.any { it.projectId != normalizedProjectId }) {
+        if (
+            normalizedProjectId.isEmpty() ||
+            sources.map(ProjectIndexSource::sourceKey).distinct().size != sources.size ||
+            sources.any {
+                it.projectId != normalizedProjectId ||
+                    (it.sourceType in FILE_SOURCE_TYPES && it.relativePath.isNullOrBlank())
+            }
+        ) {
             return ProjectIndexResult(rejected = true)
         }
 
@@ -62,7 +69,7 @@ class ProjectIndexCoordinator(
 
         sources.sortedBy(ProjectIndexSource::sourceKey).forEach { source ->
             dirtyStore.markDirty(normalizedProjectId, source.sourceKey)
-            val fileSource = source.relativePath != null && source.sourceType in FILE_SOURCE_TYPES
+            val fileSource = source.sourceType in FILE_SOURCE_TYPES
             val bodyBytes = source.body.toByteArray(StandardCharsets.UTF_8).size.toLong()
             val bodyIndexed = !fileSource || (
                 bodyBytes <= maxFileBytes && projectBodyBytes + bodyBytes <= maxProjectBodyBytes
