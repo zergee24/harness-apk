@@ -44,6 +44,29 @@ func TestDuplicateRunStartReturnsCachedResultWithoutCallingAppServer(t *testing.
 	}
 }
 
+func TestHostStatusAdvertisesAdditiveM2AndM3Capabilities(t *testing.T) {
+	var payload struct {
+		SchemaVersion int      `json:"schemaVersion"`
+		Capabilities  []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal(hostStatusPayload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SchemaVersion != 1 {
+		t.Fatalf("schemaVersion=%d", payload.SchemaVersion)
+	}
+	want := []string{
+		"workspace.candidates.v1",
+		"run.lifecycle.v1",
+		"logical-replay.v1",
+		"completion-evidence.v2",
+		"turn-command-idempotency.v1",
+	}
+	if !reflect.DeepEqual(payload.Capabilities, want) {
+		t.Fatalf("capabilities=%#v", payload.Capabilities)
+	}
+}
+
 func TestDuplicateApprovalResponseCallsAppServerAndEmitsResultOnce(t *testing.T) {
 	cache, err := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
 	if err != nil {

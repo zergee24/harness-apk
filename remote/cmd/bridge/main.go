@@ -447,7 +447,10 @@ func (b *bridge) acknowledge(deviceID, messageID string) {
 func (b *bridge) executeCommand(ctx context.Context, deviceID string, command protocol.Command) error {
 	switch command.Type {
 	case "host.status":
-		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "host.status", RequestID: command.RequestID, Message: "online", CreatedAt: time.Now().UnixMilli()}, "")
+		return b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "host.status", RequestID: command.RequestID, Message: "online",
+			Payload: hostStatusPayload(), CreatedAt: time.Now().UnixMilli(),
+		}, "")
 	case "thread.list":
 		return b.requestAppServer(ctx, deviceID, command, "thread/list", map[string]any{
 			"limit": 50, "sortKey": "updated_at", "sortDirection": "desc",
@@ -488,6 +491,19 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	default:
 		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "error", RequestID: command.RequestID, Message: "unsupported command: " + command.Type, CreatedAt: time.Now().UnixMilli()}, "")
 	}
+}
+
+func hostStatusPayload() json.RawMessage {
+	return mustJSON(map[string]any{
+		"schemaVersion": 1,
+		"capabilities": []string{
+			"workspace.candidates.v1",
+			"run.lifecycle.v1",
+			"logical-replay.v1",
+			"completion-evidence.v2",
+			"turn-command-idempotency.v1",
+		},
+	})
 }
 
 func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string, command protocol.Command) error {
