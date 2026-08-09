@@ -2,6 +2,7 @@ package run
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -103,5 +104,32 @@ func TestUpdateTurnAtomicallyBackfillsLegacyRoute(t *testing.T) {
 	updated, ok := reopened.ByThreadTurn("thread-1", "turn-real")
 	if !ok || updated.BindingID != route.BindingID || updated.BaselineJSON != route.BaselineJSON {
 		t.Fatalf("updated route=%#v ok=%v", updated, ok)
+	}
+}
+
+func TestUpdateTurnSaveFailureDoesNotMutateInMemoryRoute(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	path := filepath.Join(stateDir, "routes.json")
+	store, err := OpenRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := Route{RunID: "run-1", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1"}
+	if err := store.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir, []byte("blocks route persistence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateTurn("run-1", "thread-1", "turn-real"); err == nil {
+		t.Fatal("UpdateTurn unexpectedly persisted through injected filesystem failure")
+	}
+	loaded, ok := store.ByRun("run-1")
+	if !ok || loaded.TurnID != "" {
+		t.Fatalf("failed save mutated in-memory route: %#v ok=%v", loaded, ok)
 	}
 }

@@ -291,6 +291,143 @@ func TestLegacyTurnSteerClaimsExpectedTurnID(t *testing.T) {
 	}
 }
 
+func TestLegacyTurnStartBackfillFailureIsPersistentUnknownAndNotReexecuted(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "commands.json")
+	cache, err := commandcache.Open(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appCalls := 0
+	b := &bridge{
+		app:          appProcessReturningCounted(t, json.RawMessage(`{"turn":{}}`), &appCalls),
+		commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	command := protocol.Command{Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
+	params := map[string]any{"threadId": command.ThreadID}
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, params); err == nil || outcome != turnRPCUnknown {
+		t.Fatalf("first outcome=%q err=%v", outcome, err)
+	}
+
+	reopened, err := commandcache.Open(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.commandCache = reopened
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, params); err == nil || outcome != turnRPCUnknown {
+		t.Fatalf("retry outcome=%q err=%v", outcome, err)
+	}
+	if appCalls != 1 {
+		t.Fatalf("turn/start app-server calls=%d", appCalls)
+	}
+	cacheID, _ := legacyTurnStartCacheIdentity(command)
+	record, ok := reopened.Lookup(cacheID)
+	if !ok || record.Status != commandcache.StatusUnknown || len(record.ResultJSON) == 0 {
+		t.Fatalf("persistent unknown record=%#v ok=%v", record, ok)
+	}
+}
+
+func TestLegacyTurnStartRouteSaveFailureDoesNotReexecuteAppServer(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeStateDir := filepath.Join(dir, "route-state")
+	routes, err := runstate.OpenRoutes(filepath.Join(routeStateDir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appCalls := 0
+	injectRouteSaveFailure := func() {
+		if err := os.RemoveAll(routeStateDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(routeStateDir, []byte("blocks route persistence"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := &bridge{
+		app:          appProcessReturningHooked(t, json.RawMessage(`{"turn":{"id":"turn-real"}}`), &appCalls, injectRouteSaveFailure),
+		commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	command := protocol.Command{Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
+	params := map[string]any{"threadId": command.ThreadID}
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, params); err == nil || outcome != turnRPCUnknown {
+		t.Fatalf("first outcome=%q err=%v", outcome, err)
+	}
+	if route, ok := routes.ByRun("legacy:thread-1"); !ok || route.TurnID != "" {
+		t.Fatalf("failed route save leaked TurnID in memory: %#v ok=%v", route, ok)
+	}
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, params); err == nil || outcome != turnRPCUnknown {
+		t.Fatalf("retry outcome=%q err=%v", outcome, err)
+	}
+	if appCalls != 1 {
+		t.Fatalf("turn/start app-server calls=%d", appCalls)
+	}
+}
+
+func TestUnknownTurnStartResponseIsExplicitlyNotRetrySafe(t *testing.T) {
+	payload := turnRPCResponsePayload(nil, turnRPCUnknown, errors.New("route persistence failed"))
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["outcome"] != "UNKNOWN" || decoded["status"] != "RECONCILING" || decoded["retrySafe"] != false {
+		t.Fatalf("unknown response=%s", payload)
+	}
+	if _, ordinaryError := decoded["error"]; ordinaryError {
+		t.Fatalf("unknown outcome was encoded as ordinary retryable error: %s", payload)
+	}
+}
+
+func TestPersistentUnknownTurnStartCanReconcileWithoutCallingAppServer(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "commands.json")
+	cache, err := commandcache.Open(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	cacheID, payloadHash := legacyTurnStartCacheIdentity(command)
+	if _, execute, err := cache.Begin(cacheID, "turn.start", payloadHash); err != nil || !execute {
+		t.Fatalf("begin execute=%v err=%v", execute, err)
+	}
+	pending := mustJSON(turnStartReconciliation{
+		Command: command, Result: json.RawMessage(`{"turn":{"id":"turn-real"}}`),
+	})
+	if _, err := cache.MarkUnknownWithResult(cacheID, errors.New("injected route persistence failure"), pending); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := commandcache.Open(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.commandCache = reopened
+	if err := b.recoverTurnStartRoutes(); err != nil {
+		t.Fatal(err)
+	}
+	if route, ok := routes.ByThreadTurn("thread-1", "turn-real"); !ok || route.DeviceID != "phone-1" {
+		t.Fatalf("reconciled route=%#v ok=%v", route, ok)
+	}
+	if record, ok := reopened.Lookup(cacheID); !ok || record.Status != commandcache.StatusSucceeded {
+		t.Fatalf("reconciled command=%#v ok=%v", record, ok)
+	}
+}
+
 func TestSnapshotLedgerMissDoesNotExposeLiveTerminalState(t *testing.T) {
 	for _, status := range []string{"completed", "failed", "cancelled"} {
 		t.Run(status, func(t *testing.T) {
@@ -513,10 +650,24 @@ type writerFunc func([]byte) (int, error)
 func (function writerFunc) Write(raw []byte) (int, error) { return function(raw) }
 
 func appProcessReturning(t *testing.T, result json.RawMessage) *appProcess {
+	return appProcessReturningCounted(t, result, nil)
+}
+
+func appProcessReturningCounted(t *testing.T, result json.RawMessage, calls *int) *appProcess {
+	return appProcessReturningHooked(t, result, calls, nil)
+}
+
+func appProcessReturningHooked(t *testing.T, result json.RawMessage, calls *int, beforeResponse func()) *appProcess {
 	t.Helper()
 	reader, serverWriter := io.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
 	client := appserverrpc.NewClient(reader, writerFunc(func(requestRaw []byte) (int, error) {
+		if calls != nil {
+			*calls++
+		}
+		if beforeResponse != nil {
+			beforeResponse()
+		}
 		var request struct {
 			ID json.RawMessage `json:"id"`
 		}

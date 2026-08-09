@@ -376,6 +376,9 @@ func (b *bridge) run(ctx context.Context) error {
 	if err := b.app.client.Notify("initialized", map[string]any{}); err != nil {
 		return err
 	}
+	if err := b.recoverTurnStartRoutes(); err != nil {
+		log.Printf("recover turn/start routes after bridge connection: %v", err)
+	}
 	if err := b.recoverTerminalRuns(ctx, ""); err != nil {
 		log.Printf("recover terminal runs after bridge connection: %v", err)
 	}
@@ -465,10 +468,7 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	case "thread.start":
 		return b.requestAppServer(ctx, deviceID, command, "thread/start", map[string]any{"cwd": command.CWD})
 	case "turn.start":
-		if err := b.claimThread(command, deviceID); err != nil {
-			return err
-		}
-		return b.requestTurnAppServer(ctx, deviceID, command, "turn/start", map[string]any{"threadId": command.ThreadID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
+		return b.requestTurnStart(ctx, deviceID, command, map[string]any{"threadId": command.ThreadID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
 	case "turn.steer":
 		if err := b.claimThread(command, deviceID); err != nil {
 			return err
@@ -666,6 +666,9 @@ func (b *bridge) resumeLogicalEvents(ctx context.Context, deviceID string, comma
 		return errors.New("logical journal is unavailable")
 	}
 	knownHead := b.journal.Head(b.state.HostID, deviceID)
+	if err := b.recoverTurnStartRoutes(); err != nil {
+		log.Printf("recover turn/start routes on sync.resume: %v", err)
+	}
 	if err := b.recoverTerminalRuns(ctx, deviceID); err != nil {
 		log.Printf("recover terminal runs on sync.resume: %v", err)
 	}
@@ -860,6 +863,176 @@ func (b *bridge) requestTurnAppServer(
 	return b.requestAppServerAfter(ctx, deviceID, command, method, params, func(result json.RawMessage) error {
 		return b.backfillTurnRoute(command, result)
 	})
+}
+
+type turnRPCOutcome string
+
+const (
+	turnRPCSucceeded turnRPCOutcome = "SUCCEEDED"
+	turnRPCUnknown   turnRPCOutcome = "UNKNOWN"
+	turnRPCFailed    turnRPCOutcome = "FAILED"
+)
+
+type turnStartReconciliation struct {
+	Command protocol.Command `json:"command"`
+	Result  json.RawMessage  `json:"result"`
+}
+
+func legacyTurnStartCacheIdentity(command protocol.Command) (string, string) {
+	identity := firstNonEmpty(command.CommandID, command.RequestID)
+	if identity == "" {
+		return "", ""
+	}
+	raw, _ := json.Marshal(command)
+	digest := sha256.Sum256(raw)
+	return "legacy-turn-start:" + identity, hex.EncodeToString(digest[:])
+}
+
+func (b *bridge) requestTurnStart(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	params any,
+) error {
+	if command.ThreadID == "" || firstNonEmpty(command.CommandID, command.RequestID) == "" {
+		return errors.New("turn.start stable command and thread identity are required")
+	}
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		result, outcome, err := b.executeTurnStartOnce(callCtx, deviceID, command, params)
+		_ = b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "rpc.response", RequestID: command.RequestID,
+			Payload: turnRPCResponsePayload(result, outcome, err), CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}()
+	return nil
+}
+
+func (b *bridge) executeTurnStartOnce(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	params any,
+) (json.RawMessage, turnRPCOutcome, error) {
+	if b.commandCache == nil || b.routes == nil {
+		return nil, turnRPCFailed, errors.New("turn.start persistence is unavailable")
+	}
+	cacheID, payloadHash := legacyTurnStartCacheIdentity(command)
+	if cacheID == "" {
+		return nil, turnRPCFailed, errors.New("turn.start stable command identity is required")
+	}
+	record, execute, err := b.commandCache.Begin(cacheID, "turn.start", payloadHash)
+	if err != nil {
+		return nil, turnRPCFailed, err
+	}
+	if !execute {
+		return b.reuseTurnStartRecord(record)
+	}
+	if err := b.claimThread(command, deviceID); err != nil {
+		_, persistErr := b.commandCache.Fail(cacheID, err)
+		return nil, turnRPCFailed, errors.Join(err, persistErr)
+	}
+	if b.app == nil || b.app.client == nil {
+		err := errors.New("app-server is unavailable")
+		_, persistErr := b.commandCache.Fail(cacheID, err)
+		return nil, turnRPCFailed, errors.Join(err, persistErr)
+	}
+	result, err := b.app.client.Call(ctx, "turn/start", params)
+	if err != nil {
+		_, persistErr := b.commandCache.MarkUnknown(cacheID, err)
+		return nil, turnRPCUnknown, errors.Join(err, persistErr)
+	}
+	if err := b.backfillTurnRoute(command, result); err != nil {
+		pending := mustJSON(turnStartReconciliation{Command: command, Result: result})
+		_, persistErr := b.commandCache.MarkUnknownWithResult(cacheID, err, pending)
+		return nil, turnRPCUnknown, errors.Join(err, persistErr)
+	}
+	if _, err := b.commandCache.Complete(cacheID, "", result); err != nil {
+		pending := mustJSON(turnStartReconciliation{Command: command, Result: result})
+		_, persistErr := b.commandCache.MarkUnknownWithResult(cacheID, err, pending)
+		return nil, turnRPCUnknown, errors.Join(err, persistErr)
+	}
+	return append(json.RawMessage(nil), result...), turnRPCSucceeded, nil
+}
+
+func (b *bridge) reuseTurnStartRecord(record commandcache.Record) (json.RawMessage, turnRPCOutcome, error) {
+	switch record.Status {
+	case commandcache.StatusSucceeded:
+		return append(json.RawMessage(nil), record.ResultJSON...), turnRPCSucceeded, nil
+	case commandcache.StatusUnknown:
+		if len(record.ResultJSON) > 0 {
+			var pending turnStartReconciliation
+			if json.Unmarshal(record.ResultJSON, &pending) == nil && len(pending.Result) > 0 {
+				if err := b.backfillTurnRoute(pending.Command, pending.Result); err == nil {
+					if _, resolveErr := b.commandCache.ResolveUnknown(record.CommandID, pending.Result); resolveErr == nil {
+						return append(json.RawMessage(nil), pending.Result...), turnRPCSucceeded, nil
+					}
+				}
+			}
+		}
+		message := record.LastError
+		if message == "" {
+			message = "turn.start outcome requires reconciliation"
+		}
+		return nil, turnRPCUnknown, errors.New(message)
+	case commandcache.StatusInFlight:
+		return nil, turnRPCUnknown, errors.New("turn.start is already in flight")
+	case commandcache.StatusFailed:
+		return nil, turnRPCFailed, errors.New(record.LastError)
+	default:
+		return nil, turnRPCUnknown, errors.New("turn.start outcome is unknown")
+	}
+}
+
+func (b *bridge) recoverTurnStartRoutes() error {
+	if b.commandCache == nil || b.routes == nil {
+		return nil
+	}
+	var recoveryErrors []error
+	for _, record := range b.commandCache.RecordsByTypeStatus("turn.start", commandcache.StatusUnknown) {
+		if len(record.ResultJSON) == 0 {
+			continue
+		}
+		var pending turnStartReconciliation
+		if err := json.Unmarshal(record.ResultJSON, &pending); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("decode %s reconciliation: %w", record.CommandID, err))
+			continue
+		}
+		if len(pending.Result) == 0 {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("decode %s reconciliation: app-server result is missing", record.CommandID))
+			continue
+		}
+		if err := b.backfillTurnRoute(pending.Command, pending.Result); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("reconcile %s route: %w", record.CommandID, err))
+			continue
+		}
+		if _, err := b.commandCache.ResolveUnknown(record.CommandID, pending.Result); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("resolve %s reconciliation: %w", record.CommandID, err))
+		}
+	}
+	return errors.Join(recoveryErrors...)
+}
+
+func turnRPCResponsePayload(result json.RawMessage, outcome turnRPCOutcome, cause error) json.RawMessage {
+	if outcome == turnRPCSucceeded {
+		return mustJSON(map[string]any{"result": result})
+	}
+	if outcome == turnRPCUnknown {
+		message := "turn.start outcome requires reconciliation"
+		if cause != nil {
+			message = cause.Error()
+		}
+		return mustJSON(map[string]any{
+			"outcome": "UNKNOWN", "status": "RECONCILING", "retrySafe": false,
+			"requiresSnapshot": true, "message": message,
+		})
+	}
+	message := "turn.start failed"
+	if cause != nil {
+		message = cause.Error()
+	}
+	return mustJSON(map[string]any{"error": message, "retrySafe": false})
 }
 
 func (b *bridge) requestAppServerAfter(

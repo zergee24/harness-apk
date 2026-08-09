@@ -142,8 +142,14 @@ func (s *RouteStore) UpdateTurn(runID, threadID, turnID string) error {
 	if route.TurnID == turnID {
 		return nil
 	}
-	route.TurnID = turnID
-	return s.saveLocked()
+	updated := *route
+	updated.TurnID = turnID
+	s.data.Routes[runID] = &updated
+	if err := s.saveLocked(); err != nil {
+		s.data.Routes[runID] = route
+		return err
+	}
+	return nil
 }
 
 func (s *RouteStore) ByRun(runID string) (Route, bool) {
