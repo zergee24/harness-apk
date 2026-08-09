@@ -10,6 +10,7 @@ import (
 
 	appserverrpc "github.com/harnessapk/remote/internal/appserver"
 	"github.com/harnessapk/remote/internal/commandcache"
+	"github.com/harnessapk/remote/internal/completion"
 	"github.com/harnessapk/remote/internal/protocol"
 	runstate "github.com/harnessapk/remote/internal/run"
 )
@@ -148,5 +149,94 @@ func TestTurnSnapshotExtractsStructuredCompletionAndLastAgentMessage(t *testing.
 	}]}}`), "turn-1")
 	if !ok || turn.LastAgentMessage != "真实摘要" || !bytes.Contains(turn.StructuredOutput, []byte("结构化摘要")) {
 		t.Fatalf("turn=%#v ok=%v", turn, ok)
+	}
+}
+
+func TestRouteForParamsUsesThreadAndTurnAcrossMultipleProjectBindings(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := runstate.Route{
+		RunID: "run-a", BindingID: "project-a", HostID: "host-a", DeviceID: "phone-a",
+		ThreadID: "thread-shared", TurnID: "turn-a",
+	}
+	second := runstate.Route{
+		RunID: "run-b", BindingID: "project-b", HostID: "host-a", DeviceID: "phone-b",
+		ThreadID: "thread-shared", TurnID: "turn-b",
+	}
+	if err := routes.Put(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(second); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes}
+
+	completionRoute, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared","turn":{"id":"turn-b"}}`))
+	if !ok || completionRoute.RunID != "run-b" || completionRoute.BindingID != "project-b" {
+		t.Fatalf("completion route = %#v ok=%v", completionRoute, ok)
+	}
+	approvalRoute, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared","turnId":"turn-a","itemId":"approval-a"}`))
+	if !ok || approvalRoute.RunID != "run-a" || approvalRoute.BindingID != "project-a" {
+		t.Fatalf("approval route = %#v ok=%v", approvalRoute, ok)
+	}
+}
+
+func TestRouteForParamsWithoutTurnRequiresOneActiveRoute(t *testing.T) {
+	dir := t.TempDir()
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []runstate.Route{
+		{RunID: "run-a", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-shared", TurnID: "turn-a"},
+		{RunID: "run-b", HostID: "host-a", DeviceID: "phone-b", ThreadID: "thread-shared", TurnID: "turn-b"},
+	} {
+		if err := routes.Put(route); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := &bridge{routes: routes, terminals: terminals}
+	if route, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared"}`)); ok {
+		t.Fatalf("ambiguous thread event routed to %#v", route)
+	}
+	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{
+		RunID: "run-a", Status: "COMPLETED", CompletionJSON: json.RawMessage(`{"schemaVersion":2}`), CompletedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	route, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared"}`))
+	if !ok || route.RunID != "run-b" {
+		t.Fatalf("unique active route = %#v ok=%v", route, ok)
+	}
+}
+
+func TestSnapshotForRouteUsesFrozenCompletionWithoutAppServer(t *testing.T) {
+	dir := t.TempDir()
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenJSON := json.RawMessage(`{"schemaVersion":2,"completionId":"completion-1","summary":"frozen"}`)
+	record, _, err := terminals.Freeze(completion.TerminalRunRecord{
+		RunID: "run-1", Status: "COMPLETED", CompletionJSON: frozenJSON, CompletedAt: 1234,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{terminals: terminals}
+	snapshot, err := b.snapshotForRoute(context.Background(), runstate.Route{
+		RunID: "run-1", ThreadID: "thread-1", TurnID: "turn-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "COMPLETED" || string(snapshot.CompletionJSON) != string(frozenJSON) || snapshot.CompletedAt != record.CompletedAt {
+		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }

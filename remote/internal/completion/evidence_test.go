@@ -1,6 +1,8 @@
 package completion
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 
@@ -43,5 +45,55 @@ func TestCommittedChangesRemainVisibleWhenWorkingTreeIsClean(t *testing.T) {
 	}
 	if result.Git == nil || result.Git.State != GitCommitted || result.Git.AfterHead != "new" {
 		t.Fatalf("git=%#v", result.Git)
+	}
+}
+
+func TestCompletionV2AssignsStableEvidenceIdentityAndWorkspaceLocator(t *testing.T) {
+	result := Build(Input{
+		RunID: "run-1",
+		Workspace: WorkspaceLocator{
+			WorkspaceID:           "workspace-1",
+			RepositoryFingerprint: "fingerprint-1",
+			CWD:                   "/workspace/harness-apk",
+		},
+		ObservedFiles: []string{"docs/result.md"},
+		Items: []json.RawMessage{
+			json.RawMessage(`{"type":"commandExecution","command":"go test ./...","exitCode":0}`),
+		},
+		CompletedAt: 1234,
+	})
+
+	if result.SchemaVersion != 2 || result.CompletionID == "" {
+		t.Fatalf("completion identity = %#v", result)
+	}
+	if result.Workspace.WorkspaceID != "workspace-1" || result.Workspace.CWD != "/workspace/harness-apk" {
+		t.Fatalf("workspace locator = %#v", result.Workspace)
+	}
+	if len(result.ChangedFiles) != 1 || result.ChangedFiles[0].EvidenceID == "" || result.ChangedFiles[0].EvidenceSHA256 == "" {
+		t.Fatalf("changed file evidence = %#v", result.ChangedFiles)
+	}
+	fileContent, _ := json.Marshal(struct {
+		Path   string `json:"path"`
+		Source string `json:"source"`
+	}{Path: "docs/result.md", Source: "git-status"})
+	fileDigest := sha256.Sum256(fileContent)
+	if result.ChangedFiles[0].EvidenceSHA256 != hex.EncodeToString(fileDigest[:]) {
+		t.Fatalf("file evidence hash does not verify content: %#v", result.ChangedFiles[0])
+	}
+	if len(result.Tests) != 1 || result.Tests[0].EvidenceID == "" || result.Tests[0].EvidenceSHA256 == "" {
+		t.Fatalf("test evidence = %#v", result.Tests)
+	}
+
+	rebuilt := Build(Input{
+		RunID:         "run-1",
+		Workspace:     result.Workspace,
+		ObservedFiles: []string{"docs/result.md"},
+		Items: []json.RawMessage{
+			json.RawMessage(`{"type":"commandExecution","command":"go test ./...","exitCode":0}`),
+		},
+		CompletedAt: 1234,
+	})
+	if rebuilt.CompletionID != result.CompletionID || rebuilt.ChangedFiles[0].EvidenceID != result.ChangedFiles[0].EvidenceID || rebuilt.Tests[0].EvidenceID != result.Tests[0].EvidenceID {
+		t.Fatalf("completion evidence identity drifted: first=%#v rebuilt=%#v", result, rebuilt)
 	}
 }

@@ -1,6 +1,8 @@
 package completion
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"sort"
 	"strings"
@@ -25,14 +27,18 @@ const (
 )
 
 type ChangedFileEvidence struct {
-	Path   string `json:"path"`
-	Source string `json:"source"`
+	EvidenceID     string `json:"evidenceId,omitempty"`
+	EvidenceSHA256 string `json:"evidenceSha256,omitempty"`
+	Path           string `json:"path"`
+	Source         string `json:"source"`
 }
 
 type TestEvidence struct {
-	Command  string     `json:"command"`
-	Status   TestStatus `json:"status"`
-	ExitCode *int       `json:"exitCode,omitempty"`
+	EvidenceID     string     `json:"evidenceId,omitempty"`
+	EvidenceSHA256 string     `json:"evidenceSha256,omitempty"`
+	Command        string     `json:"command"`
+	Status         TestStatus `json:"status"`
+	ExitCode       *int       `json:"exitCode,omitempty"`
 }
 
 type GitEvidence struct {
@@ -42,16 +48,27 @@ type GitEvidence struct {
 	AfterHead  string   `json:"afterHead,omitempty"`
 }
 
+type WorkspaceLocator struct {
+	WorkspaceID           string `json:"workspaceId,omitempty"`
+	RepositoryFingerprint string `json:"repositoryFingerprint,omitempty"`
+	CWD                   string `json:"cwd,omitempty"`
+}
+
 type RunCompletion struct {
-	Summary      string                `json:"summary"`
-	ChangedFiles []ChangedFileEvidence `json:"changedFiles"`
-	Tests        []TestEvidence        `json:"tests"`
-	Git          *GitEvidence          `json:"git,omitempty"`
-	Unresolved   []string              `json:"unresolved"`
-	CompletedAt  int64                 `json:"completedAt"`
+	SchemaVersion int                   `json:"schemaVersion,omitempty"`
+	CompletionID  string                `json:"completionId,omitempty"`
+	Summary       string                `json:"summary"`
+	ChangedFiles  []ChangedFileEvidence `json:"changedFiles"`
+	Tests         []TestEvidence        `json:"tests"`
+	Git           *GitEvidence          `json:"git,omitempty"`
+	Unresolved    []string              `json:"unresolved"`
+	CompletedAt   int64                 `json:"completedAt"`
+	Workspace     WorkspaceLocator      `json:"workspace,omitempty"`
 }
 
 type Input struct {
+	RunID            string
+	Workspace        WorkspaceLocator
 	Before           workspace.Baseline
 	After            workspace.Baseline
 	CommittedFiles   []string
@@ -99,7 +116,9 @@ func Build(input Input) RunCompletion {
 					status = TestFailed
 				}
 			}
-			tests = append(tests, TestEvidence{Command: command, Status: status, ExitCode: exitCode})
+			test := TestEvidence{Command: command, Status: status, ExitCode: exitCode}
+			test.EvidenceID, test.EvidenceSHA256 = evidenceIdentity(input.RunID, "test", test)
+			tests = append(tests, test)
 		}
 	}
 	paths := make([]string, 0, len(files))
@@ -109,7 +128,9 @@ func Build(input Input) RunCompletion {
 	sort.Strings(paths)
 	changed := make([]ChangedFileEvidence, 0, len(paths))
 	for _, path := range paths {
-		changed = append(changed, ChangedFileEvidence{Path: path, Source: files[path]})
+		file := ChangedFileEvidence{Path: path, Source: files[path]}
+		file.EvidenceID, file.EvidenceSHA256 = evidenceIdentity(input.RunID, "file", file)
+		changed = append(changed, file)
 	}
 
 	summary, unresolved := structuredSummary(input.StructuredOutput)
@@ -122,11 +143,28 @@ func Build(input Input) RunCompletion {
 	if unresolved == nil {
 		unresolved = []string{"未提供结构化遗留项"}
 	}
-	return RunCompletion{
-		Summary: summary, ChangedFiles: changed, Tests: tests,
+	result := RunCompletion{
+		SchemaVersion: 2,
+		Summary:       summary, ChangedFiles: changed, Tests: tests,
 		Git: gitEvidence(input.Before, input.After), Unresolved: unresolved,
-		CompletedAt: input.CompletedAt,
+		CompletedAt: input.CompletedAt, Workspace: input.Workspace,
 	}
+	result.CompletionID, _ = evidenceIdentity(input.RunID, "completion", result)
+	return result
+}
+
+func evidenceIdentity(runID, kind string, value any) (string, string) {
+	raw, _ := json.Marshal(value)
+	contentDigest := sha256.Sum256(raw)
+	contentHash := hex.EncodeToString(contentDigest[:])
+	digest := sha256.New()
+	_, _ = digest.Write([]byte(runID))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(kind))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(raw)
+	identityHash := hex.EncodeToString(digest.Sum(nil))
+	return kind + "-" + identityHash[:24], contentHash
 }
 
 func collectChangedFiles(files map[string]string, changes any) {
