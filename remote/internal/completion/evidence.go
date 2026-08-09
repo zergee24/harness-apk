@@ -25,6 +25,7 @@ const (
 	GitCommitted   GitState = "COMMITTED"
 	GitUncommitted GitState = "UNCOMMITTED"
 	GitClean       GitState = "CLEAN"
+	GitUnverified  GitState = "UNVERIFIED"
 )
 
 type ChangedFileEvidence struct {
@@ -47,6 +48,7 @@ type GitEvidence struct {
 	Branch     string   `json:"branch,omitempty"`
 	BeforeHead string   `json:"beforeHead,omitempty"`
 	AfterHead  string   `json:"afterHead,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
 }
 
 type WorkspaceLocator struct {
@@ -68,16 +70,17 @@ type RunCompletion struct {
 }
 
 type Input struct {
-	RunID            string
-	Workspace        WorkspaceLocator
-	Before           workspace.Baseline
-	After            workspace.Baseline
-	CommittedFiles   []string
-	ObservedFiles    []string
-	Items            []json.RawMessage
-	StructuredOutput json.RawMessage
-	LastAgentMessage string
-	CompletedAt      int64
+	RunID              string
+	Workspace          WorkspaceLocator
+	Before             workspace.Baseline
+	After              workspace.Baseline
+	CommittedFiles     []string
+	ObservedFiles      []string
+	Items              []json.RawMessage
+	StructuredOutput   json.RawMessage
+	LastAgentMessage   string
+	CompletedAt        int64
+	GitInspectionError string
 }
 
 func Decode(raw json.RawMessage) (RunCompletion, bool, error) {
@@ -162,7 +165,7 @@ func Build(input Input) RunCompletion {
 	result := RunCompletion{
 		SchemaVersion: 2,
 		Summary:       summary, ChangedFiles: changed, Tests: tests,
-		Git: gitEvidence(input.Before, input.After), Unresolved: unresolved,
+		Git: gitEvidence(input.Before, input.After, input.GitInspectionError), Unresolved: unresolved,
 		CompletedAt: input.CompletedAt, Workspace: input.Workspace,
 	}
 	result.CompletionID, _ = evidenceIdentity(input.RunID, "completion", result)
@@ -226,8 +229,7 @@ func commandText(value any) string {
 
 func isKnownTestCommand(command string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(command))
-	return strings.Contains(normalized, "gradlew test") ||
-		strings.Contains(normalized, "gradlew connected") ||
+	return isGradleTestCommand(normalized) ||
 		strings.HasPrefix(normalized, "go test") ||
 		strings.Contains(normalized, " go test") ||
 		strings.HasPrefix(normalized, "pytest") ||
@@ -235,6 +237,31 @@ func isKnownTestCommand(command string) bool {
 		strings.Contains(normalized, "jest") || strings.Contains(normalized, "vitest") ||
 		strings.Contains(normalized, "cargo test") || strings.Contains(normalized, "swift test") ||
 		(strings.Contains(normalized, "xcodebuild") && strings.Contains(normalized, " test"))
+}
+
+func isGradleTestCommand(command string) bool {
+	seenGradleWrapper := false
+	for _, field := range strings.Fields(command) {
+		field = strings.Trim(field, "'\";()")
+		if !seenGradleWrapper {
+			base := field
+			if slash := strings.LastIndex(base, "/"); slash >= 0 {
+				base = base[slash+1:]
+			}
+			seenGradleWrapper = base == "gradlew" || base == "gradlew.bat"
+			continue
+		}
+		if field == "" || strings.HasPrefix(field, "-") {
+			continue
+		}
+		parts := strings.Split(field, ":")
+		task := parts[len(parts)-1]
+		if strings.HasPrefix(task, "test") ||
+			(strings.HasPrefix(task, "connected") && strings.Contains(task, "androidtest")) {
+			return true
+		}
+	}
+	return false
 }
 
 func integerPointer(value any) *int {
@@ -263,7 +290,19 @@ func structuredSummary(raw json.RawMessage) (string, []string) {
 	return strings.TrimSpace(output.Summary), output.Unresolved
 }
 
-func gitEvidence(before, after workspace.Baseline) *GitEvidence {
+func gitEvidence(before, after workspace.Baseline, inspectionError string) *GitEvidence {
+	if strings.TrimSpace(inspectionError) == "" && before.IsGit && !after.IsGit {
+		inspectionError = "post-run Git baseline is unavailable"
+	}
+	if strings.TrimSpace(inspectionError) == "" && before.IsGit && before.Head != "" && after.Head == "" {
+		inspectionError = "post-run Git HEAD is unavailable"
+	}
+	if strings.TrimSpace(inspectionError) != "" {
+		return &GitEvidence{
+			State: GitUnverified, Branch: firstNonEmpty(after.Branch, before.Branch),
+			BeforeHead: before.Head, AfterHead: after.Head, Reason: strings.TrimSpace(inspectionError),
+		}
+	}
 	if !before.IsGit && !after.IsGit {
 		return nil
 	}
@@ -277,4 +316,13 @@ func gitEvidence(before, after workspace.Baseline) *GitEvidence {
 		State: state, Branch: after.Branch,
 		BeforeHead: before.Head, AfterHead: after.Head,
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

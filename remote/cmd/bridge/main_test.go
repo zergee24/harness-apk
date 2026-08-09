@@ -134,6 +134,25 @@ func TestSnapshotStatusMapsAuthoritativeTurnState(t *testing.T) {
 	}
 }
 
+func TestSnapshotStatusKeepsUnknownOrMissingTurnReconciling(t *testing.T) {
+	for name, raw := range map[string]json.RawMessage{
+		"unknown":        json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"futureStatus"}}]}}`),
+		"missing":        json.RawMessage(`{"thread":{"turns":[{"id":"other-turn","status":{"type":"completed"}}]}}`),
+		"empty identity": json.RawMessage(`{"thread":{"turns":[{"id":"latest-turn","status":{"type":"inProgress"}}]}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			turnID := "turn-1"
+			if name == "empty identity" {
+				turnID = ""
+			}
+			status, _ := snapshotStatus(raw, turnID)
+			if status != "RECONCILING" {
+				t.Fatalf("status=%q", status)
+			}
+		})
+	}
+}
+
 func TestTimelineLogicalPayloadTranslatesUnknownItemAndRedactsSecrets(t *testing.T) {
 	eventType, payload, ok := timelineLogicalPayload(
 		"item/completed",
@@ -238,13 +257,51 @@ func TestRouteForParamsWithUnknownTurnDoesNotFallBackToLegacyEmptyTurnRoute(t *t
 	}
 }
 
+func TestLegacyTurnStartBackfillsRealTurnIDBeforeRouting(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.start", ThreadID: "thread-1", BindingID: "project-1"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.backfillTurnRoute(command, json.RawMessage(`{"turn":{"id":"turn-real"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	route, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-1","turnId":"turn-real"}`))
+	if !ok || route.RunID != "legacy:thread-1" || route.DeviceID != "phone-1" {
+		t.Fatalf("backfilled route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestLegacyTurnSteerClaimsExpectedTurnID(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.steer", ThreadID: "thread-1", ExpectedTurnID: "turn-existing"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if route, ok := routes.ByThreadTurn("thread-1", "turn-existing"); !ok || route.RunID != "legacy:thread-1" {
+		t.Fatalf("steer route=%#v ok=%v", route, ok)
+	}
+}
+
 func TestSnapshotLedgerMissDoesNotExposeLiveTerminalState(t *testing.T) {
 	for _, status := range []string{"completed", "failed", "cancelled"} {
 		t.Run(status, func(t *testing.T) {
+			terminals, err := completion.OpenTerminalRunStore(filepath.Join(t.TempDir(), "terminal-runs.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
 			app := appProcessReturning(t, json.RawMessage(fmt.Sprintf(
 				`{"thread":{"turns":[{"id":"turn-1","status":{"type":%q}}]}}`, status,
 			)))
-			b := &bridge{app: app}
+			b := &bridge{app: app, terminals: terminals}
 			snapshot, err := b.snapshotForRoute(context.Background(), runstate.Route{
 				RunID: "run-1", ThreadID: "thread-1", TurnID: "turn-1",
 			})
@@ -253,6 +310,9 @@ func TestSnapshotLedgerMissDoesNotExposeLiveTerminalState(t *testing.T) {
 			}
 			if snapshot.Status != "RECONCILING" || len(snapshot.CompletionJSON) != 0 || snapshot.CompletedAt != 0 {
 				t.Fatalf("ledger miss exposed live terminal state: %#v", snapshot)
+			}
+			if pending := terminals.PendingObservations(); len(pending) != 0 {
+				t.Fatalf("snapshot rebuilt terminal evidence indirectly: %#v", pending)
 			}
 		})
 	}
@@ -272,6 +332,9 @@ func TestCompleteRunTemporaryThreadReadFailureDoesNotFreezeFailedTerminal(t *tes
 	}, json.RawMessage(`{"status":{"type":"completed"}}`))
 	if record, frozen := terminals.Lookup("run-1"); frozen {
 		t.Fatalf("temporary read failure froze terminal state: %#v", record)
+	}
+	if pending := terminals.PendingObservations(); len(pending) != 1 || pending[0].RunID != "run-1" {
+		t.Fatalf("terminal observation was not retained for retry: %#v", pending)
 	}
 }
 
@@ -365,6 +428,83 @@ func TestSnapshotForRouteUsesFrozenCompletionWithoutAppServer(t *testing.T) {
 	}
 	if snapshot.Status != "COMPLETED" || string(snapshot.CompletionJSON) != string(frozenJSON) || snapshot.CompletedAt != record.CompletedAt {
 		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestRecoverTerminalRunsBackfillsMissingJournalEvent(t *testing.T) {
+	dir := t.TempDir()
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{
+		RunID: "run-1", Status: "COMPLETED", CompletionJSON: json.RawMessage(`{"schemaVersion":2,"summary":"frozen"}`), CompletedAt: 1234,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{RunID: "run-1", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1"}); err != nil {
+		t.Fatal(err)
+	}
+	b := bridgeForTerminalTest(t, nil, terminals)
+	b.routes = routes
+	if err := b.recoverTerminalRuns(context.Background(), "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	pending := b.journal.Pending("host-1", "phone-1")
+	if len(pending) != 1 || pending[0].Type != "run.completed" || pending[0].RunID != "run-1" {
+		t.Fatalf("journal backfill=%#v", pending)
+	}
+	if len(terminals.PendingJournalRecords()) != 0 {
+		t.Fatalf("journaled terminal remained pending")
+	}
+}
+
+func TestRecoverTerminalRunsRetriesPersistentObservation(t *testing.T) {
+	dir := t.TempDir()
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","status":{"type":"completed"}}`)
+	if err := terminals.Observe(completion.TerminalObservation{RunID: "run-1", Params: params, ObservedAt: 1234}); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := runstate.Route{RunID: "run-1", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1"}
+	if err := routes.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	app := appProcessReturning(t, json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"completed"},"items":[]}]}}`))
+	b := bridgeForTerminalTest(t, app, terminals)
+	b.routes = routes
+	if err := b.recoverTerminalRuns(context.Background(), "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if record, ok := terminals.Lookup("run-1"); !ok || record.Status != "COMPLETED" {
+		t.Fatalf("recovered terminal=%#v ok=%v", record, ok)
+	}
+	if len(terminals.PendingObservations()) != 0 || len(terminals.PendingJournalRecords()) != 0 {
+		t.Fatalf("recovery did not drain durable reconciliation state")
+	}
+}
+
+func TestBuildCompletionEvidenceMarksWorkspaceCaptureFailureUnverified(t *testing.T) {
+	route := runstate.Route{
+		RunID: "run-1", WorkspaceID: "workspace-1",
+		BaselineJSON: string(mustJSON(runstate.WorkspaceBaseline{
+			CWD: filepath.Join(t.TempDir(), "missing"), IsGit: true, Head: "before", Branch: "main",
+		})),
+	}
+	evidence := buildCompletionEvidence(route, completedTurn{})
+	if evidence.Git == nil || evidence.Git.State != completion.GitUnverified || evidence.Git.Reason == "" {
+		t.Fatalf("git evidence=%#v", evidence.Git)
 	}
 }
 

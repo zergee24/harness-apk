@@ -123,6 +123,29 @@ func (s *RouteStore) Put(route Route) error {
 	return s.saveLocked()
 }
 
+func (s *RouteStore) UpdateTurn(runID, threadID, turnID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runID == "" || threadID == "" || turnID == "" {
+		return errors.New("run, thread, and turn identity are required")
+	}
+	route := s.data.Routes[runID]
+	if route == nil {
+		return errors.New("route not found")
+	}
+	if route.ThreadID != threadID {
+		return errors.New("route thread identity changed")
+	}
+	if route.TurnID != "" && route.TurnID != turnID {
+		return errors.New("route turn identity changed")
+	}
+	if route.TurnID == turnID {
+		return nil
+	}
+	route.TurnID = turnID
+	return s.saveLocked()
+}
+
 func (s *RouteStore) ByRun(runID string) (Route, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

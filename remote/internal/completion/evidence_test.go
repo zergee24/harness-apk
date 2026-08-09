@@ -51,6 +51,40 @@ func TestKnownTestCommandRequiresZeroExitCode(t *testing.T) {
 	}
 }
 
+func TestAndroidGradleTasksAreRecognizedAsTestEvidence(t *testing.T) {
+	result := Build(Input{Items: []json.RawMessage{
+		json.RawMessage(`{"type":"commandExecution","command":"./gradlew :app:testDebugUnitTest","exitCode":0}`),
+		json.RawMessage(`{"type":"commandExecution","command":"ANDROID_SERIAL=emulator-5554 ./gradlew :app:connectedDebugAndroidTest","exitCode":1}`),
+		json.RawMessage(`{"type":"commandExecution","command":"./gradlew :app:assembleDebug","exitCode":0}`),
+	}})
+
+	if len(result.Tests) != 2 || result.Tests[0].Status != TestPassed || result.Tests[1].Status != TestFailed {
+		t.Fatalf("android gradle tests=%#v", result.Tests)
+	}
+}
+
+func TestGitInspectionFailureIsUnverifiedInsteadOfClean(t *testing.T) {
+	result := Build(Input{
+		Before:             workspace.Baseline{IsGit: true, Head: "before", Branch: "main"},
+		GitInspectionError: "git status failed: permission denied",
+	})
+
+	if result.Git == nil || result.Git.State != GitUnverified || result.Git.Reason == "" {
+		t.Fatalf("git evidence=%#v", result.Git)
+	}
+}
+
+func TestMissingPostRunGitBaselineIsUnverifiedInsteadOfClean(t *testing.T) {
+	result := Build(Input{
+		Before: workspace.Baseline{IsGit: true, Head: "before", Branch: "main"},
+		After:  workspace.Baseline{},
+	})
+
+	if result.Git == nil || result.Git.State != GitUnverified || result.Git.Reason == "" {
+		t.Fatalf("git evidence=%#v", result.Git)
+	}
+}
+
 func TestCommittedChangesRemainVisibleWhenWorkingTreeIsClean(t *testing.T) {
 	result := Build(Input{
 		Before:         workspace.Baseline{IsGit: true, Head: "old", Branch: "test"},

@@ -79,3 +79,29 @@ func TestNewProcessEpochInvalidatesOldServerRequestIDs(t *testing.T) {
 		t.Fatal("old process epoch server request was accepted")
 	}
 }
+
+func TestUpdateTurnAtomicallyBackfillsLegacyRoute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store, err := OpenRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := Route{
+		RunID: "legacy:thread-1", BindingID: "binding-1", WorkspaceID: "workspace-1",
+		HostID: "host-1", DeviceID: "device-1", ThreadID: "thread-1", BaselineJSON: `{"cwd":"/workspace"}`,
+	}
+	if err := store.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateTurn(route.RunID, route.ThreadID, "turn-real"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, ok := reopened.ByThreadTurn("thread-1", "turn-real")
+	if !ok || updated.BindingID != route.BindingID || updated.BaselineJSON != route.BaselineJSON {
+		t.Fatalf("updated route=%#v ok=%v", updated, ok)
+	}
+}
