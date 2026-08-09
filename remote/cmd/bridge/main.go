@@ -881,9 +881,12 @@ func (b *bridge) snapshotForRoute(ctx context.Context, route runstate.Route) (ru
 	if err != nil {
 		return snapshot, nil
 	}
-	snapshot.Status, snapshot.LatestLine = snapshotStatus(result, route.TurnID)
-	if snapshot.Status == "COMPLETED" {
-		snapshot.ErrorMessage = "terminal completion ledger unavailable"
+	liveStatus, liveLine := snapshotStatus(result, route.TurnID)
+	switch liveStatus {
+	case "COMPLETED", "FAILED", "CANCELLED":
+		snapshot.ErrorMessage = "terminal run ledger unavailable"
+	default:
+		snapshot.Status, snapshot.LatestLine = liveStatus, liveLine
 	}
 	return snapshot, nil
 }
@@ -1153,28 +1156,16 @@ func (b *bridge) completeRun(ctx context.Context, route runstate.Route, params j
 		"threadId": route.ThreadID, "includeTurns": true,
 	})
 	if err != nil {
-		if _, freezeErr := b.freezeTerminal(route, "FAILED", nil, time.Now().UnixMilli()); freezeErr != nil {
-			log.Printf("freeze failed run %s before journal: %v", route.RunID, freezeErr)
-			return
-		}
-		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.failed", mustJSON(map[string]string{
-			"latestLine": "读取完成结果失败", "errorMessage": err.Error(),
-		}))
+		log.Printf("defer terminal run %s after thread/read failure: %v", route.RunID, err)
 		return
 	}
 	turn, ok := turnSnapshot(result, route.TurnID)
 	if !ok {
-		if _, freezeErr := b.freezeTerminal(route, "FAILED", nil, time.Now().UnixMilli()); freezeErr != nil {
-			log.Printf("freeze failed run %s before journal: %v", route.RunID, freezeErr)
-			return
-		}
-		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.failed", mustJSON(map[string]string{
-			"latestLine": "完成结果缺少目标 Turn", "errorMessage": "thread/read did not contain the routed turn",
-		}))
+		log.Printf("defer terminal run %s: thread/read did not contain turn %s", route.RunID, route.TurnID)
 		return
 	}
 	status := completionTurnStatus(params, turn.Status)
-	if status == "interrupted" || status == "cancelled" || status == "canceled" {
+	if status == "cancelled" {
 		if _, err := b.freezeTerminal(route, "CANCELLED", nil, time.Now().UnixMilli()); err != nil {
 			log.Printf("freeze cancelled run %s before journal: %v", route.RunID, err)
 			return
@@ -1194,6 +1185,10 @@ func (b *bridge) completeRun(ctx context.Context, route runstate.Route, params j
 			"threadId": route.ThreadID, "turnId": route.TurnID,
 			"presentationKind": "RECOVERY", "latestLine": "任务失败",
 		}))
+		return
+	}
+	if status != "completed" {
+		log.Printf("defer terminal run %s with non-terminal status", route.RunID)
 		return
 	}
 	evidence := buildCompletionEvidence(route, turn)
@@ -1306,32 +1301,53 @@ func completionTurnStatus(params, fallback json.RawMessage) string {
 	for _, raw := range []json.RawMessage{params, fallback} {
 		var direct string
 		if json.Unmarshal(raw, &direct) == nil && direct != "" {
-			return strings.ToLower(direct)
+			if status := normalizeCompletionStatus(direct); status != "unknown" {
+				return status
+			}
 		}
 		var object map[string]any
 		if json.Unmarshal(raw, &object) != nil {
 			continue
 		}
-		for _, value := range []any{object["status"], object["turn"]} {
-			if nested, ok := value.(map[string]any); ok {
-				value = nested["status"]
-			}
-			switch status := value.(type) {
-			case string:
-				if status != "" {
-					return strings.ToLower(status)
-				}
-			case map[string]any:
-				if kind, _ := status["type"].(string); kind != "" {
-					return strings.ToLower(kind)
-				}
-			}
+		candidates := []any{object["status"]}
+		if turn, ok := object["turn"].(map[string]any); ok {
+			candidates = append(candidates, turn["status"])
 		}
-		if kind, _ := object["type"].(string); kind != "" {
-			return strings.ToLower(kind)
+		candidates = append(candidates, object["type"])
+		for _, candidate := range candidates {
+			if status := normalizeCompletionStatus(statusText(candidate)); status != "unknown" {
+				return status
+			}
 		}
 	}
-	return "completed"
+	return "unknown"
+}
+
+func statusText(value any) string {
+	switch status := value.(type) {
+	case string:
+		return status
+	case map[string]any:
+		if kind, _ := status["type"].(string); kind != "" {
+			return kind
+		}
+		return statusText(status["status"])
+	default:
+		return ""
+	}
+}
+
+func normalizeCompletionStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed":
+		return "completed"
+	case "failed":
+		return "failed"
+	case "interrupted", "cancelled", "canceled":
+		return "cancelled"
+	default:
+		return "unknown"
+	}
 }
 
 func approvalLogicalPayload(message appserverrpc.Message, approvalID, processEpoch string) json.RawMessage {
@@ -1447,15 +1463,10 @@ func (b *bridge) routeForParams(params json.RawMessage) (runstate.Route, bool) {
 		return runstate.Route{}, false
 	}
 	if turnID != "" {
-		if route, found := b.routes.ByThreadTurn(threadID, turnID); found {
-			return route, true
-		}
+		return b.routes.ByThreadTurn(threadID, turnID)
 	}
 	active := make([]runstate.Route, 0, 1)
 	for _, route := range b.routes.ByThreadAll(threadID) {
-		if turnID != "" && route.TurnID != "" {
-			continue
-		}
 		if b.terminals != nil {
 			if _, terminal := b.terminals.Lookup(route.RunID); terminal {
 				continue

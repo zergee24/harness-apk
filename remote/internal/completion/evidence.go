@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -77,6 +78,21 @@ type Input struct {
 	StructuredOutput json.RawMessage
 	LastAgentMessage string
 	CompletedAt      int64
+}
+
+func Decode(raw json.RawMessage) (RunCompletion, bool, error) {
+	var result RunCompletion
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return RunCompletion{}, false, err
+	}
+	switch result.SchemaVersion {
+	case 0, 1:
+		return result, true, nil
+	case 2:
+		return result, false, nil
+	default:
+		return RunCompletion{}, false, fmt.Errorf("unsupported completion schema version %d", result.SchemaVersion)
+	}
 }
 
 func Build(input Input) RunCompletion {

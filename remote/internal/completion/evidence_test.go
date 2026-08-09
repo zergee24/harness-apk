@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/harnessapk/remote/internal/workspace"
@@ -17,6 +18,23 @@ func TestAgentClaimDoesNotBecomePassedTestEvidence(t *testing.T) {
 
 	if len(result.Tests) != 0 {
 		t.Fatalf("agent prose became test evidence: %#v", result.Tests)
+	}
+}
+
+func TestLegacyV1CompletionFixtureStillDecodes(t *testing.T) {
+	raw, err := os.ReadFile("testdata/completion-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, isLegacy, err := Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isLegacy || legacy.SchemaVersion != 0 || legacy.Summary != "M2 legacy completion" || len(legacy.ChangedFiles) != 1 {
+		t.Fatalf("legacy completion = %#v", legacy)
+	}
+	if legacy.ChangedFiles[0].EvidenceID != "" || legacy.Workspace.WorkspaceID != "" {
+		t.Fatalf("v2 additive fields unexpectedly required for v1: %#v", legacy)
 	}
 }
 
