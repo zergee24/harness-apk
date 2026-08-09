@@ -70,8 +70,10 @@ class LocalSearchRepositoryInstrumentedTest {
             val documents = sqlite.compileStatement(
                 """
                 INSERT INTO local_search_documents
-                    (id,type,title,body,conversationId,messageId,projectId,updatedAt)
-                VALUES (?,?,?,?,?,?,?,?)
+                    (id,type,title,body,conversationId,messageId,projectId,updatedAt,
+                     sourceType,authority,sourceKey,headingPath,ordinal,searchableText,
+                     sourceSha256,sourceUpdatedAt,indexedAt,dirty)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """.trimIndent(),
             )
             val fts = sqlite.compileStatement(
@@ -89,6 +91,16 @@ class LocalSearchRepositoryInstrumentedTest {
                 documents.bindString(6, "benchmark-$index")
                 documents.bindNull(7)
                 documents.bindLong(8, index.toLong())
+                documents.bindString(9, "PROJECT_MESSAGE")
+                documents.bindString(10, "USER_STATED")
+                documents.bindString(11, id)
+                documents.bindString(12, "")
+                documents.bindLong(13, 0L)
+                documents.bindString(14, body)
+                documents.bindString(15, "")
+                documents.bindLong(16, index.toLong())
+                documents.bindLong(17, index.toLong())
+                documents.bindLong(18, 0L)
                 documents.executeInsert()
                 fts.clearBindings()
                 fts.bindString(1, id)
