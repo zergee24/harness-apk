@@ -74,6 +74,72 @@ internal fun unwrapSingleLineGluedTextFence(line: String): String? {
 private fun String.startsWithHanCharacter(): Boolean =
     firstOrNull()?.let { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN } == true
 
+internal fun String.hasUnclosedFence(): Boolean {
+    var activeFence: MarkdownFence? = null
+    var previousFenceLineBlank = false
+    lineSequence().forEach { line ->
+        val active = activeFence
+        when {
+            active == null -> {
+                activeFence = parseMarkdownFenceOpening(line)
+                previousFenceLineBlank = false
+            }
+            active.isClosingLine(line) || active.trailingCloseContent(line) != null -> {
+                activeFence = null
+                previousFenceLineBlank = false
+            }
+            active.shouldRecoverBefore(line, previousFenceLineBlank) -> {
+                activeFence = parseMarkdownFenceOpening(line)
+                previousFenceLineBlank = false
+            }
+            else -> previousFenceLineBlank = line.isBlank()
+        }
+    }
+    return activeFence != null
+}
+
+internal fun String.hasUnclosedTable(): Boolean {
+    val lines = lines()
+    val delimiterIndex = lines.indexOfFirst { it.isGfmTableDelimiterLine() }
+    if (delimiterIndex <= 0) return false
+    if (!lines[delimiterIndex - 1].isLikelyTableRow()) return false
+    return lines
+        .drop(delimiterIndex + 1)
+        .none { it.isBlank() }
+}
+
+internal fun String.isLikelyTableRow(): Boolean {
+    val trimmed = trim()
+    return trimmed.count { it == '|' } >= 2
+}
+
+internal fun String.isGfmTableDelimiterLine(): Boolean {
+    val cells = trim().trim('|').split('|')
+    if (cells.size < 2) return false
+    return cells.all { cell ->
+        val normalized = cell.trim()
+        normalized.length >= 3 &&
+            normalized.all { it == '-' || it == ':' } &&
+            normalized.any { it == '-' }
+    }
+}
+
+internal fun String.hasUnclosedDisplayMath(): Boolean {
+    var dollarMathOpen = false
+    var bracketMathOpen = false
+    lineSequence().forEach { line ->
+        when (line.trim()) {
+            "$$" -> dollarMathOpen = !dollarMathOpen
+            "\\[" -> bracketMathOpen = true
+            "\\]" -> bracketMathOpen = false
+        }
+    }
+    return dollarMathOpen || bracketMathOpen
+}
+
+internal fun String.hasOpenStreamingStructure(): Boolean =
+    hasUnclosedFence() || hasUnclosedDisplayMath() || hasUnclosedTable()
+
 private const val MAX_FENCE_INDENT = 3
 private const val MIN_FENCE_LENGTH = 3
 private const val TEXT_LANGUAGE_LENGTH = 4

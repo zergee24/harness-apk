@@ -1,5 +1,6 @@
 package com.harnessapk.chat
 
+import com.harnessapk.ui.markdown.hasOpenStreamingStructure
 import com.harnessapk.wiki.hideWikiCitationTokensForDisplay
 import com.harnessapk.wiki.removeVisibleWikiCitationTokens
 sealed interface StreamEvent {
@@ -423,16 +424,39 @@ private fun UiMessagePartType.canSplitTail(): Boolean =
 
 private fun splitPoint(text: String, maxPrefixChars: Int): Int {
     val maxSplit = maxPrefixChars.coerceIn(1, text.length - 1)
+    val windowed = candidateSplitPositions(text, maxSplit)
+        .sortedDescending()
+        .firstOrNull { splitAt -> text.take(splitAt).hasSafeSplitBoundary() }
+    if (windowed != null) return windowed
+    return candidateSplitPositions(text, text.length - 1)
+        .sortedDescending()
+        .firstOrNull { splitAt -> text.take(splitAt).hasSafeSplitBoundary() }
+        ?: -1
+}
+
+private fun candidateSplitPositions(text: String, maxSplit: Int): List<Int> = buildList {
     text.lastIndexOf("\n\n", startIndex = (maxSplit - 1).coerceAtLeast(0)).takeIf { it >= 0 }?.let {
-        return it + 2
+        add(it + 2)
     }
     text.lastIndexOf('\n', startIndex = (maxSplit - 1).coerceAtLeast(0)).takeIf { it >= 0 }?.let {
-        return it + 1
+        add(it + 1)
     }
-    val punctuationSplit = listOf('。', '！', '？', '.', '!', '?')
+    listOf('。', '！', '？', '.', '!', '?')
         .map { punctuation -> text.lastIndexOf(punctuation, startIndex = (maxSplit - 1).coerceAtLeast(0)) }
         .filter { it >= 0 }
         .maxOrNull()
-    if (punctuationSplit != null) return punctuationSplit + 1
-    return maxSplit
+        ?.let { add(it + 1) }
 }
+
+private fun String.hasSafeSplitBoundary(): Boolean {
+    val boundary = lastOrNull() ?: return false
+    if (boundary != '\n' && !boundary.isSentencePunctuation()) return false
+    if (hasOpenStreamingStructure()) return false
+    return true
+}
+
+private fun Char.isSentencePunctuation(): Boolean =
+    this in "。！？.!?"
+
+private fun List<Int>.maxOrNull(): Int? =
+    if (isEmpty()) null else max()

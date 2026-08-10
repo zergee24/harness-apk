@@ -11,9 +11,11 @@ class MarkdownMessageParserTest {
         listOf("text", "txt", "plaintext", "plain", "TEXT title").forEach { language ->
             assertTrue(language, plainTextCodeBlockWrapsLines(language))
         }
-        listOf("kotlin", "bash", "json", null).forEach { language ->
-            assertTrue(language.orEmpty(), !plainTextCodeBlockWrapsLines(language))
+        listOf("kotlin", "bash", "json").forEach { language ->
+            assertTrue(language, !plainTextCodeBlockWrapsLines(language))
         }
+        assertTrue("blank info should wrap like text", plainTextCodeBlockWrapsLines(null))
+        assertTrue("blank info should wrap like text", plainTextCodeBlockWrapsLines(""))
     }
 
     @Test

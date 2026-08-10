@@ -290,10 +290,10 @@ private fun MarkdownCodeBlock(block: MarkdownBlock.Code) {
 }
 
 internal fun plainTextCodeBlockWrapsLines(info: String?): Boolean =
-    info.orEmpty()
-        .trim()
-        .substringBefore(' ')
-        .lowercase(Locale.ROOT) in plainTextCodeLanguages
+    info.isNullOrBlank() ||
+        info.trim()
+            .substringBefore(' ')
+            .lowercase(Locale.ROOT) in plainTextCodeLanguages
 
 private val plainTextCodeLanguages = setOf("text", "txt", "plaintext", "plain")
 

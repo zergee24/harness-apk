@@ -1,5 +1,6 @@
 package com.harnessapk.chat
 
+import com.harnessapk.ui.markdown.hasOpenStreamingStructure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -376,6 +377,77 @@ class StreamingMessageAccumulatorTest {
         accumulator.onEvent(StreamEvent.TextDelta("世界"), nowMillis = 400L)
 
         assertEquals("世界", accumulator.snapshot().legacyVisibleDelta(previousVisibleText = "你好"))
+    }
+
+    @Test
+    fun streamingSplitNeverBreaksCodeFenceOrTableInTheMiddle() {
+        val markdown = buildString {
+            appendLine("```")
+            (1..40).forEach { index ->
+                appendLine("const line$index = value$index;")
+            }
+            appendLine("```")
+            appendLine()
+            appendLine("| Product | Category | Price |")
+            appendLine("|---|---|---:|")
+            appendLine("| Wireless Keyboard | Computer Accessories | USD \$49.99 |")
+            appendLine("| Noise Cancelling Headphones | Audio Equipment | USD \$129.50 |")
+            appendLine("| Ergonomic Office Chair | Office Furniture | USD \$349.95 |")
+        }.trimEnd()
+        val accumulator = StreamingMessageAccumulator(
+            flushIntervalMillis = 300L,
+            maxBufferedChars = 120,
+            maxTailChars = 200,
+        )
+        var now = 0L
+
+        markdown.chunked(31).forEach { chunk ->
+            now += 80L
+            accumulator.onEvent(StreamEvent.TextDelta(chunk), nowMillis = now)
+        }
+        val finished = accumulator.onEvent(StreamEvent.Finished("stop"), nowMillis = now + 80L)!!
+
+        assertEquals(markdown, finished.snapshot.legacyVisibleText())
+        val textParts = finished.snapshot.parts.filter { it.type == UiMessagePartType.TEXT }
+        assertTrue(textParts.size > 1)
+        assertTrue(textParts.any { it.content.contains("| Product | Category | Price |") })
+    }
+
+    @Test
+    fun streamingStablePartsNeverEndInsideUnclosedFenceOrTable() {
+        val markdown = buildString {
+            appendLine("```")
+            (1..60).forEach { index ->
+                appendLine("line$index".repeat(3))
+            }
+            appendLine("```")
+            appendLine()
+            appendLine("| A | B |")
+            appendLine("|---|---|")
+            appendLine("| 1 | 2 |")
+            appendLine("| 3 | 4 |")
+        }.trimEnd()
+        val accumulator = StreamingMessageAccumulator(
+            flushIntervalMillis = 300L,
+            maxBufferedChars = 80,
+            maxTailChars = 150,
+        )
+        var now = 0L
+
+        markdown.chunked(23).forEach { chunk ->
+            now += 80L
+            accumulator.onEvent(StreamEvent.TextDelta(chunk), nowMillis = now)
+        }
+        val finished = accumulator.onEvent(StreamEvent.Finished("stop"), nowMillis = now + 80L)!!
+
+        assertEquals(markdown, finished.snapshot.legacyVisibleText())
+        val textParts = finished.snapshot.parts.filter { it.type == UiMessagePartType.TEXT }
+        textParts.dropLast(1).forEach { part ->
+            assertFalse(
+                "stable split part must not end inside an unclosed fence/table:\n${part.content.takeLast(120)}",
+                part.content.hasOpenStreamingStructure(),
+            )
+        }
     }
 
     @Test
