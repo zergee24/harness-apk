@@ -623,6 +623,26 @@ class MarkdownMessageParserTest {
     }
 
     @Test
+    fun splitsTableHeaderGluedToHeadingLine() {
+        val blocks = parseMarkdownBlocks(
+            """
+            ##1. Table with five columns| ID | Name | Department | Location | Status |
+            |---:|---|---|---|---|
+            |101 | Alice | Research | London | Active |
+            |102 | Bob | Operations | Tokyo | Pending |
+            """.trimIndent(),
+        )
+
+        val heading = blocks.filterIsInstance<MarkdownBlock.Heading>().single()
+        assertEquals("1. Table with five columns", heading.text.plainText())
+        val table = blocks.filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(5, table.headers.size)
+        assertEquals(listOf("ID", "Name", "Department", "Location", "Status"), table.headers.map { it.plainText() })
+        assertEquals(2, table.rows.size)
+        assertEquals("Alice", table.rows[0][1].plainText())
+    }
+
+    @Test
     fun parsesMarkdownRegressionCorpus() {
         val samples = listOf(
             "nested_lists.md" to MarkdownBlock.BulletList::class,

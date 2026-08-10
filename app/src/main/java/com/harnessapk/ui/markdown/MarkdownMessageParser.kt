@@ -273,10 +273,22 @@ private fun normalizeHeadingLine(line: String): String =
     inlineHeadingMarker.replace(line) { "\n${it.value} " }
         .lineSequence()
         .joinToString("\n") { segment ->
-            headingWithoutSpaceAtStart.replace(segment) {
-                "${it.groupValues[1]}${it.groupValues[2]} "
-            }
+            splitGluedTableHeader(
+                headingWithoutSpaceAtStart.replace(segment) {
+                    "${it.groupValues[1]}${it.groupValues[2]} "
+                },
+            )
         }
+
+private fun splitGluedTableHeader(line: String): String {
+    if (!line.startsWith("#")) return line
+    val pipeIndex = line.indexOf('|')
+    if (pipeIndex <= 1) return line
+    val tablePart = line.drop(pipeIndex)
+    if (!tablePart.startsWith("|") || !tablePart.endsWith("|")) return line
+    if (tablePart.count { it == '|' } < 2) return line
+    return "${line.take(pipeIndex).trimEnd()}\n$tablePart"
+}
 
 private fun hasSingleLineFence(line: String): Boolean {
     val first = line.indexOf("```")
