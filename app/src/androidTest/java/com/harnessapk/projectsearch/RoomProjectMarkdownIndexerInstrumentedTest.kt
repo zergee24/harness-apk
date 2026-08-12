@@ -18,6 +18,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.security.MessageDigest
 
 @RunWith(AndroidJUnit4::class)
 class RoomProjectMarkdownIndexerInstrumentedTest {
@@ -192,17 +193,34 @@ class RoomProjectMarkdownIndexerInstrumentedTest {
         startedAt = 10L,
         updatedAt = 20L,
         completedAt = 20L,
-        completionJson = """
+        completionJson = verifiedCompletionJson(id, marker),
+        errorMessage = null,
+    )
+
+    private fun verifiedCompletionJson(id: String, marker: String): String {
+        val path = "docs/$id.md"
+        val evidenceHash = sha256("""{"path":"$path","source":"git"}""")
+        return """
             {
               "schemaVersion":2,
               "completionId":"completion-$id",
               "summary":"$marker",
-              "changedFiles":[],
+              "changedFiles":[
+                {
+                  "evidenceId":"file-$id",
+                  "evidenceSha256":"$evidenceHash",
+                  "path":"$path",
+                  "source":"git"
+                }
+              ],
               "tests":[],
               "unresolved":[],
               "completedAt":20
             }
-        """.trimIndent(),
-        errorMessage = null,
-    )
+        """.trimIndent()
+    }
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.encodeToByteArray())
+        .joinToString("") { byte -> "%02x".format(byte) }
 }
