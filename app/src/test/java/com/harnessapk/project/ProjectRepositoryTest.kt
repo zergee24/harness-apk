@@ -8,6 +8,7 @@ import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -205,6 +206,49 @@ class ProjectRepositoryTest {
 
         assertFalse(project.rootDirectory.exists())
         assertEquals(emptyList<Project>(), repository.listProjects())
+    }
+
+    @Test
+    fun deletingProjectNeverReusesItsIdForSameNameAcrossRepositoryRestart() = runTest {
+        val root = temporaryFolder.newFolder("project-generation-root")
+        val firstRepository = FileProjectRepository(root, TimeProvider { 350L })
+        val deleted = firstRepository.createProject("Harness")
+
+        firstRepository.deleteProject(deleted.id)
+        val restartedRepository = FileProjectRepository(root, TimeProvider { 351L })
+        val recreated = restartedRepository.createProject("Harness")
+
+        assertEquals("harness", deleted.id)
+        assertEquals("harness-2", recreated.id)
+        assertNotEquals("历史 Run 与 Evidence 仍按 projectId 归属，删除后的 ID 不得跨代复用", deleted.id, recreated.id)
+        assertNotEquals(deleted.rootDirectory, recreated.rootDirectory)
+        assertEquals("Harness", recreated.name)
+        assertTrue(recreated.rootDirectory.isDirectory)
+        assertTrue(
+            runCatching { restartedRepository.resolveProjectDirectory(deleted.id) }.exceptionOrNull() is
+                ProjectWorkspaceException,
+        )
+    }
+
+    @Test
+    fun preparedAndZipImportsAlsoSkipRetiredProjectIds() = runTest {
+        val root = temporaryFolder.newFolder("project-import-generation-root")
+        val repository = FileProjectRepository(root, TimeProvider { 352L })
+        val original = repository.createProject("Imported Harness")
+        val exported = ByteArrayOutputStream()
+        repository.exportProjectZip(original.id, exported)
+        repository.deleteProject(original.id)
+
+        val restartedRepository = FileProjectRepository(root, TimeProvider { 353L })
+        val imported = restartedRepository.importProjectZip(ByteArrayInputStream(exported.toByteArray()))
+        restartedRepository.deleteProject(imported.id)
+        val prepared = restartedRepository.createProjectFromPreparedDirectory("Imported Harness") { directory ->
+            directory.resolve("README.md").writeProjectText("# Imported Harness")
+        }
+
+        assertEquals("imported-harness", original.id)
+        assertEquals("imported-harness-2", imported.id)
+        assertEquals("imported-harness-3", prepared.id)
     }
 
     @Test

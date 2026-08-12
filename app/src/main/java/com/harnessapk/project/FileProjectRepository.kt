@@ -26,6 +26,7 @@ class FileProjectRepository(
     private val onProjectContentChanged: suspend (Project) -> Unit = {},
 ) {
     private val projectsRoot = rootDirectory.resolve("projects")
+    private val retiredProjectIdsRoot = rootDirectory.resolve(".harness/retired-project-ids")
 
     suspend fun createProject(name: String): Project {
         val trimmedName = name.trim()
@@ -111,6 +112,7 @@ class FileProjectRepository(
 
     suspend fun deleteProject(projectId: String) {
         val project = projectDirectory(projectId)
+        retireProjectId(projectId)
         if (!project.deleteRecursively()) {
             throw ProjectWorkspaceException("删除项目失败：$projectId")
         }
@@ -650,12 +652,25 @@ class FileProjectRepository(
         val base = safeFileName(name).ifBlank { UUID.randomUUID().toString() }
         var candidate = base
         var counter = 2
-        while (projectsRoot.resolve(candidate).exists()) {
+        while (projectsRoot.resolve(candidate).exists() || retiredProjectIdMarker(candidate).isFile) {
             candidate = "$base-$counter"
             counter += 1
         }
         return candidate
     }
+
+    private fun retireProjectId(projectId: String) {
+        if (!retiredProjectIdsRoot.isDirectory && !retiredProjectIdsRoot.mkdirs()) {
+            throw ProjectWorkspaceException("无法持久化项目代际标记：$projectId")
+        }
+        val marker = retiredProjectIdMarker(projectId)
+        if (!marker.isFile && !marker.createNewFile()) {
+            throw ProjectWorkspaceException("无法持久化项目代际标记：$projectId")
+        }
+    }
+
+    private fun retiredProjectIdMarker(projectId: String): File =
+        retiredProjectIdsRoot.resolve(sha256(projectId.encodeToByteArray()))
 
     private fun safeFileName(value: String): String {
         val normalized = value

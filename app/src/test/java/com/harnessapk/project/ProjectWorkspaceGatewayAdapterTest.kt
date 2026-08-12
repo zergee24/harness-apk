@@ -180,6 +180,23 @@ class ProjectWorkspaceGatewayAdapterTest {
         assertTrue(!project.rootDirectory.resolve("reports/same.md").exists())
     }
 
+    @Test
+    fun historicalRunDraftCannotApplyAfterSameNameProjectIsRecreated() = runTest {
+        val root = temporaryFolder.newFolder("historical-run-apply-root")
+        val repository = FileProjectRepository(root, TimeProvider { 1L })
+        val historicalProject = repository.createProject("Harness")
+        repository.deleteProject(historicalProject.id)
+        val recreatedProject = FileProjectRepository(root, TimeProvider { 2L }).createProject("Harness")
+
+        val result = ProjectWorkspaceGatewayAdapter(repository).applyMarkdownUpdates(
+            historicalProject.id,
+            listOf(proposal("reports/old-run.md", "# 历史 Run\n")),
+        )
+
+        assertTrue(result.failed.single().errorMessage.orEmpty().contains("未找到项目"))
+        assertTrue(!recreatedProject.rootDirectory.resolve("reports/old-run.md").exists())
+    }
+
     private fun proposal(path: String, markdown: String) = MarkdownUpdateProposal(
         operation = MarkdownUpdateOperation.CREATE,
         path = path,
