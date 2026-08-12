@@ -19,12 +19,14 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
@@ -33,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +53,7 @@ import com.harnessapk.remote.ApprovalDecision
 import com.harnessapk.remote.RemoteApprovalRisk
 import com.harnessapk.remote.RemoteConnectionService
 import com.harnessapk.remote.RemoteCompletionEvidence
+import com.harnessapk.remote.RemoteCompletionVerification
 import com.harnessapk.remote.RemoteSyncPosition
 import com.harnessapk.remote.RemoteTimelinePresentation
 import com.harnessapk.remote.collapseRemoteTimeline
@@ -57,10 +61,21 @@ import com.harnessapk.remote.isRemoteApprovalActionEnabled
 import com.harnessapk.remote.parseRemoteCompletionEvidence
 import com.harnessapk.remote.parseRemoteApprovalRisk
 import com.harnessapk.remote.remoteApprovalPolicy
+import com.harnessapk.session.MarkdownDraftOrigin
+import com.harnessapk.session.MarkdownDraftOriginType
+import com.harnessapk.session.MarkdownDraftOwner
+import com.harnessapk.session.MarkdownUpdateOperation
+import com.harnessapk.session.MarkdownUpdateProposal
+import com.harnessapk.session.buildMarkdownDiff
+import com.harnessapk.session.remoteCompletionMarkdownPlan
+import com.harnessapk.storage.MarkdownChangeDraftItemEntity
 import com.harnessapk.storage.RemoteApprovalEntity
 import com.harnessapk.storage.RemoteRunEventEntity
 import com.harnessapk.ui.theme.HarnessSpacing
+import com.harnessapk.ui.components.MarkdownDraftDiff
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.update
+import java.security.MessageDigest
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,6 +103,31 @@ fun RunDetailScreen(
     var loadingOlder by rememberSaveable(runId) { mutableStateOf(false) }
     var reachedTimelineStart by rememberSaveable(runId) { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
+    var remoteDraftId by rememberSaveable(runId) { mutableStateOf<String?>(null) }
+    var remoteDraftStatus by rememberSaveable(runId) { mutableStateOf<String?>(null) }
+    var remoteDraftItems by remember(runId) { mutableStateOf<List<MarkdownChangeDraftItemEntity>>(emptyList()) }
+    LaunchedEffect(runId) {
+        container.database.projectSearchDao()
+            .draftOriginForSource(MarkdownDraftOriginType.REMOTE_RUN.name, runId)
+            ?.let { origin ->
+                remoteDraftId = origin.draftId
+                val dao = container.database.markdownChangeDraftDao()
+                val draft = dao.findDraft(origin.draftId)
+                if (draft?.status == "APPLYING") {
+                    dao.updateDraft(
+                        draft.copy(
+                            status = "FAILED",
+                            summary = "上次应用被中断，请核对文件后重试",
+                            updatedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                    remoteDraftStatus = "FAILED"
+                } else {
+                    remoteDraftStatus = draft?.status
+                }
+                remoteDraftItems = dao.listItems(origin.draftId)
+            }
+    }
     fun enqueue(approval: RemoteApprovalEntity, decision: ApprovalDecision) {
         scope.launch {
             actionError = null
@@ -216,7 +256,99 @@ fun RunDetailScreen(
                 val completion = remember(current.completionJson) {
                     current.completionJson?.let { raw -> runCatching { parseRemoteCompletionEvidence(raw) }.getOrNull() }
                 }
-                completion?.let { RemoteCompletionCard(it) }
+                completion?.let { evidence ->
+                    RemoteCompletionCard(
+                        evidence = evidence,
+                        depositStatus = remoteDraftStatus,
+                        onDepositToProject = if (
+                            current.completionJson == null ||
+                            evidence.verification != RemoteCompletionVerification.VERIFIED_V2
+                        ) null else {
+                            {
+                                scope.launch {
+                                    actionError = null
+                                    runCatching {
+                                        val existing = container.database.projectSearchDao()
+                                            .draftOriginForSource(MarkdownDraftOriginType.REMOTE_RUN.name, runId)
+                                        val record = if (existing != null) {
+                                            val draft = requireNotNull(
+                                                container.database.markdownChangeDraftDao().findDraft(existing.draftId),
+                                            )
+                                            com.harnessapk.session.PersistedMarkdownDraft(
+                                                draft = draft,
+                                                items = container.database.markdownChangeDraftDao().listItems(existing.draftId),
+                                                origin = existing,
+                                            )
+                                        } else {
+                                            container.markdownDraftCoordinator.persistPlan(
+                                                owner = MarkdownDraftOwner(projectId = current.projectId),
+                                                origin = MarkdownDraftOrigin(
+                                                    type = MarkdownDraftOriginType.REMOTE_RUN,
+                                                    sourceId = runId,
+                                                    sourceSha256 = requireNotNull(current.completionJson).sha256(),
+                                                    sourceProjectId = current.projectId,
+                                                ),
+                                                plan = remoteCompletionMarkdownPlan(runId, evidence),
+                                                snapshots = emptyList(),
+                                                rawResponse = current.completionJson,
+                                            )
+                                        }
+                                        remoteDraftId = record.draft.id
+                                        remoteDraftStatus = record.draft.status
+                                        remoteDraftItems = record.items
+                                    }.onFailure { actionError = it.message ?: "沉淀到项目失败" }
+                                }
+                            }
+                        },
+                    )
+                    if (remoteDraftItems.isNotEmpty()) {
+                        RemoteMarkdownDraftReviewCard(
+                            items = remoteDraftItems,
+                            status = remoteDraftStatus.orEmpty(),
+                            onRetainedChanged = { itemId, retained ->
+                                scope.launch {
+                                    container.database.markdownChangeDraftDao().updateItemRetained(itemId, retained)
+                                    remoteDraftItems = remoteDraftItems.map { item ->
+                                        if (item.id == itemId) item.copy(retained = retained) else item
+                                    }
+                                }
+                            },
+                            onApply = { selectedItemIds ->
+                                scope.launch {
+                                    actionError = null
+                                    runCatching {
+                                        val draftId = requireNotNull(remoteDraftId)
+                                        val dao = container.database.markdownChangeDraftDao()
+                                        remoteDraftStatus = "APPLYING"
+                                        val result = container.markdownDraftApplyCoordinator.apply(
+                                            draftId = draftId,
+                                            projectId = current.projectId,
+                                            selectedItemIds = selectedItemIds,
+                                        )
+                                        remoteDraftStatus = dao.findDraft(draftId)?.status
+                                        remoteDraftItems = dao.listItems(draftId)
+                                        val written = result.succeeded.mapNotNull { it.writtenDeliverable?.path }
+                                        if (written.isNotEmpty()) {
+                                            container.projectAppliedPaths.update { currentMap ->
+                                                currentMap + (current.projectId to (currentMap[current.projectId].orEmpty() + written).distinct())
+                                            }
+                                            container.projectContentInvalidation.emit(current.projectId)
+                                        }
+                                        if (result.failed.isNotEmpty()) {
+                                            actionError = result.failed.joinToString("；") { it.errorMessage.orEmpty() }
+                                        }
+                                    }.onFailure { error ->
+                                        actionError = error.message ?: "应用项目变更失败"
+                                        remoteDraftId?.let { draftId ->
+                                            remoteDraftStatus = container.database.markdownChangeDraftDao()
+                                                .findDraft(draftId)?.status
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                    }
+                }
                 actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 approvals.filter { it.status == "PENDING" }.forEach { approval ->
                     val position = RemoteSyncPosition(
@@ -325,7 +457,11 @@ internal fun RemoteTimelineSection(
 }
 
 @Composable
-internal fun RemoteCompletionCard(evidence: RemoteCompletionEvidence) {
+internal fun RemoteCompletionCard(
+    evidence: RemoteCompletionEvidence,
+    depositStatus: String? = null,
+    onDepositToProject: (() -> Unit)? = null,
+) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth().semantics { contentDescription = "任务完成证据" },
@@ -341,6 +477,14 @@ internal fun RemoteCompletionCard(evidence: RemoteCompletionEvidence) {
             CompletionEvidenceRow("测试", evidence.testSummary)
             CompletionEvidenceRow("Git", evidence.gitSummary)
             CompletionEvidenceRow(
+                "取证",
+                when (evidence.verification) {
+                    RemoteCompletionVerification.VERIFIED_V2 -> "已冻结验证"
+                    RemoteCompletionVerification.UNVERIFIED_V2 -> "v2 证据未完整验证"
+                    RemoteCompletionVerification.LEGACY_UNVERIFIED -> "旧版结果未验证"
+                },
+            )
+            CompletionEvidenceRow(
                 "遗留",
                 if (evidence.unresolved.isEmpty()) "0 项" else "${evidence.unresolved.size} 项",
             )
@@ -348,6 +492,22 @@ internal fun RemoteCompletionCard(evidence: RemoteCompletionEvidence) {
                 onClick = { expanded = !expanded },
                 modifier = Modifier.heightIn(min = 48.dp),
             ) { Text(if (expanded) "收起结果" else "查看结果") }
+            onDepositToProject?.let { deposit ->
+                Button(
+                    onClick = deposit,
+                    enabled = depositStatus == null,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) {
+                    Text(if (depositStatus == null) "沉淀到项目" else "已生成待审核 Diff")
+                }
+            }
+            if (evidence.verification != RemoteCompletionVerification.VERIFIED_V2) {
+                Text(
+                    "此结果可查看，但不能作为 M3 项目沉淀证据。请升级 Mac Bridge 后运行新任务。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             if (expanded) {
                 if (evidence.changedFiles.isNotEmpty()) {
                     Text(evidence.changedFiles.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
@@ -364,6 +524,62 @@ internal fun RemoteCompletionCard(evidence: RemoteCompletionEvidence) {
 }
 
 @Composable
+internal fun RemoteMarkdownDraftReviewCard(
+    items: List<MarkdownChangeDraftItemEntity>,
+    status: String,
+    onRetainedChanged: (itemId: String, retained: Boolean) -> Unit = { _, _ -> },
+    onApply: (selectedItemIds: Set<String>) -> Unit,
+) {
+    var expanded by rememberSaveable(items.firstOrNull()?.draftId) { mutableStateOf(false) }
+    val selectedIds = items.filter { it.retained }.mapTo(linkedSetOf(), MarkdownChangeDraftItemEntity::id)
+    Card(
+        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Remote 项目变更 Diff" },
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("审核 Diff", style = MaterialTheme.typography.titleMedium)
+            items.forEach { item ->
+                Row {
+                    Checkbox(
+                        checked = item.retained,
+                        onCheckedChange = { retained -> onRetainedChanged(item.id, retained) },
+                        enabled = status != "APPLYING" && item.applyStatus != "SUCCEEDED",
+                    )
+                    Text(
+                        "${if (item.operation == "CREATE") "新增" else "更新"} · ${item.relativePath}" +
+                            if (item.applyStatus == "SUCCEEDED") " · 已应用" else "",
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                }
+            }
+            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(if (expanded) "收起完整变更" else "查看完整变更")
+            }
+            if (expanded) {
+                items.forEach { item ->
+                    MarkdownDraftDiff(buildMarkdownDiff("", item.proposedMarkdown))
+                }
+            }
+            if (status == "APPLYING") {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text("正在应用所选变更")
+            }
+            if (status == "READY" || status == "PARTIALLY_APPLIED" || status == "FAILED") {
+                Button(
+                    onClick = { onApply(selectedIds) },
+                    enabled = selectedIds.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) {
+                    Text(if (status == "PARTIALLY_APPLIED" || status == "FAILED") "重试应用" else "应用所选")
+                }
+            } else if (status == "APPLIED") {
+                Text("已写入项目，尚未 Commit", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
 private fun CompletionEvidenceRow(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth()) {
         Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -371,6 +587,10 @@ private fun CompletionEvidenceRow(label: String, value: String) {
         Text(value)
     }
 }
+
+private fun String.sha256(): String = MessageDigest.getInstance("SHA-256")
+    .digest(encodeToByteArray())
+    .joinToString("") { byte -> "%02x".format(byte) }
 
 @Composable
 private fun ApprovalDetailCard(

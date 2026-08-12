@@ -71,6 +71,7 @@ class RemoteProtocolContractTest {
 
         assertFalse(availability.canStartM2Run)
         assertTrue(availability.canOpenLegacyHistory)
+        assertFalse(availability.canUseM3CompletionEvidence)
     }
 
     @Test
@@ -80,10 +81,36 @@ class RemoteProtocolContractTest {
                 "workspace.candidates.v1",
                 "run.lifecycle.v1",
                 "logical-replay.v1",
+                "completion-evidence.v2",
             ),
         )
 
         assertTrue(availability.canStartM2Run)
+        assertTrue(availability.canUseM3CompletionEvidence)
+    }
+
+    @Test
+    fun hostStatusParsesCapabilitiesAndFailsClosedForUnknownSchema() {
+        val capabilities = parseRemoteHostCapabilities(
+            RemoteEvent(
+                type = "host.status",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"schemaVersion":1,"capabilities":["run.lifecycle.v1","completion-evidence.v2","run.lifecycle.v1"]}""",
+                ),
+            ),
+        )
+
+        assertEquals(setOf("run.lifecycle.v1", "completion-evidence.v2"), capabilities)
+        assertTrue(
+            parseRemoteHostCapabilities(
+                RemoteEvent(
+                    type = "host.status",
+                    payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                        """{"schemaVersion":2,"capabilities":["completion-evidence.v2"]}""",
+                    ),
+                ),
+            ).isEmpty(),
+        )
     }
 
     @Test

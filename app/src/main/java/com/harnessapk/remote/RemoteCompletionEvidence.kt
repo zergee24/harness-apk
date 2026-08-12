@@ -15,6 +15,11 @@ data class RemoteCompletionEvidence(
     val gitState: String?,
     val unresolved: List<String>,
     val completedAt: Long,
+    val schemaVersion: Int = 1,
+    val completionId: String? = null,
+    val files: List<RemoteFileEvidence> = emptyList(),
+    val workspace: RemoteWorkspaceLocator? = null,
+    val verification: RemoteCompletionVerification = RemoteCompletionVerification.LEGACY_UNVERIFIED,
 ) {
     val fileSummary: String
         get() = if (changedFiles.isEmpty()) "文件未验证" else "文件 ${changedFiles.size} 个"
@@ -45,7 +50,28 @@ data class RemoteTestEvidence(
     val command: String,
     val status: String,
     val exitCode: Int?,
+    val evidenceId: String? = null,
+    val evidenceSha256: String? = null,
 )
+
+data class RemoteFileEvidence(
+    val evidenceId: String?,
+    val evidenceSha256: String?,
+    val path: String,
+    val source: String?,
+)
+
+data class RemoteWorkspaceLocator(
+    val workspaceId: String?,
+    val repositoryFingerprint: String?,
+    val cwd: String?,
+)
+
+enum class RemoteCompletionVerification {
+    VERIFIED_V2,
+    UNVERIFIED_V2,
+    LEGACY_UNVERIFIED,
+}
 
 data class RemoteTimelinePresentation(
     val id: String,
@@ -60,24 +86,59 @@ data class RemoteTimelinePresentation(
 
 internal fun parseRemoteCompletionEvidence(raw: String): RemoteCompletionEvidence {
     val root = Json.parseToJsonElement(raw).jsonObject
-    val changedFiles = (root["changedFiles"] as? JsonArray).orEmpty().mapNotNull { element ->
-        runCatching { element.jsonObject.string("path") }.getOrNull()
+    val schemaVersion = root.long("schemaVersion")?.toInt() ?: 1
+    require(schemaVersion in 1..2) { "不支持的 Remote completion schema：$schemaVersion" }
+    val files = (root["changedFiles"] as? JsonArray).orEmpty().mapNotNull { element ->
+        val file = runCatching { element.jsonObject }.getOrNull() ?: return@mapNotNull null
+        val path = file.string("path") ?: return@mapNotNull null
+        RemoteFileEvidence(
+            evidenceId = file.string("evidenceId"),
+            evidenceSha256 = file.string("evidenceSha256"),
+            path = path,
+            source = file.string("source"),
+        )
     }
     val tests = (root["tests"] as? JsonArray).orEmpty().mapNotNull { element ->
         val test = runCatching { element.jsonObject }.getOrNull() ?: return@mapNotNull null
         val command = test.string("command") ?: return@mapNotNull null
-        RemoteTestEvidence(command, test.string("status") ?: "UNVERIFIED", test.long("exitCode")?.toInt())
+        RemoteTestEvidence(
+            command = command,
+            status = test.string("status") ?: "UNVERIFIED",
+            exitCode = test.long("exitCode")?.toInt(),
+            evidenceId = test.string("evidenceId"),
+            evidenceSha256 = test.string("evidenceSha256"),
+        )
     }
     val unresolved = (root["unresolved"] as? JsonArray).orEmpty().mapNotNull {
         runCatching { it.jsonPrimitive.contentOrNull }.getOrNull()
     }
+    val workspace = (root["workspace"] as? JsonObject)?.let { locator ->
+        RemoteWorkspaceLocator(
+            workspaceId = locator.string("workspaceId"),
+            repositoryFingerprint = locator.string("repositoryFingerprint"),
+            cwd = locator.string("cwd"),
+        )
+    }
+    val completionId = root.string("completionId")
+    val hasStableEvidence = files.all { !it.evidenceId.isNullOrBlank() && !it.evidenceSha256.isNullOrBlank() } &&
+        tests.all { !it.evidenceId.isNullOrBlank() && !it.evidenceSha256.isNullOrBlank() }
+    val verification = when {
+        schemaVersion < 2 -> RemoteCompletionVerification.LEGACY_UNVERIFIED
+        !completionId.isNullOrBlank() && hasStableEvidence -> RemoteCompletionVerification.VERIFIED_V2
+        else -> RemoteCompletionVerification.UNVERIFIED_V2
+    }
     return RemoteCompletionEvidence(
         summary = root.string("summary") ?: "任务已完成",
-        changedFiles = changedFiles,
+        changedFiles = files.map(RemoteFileEvidence::path),
         tests = tests,
         gitState = (root["git"] as? JsonObject)?.string("state"),
         unresolved = unresolved,
         completedAt = root.long("completedAt") ?: 0L,
+        schemaVersion = schemaVersion,
+        completionId = completionId,
+        files = files,
+        workspace = workspace,
+        verification = verification,
     )
 }
 

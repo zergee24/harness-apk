@@ -1,0 +1,22 @@
+{
+  "summary": "M2 legacy completion",
+  "changedFiles": [
+    {
+      "path": "remote/cmd/bridge/main.go",
+      "source": "git"
+    }
+  ],
+  "tests": [
+    {
+      "command": "go test ./...",
+      "status": "PASSED",
+      "exitCode": 0
+    }
+  ],
+  "git": {
+    "state": "COMMITTED",
+    "branch": "codex/m2"
+  },
+  "unresolved": [],
+  "completedAt": 1723000000000
+}

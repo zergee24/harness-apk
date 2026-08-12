@@ -52,6 +52,83 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
     @Test
+    fun contextFactDismissalIsRunScopedWhileAppliedFactsSuppressFutureRuns() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK)
+            .build()
+        val dao = database.projectSearchDao()
+        val key = "key_decisions:${"a".repeat(64)}"
+        dao.upsertContextFact(
+            ContextFactDedupeEntity("project", key, "b".repeat(64), "run-1", "DISMISSED", 1L),
+        )
+
+        assertEquals(listOf(key), dao.suppressedContextFactKeys("project", "run-1"))
+        assertTrue(dao.suppressedContextFactKeys("project", "run-2").isEmpty())
+
+        dao.upsertContextFact(
+            ContextFactDedupeEntity("project", key, "b".repeat(64), "run-2", "PENDING", 2L),
+        )
+        dao.updateContextFactStatusForSource("run-2", "APPLIED", 3L)
+        assertEquals(listOf(key), dao.suppressedContextFactKeys("project", "run-3"))
+        database.close()
+    }
+
+    @Test
+    fun migration22To23PreservesM1M2DataAndAddsProjectEvidenceTables() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-22-23-project-memory-${System.nanoTime()}.db"
+        createVersion15Fixture(context, name)
+        upgradeVersion15FixtureTo20(context, name)
+        seedVersion20SearchMigrationData(context, name)
+        upgradeVersion20FixtureTo21(context, name)
+        upgradeVersion21FixtureTo22(context, name)
+        seedVersion22RemoteData(context, name)
+        seedVersion22MarkdownDraftData(context, name)
+
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(AppDatabase.MIGRATION_22_23)
+            .addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK)
+            .build()
+        val sqlite = migrated.openHelper.writableDatabase
+
+        assertEquals(23, sqlite.version)
+        assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM remote_runs WHERE id = 'run-m3-fixture'"))
+        assertEquals("workspace-fixture", sqlite.string("SELECT workspaceId FROM project_remote_bindings WHERE id = 'binding-missing-history'"))
+        assertEquals("turn.completed", sqlite.string("SELECT type FROM remote_run_events WHERE logicalEventId = 'event-m3-fixture'"))
+        assertEquals("PENDING", sqlite.string("SELECT status FROM remote_approvals WHERE id = 'approval-m3-fixture'"))
+        assertEquals("ENQUEUED", sqlite.string("SELECT status FROM remote_command_outbox WHERE commandId = 'command-m3-fixture'"))
+        assertEquals("GAP", sqlite.string("SELECT reconciliationState FROM remote_sync_cursors WHERE hostId = 'host-1' AND deviceId = 'device-1'"))
+        assertEquals(
+            "{\"schemaVersion\":2,\"projectId\":\"project-1\",\"projectContextSha256\":\"abc\"}",
+            sqlite.string("SELECT requestContextJson FROM chat_execution_entries WHERE id = 'entry-queue'"),
+        )
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM markdown_change_drafts WHERE id = 'draft-m3-fixture'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM markdown_change_draft_items WHERE draftId = 'draft-m3-fixture'"))
+        assertEquals(
+            "默认使用中文",
+            sqlite.string("SELECT body FROM local_search_documents WHERE id = 'message:daily-message'"),
+        )
+        listOf(
+            "project_retrieval_runs",
+            "project_evidence_snapshots",
+            "markdown_draft_origins",
+            "context_fact_dedupe",
+            "remote_run_completions",
+        ).forEach { table ->
+            assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '$table'"))
+            assertEquals(0, sqlite.scalarInt("SELECT COUNT(*) FROM $table"))
+        }
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_table_info('markdown_change_drafts') WHERE name = 'conversationId' AND [notnull] = 0"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM pragma_table_info('local_search_documents') WHERE name = 'sourceSha256'"))
+        sqlite.assertNoForeignKeyViolations()
+        migrated.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
     fun migration21To22AddsRemoteRunStateWithoutChangingM1Data() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-21-22-remote-${System.nanoTime()}.db"
@@ -61,12 +138,12 @@ class AppDatabaseTest {
         upgradeVersion20FixtureTo21(context, name)
 
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_21_22)
+            .addMigrations(AppDatabase.MIGRATION_21_22, AppDatabase.MIGRATION_22_23)
             .addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK)
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(22, sqlite.version)
+        assertEquals(23, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "{}",
@@ -145,12 +222,16 @@ class AppDatabaseTest {
         seedVersion20SearchMigrationData(context, name)
 
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22)
+            .addMigrations(
+                AppDatabase.MIGRATION_20_21,
+                AppDatabase.MIGRATION_21_22,
+                AppDatabase.MIGRATION_22_23,
+            )
             .addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK)
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(22, sqlite.version)
+        assertEquals(23, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "{}",
@@ -190,11 +271,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
                 AppDatabase.MIGRATION_21_22,
+                AppDatabase.MIGRATION_22_23,
             )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(22, sqlite.version)
+        assertEquals(23, sqlite.version)
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wikis'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wiki_versions'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversation_wiki_mounts'"))
@@ -969,11 +1051,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
                 AppDatabase.MIGRATION_21_22,
+                AppDatabase.MIGRATION_22_23,
             )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(22, sqlite.version)
+        assertEquals(23, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "daily-conversation|USER|默认使用中文",
@@ -1236,7 +1319,7 @@ class AppDatabaseTest {
         val migrated = version15
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(22, sqlite.version)
+        assertEquals(23, sqlite.version)
         assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals("默认使用中文", sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"))
         assertEquals("notes/project.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
@@ -1293,11 +1376,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
                 AppDatabase.MIGRATION_21_22,
+                AppDatabase.MIGRATION_22_23,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(22, sqlite.version)
+        assertEquals(23, sqlite.version)
         assertEquals(
             1,
             sqlite.scalarInt(
@@ -1484,13 +1568,14 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
                 AppDatabase.MIGRATION_21_22,
+                AppDatabase.MIGRATION_22_23,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
         val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
 
         assertTrue("迁移耗时 ${elapsedMillis}ms，阻塞了会话页启动", elapsedMillis < 5_000)
-        assertEquals(22, sqlite.version)
+        assertEquals(23, sqlite.version)
         assertEquals(12_001, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
         assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         db.conversationDao().insert(conversation("post-large-upgrade", updatedAt = 32L))
@@ -1519,6 +1604,7 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
                 AppDatabase.MIGRATION_21_22,
+                AppDatabase.MIGRATION_22_23,
             )
             .build()
         db.openHelper.writableDatabase
@@ -1569,11 +1655,12 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_19_20,
                     AppDatabase.MIGRATION_20_21,
                     AppDatabase.MIGRATION_21_22,
+                    AppDatabase.MIGRATION_22_23,
                 )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(22, sqlite.version)
+            assertEquals(23, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -1617,11 +1704,12 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_19_20,
                     AppDatabase.MIGRATION_20_21,
                     AppDatabase.MIGRATION_21_22,
+                    AppDatabase.MIGRATION_22_23,
                 )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(22, sqlite.version)
+            assertEquals(23, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -2302,6 +2390,132 @@ class AppDatabaseTest {
         val db = helper.writableDatabase
         check(db.version == 21)
         helper.close()
+    }
+
+    private fun upgradeVersion21FixtureTo22(context: Context, name: String) {
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(
+                    object : SupportSQLiteOpenHelper.Callback(22) {
+                        override fun onConfigure(db: SupportSQLiteDatabase) = db.setForeignKeyConstraintsEnabled(true)
+                        override fun onCreate(db: SupportSQLiteDatabase) = error("version 21 fixture must already exist")
+                        override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                            check(oldVersion == 21 && newVersion == 22)
+                            AppDatabase.MIGRATION_21_22.migrate(db)
+                        }
+                    },
+                ).build(),
+        )
+        check(helper.writableDatabase.version == 22)
+        helper.close()
+    }
+
+    private fun seedVersion22RemoteData(context: Context, name: String) {
+        val db = context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null)
+        db.execSQL(
+            """
+            INSERT INTO project_remote_bindings (
+                id, projectId, hostId, workspaceId, cwd, displayName, repositoryFingerprint,
+                repositoryLabel, state, verifiedAt, createdAt, updatedAt
+            ) VALUES (
+                'binding-missing-history', 'project-1', 'host-1', 'workspace-fixture', '/mac/project',
+                'Project One', 'fingerprint-1', 'owner/repo', 'VERIFIED', 8, 8, 9
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO remote_runs (
+                id, projectId, projectNameSnapshot, bindingId, bindingSnapshotJson, hostId,
+                threadId, turnId, objective, status, latestLine, lastLogicalSequence,
+                startedAt, updatedAt, completedAt, completionJson, errorMessage
+            ) VALUES (
+                'run-m3-fixture', 'project-1', 'Project One', 'binding-missing-history', '{}', 'host-1',
+                'thread-1', 'turn-1', '验证 M3', 'COMPLETED', '完成', 1,
+                10, 11, 11, '{"summary":"done"}', NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO remote_run_events (
+                logicalEventId, runId, hostId, deviceId, sequence, type, itemId,
+                presentationKind, payloadJson, createdAt
+            ) VALUES (
+                'event-m3-fixture', 'run-m3-fixture', 'host-1', 'device-1', 1,
+                'turn.completed', 'turn-1', 'STATUS', '{"status":"completed"}', 11
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO remote_approvals (
+                id, runId, logicalEventId, serverRequestIdJson, processEpoch, method, itemId,
+                actionType, target, commandPreview, detailsJson, availableDecisionsJson,
+                risk, status, responseCommandId, requestedAt, resolvedAt
+            ) VALUES (
+                'approval-m3-fixture', 'run-m3-fixture', 'approval-event-m3', '1', 'epoch-1',
+                'item/commandExecution/requestApproval', 'item-1', 'COMMAND', 'gradlew test',
+                './gradlew :app:testDebugUnitTest', '{}', '["allow"]', 'MEDIUM', 'PENDING', NULL, 10, NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO remote_command_outbox (
+                commandId, runId, type, payloadJson, payloadSha256, status, attemptCount,
+                nextAttemptAt, lastAttemptAt, acknowledgedAt, completedAt, resultJson,
+                lastError, createdAt, updatedAt
+            ) VALUES (
+                'command-m3-fixture', 'run-m3-fixture', 'APPROVAL', '{}', 'abc', 'ENQUEUED', 1,
+                12, 11, NULL, NULL, NULL, NULL, 10, 11
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO remote_sync_cursors (
+                hostId, deviceId, lastContiguousSequence, gapFromSequence, reconciliationState, lastSyncedAt
+            ) VALUES ('host-1', 'device-1', 1, 2, 'GAP', 11)
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            UPDATE chat_execution_entries
+            SET requestContextJson = '{"schemaVersion":2,"projectId":"project-1","projectContextSha256":"abc"}'
+            WHERE id = 'entry-queue'
+            """.trimIndent(),
+        )
+        db.close()
+    }
+
+    private fun seedVersion22MarkdownDraftData(context: Context, name: String) {
+        val db = context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null)
+        db.execSQL(
+            """
+            INSERT INTO markdown_change_drafts (
+                id, conversationId, projectId, sourceUserMessageId, assistantMessageId,
+                status, summary, rawResponse, errorMessage, createdAt, updatedAt
+            ) VALUES (
+                'draft-m3-fixture', 'daily-conversation', 'project-1', 'daily-message', NULL,
+                'READY', '保留草稿', NULL, NULL, 10, 11
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO markdown_change_draft_items (
+                id, draftId, itemIndex, operation, relativePath, title, reason,
+                proposedMarkdown, retained, baselineSha256, expectedAbsent,
+                applyStatus, applyErrorMessage
+            ) VALUES (
+                'draft-item-m3-fixture', 'draft-m3-fixture', 0, 'UPDATE', 'context.md',
+                '更新上下文', '测试迁移', '# M3', 1, NULL, 0, NULL, NULL
+            )
+            """.trimIndent(),
+        )
+        db.close()
     }
 
     private fun remoteBinding() = ProjectRemoteBindingEntity(

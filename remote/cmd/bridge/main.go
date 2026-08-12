@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ type bridge struct {
 	journal      *journal.Store
 	commandCache *commandcache.Store
 	routes       *runstate.RouteStore
+	terminals    *completion.TerminalRunStore
 	workspaces   *workspace.Registry
 	seen         map[string]time.Time
 }
@@ -275,6 +277,13 @@ func runServe(defaultPath string, args []string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		terminalStore, err := completion.OpenTerminalRunStore(filepath.Join(filepath.Dir(*statePath), "terminal-runs.json"))
+		if err != nil {
+			log.Printf("open terminal run ledger: %v", err)
+			app.close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
 		if err := routeStore.BeginProcessEpoch(app.client.ProcessEpoch()); err != nil {
 			log.Printf("start app-server process epoch: %v", err)
 			app.close()
@@ -290,7 +299,7 @@ func runServe(defaultPath string, args []string) {
 		}
 		b := &bridge{
 			state: state, path: *statePath, app: app, journal: journalStore,
-			commandCache: commandStore, routes: routeStore, workspaces: workspaceRegistry,
+			commandCache: commandStore, routes: routeStore, terminals: terminalStore, workspaces: workspaceRegistry,
 			seen: map[string]time.Time{},
 		}
 		if err := b.run(context.Background()); err != nil {
@@ -367,6 +376,12 @@ func (b *bridge) run(ctx context.Context) error {
 	if err := b.app.client.Notify("initialized", map[string]any{}); err != nil {
 		return err
 	}
+	if err := b.recoverTurnStartRoutes(); err != nil {
+		log.Printf("recover turn/start routes after bridge connection: %v", err)
+	}
+	if err := b.recoverTerminalRuns(ctx, ""); err != nil {
+		log.Printf("recover terminal runs after bridge connection: %v", err)
+	}
 	for {
 		select {
 		case err := <-errorsCh:
@@ -432,7 +447,10 @@ func (b *bridge) acknowledge(deviceID, messageID string) {
 func (b *bridge) executeCommand(ctx context.Context, deviceID string, command protocol.Command) error {
 	switch command.Type {
 	case "host.status":
-		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "host.status", RequestID: command.RequestID, Message: "online", CreatedAt: time.Now().UnixMilli()}, "")
+		return b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "host.status", RequestID: command.RequestID, Message: "online",
+			Payload: hostStatusPayload(), CreatedAt: time.Now().UnixMilli(),
+		}, "")
 	case "thread.list":
 		return b.requestAppServer(ctx, deviceID, command, "thread/list", map[string]any{
 			"limit": 50, "sortKey": "updated_at", "sortDirection": "desc",
@@ -453,15 +471,12 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	case "thread.start":
 		return b.requestAppServer(ctx, deviceID, command, "thread/start", map[string]any{"cwd": command.CWD})
 	case "turn.start":
-		if err := b.claimThread(command, deviceID); err != nil {
-			return err
-		}
-		return b.requestAppServer(ctx, deviceID, command, "turn/start", map[string]any{"threadId": command.ThreadID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
+		return b.requestTurnStart(ctx, deviceID, command, map[string]any{"threadId": command.ThreadID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
 	case "turn.steer":
 		if err := b.claimThread(command, deviceID); err != nil {
 			return err
 		}
-		return b.requestAppServer(ctx, deviceID, command, "turn/steer", map[string]any{"threadId": command.ThreadID, "expectedTurnId": command.ExpectedTurnID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
+		return b.requestTurnAppServer(ctx, deviceID, command, "turn/steer", map[string]any{"threadId": command.ThreadID, "expectedTurnId": command.ExpectedTurnID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
 	case "turn.interrupt":
 		return b.requestAppServer(ctx, deviceID, command, "turn/interrupt", map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID})
 	case "approval.respond":
@@ -476,6 +491,19 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	default:
 		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "error", RequestID: command.RequestID, Message: "unsupported command: " + command.Type, CreatedAt: time.Now().UnixMilli()}, "")
 	}
+}
+
+func hostStatusPayload() json.RawMessage {
+	return mustJSON(map[string]any{
+		"schemaVersion": 1,
+		"capabilities": []string{
+			"workspace.candidates.v1",
+			"run.lifecycle.v1",
+			"logical-replay.v1",
+			"completion-evidence.v2",
+			"turn-command-idempotency.v1",
+		},
+	})
 }
 
 func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string, command protocol.Command) error {
@@ -653,10 +681,16 @@ func (b *bridge) resumeLogicalEvents(ctx context.Context, deviceID string, comma
 	if b.journal == nil {
 		return errors.New("logical journal is unavailable")
 	}
-	head := b.journal.Head(b.state.HostID, deviceID)
+	knownHead := b.journal.Head(b.state.HostID, deviceID)
+	if err := b.recoverTurnStartRoutes(); err != nil {
+		log.Printf("recover turn/start routes on sync.resume: %v", err)
+	}
+	if err := b.recoverTerminalRuns(ctx, deviceID); err != nil {
+		log.Printf("recover terminal runs on sync.resume: %v", err)
+	}
 	ackThrough := command.HighestContiguousSequence
-	if ackThrough > head {
-		ackThrough = head
+	if ackThrough > knownHead {
+		ackThrough = knownHead
 	}
 	if err := b.journal.Ack(b.state.HostID, deviceID, ackThrough); err != nil {
 		return err
@@ -664,7 +698,7 @@ func (b *bridge) resumeLogicalEvents(ctx context.Context, deviceID string, comma
 	b.mu.Lock()
 	forceSnapshot := b.state.NeedsInitialGapSnapshot
 	b.mu.Unlock()
-	if forceSnapshot || command.HighestContiguousSequence > head || b.journal.RequiresSnapshot(b.state.HostID, deviceID, ackThrough) {
+	if forceSnapshot || command.HighestContiguousSequence > knownHead || b.journal.RequiresSnapshot(b.state.HostID, deviceID, ackThrough) {
 		return b.sendEvent(ctx, deviceID, protocol.Event{
 			Type: "sync.gap", RequestID: command.RequestID,
 			Payload: mustJSON(map[string]any{
@@ -692,6 +726,7 @@ type runSnapshot struct {
 	TurnID         string          `json:"turnId,omitempty"`
 	LatestLine     string          `json:"latestLine"`
 	CompletionJSON json.RawMessage `json:"completion,omitempty"`
+	CompletedAt    int64           `json:"completedAt,omitempty"`
 	ErrorMessage   string          `json:"errorMessage,omitempty"`
 }
 
@@ -699,25 +734,9 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 	routes := b.routes.ByRuns(runIDs)
 	runs := make([]runSnapshot, 0, len(routes))
 	for _, route := range routes {
-		snapshot := runSnapshot{
-			RunID: route.RunID, ThreadID: route.ThreadID, TurnID: route.TurnID,
-			Status: "RECONCILING", LatestLine: "正在与 Mac 对账",
-		}
-		if route.ThreadID != "" {
-			readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			result, err := b.app.client.Call(readCtx, "thread/read", map[string]any{
-				"threadId": route.ThreadID, "includeTurns": true,
-			})
-			cancel()
-			if err == nil {
-				snapshot.Status, snapshot.LatestLine = snapshotStatus(result, route.TurnID)
-				if snapshot.Status == "COMPLETED" {
-					if turn, found := turnSnapshot(result, route.TurnID); found {
-						evidence := buildCompletionEvidence(route, turn)
-						snapshot.CompletionJSON = mustJSON(evidence)
-					}
-				}
-			}
+		snapshot, err := b.snapshotForRoute(ctx, route)
+		if err != nil {
+			return err
 		}
 		runs = append(runs, snapshot)
 	}
@@ -754,6 +773,9 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 }
 
 func snapshotStatus(raw json.RawMessage, turnID string) (string, string) {
+	if turnID == "" {
+		return "RECONCILING", "正在与 Mac 对账"
+	}
 	var result struct {
 		Thread struct {
 			Turns []struct {
@@ -785,11 +807,13 @@ func snapshotStatus(raw json.RawMessage, turnID string) (string, string) {
 			return "FAILED", "任务失败"
 		case "interrupted", "cancelled", "canceled":
 			return "CANCELLED", "任务已停止"
-		default:
+		case "inprogress", "running":
 			return "RUNNING", "任务正在 Mac 上运行"
+		default:
+			return "RECONCILING", "正在与 Mac 对账"
 		}
 	}
-	return "RUNNING", "任务正在 Mac 上运行"
+	return "RECONCILING", "正在与 Mac 对账"
 }
 
 func (b *bridge) sendLogicalEvent(ctx context.Context, event protocol.LogicalEvent) error {
@@ -842,6 +866,199 @@ func (b *bridge) requestAppServer(
 	method string,
 	params any,
 ) error {
+	return b.requestAppServerAfter(ctx, deviceID, command, method, params, nil)
+}
+
+func (b *bridge) requestTurnAppServer(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	method string,
+	params any,
+) error {
+	return b.requestAppServerAfter(ctx, deviceID, command, method, params, func(result json.RawMessage) error {
+		return b.backfillTurnRoute(command, result)
+	})
+}
+
+type turnRPCOutcome string
+
+const (
+	turnRPCSucceeded turnRPCOutcome = "SUCCEEDED"
+	turnRPCUnknown   turnRPCOutcome = "UNKNOWN"
+	turnRPCFailed    turnRPCOutcome = "FAILED"
+)
+
+type turnStartReconciliation struct {
+	Command protocol.Command `json:"command"`
+	Result  json.RawMessage  `json:"result"`
+}
+
+func legacyTurnStartCacheIdentity(command protocol.Command) (string, string) {
+	identity := firstNonEmpty(command.CommandID, command.RequestID)
+	if identity == "" {
+		return "", ""
+	}
+	raw, _ := json.Marshal(command)
+	digest := sha256.Sum256(raw)
+	return "legacy-turn-start:" + identity, hex.EncodeToString(digest[:])
+}
+
+func (b *bridge) requestTurnStart(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	params any,
+) error {
+	if command.ThreadID == "" || firstNonEmpty(command.CommandID, command.RequestID) == "" {
+		return errors.New("turn.start stable command and thread identity are required")
+	}
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		result, outcome, err := b.executeTurnStartOnce(callCtx, deviceID, command, params)
+		_ = b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "rpc.response", RequestID: command.RequestID,
+			Payload: turnRPCResponsePayload(result, outcome, err), CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}()
+	return nil
+}
+
+func (b *bridge) executeTurnStartOnce(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	params any,
+) (json.RawMessage, turnRPCOutcome, error) {
+	if b.commandCache == nil || b.routes == nil {
+		return nil, turnRPCFailed, errors.New("turn.start persistence is unavailable")
+	}
+	cacheID, payloadHash := legacyTurnStartCacheIdentity(command)
+	if cacheID == "" {
+		return nil, turnRPCFailed, errors.New("turn.start stable command identity is required")
+	}
+	record, execute, err := b.commandCache.Begin(cacheID, "turn.start", payloadHash)
+	if err != nil {
+		return nil, turnRPCFailed, err
+	}
+	if !execute {
+		return b.reuseTurnStartRecord(record)
+	}
+	if err := b.claimThread(command, deviceID); err != nil {
+		_, persistErr := b.commandCache.Fail(cacheID, err)
+		return nil, turnRPCFailed, errors.Join(err, persistErr)
+	}
+	if b.app == nil || b.app.client == nil {
+		err := errors.New("app-server is unavailable")
+		_, persistErr := b.commandCache.Fail(cacheID, err)
+		return nil, turnRPCFailed, errors.Join(err, persistErr)
+	}
+	result, err := b.app.client.Call(ctx, "turn/start", params)
+	if err != nil {
+		_, persistErr := b.commandCache.MarkUnknown(cacheID, err)
+		return nil, turnRPCUnknown, errors.Join(err, persistErr)
+	}
+	if err := b.backfillTurnRoute(command, result); err != nil {
+		pending := mustJSON(turnStartReconciliation{Command: command, Result: result})
+		_, persistErr := b.commandCache.MarkUnknownWithResult(cacheID, err, pending)
+		return nil, turnRPCUnknown, errors.Join(err, persistErr)
+	}
+	if _, err := b.commandCache.Complete(cacheID, "", result); err != nil {
+		pending := mustJSON(turnStartReconciliation{Command: command, Result: result})
+		_, persistErr := b.commandCache.MarkUnknownWithResult(cacheID, err, pending)
+		return nil, turnRPCUnknown, errors.Join(err, persistErr)
+	}
+	return append(json.RawMessage(nil), result...), turnRPCSucceeded, nil
+}
+
+func (b *bridge) reuseTurnStartRecord(record commandcache.Record) (json.RawMessage, turnRPCOutcome, error) {
+	switch record.Status {
+	case commandcache.StatusSucceeded:
+		return append(json.RawMessage(nil), record.ResultJSON...), turnRPCSucceeded, nil
+	case commandcache.StatusUnknown:
+		if len(record.ResultJSON) > 0 {
+			var pending turnStartReconciliation
+			if json.Unmarshal(record.ResultJSON, &pending) == nil && len(pending.Result) > 0 {
+				if err := b.backfillTurnRoute(pending.Command, pending.Result); err == nil {
+					if _, resolveErr := b.commandCache.ResolveUnknown(record.CommandID, pending.Result); resolveErr == nil {
+						return append(json.RawMessage(nil), pending.Result...), turnRPCSucceeded, nil
+					}
+				}
+			}
+		}
+		message := record.LastError
+		if message == "" {
+			message = "turn.start outcome requires reconciliation"
+		}
+		return nil, turnRPCUnknown, errors.New(message)
+	case commandcache.StatusInFlight:
+		return nil, turnRPCUnknown, errors.New("turn.start is already in flight")
+	case commandcache.StatusFailed:
+		return nil, turnRPCFailed, errors.New(record.LastError)
+	default:
+		return nil, turnRPCUnknown, errors.New("turn.start outcome is unknown")
+	}
+}
+
+func (b *bridge) recoverTurnStartRoutes() error {
+	if b.commandCache == nil || b.routes == nil {
+		return nil
+	}
+	var recoveryErrors []error
+	for _, record := range b.commandCache.RecordsByTypeStatus("turn.start", commandcache.StatusUnknown) {
+		if len(record.ResultJSON) == 0 {
+			continue
+		}
+		var pending turnStartReconciliation
+		if err := json.Unmarshal(record.ResultJSON, &pending); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("decode %s reconciliation: %w", record.CommandID, err))
+			continue
+		}
+		if len(pending.Result) == 0 {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("decode %s reconciliation: app-server result is missing", record.CommandID))
+			continue
+		}
+		if err := b.backfillTurnRoute(pending.Command, pending.Result); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("reconcile %s route: %w", record.CommandID, err))
+			continue
+		}
+		if _, err := b.commandCache.ResolveUnknown(record.CommandID, pending.Result); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("resolve %s reconciliation: %w", record.CommandID, err))
+		}
+	}
+	return errors.Join(recoveryErrors...)
+}
+
+func turnRPCResponsePayload(result json.RawMessage, outcome turnRPCOutcome, cause error) json.RawMessage {
+	if outcome == turnRPCSucceeded {
+		return mustJSON(map[string]any{"result": result})
+	}
+	if outcome == turnRPCUnknown {
+		message := "turn.start outcome requires reconciliation"
+		if cause != nil {
+			message = cause.Error()
+		}
+		return mustJSON(map[string]any{
+			"outcome": "UNKNOWN", "status": "RECONCILING", "retrySafe": false,
+			"requiresSnapshot": true, "message": message,
+		})
+	}
+	message := "turn.start failed"
+	if cause != nil {
+		message = cause.Error()
+	}
+	return mustJSON(map[string]any{"error": message, "retrySafe": false})
+}
+
+func (b *bridge) requestAppServerAfter(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	method string,
+	params any,
+	after func(json.RawMessage) error,
+) error {
 	if method == "" {
 		return errors.New("app-server method is required")
 	}
@@ -849,6 +1066,9 @@ func (b *bridge) requestAppServer(
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		result, err := b.app.client.Call(callCtx, method, params)
+		if err == nil && after != nil {
+			err = after(result)
+		}
 		if err != nil {
 			if command.CommandID != "" && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
 				_, _ = b.commandCache.MarkUnknown(command.CommandID, err)
@@ -865,6 +1085,51 @@ func (b *bridge) requestAppServer(
 		}, "")
 	}()
 	return nil
+}
+
+func (b *bridge) snapshotForRoute(ctx context.Context, route runstate.Route) (runSnapshot, error) {
+	if b.terminals != nil {
+		if record, found := b.terminals.Lookup(route.RunID); found {
+			return terminalSnapshot(route, record), nil
+		}
+	}
+	snapshot := runSnapshot{
+		RunID: route.RunID, ThreadID: route.ThreadID, TurnID: route.TurnID,
+		Status: "RECONCILING", LatestLine: "正在与 Mac 对账",
+	}
+	if route.ThreadID == "" || b.app == nil || b.app.client == nil {
+		return snapshot, nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	result, err := b.app.client.Call(readCtx, "thread/read", map[string]any{
+		"threadId": route.ThreadID, "includeTurns": true,
+	})
+	cancel()
+	if err != nil {
+		return snapshot, nil
+	}
+	liveStatus, liveLine := snapshotStatus(result, route.TurnID)
+	switch liveStatus {
+	case "COMPLETED", "FAILED", "CANCELLED":
+		snapshot.ErrorMessage = "terminal run ledger unavailable"
+	default:
+		snapshot.Status, snapshot.LatestLine = liveStatus, liveLine
+	}
+	return snapshot, nil
+}
+
+func terminalSnapshot(route runstate.Route, record completion.TerminalRunRecord) runSnapshot {
+	latestLine := "任务已完成"
+	if record.Status == "FAILED" {
+		latestLine = "任务失败"
+	} else if record.Status == "CANCELLED" {
+		latestLine = "任务已停止"
+	}
+	return runSnapshot{
+		RunID: route.RunID, ThreadID: route.ThreadID, TurnID: route.TurnID,
+		Status: record.Status, LatestLine: latestLine,
+		CompletionJSON: append(json.RawMessage(nil), record.CompletionJSON...), CompletedAt: record.CompletedAt,
+	}
 }
 
 func (b *bridge) respondApproval(ctx context.Context, deviceID string, command protocol.Command) error {
@@ -1013,6 +1278,13 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 	if message.Method == "turn/completed" {
 		pushKind = "completion"
 		if route, ok := b.routeForParams(message.Params); ok {
+			if b.terminals != nil {
+				if err := b.terminals.Observe(completion.TerminalObservation{
+					RunID: route.RunID, Params: message.Params, ObservedAt: time.Now().UnixMilli(),
+				}); err != nil {
+					log.Printf("persist terminal observation before reconciliation for %s: %v", route.RunID, err)
+				}
+			}
 			go b.completeRun(ctx, route, message.Params)
 		}
 	}
@@ -1112,45 +1384,170 @@ func userInputLogicalPayload(raw json.RawMessage) json.RawMessage {
 }
 
 func (b *bridge) completeRun(ctx context.Context, route runstate.Route, params json.RawMessage) {
+	if b.terminals != nil {
+		if err := b.terminals.Observe(completion.TerminalObservation{
+			RunID: route.RunID, Params: params, ObservedAt: time.Now().UnixMilli(),
+		}); err != nil {
+			log.Printf("persist terminal observation for %s: %v", route.RunID, err)
+		}
+	}
+	if err := b.reconcileTerminalRun(ctx, route, params); err != nil {
+		log.Printf("defer terminal run %s: %v", route.RunID, err)
+		if b.terminals != nil {
+			if persistErr := b.terminals.RecordObservationFailure(route.RunID, err.Error()); persistErr != nil {
+				log.Printf("persist terminal reconciliation failure for %s: %v", route.RunID, persistErr)
+			}
+		}
+	}
+}
+
+func (b *bridge) reconcileTerminalRun(ctx context.Context, route runstate.Route, params json.RawMessage) error {
+	if b.terminals != nil {
+		if frozen, found := b.terminals.Lookup(route.RunID); found {
+			return b.publishFrozenTerminal(ctx, route, frozen)
+		}
+	}
+	if b.app == nil || b.app.client == nil || route.ThreadID == "" || route.TurnID == "" {
+		return errors.New("terminal route or app-server is unavailable")
+	}
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	result, err := b.app.client.Call(callCtx, "thread/read", map[string]any{
 		"threadId": route.ThreadID, "includeTurns": true,
 	})
 	if err != nil {
-		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.failed", mustJSON(map[string]string{
-			"latestLine": "读取完成结果失败", "errorMessage": err.Error(),
-		}))
-		return
+		return fmt.Errorf("thread/read failed: %w", err)
 	}
 	turn, ok := turnSnapshot(result, route.TurnID)
 	if !ok {
-		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.failed", mustJSON(map[string]string{
-			"latestLine": "完成结果缺少目标 Turn", "errorMessage": "thread/read did not contain the routed turn",
-		}))
-		return
+		return fmt.Errorf("thread/read did not contain target turn %s", route.TurnID)
 	}
 	status := completionTurnStatus(params, turn.Status)
-	if status == "interrupted" || status == "cancelled" || status == "canceled" {
-		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.cancelled", mustJSON(map[string]any{
-			"threadId": route.ThreadID, "turnId": route.TurnID,
-			"presentationKind": "CANCELLED", "latestLine": "任务已停止",
-		}))
-		return
+	if status == "cancelled" {
+		record, err := b.freezeTerminal(route, "CANCELLED", nil, time.Now().UnixMilli())
+		if err != nil {
+			return fmt.Errorf("freeze cancelled run before journal: %w", err)
+		}
+		return b.publishFrozenTerminal(ctx, route, record)
 	}
 	if status == "failed" {
-		_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.failed", mustJSON(map[string]any{
-			"threadId": route.ThreadID, "turnId": route.TurnID,
-			"presentationKind": "RECOVERY", "latestLine": "任务失败",
-		}))
-		return
+		record, err := b.freezeTerminal(route, "FAILED", nil, time.Now().UnixMilli())
+		if err != nil {
+			return fmt.Errorf("freeze failed run before journal: %w", err)
+		}
+		return b.publishFrozenTerminal(ctx, route, record)
+	}
+	if status != "completed" {
+		return errors.New("target turn status is unknown or non-terminal")
 	}
 	evidence := buildCompletionEvidence(route, turn)
-	payload := mustJSON(map[string]any{
-		"threadId": route.ThreadID, "turnId": route.TurnID,
-		"presentationKind": "COMPLETION", "latestLine": "任务已完成", "completion": evidence,
-	})
-	_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, "run.completed", payload)
+	record, err := b.freezeTerminal(route, "COMPLETED", mustJSON(evidence), evidence.CompletedAt)
+	if err != nil {
+		return fmt.Errorf("freeze completed run before journal: %w", err)
+	}
+	return b.publishFrozenTerminal(ctx, route, record)
+}
+
+func (b *bridge) recoverTerminalRuns(ctx context.Context, deviceID string) error {
+	if b.terminals == nil {
+		return nil
+	}
+	var recoveryErrors []error
+	for _, record := range b.terminals.PendingJournalRecords() {
+		route, ok := b.routes.ByRun(record.RunID)
+		if !ok || (deviceID != "" && route.DeviceID != deviceID) {
+			continue
+		}
+		if err := b.publishFrozenTerminal(ctx, route, record); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("publish frozen terminal %s: %w", record.RunID, err))
+		}
+	}
+	for _, observation := range b.terminals.PendingObservations() {
+		route, ok := b.routes.ByRun(observation.RunID)
+		if !ok || (deviceID != "" && route.DeviceID != deviceID) {
+			continue
+		}
+		if err := b.reconcileTerminalRun(ctx, route, observation.Params); err != nil {
+			_ = b.terminals.RecordObservationFailure(observation.RunID, err.Error())
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("reconcile observed terminal %s: %w", observation.RunID, err))
+		}
+	}
+	return errors.Join(recoveryErrors...)
+}
+
+func (b *bridge) publishFrozenTerminal(ctx context.Context, route runstate.Route, record completion.TerminalRunRecord) error {
+	eventType, payload := frozenTerminalPayload(route, record)
+	if b.terminals == nil {
+		_, err := b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, eventType, payload)
+		return err
+	}
+	if b.journal == nil {
+		return errors.New("logical journal is unavailable")
+	}
+	eventID := frozenTerminalEventID(b.state.HostID, route, record)
+	if !b.journal.Has(eventID) {
+		event := protocol.LogicalEvent{
+			SchemaVersion: 1, EventID: eventID, HostID: b.state.HostID, DeviceID: route.DeviceID,
+			RunID: route.RunID, Type: eventType, Payload: payload, CreatedAt: record.CompletedAt,
+		}
+		if err := b.sendLogicalEvent(ctx, event); err != nil && !b.journal.Has(eventID) {
+			return err
+		}
+	}
+	return b.terminals.MarkJournaled(route.RunID, eventID)
+}
+
+func frozenTerminalEventID(hostID string, route runstate.Route, record completion.TerminalRunRecord) string {
+	identity := strings.Join([]string{
+		hostID, route.DeviceID, route.RunID, record.Status,
+		strconv.FormatInt(record.CompletedAt, 10), record.CompletionSHA256,
+	}, "\x00")
+	digest := sha256.Sum256([]byte(identity))
+	return "terminal-" + hex.EncodeToString(digest[:16])
+}
+
+func frozenTerminalPayload(route runstate.Route, record completion.TerminalRunRecord) (string, json.RawMessage) {
+	payload := map[string]any{"threadId": route.ThreadID, "turnId": route.TurnID}
+	switch record.Status {
+	case "COMPLETED":
+		payload["presentationKind"] = "COMPLETION"
+		payload["latestLine"] = "任务已完成"
+		payload["completion"] = record.CompletionJSON
+		return "run.completed", mustJSON(payload)
+	case "FAILED":
+		payload["presentationKind"] = "RECOVERY"
+		payload["latestLine"] = "任务失败"
+		return "run.failed", mustJSON(payload)
+	default:
+		payload["presentationKind"] = "CANCELLED"
+		payload["latestLine"] = "任务已停止"
+		return "run.cancelled", mustJSON(payload)
+	}
+}
+
+func (b *bridge) freezeTerminal(
+	route runstate.Route,
+	status string,
+	completionJSON json.RawMessage,
+	completedAt int64,
+) (completion.TerminalRunRecord, error) {
+	record := completion.TerminalRunRecord{
+		RunID: route.RunID, Status: status, CompletionJSON: completionJSON,
+		CompletedAt: completedAt, Workspace: completionWorkspace(route),
+	}
+	if b.terminals == nil {
+		return record, nil
+	}
+	frozen, _, err := b.terminals.Freeze(record)
+	return frozen, err
+}
+
+func completionWorkspace(route runstate.Route) completion.WorkspaceLocator {
+	var baseline runstate.WorkspaceBaseline
+	_ = json.Unmarshal([]byte(route.BaselineJSON), &baseline)
+	return completion.WorkspaceLocator{
+		WorkspaceID: route.WorkspaceID, RepositoryFingerprint: baseline.RepositoryFingerprint, CWD: baseline.CWD,
+	}
 }
 
 func buildCompletionEvidence(route runstate.Route, turn completedTurn) completion.RunCompletion {
@@ -1161,15 +1558,27 @@ func buildCompletionEvidence(route runstate.Route, turn completedTurn) completio
 		PorcelainV2Z: baseline.PorcelainV2Z, CapturedAt: baseline.CapturedAt,
 	}
 	after, inspectErr := workspace.CaptureBaseline(baseline.CWD)
+	inspectionErrors := make([]string, 0, 2)
 	if inspectErr != nil {
-		after = workspace.Baseline{}
+		inspectionErrors = append(inspectionErrors, "capture workspace state: "+inspectErr.Error())
+	} else if before.IsGit && !after.IsGit {
+		inspectionErrors = append(inspectionErrors, "workspace is no longer verifiably a Git repository")
 	}
-	committed, _ := workspace.ChangedFilesBetween(baseline.CWD, before.Head, after.Head)
+	committed := []string(nil)
+	if inspectErr == nil && (before.IsGit == after.IsGit) {
+		var diffErr error
+		committed, diffErr = workspace.ChangedFilesBetween(baseline.CWD, before.Head, after.Head)
+		if diffErr != nil {
+			inspectionErrors = append(inspectionErrors, "inspect committed files: "+diffErr.Error())
+		}
+	}
 	observed := workspace.ChangedFilesFromStatus(before.PorcelainV2Z, after.PorcelainV2Z)
 	return completion.Build(completion.Input{
+		RunID: route.RunID, Workspace: completionWorkspace(route),
 		Before: before, After: after, CommittedFiles: committed, ObservedFiles: observed,
 		Items: turn.Items, StructuredOutput: turn.StructuredOutput,
 		LastAgentMessage: turn.LastAgentMessage, CompletedAt: time.Now().UnixMilli(),
+		GitInspectionError: strings.Join(inspectionErrors, "; "),
 	})
 }
 
@@ -1224,32 +1633,53 @@ func completionTurnStatus(params, fallback json.RawMessage) string {
 	for _, raw := range []json.RawMessage{params, fallback} {
 		var direct string
 		if json.Unmarshal(raw, &direct) == nil && direct != "" {
-			return strings.ToLower(direct)
+			if status := normalizeCompletionStatus(direct); status != "unknown" {
+				return status
+			}
 		}
 		var object map[string]any
 		if json.Unmarshal(raw, &object) != nil {
 			continue
 		}
-		for _, value := range []any{object["status"], object["turn"]} {
-			if nested, ok := value.(map[string]any); ok {
-				value = nested["status"]
-			}
-			switch status := value.(type) {
-			case string:
-				if status != "" {
-					return strings.ToLower(status)
-				}
-			case map[string]any:
-				if kind, _ := status["type"].(string); kind != "" {
-					return strings.ToLower(kind)
-				}
-			}
+		candidates := []any{object["status"]}
+		if turn, ok := object["turn"].(map[string]any); ok {
+			candidates = append(candidates, turn["status"])
 		}
-		if kind, _ := object["type"].(string); kind != "" {
-			return strings.ToLower(kind)
+		candidates = append(candidates, object["type"])
+		for _, candidate := range candidates {
+			if status := normalizeCompletionStatus(statusText(candidate)); status != "unknown" {
+				return status
+			}
 		}
 	}
-	return "completed"
+	return "unknown"
+}
+
+func statusText(value any) string {
+	switch status := value.(type) {
+	case string:
+		return status
+	case map[string]any:
+		if kind, _ := status["type"].(string); kind != "" {
+			return kind
+		}
+		return statusText(status["status"])
+	default:
+		return ""
+	}
+}
+
+func normalizeCompletionStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed":
+		return "completed"
+	case "failed":
+		return "failed"
+	case "interrupted", "cancelled", "canceled":
+		return "cancelled"
+	default:
+		return "unknown"
+	}
 }
 
 func approvalLogicalPayload(message appserverrpc.Message, approvalID, processEpoch string) json.RawMessage {
@@ -1360,25 +1790,80 @@ func approvalTarget(params map[string]any) string {
 }
 
 func (b *bridge) routeForParams(params json.RawMessage) (runstate.Route, bool) {
-	threadID := threadIDFromParams(params)
+	threadID, turnID := routeIdentityFromParams(params)
 	if threadID == "" || b.routes == nil {
 		return runstate.Route{}, false
 	}
-	return b.routes.ByThread(threadID)
+	if turnID != "" {
+		return b.routes.ByThreadTurn(threadID, turnID)
+	}
+	active := make([]runstate.Route, 0, 1)
+	for _, route := range b.routes.ByThreadAll(threadID) {
+		if b.terminals != nil {
+			if _, terminal := b.terminals.Lookup(route.RunID); terminal {
+				continue
+			}
+		}
+		active = append(active, route)
+		if len(active) > 1 {
+			return runstate.Route{}, false
+		}
+	}
+	if len(active) != 1 {
+		return runstate.Route{}, false
+	}
+	return active[0], true
 }
 
 func (b *bridge) claimThread(command protocol.Command, deviceID string) error {
 	if command.ThreadID == "" || deviceID == "" {
 		return errors.New("thread and device are required")
 	}
+	if b.routes == nil {
+		return errors.New("route store is unavailable")
+	}
 	runID := command.RunID
 	if runID == "" {
 		runID = "legacy:" + command.ThreadID
 	}
-	return b.routes.Put(runstate.Route{
-		RunID: runID, BindingID: command.BindingID, WorkspaceID: command.WorkspaceID,
-		HostID: b.state.HostID, DeviceID: deviceID, ThreadID: command.ThreadID, TurnID: command.TurnID,
-	})
+	route, _ := b.routes.ByRun(runID)
+	route.RunID = runID
+	route.HostID = b.state.HostID
+	route.DeviceID = deviceID
+	route.ThreadID = command.ThreadID
+	if command.BindingID != "" {
+		route.BindingID = command.BindingID
+	}
+	if command.WorkspaceID != "" {
+		route.WorkspaceID = command.WorkspaceID
+	}
+	if command.Type == "turn.steer" {
+		route.TurnID = firstNonEmpty(command.TurnID, command.ExpectedTurnID)
+	} else {
+		route.TurnID = command.TurnID
+	}
+	return b.routes.Put(route)
+}
+
+func (b *bridge) backfillTurnRoute(command protocol.Command, result json.RawMessage) error {
+	var envelope struct {
+		TurnID string `json:"turnId"`
+		Turn   struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	if json.Unmarshal(result, &envelope) != nil {
+		return errors.New("turn response is invalid")
+	}
+	turnID := firstNonEmpty(envelope.TurnID, envelope.Turn.ID, command.TurnID, command.ExpectedTurnID)
+	if turnID == "" {
+		return errors.New("turn response is missing turn id")
+	}
+	runID := command.RunID
+	if runID == "" {
+		runID = "legacy:" + command.ThreadID
+	}
+	return b.routes.UpdateTurn(runID, command.ThreadID, turnID)
 }
 
 func (b *bridge) eventTargets(params json.RawMessage) []string {
@@ -1390,19 +1875,37 @@ func (b *bridge) eventTargets(params json.RawMessage) []string {
 }
 
 func threadIDFromParams(params json.RawMessage) string {
+	threadID, _ := routeIdentityFromParams(params)
+	return threadID
+}
+
+func routeIdentityFromParams(params json.RawMessage) (string, string) {
 	var envelope struct {
 		ThreadID string `json:"threadId"`
+		TurnID   string `json:"turnId"`
 		Thread   struct {
 			ID string `json:"id"`
 		} `json:"thread"`
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
 	}
 	if json.Unmarshal(params, &envelope) != nil {
-		return ""
+		return "", ""
 	}
 	if envelope.ThreadID != "" {
-		return envelope.ThreadID
+		return envelope.ThreadID, firstNonEmpty(envelope.TurnID, envelope.Turn.ID)
 	}
-	return envelope.Thread.ID
+	return envelope.Thread.ID, firstNonEmpty(envelope.TurnID, envelope.Turn.ID)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func stableApprovalID(epoch string, serverRequestID json.RawMessage) string {

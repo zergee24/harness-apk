@@ -72,7 +72,16 @@ data class ContextSnapshotV2(
     val webSearchEnabled: Boolean,
     val attachments: List<AttachmentSnapshot>,
     val capturedAt: Long,
+    val retrievalRunId: String? = null,
+    val projectEvidenceIds: List<String> = emptyList(),
+    val relationshipMemoryIds: List<String> = emptyList(),
 )
+
+/**
+ * V3 is a wire-compatible superset of V2. The alias deliberately keeps existing
+ * UI and retry code source compatible while schemaVersion controls persistence.
+ */
+typealias ContextSnapshotV3 = ContextSnapshotV2
 
 data class ContextSnapshotDraftV2(
     val projectId: String?,
@@ -191,6 +200,13 @@ internal fun encodeExecutionRequestContext(context: ChatExecutionRequestContext)
         put("model", JsonPrimitive(snapshot.model))
         put("reasoningEffort", JsonPrimitive(snapshot.reasoningEffort))
         put("capturedAt", JsonPrimitive(snapshot.capturedAt))
+        snapshot.retrievalRunId?.let { put("retrievalRunId", JsonPrimitive(it)) }
+        put("projectEvidenceIds", buildJsonArray {
+            snapshot.projectEvidenceIds.forEach { add(JsonPrimitive(it)) }
+        })
+        put("relationshipMemoryIds", buildJsonArray {
+            snapshot.relationshipMemoryIds.forEach { add(JsonPrimitive(it)) }
+        })
         put("attachments", buildJsonArray {
             snapshot.attachments.forEach { attachment ->
                 add(buildJsonObject {
@@ -218,8 +234,10 @@ internal fun decodeExecutionRequestContext(raw: String): ChatExecutionRequestCon
     val wikiScopeSnapshot = root["wikiScopeSnapshot"]?.let { encodedScope ->
         decodeWikiScopeSnapshot(encodedScope.toString())
     }
-    val contextSnapshot = if (root.string("schemaVersion")?.toIntOrNull() == 2) {
+    val schemaVersion = root.string("schemaVersion")?.toIntOrNull()
+    val contextSnapshot = if (schemaVersion == 2 || schemaVersion == 3) {
         ContextSnapshotV2(
+            schemaVersion = schemaVersion,
             projectId = root.string("projectId"),
             projectName = root.string("snapshotProjectName"),
             projectContextSha256 = root.string("projectContextSha256"),
@@ -239,6 +257,9 @@ internal fun decodeExecutionRequestContext(raw: String): ChatExecutionRequestCon
                 )
             },
             capturedAt = root.string("capturedAt")?.toLongOrNull() ?: 0L,
+            retrievalRunId = root.string("retrievalRunId"),
+            projectEvidenceIds = root.stringArray("projectEvidenceIds"),
+            relationshipMemoryIds = root.stringArray("relationshipMemoryIds"),
         )
     } else {
         null
@@ -256,3 +277,6 @@ internal fun decodeExecutionRequestContext(raw: String): ChatExecutionRequestCon
 
 private fun kotlinx.serialization.json.JsonObject.string(key: String): String? =
     this[key]?.jsonPrimitive?.contentOrNull
+
+private fun kotlinx.serialization.json.JsonObject.stringArray(key: String): List<String> =
+    this[key]?.jsonArray.orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull }

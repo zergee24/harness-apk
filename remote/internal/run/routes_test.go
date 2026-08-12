@@ -2,6 +2,7 @@ package run
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -77,5 +78,58 @@ func TestNewProcessEpochInvalidatesOldServerRequestIDs(t *testing.T) {
 	}
 	if err := store.ValidateResponse("approval-1", "epoch-1", requestID); err == nil {
 		t.Fatal("old process epoch server request was accepted")
+	}
+}
+
+func TestUpdateTurnAtomicallyBackfillsLegacyRoute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store, err := OpenRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := Route{
+		RunID: "legacy:thread-1", BindingID: "binding-1", WorkspaceID: "workspace-1",
+		HostID: "host-1", DeviceID: "device-1", ThreadID: "thread-1", BaselineJSON: `{"cwd":"/workspace"}`,
+	}
+	if err := store.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateTurn(route.RunID, route.ThreadID, "turn-real"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, ok := reopened.ByThreadTurn("thread-1", "turn-real")
+	if !ok || updated.BindingID != route.BindingID || updated.BaselineJSON != route.BaselineJSON {
+		t.Fatalf("updated route=%#v ok=%v", updated, ok)
+	}
+}
+
+func TestUpdateTurnSaveFailureDoesNotMutateInMemoryRoute(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	path := filepath.Join(stateDir, "routes.json")
+	store, err := OpenRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := Route{RunID: "run-1", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1"}
+	if err := store.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir, []byte("blocks route persistence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateTurn("run-1", "thread-1", "turn-real"); err == nil {
+		t.Fatal("UpdateTurn unexpectedly persisted through injected filesystem failure")
+	}
+	loaded, ok := store.ByRun("run-1")
+	if !ok || loaded.TurnID != "" {
+		t.Fatalf("failed save mutated in-memory route: %#v ok=%v", loaded, ok)
 	}
 }

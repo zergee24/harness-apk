@@ -151,9 +151,10 @@ class ChatRepository(
         conversationId: String,
         content: String,
         attachments: List<PendingImageAttachment>,
+        messageId: String = UUID.randomUUID().toString(),
     ): String {
         val now = timeProvider.nowMillis()
-        val id = UUID.randomUUID().toString()
+        val id = messageId
         messageDao.insert(
             MessageEntity(
                 id = id,

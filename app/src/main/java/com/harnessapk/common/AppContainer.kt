@@ -43,7 +43,11 @@ import com.harnessapk.chat.ConversationWikiScopeReplacer
 import com.harnessapk.chat.ConversationDraftStore
 import com.harnessapk.chat.QueuedAttachmentStore
 import com.harnessapk.chat.SendMessageUseCase
+import com.harnessapk.chat.ProjectSourcePartWriter
+import com.harnessapk.chat.ProjectTerminalTransactionRunner
 import com.harnessapk.chat.WikiSourcePartWriter
+import com.harnessapk.chat.decodeExecutionRequestContext
+import com.harnessapk.chat.encodeExecutionRequestContext
 import com.harnessapk.chat.assembleAgentContextForConversation
 import com.harnessapk.chat.webSearchAllowedForAgentConversation
 import com.harnessapk.capture.CaptureDraftRepository
@@ -55,6 +59,19 @@ import com.harnessapk.network.OpenAiCompatibleClient
 import com.harnessapk.project.FileProjectRepository
 import com.harnessapk.project.DeleteProjectUseCase
 import com.harnessapk.project.ProjectWorkspaceGatewayAdapter
+import com.harnessapk.projectsearch.ProjectContextAssembler
+import com.harnessapk.projectsearch.ProjectEvidenceCapture
+import com.harnessapk.projectsearch.ProjectEvidenceSnapshotRepository
+import com.harnessapk.projectsearch.ProjectEvidenceStore
+import com.harnessapk.projectsearch.ProjectEvidenceLiveVerifier
+import com.harnessapk.projectsearch.ProjectRetrievalResult
+import com.harnessapk.projectsearch.ProjectRetrievalStatus
+import com.harnessapk.projectsearch.ProjectRuntimeContext
+import com.harnessapk.projectsearch.ProjectSourceType
+import com.harnessapk.projectsearch.RoomProjectRetrievalGateway
+import com.harnessapk.projectsearch.RoomProjectMarkdownIndexer
+import com.harnessapk.projectsearch.ProjectIndexWorker
+import com.harnessapk.projectsearch.RoomProjectRunEvidenceIndexer
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderCapabilityCatalogClient
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
@@ -63,9 +80,16 @@ import com.harnessapk.voice.VoiceCredentialStore
 import com.harnessapk.search.LocalSearchRepository
 import com.harnessapk.session.PromptOptimizerUseCase
 import com.harnessapk.session.MarkdownNotebookRepository
+import com.harnessapk.session.MarkdownDraftCoordinator
+import com.harnessapk.session.MarkdownDraftApplyCoordinator
+import com.harnessapk.session.MarkdownDraftApplyStore
+import com.harnessapk.session.MarkdownDraftOriginType
+import com.harnessapk.session.MarkdownDraftStore
+import com.harnessapk.session.PersistedMarkdownDraft
 import com.harnessapk.session.WikiMarkdownContextRepository
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.AppSettingsStore
+import com.harnessapk.storage.ContextFactDedupeEntity
 import com.harnessapk.wiki.InstalledWikiContentStore
 import com.harnessapk.wiki.ConversationWikiRepository
 import com.harnessapk.wiki.ConversationWikiTransactionRunner
@@ -91,6 +115,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import com.harnessapk.remote.AliyunPushManager
 import com.harnessapk.remote.RemoteEnrollmentClient
 import com.harnessapk.remote.RemoteBindingRepository
@@ -112,6 +138,7 @@ import com.harnessapk.ui.HomeModeStore
 class AppContainer(
     context: Context,
     applicationScopeOverride: CoroutineScope? = null,
+    scheduleProjectIndexWarmup: Boolean = true,
 ) {
     private val appContext = context.applicationContext
     val dispatchers = AppDispatchers()
@@ -143,6 +170,7 @@ class AppContainer(
         AppDatabase.MIGRATION_19_20,
         AppDatabase.MIGRATION_20_21,
         AppDatabase.MIGRATION_21_22,
+        AppDatabase.MIGRATION_22_23,
     ).addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -308,14 +336,27 @@ class AppContainer(
     val queuedAttachmentStore = QueuedAttachmentStore(appContext)
     val conversationDraftStore = ConversationDraftStore(appContext, json)
     val localSearchRepository = LocalSearchRepository(database.localSearchDao(), dispatchers)
+    val projectMarkdownIndexer = RoomProjectMarkdownIndexer(database.localSearchDao())
     val projectRepository = FileProjectRepository(
         rootDirectory = appContext.filesDir,
         timeProvider = SystemTimeProvider,
-        onProjectUpsert = localSearchRepository::upsertProject,
-        onProjectDelete = localSearchRepository::deleteProject,
+        onProjectUpsert = { project ->
+            localSearchRepository.upsertProject(project)
+            ProjectIndexWorker.enqueue(appContext, project.id)
+        },
+        onProjectDelete = { projectId ->
+            ProjectIndexWorker.cancel(appContext, projectId)
+            projectMarkdownIndexer.deleteProject(projectId)
+            localSearchRepository.deleteProject(projectId)
+        },
+        onProjectContentChanged = { project -> ProjectIndexWorker.enqueue(appContext, project.id) },
     )
     private val localSearchWarmup = applicationScope.launch {
-        localSearchRepository.rebuildTokens(projectRepository.listProjects())
+        val projects = projectRepository.listProjects()
+        localSearchRepository.rebuildTokens(projects)
+        if (scheduleProjectIndexWarmup) {
+            projects.forEach { project -> ProjectIndexWorker.enqueue(appContext, project.id) }
+        }
     }
     val captureDraftRepository = CaptureDraftRepository(appContext)
     val captureStagingStore = CaptureStagingStore(appContext)
@@ -353,6 +394,32 @@ class AppContainer(
         database = database,
     )
     val projectWorkspaceGateway = ProjectWorkspaceGatewayAdapter(projectRepository)
+    private val roomProjectRetrievalGateway = RoomProjectRetrievalGateway(
+        dao = database.projectSearchDao(),
+        localSearchDao = database.localSearchDao(),
+        messageDao = database.messageDao(),
+        runEvidenceIndexer = RoomProjectRunEvidenceIndexer(
+            remoteDao = database.remoteDao(),
+            localSearchDao = database.localSearchDao(),
+        ),
+    )
+    private val projectEvidenceSnapshotRepository = ProjectEvidenceSnapshotRepository(
+        store = ProjectEvidenceStore { capture -> persistProjectEvidenceCapture(capture) },
+        timeProvider = SystemTimeProvider::nowMillis,
+        liveVerifier = ProjectEvidenceLiveVerifier { requestedProjectId, document ->
+            if (document.sourceType !in setOf(ProjectSourceType.CONTEXT, ProjectSourceType.MARKDOWN)) {
+                true
+            } else {
+                document.relativePath?.let { path ->
+                    projectRepository.projectFileRevisionIsCurrent(
+                        projectId = requestedProjectId,
+                        relativePath = path,
+                        expectedSha256 = document.sourceSha256,
+                    )
+                } ?: false
+            }
+        },
+    )
     val promptOptimizerUseCase = PromptOptimizerUseCase(
         providerRepository = providerRepository,
         client = openAiClient,
@@ -391,6 +458,50 @@ class AppContainer(
         ),
         wikiContextProvider = { _, query, scope -> wikiContextAssembler.assemble(query, scope) },
         wikiSourcePartWriter = wikiSourcePartWriter,
+        projectContextProvider = { _, executionId, assistantMessageId, query, projectId ->
+            val existingEvidence = database.projectSearchDao().evidenceForExecution(executionId)
+            val existingRun = database.projectSearchDao().retrievalRunForExecution(executionId)
+            if (existingRun != null) {
+                if (existingEvidence.isEmpty()) {
+                    null
+                } else {
+                    database.projectSearchDao().rebindEvidenceToMessage(executionId, assistantMessageId)
+                    ProjectRuntimeContext(
+                        retrievalRunId = existingRun.id,
+                        evidence = existingEvidence,
+                        systemContext = ProjectContextAssembler.assemble(existingEvidence),
+                    )
+                }
+            } else {
+                val result = runCatching { roomProjectRetrievalGateway.retrieve(projectId, query) }
+                    .getOrElse { ProjectRetrievalResult(ProjectRetrievalStatus.FAILED, emptyList()) }
+                projectEvidenceSnapshotRepository.capture(
+                    executionId = executionId,
+                    assistantMessageId = assistantMessageId,
+                    projectId = projectId,
+                    query = query,
+                    result = result,
+                )
+            }
+        },
+        projectSourcePartWriter = ProjectSourcePartWriter(
+            chatRepository = chatRepository,
+            transactionRunner = ProjectTerminalTransactionRunner { block -> database.withTransaction { block() } },
+            auditWriter = { executionId, status, unknownTokens ->
+                database.projectSearchDao().updateCitationVerification(
+                    executionId = executionId,
+                    status = status,
+                    unknownTokensJson = JsonArray(unknownTokens.map(::JsonPrimitive)).toString(),
+                )
+            },
+        ),
+        projectCitationAuditWriter = { executionId, status, unknownTokens ->
+            database.projectSearchDao().updateCitationVerification(
+                executionId = executionId,
+                status = status,
+                unknownTokensJson = JsonArray(unknownTokens.map(::JsonPrimitive)).toString(),
+            )
+        },
         lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val chatExecutionRepository = ChatExecutionRepository(
@@ -431,6 +542,70 @@ class AppContainer(
         draftDao = database.markdownChangeDraftDao(),
         timeProvider = SystemTimeProvider,
     )
+    val markdownDraftCoordinator = MarkdownDraftCoordinator(
+        store = object : MarkdownDraftStore {
+            override suspend fun find(
+                originType: MarkdownDraftOriginType,
+                sourceId: String,
+            ): PersistedMarkdownDraft? {
+                val origin = database.projectSearchDao()
+                    .draftOriginForSource(originType.name, sourceId) ?: return null
+                val draft = database.markdownChangeDraftDao().findDraft(origin.draftId) ?: return null
+                return PersistedMarkdownDraft(
+                    draft = draft,
+                    items = database.markdownChangeDraftDao().listItems(origin.draftId),
+                    origin = origin,
+                )
+            }
+
+            override suspend fun save(record: PersistedMarkdownDraft) {
+                database.withTransaction {
+                    database.markdownChangeDraftDao().upsertDraft(record.draft)
+                    database.markdownChangeDraftDao().replaceItems(record.draft.id, record.items)
+                    val projectDao = database.projectSearchDao()
+                    val existingOrigin = projectDao.draftOriginForSource(
+                        record.origin.sourceType,
+                        record.origin.sourceId,
+                    )
+                    if (existingOrigin == null) {
+                        projectDao.insertDraftOrigin(record.origin)
+                    } else {
+                        require(existingOrigin.draftId == record.draft.id)
+                        require(existingOrigin.sourceSha256 == record.origin.sourceSha256)
+                    }
+                    record.contextFacts.forEach { fact ->
+                        projectDao.upsertContextFact(
+                            ContextFactDedupeEntity(
+                                projectId = record.draft.projectId,
+                                semanticKey = fact.semanticKey,
+                                evidenceHash = fact.evidenceHash,
+                                sourceId = record.origin.sourceId,
+                                status = "PENDING",
+                                updatedAt = record.draft.updatedAt,
+                            ),
+                        )
+                    }
+                }
+            }
+        },
+        timeProvider = SystemTimeProvider::nowMillis,
+    )
+    val markdownDraftApplyCoordinator = MarkdownDraftApplyCoordinator(
+        store = object : MarkdownDraftApplyStore {
+            private val dao get() = database.markdownChangeDraftDao()
+
+            override suspend fun findDraft(draftId: String) = dao.findDraft(draftId)
+            override suspend fun listItems(draftId: String) = dao.listItems(draftId)
+            override suspend fun claim(draftId: String, updatedAt: Long) = dao.claimForApply(draftId, updatedAt) == 1
+            override suspend fun updateItem(itemId: String, status: String, errorMessage: String?) =
+                dao.updateItemApplyResult(itemId, status, errorMessage)
+            override suspend fun updateDraft(draft: com.harnessapk.storage.MarkdownChangeDraftEntity) =
+                dao.updateDraft(draft)
+        },
+        gateway = projectWorkspaceGateway,
+        timeProvider = SystemTimeProvider::nowMillis,
+        markContextFacts = ::markContextFacts,
+    )
     val updateRepository = UpdateRepository(
         okHttpClient = updateHttpClient,
         json = json,
@@ -444,6 +619,29 @@ class AppContainer(
     )
     val apkInstaller = ApkInstaller(appContext)
 
+    private suspend fun persistProjectEvidenceCapture(capture: ProjectEvidenceCapture) {
+        database.withTransaction {
+            val projectDao = database.projectSearchDao()
+            projectDao.upsertRetrievalRun(capture.run)
+            if (capture.evidence.isNotEmpty()) projectDao.insertEvidenceSnapshots(capture.evidence)
+            val executionDao = database.chatExecutionEntryDao()
+            val execution = executionDao.findById(capture.run.executionId) ?: return@withTransaction
+            val requestContext = decodeExecutionRequestContext(execution.requestContextJson)
+            val snapshot = requestContext.contextSnapshot ?: return@withTransaction
+            val v3 = snapshot.copy(
+                schemaVersion = 3,
+                retrievalRunId = capture.run.id,
+                projectEvidenceIds = capture.evidence.map { it.id },
+            )
+            executionDao.update(
+                execution.copy(
+                    requestContextJson = encodeExecutionRequestContext(requestContext.copy(contextSnapshot = v3)),
+                    updatedAt = SystemTimeProvider.nowMillis(),
+                ),
+            )
+        }
+    }
+
     /**
      * 发出发生文件写回的项目 id，供项目工作台（Git/文件视图）静默刷新。
      * 使用无 replay 的 SharedFlow：只在有活跃收集者时投递，避免切项目时回放旧值。
@@ -455,4 +653,24 @@ class AppContainer(
      * key = 项目 id，value = 相对项目根目录的路径列表。
      */
     val projectAppliedPaths = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+
+    private val activeMarkdownPlanningDraftIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    fun beginMarkdownDraftPlanning(draftId: String): Boolean = activeMarkdownPlanningDraftIds.add(draftId)
+
+    fun finishMarkdownDraftPlanning(draftId: String) {
+        activeMarkdownPlanningDraftIds.remove(draftId)
+    }
+
+    fun isMarkdownDraftPlanning(draftId: String): Boolean = draftId in activeMarkdownPlanningDraftIds
+
+    suspend fun markContextFacts(draftId: String, status: String) {
+        require(status == "APPLIED" || status == "DISMISSED")
+        val origin = database.projectSearchDao().draftOrigin(draftId) ?: return
+        database.projectSearchDao().updateContextFactStatusForSource(
+            sourceId = origin.sourceId,
+            status = status,
+            updatedAt = SystemTimeProvider.nowMillis(),
+        )
+    }
 }

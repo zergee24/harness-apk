@@ -72,7 +72,11 @@ class RemoteRepository(
         reconnectJob?.cancel()
         socket?.close(1000, "user disconnected")
         socket = null
-        _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.DISCONNECTED, isWorking = false)
+        _state.value = _state.value.copy(
+            connectionStatus = RemoteConnectionStatus.DISCONNECTED,
+            isWorking = false,
+            capabilities = emptySet(),
+        )
     }
 
     fun refreshThreads() = send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))
@@ -195,7 +199,11 @@ class RemoteRepository(
 
     private fun scheduleReconnect(reason: String) {
         socket = null
-        _state.value = _state.value.copy(connectionStatus = if (explicitDisconnect) RemoteConnectionStatus.DISCONNECTED else RemoteConnectionStatus.ERROR, errorMessage = reason)
+        _state.value = _state.value.copy(
+            connectionStatus = if (explicitDisconnect) RemoteConnectionStatus.DISCONNECTED else RemoteConnectionStatus.ERROR,
+            errorMessage = reason,
+            capabilities = emptySet(),
+        )
         if (explicitDisconnect) return
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
@@ -268,7 +276,10 @@ class RemoteRepository(
 
     internal fun handleEvent(event: RemoteEvent) {
         when (event.type) {
-            "host.status" -> _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED)
+            "host.status" -> _state.value = _state.value.copy(
+                connectionStatus = RemoteConnectionStatus.CONNECTED,
+                capabilities = parseRemoteHostCapabilities(event),
+            )
             "error" -> {
                 val message = event.message ?: "Codex 远程任务失败"
                 _state.value = _state.value.copy(errorMessage = message, isWorking = false)

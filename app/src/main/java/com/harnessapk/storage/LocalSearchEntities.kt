@@ -19,6 +19,18 @@ data class LocalSearchDocumentEntity(
     val messageId: String?,
     val projectId: String?,
     val updatedAt: Long,
+    val sourceType: String = "",
+    val authority: String = "",
+    val sourceKey: String = "",
+    val relativePath: String? = null,
+    val headingPath: String = "",
+    val ordinal: Int = 0,
+    val searchableText: String = "",
+    val sourceSha256: String = "",
+    val gitBlobId: String? = null,
+    val sourceUpdatedAt: Long = updatedAt,
+    val indexedAt: Long = updatedAt,
+    val dirty: Boolean = false,
 )
 
 @Fts4(tokenizer = FtsOptions.TOKENIZER_UNICODE61)

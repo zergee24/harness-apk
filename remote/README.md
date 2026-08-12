@@ -121,6 +121,50 @@ Install the v2 binary, bootstrap the launch agent, then verify `bridge.json` has
 
 Rollback must use a Bridge build that understands state v2. Stop the launch agent, move the current directory aside, restore the complete backup atomically at the directory level, and bootstrap the compatible build. Never delete only `logical-events.log`, `commands.json` or `routes.json`; the ledgers form one recovery set. A legacy v1-only binary is not a valid rollback target after migration.
 
+### M3 capabilities and completion ledger
+
+M3 keeps Wire v1 and Logical Event v1. Capability negotiation is an additive encrypted payload on `host.status`:
+
+```json
+{
+  "schemaVersion": 1,
+  "capabilities": [
+    "workspace.candidates.v1",
+    "run.lifecycle.v1",
+    "logical-replay.v1",
+    "completion-evidence.v2",
+    "turn-command-idempotency.v1"
+  ]
+}
+```
+
+Older phones may ignore this payload. Newer phones require all three M2 run capabilities before enabling project Run, and must fail closed for an unsupported payload schema. Missing `completion-evidence.v2` or `turn-command-idempotency.v1` means the corresponding M3 behavior must stay disabled; capability absence is not permission to guess support.
+
+Bridge state v2 now treats these files as one recovery set beside `bridge.json`:
+
+- `logical-events.log`: encrypted Logical Event journal and replay source.
+- `commands.json`: durable command idempotency, including legacy `turn.start` `UNKNOWN` reconciliation.
+- `routes.json`: `(runId, threadId, turnId, deviceId)` routing and approval ownership.
+- `workspaces.json`: registered/candidate workspace bindings.
+- `terminal-runs.json`: first terminal status, frozen completion JSON/SHA-256/workspace locator, terminal observations and journal publication markers.
+
+On the first terminal observation, Bridge persists reconciliation before reading final evidence. A completed Run is frozen before `run.completed` is journaled. Startup, WebSocket reconnect and phone `sync.resume` retry pending reconciliation; if the ledger is frozen but the journal event is absent, Bridge republishes the same stable event identity. Gap/Snapshot reads only frozen terminal values. It never reconstructs a terminal completion from the current Mac workspace.
+
+Workspace or Git inspection failure produces `UNVERIFIED` evidence with a reason, never a synthetic `CLEAN`. If a ledger rename succeeds but directory Sync reports an uncertain result, Bridge keeps the first terminal value and stops later writes in that process rather than risk overwriting it.
+
+For legacy `turn.start`, `CommandID` (or `RequestID` when no command ID exists) is the durable idempotency boundary. If Codex app-server succeeds but TurnID parsing or route persistence fails, Bridge returns `UNKNOWN/RECONCILING` with `retrySafe=false`, saves the app-server result when available, and retries only the local route update. It does not call `turn/start` a second time for the same identity.
+
+Operational checks:
+
+1. Never print or upload the raw state files: they can contain private completion text, commands, paths and encrypted event data.
+2. Check Bridge logs for ledger decode/hash errors, persistent `UNKNOWN`, directory Sync failures, or repeated reconciliation failures.
+3. For a pending terminal or route reconciliation, keep the compatible Bridge running and reconnect the phone or issue normal `sync.resume`; do not edit JSON or delete a single ledger.
+4. Mac-only files remain Mac-only. M3 adds no Relay file transfer and no Bridge file write-back; use explicit Git Fetch or a separately confirmed import workflow.
+
+Before any M3 Bridge upgrade or rollback, stop the launch agent and take a permission-preserving backup of the whole `~/.harness-remote` directory as shown above. A valid rollback binary must understand Bridge state v2, completion evidence v2, `terminal-runs.json` schema v2, terminal reconciliation/publication markers and turn-command idempotency. If no compatible rollback binary is available, leave the current Bridge stopped or running with the mobile M3 entry disabled; do not start a legacy binary against the directory.
+
+After restoring a complete compatible backup, verify in order: Bridge state opens without decode/hash errors, `host.status` reports only capabilities the binary actually implements, phone resume/Snapshot converges, one Run completes with an unchanged frozen completion after reconnect, and a repeated `turn.start` identity does not create a second Turn. Keep both the pre-change and failed-attempt directories until those checks finish. Never restore `terminal-runs.json`, `commands.json` or `logical-events.log` independently.
+
 ### M2 automated acceptance
 
 The automated suite refuses ADB 5037 and requires an isolated emulator server containing exactly one declared serial:

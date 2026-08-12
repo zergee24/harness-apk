@@ -35,7 +35,11 @@ internal fun buildConversationSearchDocuments(
         }.joinToString("\n"),
         process = parts.filter { it.type in processSearchPartTypes }.joinToString("\n") { it.content },
         sources = buildList {
-            parts.filter { it.type == UiMessagePartType.AGENT_SOURCES || it.type == UiMessagePartType.WIKI_SOURCES }
+            parts.filter {
+                it.type == UiMessagePartType.AGENT_SOURCES ||
+                    it.type == UiMessagePartType.WIKI_SOURCES ||
+                    it.type == UiMessagePartType.PROJECT_SOURCES
+            }
                 .forEach { add(it.content) }
             citationsByMessageId[message.id].orEmpty().forEach { citation ->
                 add(citation.wikiTitle)

@@ -28,6 +28,18 @@ class MarkdownLinkInteractionTest {
     }
 
     @Test
+    fun validProjectEvidenceLinkResolvesToItsExactId() {
+        assertEquals(
+            MarkdownLinkTarget.ProjectEvidence("evidence-1"),
+            markdownLinkTarget("harness-project://evidence/evidence-1"),
+        )
+        assertEquals(
+            MarkdownLinkTarget.Ignored,
+            markdownLinkTarget("harness-project://evidence/../evidence-1"),
+        )
+    }
+
+    @Test
     fun externalHttpLinkPassesThroughButUnsafeSchemesAreIgnored() {
         val external = markdownLinkTarget("https://example.com/reference?q=history")
 
@@ -46,6 +58,15 @@ class MarkdownLinkInteractionTest {
         assertEquals(
             "结论¹，另见[网站](https://example.com)",
             markdownTextForCopy("结论[¹](harness-wiki://citation/$citationId)，另见[网站](https://example.com)"),
+        )
+    }
+
+
+    @Test
+    fun copyingMarkdownKeepsProjectTokenWithoutInternalUrl() {
+        assertEquals(
+            "结论⟦P1⟧",
+            markdownTextForCopy("结论[⟦P1⟧](harness-project://evidence/evidence-1)"),
         )
     }
 }

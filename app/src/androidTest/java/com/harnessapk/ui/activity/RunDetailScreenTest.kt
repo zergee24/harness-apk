@@ -21,10 +21,12 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.harnessapk.remote.RemoteCompletionEvidence
+import com.harnessapk.remote.RemoteCompletionVerification
 import com.harnessapk.remote.RemoteTimelinePresentation
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.RemoteRunEntity
 import com.harnessapk.storage.RemoteRunEventEntity
+import com.harnessapk.storage.MarkdownChangeDraftItemEntity
 import com.harnessapk.ui.theme.HarnessApkTheme
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -72,6 +74,9 @@ class RunDetailScreenTest {
         composeRule.onNodeWithText("文件未验证").assertIsDisplayed()
         composeRule.onNodeWithText("测试未验证").assertIsDisplayed()
         composeRule.onNodeWithText("Git 未验证").assertIsDisplayed()
+        composeRule.onNodeWithText("旧版结果未验证").assertIsDisplayed()
+        composeRule.onNodeWithText("此结果可查看，但不能作为 M3 项目沉淀证据。请升级 Mac Bridge 后运行新任务。")
+            .assertIsDisplayed()
         composeRule.onNodeWithContentDescription("任务完成证据")
             .assertContentDescriptionEquals("任务完成证据")
         composeRule.onNodeWithText("查看诊断信息").assertHeightIsAtLeast(48.dp).performClick()
@@ -104,6 +109,49 @@ class RunDetailScreenTest {
         } finally {
             db.close()
         }
+    }
+
+    @Test
+    fun remoteCompletionUsesDepositThenOneDiffApplyReviewAt320Dp() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                Box(Modifier.width(320.dp)) {
+                    androidx.compose.foundation.layout.Column {
+                        RemoteCompletionCard(
+                            evidence = RemoteCompletionEvidence(
+                                summary = "完成 M3",
+                                changedFiles = listOf("docs/result.md"),
+                                tests = emptyList(),
+                                gitState = "UNCOMMITTED",
+                                unresolved = emptyList(),
+                                completedAt = 1L,
+                                schemaVersion = 2,
+                                completionId = "completion-1",
+                                verification = RemoteCompletionVerification.VERIFIED_V2,
+                            ),
+                            onDepositToProject = {},
+                        )
+                        RemoteMarkdownDraftReviewCard(
+                            items = listOf(
+                                MarkdownChangeDraftItemEntity(
+                                    id = "item-1", draftId = "draft-1", itemIndex = 0,
+                                    operation = "CREATE", relativePath = "reports/remote-run.md",
+                                    title = "Remote Run", reason = "沉淀", proposedMarkdown = "# 完成 M3",
+                                    retained = true, baselineSha256 = null, expectedAbsent = true,
+                                    applyStatus = null, applyErrorMessage = null,
+                                ),
+                            ),
+                            status = "READY",
+                            onApply = {},
+                        )
+                    }
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("沉淀到项目").assertHeightIsAtLeast(48.dp).assertIsDisplayed()
+        composeRule.onNodeWithText("审核 Diff").assertIsDisplayed()
+        composeRule.onNodeWithText("应用所选").assertHeightIsAtLeast(48.dp).assertIsDisplayed()
     }
 
     private fun run() = RemoteRunEntity(

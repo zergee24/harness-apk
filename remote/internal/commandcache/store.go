@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -149,6 +150,59 @@ func (s *Store) MarkUnknown(commandID string, cause error) (Record, error) {
 		return Record{}, err
 	}
 	return clone(*record), nil
+}
+
+func (s *Store) MarkUnknownWithResult(commandID string, cause error, result json.RawMessage) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.data.Records[commandID]
+	if record == nil {
+		return Record{}, errors.New("command not found")
+	}
+	record.Status = StatusUnknown
+	record.ResultJSON = append(json.RawMessage(nil), result...)
+	record.LastError = cause.Error()
+	record.UpdatedAt = time.Now().UnixMilli()
+	if err := s.saveLocked(); err != nil {
+		return Record{}, err
+	}
+	return clone(*record), nil
+}
+
+func (s *Store) ResolveUnknown(commandID string, result json.RawMessage) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.data.Records[commandID]
+	if record == nil {
+		return Record{}, errors.New("command not found")
+	}
+	if record.Status == StatusSucceeded {
+		return clone(*record), nil
+	}
+	if record.Status != StatusUnknown {
+		return clone(*record), errors.New("command is not awaiting reconciliation")
+	}
+	record.Status = StatusSucceeded
+	record.ResultJSON = append(json.RawMessage(nil), result...)
+	record.LastError = ""
+	record.UpdatedAt = time.Now().UnixMilli()
+	if err := s.saveLocked(); err != nil {
+		return Record{}, err
+	}
+	return clone(*record), nil
+}
+
+func (s *Store) RecordsByTypeStatus(commandType string, status Status) []Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]Record, 0)
+	for _, record := range s.data.Records {
+		if record.Type == commandType && record.Status == status {
+			result = append(result, clone(*record))
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CommandID < result[j].CommandID })
+	return result
 }
 
 func (s *Store) AttachResult(commandID, resultEventID string, result json.RawMessage) (Record, error) {

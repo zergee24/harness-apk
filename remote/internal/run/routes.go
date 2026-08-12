@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 )
 
@@ -122,6 +123,35 @@ func (s *RouteStore) Put(route Route) error {
 	return s.saveLocked()
 }
 
+func (s *RouteStore) UpdateTurn(runID, threadID, turnID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runID == "" || threadID == "" || turnID == "" {
+		return errors.New("run, thread, and turn identity are required")
+	}
+	route := s.data.Routes[runID]
+	if route == nil {
+		return errors.New("route not found")
+	}
+	if route.ThreadID != threadID {
+		return errors.New("route thread identity changed")
+	}
+	if route.TurnID != "" && route.TurnID != turnID {
+		return errors.New("route turn identity changed")
+	}
+	if route.TurnID == turnID {
+		return nil
+	}
+	updated := *route
+	updated.TurnID = turnID
+	s.data.Routes[runID] = &updated
+	if err := s.saveLocked(); err != nil {
+		s.data.Routes[runID] = route
+		return err
+	}
+	return nil
+}
+
 func (s *RouteStore) ByRun(runID string) (Route, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -141,6 +171,41 @@ func (s *RouteStore) ByThread(threadID string) (Route, bool) {
 		}
 	}
 	return Route{}, false
+}
+
+func (s *RouteStore) ByThreadTurn(threadID, turnID string) (Route, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if threadID == "" || turnID == "" {
+		return Route{}, false
+	}
+	var matched *Route
+	for _, route := range s.data.Routes {
+		if route.ThreadID == threadID && route.TurnID == turnID {
+			if matched != nil {
+				return Route{}, false
+			}
+			copy := *route
+			matched = &copy
+		}
+	}
+	if matched != nil {
+		return *matched, true
+	}
+	return Route{}, false
+}
+
+func (s *RouteStore) ByThreadAll(threadID string) []Route {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]Route, 0)
+	for _, route := range s.data.Routes {
+		if route.ThreadID == threadID {
+			result = append(result, *route)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].RunID < result[j].RunID })
+	return result
 }
 
 func (s *RouteStore) ByRuns(runIDs []string) []Route {

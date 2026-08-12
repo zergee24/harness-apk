@@ -1,7 +1,10 @@
 package completion
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -22,17 +25,22 @@ const (
 	GitCommitted   GitState = "COMMITTED"
 	GitUncommitted GitState = "UNCOMMITTED"
 	GitClean       GitState = "CLEAN"
+	GitUnverified  GitState = "UNVERIFIED"
 )
 
 type ChangedFileEvidence struct {
-	Path   string `json:"path"`
-	Source string `json:"source"`
+	EvidenceID     string `json:"evidenceId,omitempty"`
+	EvidenceSHA256 string `json:"evidenceSha256,omitempty"`
+	Path           string `json:"path"`
+	Source         string `json:"source"`
 }
 
 type TestEvidence struct {
-	Command  string     `json:"command"`
-	Status   TestStatus `json:"status"`
-	ExitCode *int       `json:"exitCode,omitempty"`
+	EvidenceID     string     `json:"evidenceId,omitempty"`
+	EvidenceSHA256 string     `json:"evidenceSha256,omitempty"`
+	Command        string     `json:"command"`
+	Status         TestStatus `json:"status"`
+	ExitCode       *int       `json:"exitCode,omitempty"`
 }
 
 type GitEvidence struct {
@@ -40,26 +48,54 @@ type GitEvidence struct {
 	Branch     string   `json:"branch,omitempty"`
 	BeforeHead string   `json:"beforeHead,omitempty"`
 	AfterHead  string   `json:"afterHead,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+}
+
+type WorkspaceLocator struct {
+	WorkspaceID           string `json:"workspaceId,omitempty"`
+	RepositoryFingerprint string `json:"repositoryFingerprint,omitempty"`
+	CWD                   string `json:"cwd,omitempty"`
 }
 
 type RunCompletion struct {
-	Summary      string                `json:"summary"`
-	ChangedFiles []ChangedFileEvidence `json:"changedFiles"`
-	Tests        []TestEvidence        `json:"tests"`
-	Git          *GitEvidence          `json:"git,omitempty"`
-	Unresolved   []string              `json:"unresolved"`
-	CompletedAt  int64                 `json:"completedAt"`
+	SchemaVersion int                   `json:"schemaVersion,omitempty"`
+	CompletionID  string                `json:"completionId,omitempty"`
+	Summary       string                `json:"summary"`
+	ChangedFiles  []ChangedFileEvidence `json:"changedFiles"`
+	Tests         []TestEvidence        `json:"tests"`
+	Git           *GitEvidence          `json:"git,omitempty"`
+	Unresolved    []string              `json:"unresolved"`
+	CompletedAt   int64                 `json:"completedAt"`
+	Workspace     WorkspaceLocator      `json:"workspace,omitempty"`
 }
 
 type Input struct {
-	Before           workspace.Baseline
-	After            workspace.Baseline
-	CommittedFiles   []string
-	ObservedFiles    []string
-	Items            []json.RawMessage
-	StructuredOutput json.RawMessage
-	LastAgentMessage string
-	CompletedAt      int64
+	RunID              string
+	Workspace          WorkspaceLocator
+	Before             workspace.Baseline
+	After              workspace.Baseline
+	CommittedFiles     []string
+	ObservedFiles      []string
+	Items              []json.RawMessage
+	StructuredOutput   json.RawMessage
+	LastAgentMessage   string
+	CompletedAt        int64
+	GitInspectionError string
+}
+
+func Decode(raw json.RawMessage) (RunCompletion, bool, error) {
+	var result RunCompletion
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return RunCompletion{}, false, err
+	}
+	switch result.SchemaVersion {
+	case 0, 1:
+		return result, true, nil
+	case 2:
+		return result, false, nil
+	default:
+		return RunCompletion{}, false, fmt.Errorf("unsupported completion schema version %d", result.SchemaVersion)
+	}
 }
 
 func Build(input Input) RunCompletion {
@@ -99,7 +135,9 @@ func Build(input Input) RunCompletion {
 					status = TestFailed
 				}
 			}
-			tests = append(tests, TestEvidence{Command: command, Status: status, ExitCode: exitCode})
+			test := TestEvidence{Command: command, Status: status, ExitCode: exitCode}
+			test.EvidenceID, test.EvidenceSHA256 = evidenceIdentity(input.RunID, "test", test)
+			tests = append(tests, test)
 		}
 	}
 	paths := make([]string, 0, len(files))
@@ -109,7 +147,9 @@ func Build(input Input) RunCompletion {
 	sort.Strings(paths)
 	changed := make([]ChangedFileEvidence, 0, len(paths))
 	for _, path := range paths {
-		changed = append(changed, ChangedFileEvidence{Path: path, Source: files[path]})
+		file := ChangedFileEvidence{Path: path, Source: files[path]}
+		file.EvidenceID, file.EvidenceSHA256 = evidenceIdentity(input.RunID, "file", file)
+		changed = append(changed, file)
 	}
 
 	summary, unresolved := structuredSummary(input.StructuredOutput)
@@ -122,11 +162,28 @@ func Build(input Input) RunCompletion {
 	if unresolved == nil {
 		unresolved = []string{"未提供结构化遗留项"}
 	}
-	return RunCompletion{
-		Summary: summary, ChangedFiles: changed, Tests: tests,
-		Git: gitEvidence(input.Before, input.After), Unresolved: unresolved,
-		CompletedAt: input.CompletedAt,
+	result := RunCompletion{
+		SchemaVersion: 2,
+		Summary:       summary, ChangedFiles: changed, Tests: tests,
+		Git: gitEvidence(input.Before, input.After, input.GitInspectionError), Unresolved: unresolved,
+		CompletedAt: input.CompletedAt, Workspace: input.Workspace,
 	}
+	result.CompletionID, _ = evidenceIdentity(input.RunID, "completion", result)
+	return result
+}
+
+func evidenceIdentity(runID, kind string, value any) (string, string) {
+	raw, _ := json.Marshal(value)
+	contentDigest := sha256.Sum256(raw)
+	contentHash := hex.EncodeToString(contentDigest[:])
+	digest := sha256.New()
+	_, _ = digest.Write([]byte(runID))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(kind))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(raw)
+	identityHash := hex.EncodeToString(digest.Sum(nil))
+	return kind + "-" + identityHash[:24], contentHash
 }
 
 func collectChangedFiles(files map[string]string, changes any) {
@@ -172,8 +229,7 @@ func commandText(value any) string {
 
 func isKnownTestCommand(command string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(command))
-	return strings.Contains(normalized, "gradlew test") ||
-		strings.Contains(normalized, "gradlew connected") ||
+	return isGradleTestCommand(normalized) ||
 		strings.HasPrefix(normalized, "go test") ||
 		strings.Contains(normalized, " go test") ||
 		strings.HasPrefix(normalized, "pytest") ||
@@ -181,6 +237,31 @@ func isKnownTestCommand(command string) bool {
 		strings.Contains(normalized, "jest") || strings.Contains(normalized, "vitest") ||
 		strings.Contains(normalized, "cargo test") || strings.Contains(normalized, "swift test") ||
 		(strings.Contains(normalized, "xcodebuild") && strings.Contains(normalized, " test"))
+}
+
+func isGradleTestCommand(command string) bool {
+	seenGradleWrapper := false
+	for _, field := range strings.Fields(command) {
+		field = strings.Trim(field, "'\";()")
+		if !seenGradleWrapper {
+			base := field
+			if slash := strings.LastIndex(base, "/"); slash >= 0 {
+				base = base[slash+1:]
+			}
+			seenGradleWrapper = base == "gradlew" || base == "gradlew.bat"
+			continue
+		}
+		if field == "" || strings.HasPrefix(field, "-") {
+			continue
+		}
+		parts := strings.Split(field, ":")
+		task := parts[len(parts)-1]
+		if strings.HasPrefix(task, "test") ||
+			(strings.HasPrefix(task, "connected") && strings.Contains(task, "androidtest")) {
+			return true
+		}
+	}
+	return false
 }
 
 func integerPointer(value any) *int {
@@ -209,7 +290,19 @@ func structuredSummary(raw json.RawMessage) (string, []string) {
 	return strings.TrimSpace(output.Summary), output.Unresolved
 }
 
-func gitEvidence(before, after workspace.Baseline) *GitEvidence {
+func gitEvidence(before, after workspace.Baseline, inspectionError string) *GitEvidence {
+	if strings.TrimSpace(inspectionError) == "" && before.IsGit && !after.IsGit {
+		inspectionError = "post-run Git baseline is unavailable"
+	}
+	if strings.TrimSpace(inspectionError) == "" && before.IsGit && before.Head != "" && after.Head == "" {
+		inspectionError = "post-run Git HEAD is unavailable"
+	}
+	if strings.TrimSpace(inspectionError) != "" {
+		return &GitEvidence{
+			State: GitUnverified, Branch: firstNonEmpty(after.Branch, before.Branch),
+			BeforeHead: before.Head, AfterHead: after.Head, Reason: strings.TrimSpace(inspectionError),
+		}
+	}
 	if !before.IsGit && !after.IsGit {
 		return nil
 	}
@@ -223,4 +316,13 @@ func gitEvidence(before, after workspace.Baseline) *GitEvidence {
 		State: state, Branch: after.Branch,
 		BeforeHead: before.Head, AfterHead: after.Head,
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

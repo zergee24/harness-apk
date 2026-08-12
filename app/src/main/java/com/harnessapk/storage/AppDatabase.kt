@@ -46,8 +46,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RemoteApprovalEntity::class,
         RemoteCommandOutboxEntity::class,
         RemoteSyncCursorEntity::class,
+        ProjectRetrievalRunEntity::class,
+        ProjectEvidenceSnapshotEntity::class,
+        MarkdownDraftOriginEntity::class,
+        ContextFactDedupeEntity::class,
+        RemoteRunCompletionEntity::class,
     ],
-    version = 22,
+    version = 23,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -66,6 +71,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun conversationWikiDao(): ConversationWikiDao
     abstract fun localSearchDao(): LocalSearchDao
     abstract fun remoteDao(): RemoteDao
+    abstract fun projectSearchDao(): ProjectSearchDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -1109,12 +1115,111 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_22_23: Migration = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN sourceType TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN authority TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN sourceKey TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN relativePath TEXT")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN headingPath TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN searchableText TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN sourceSha256 TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN gitBlobId TEXT")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN sourceUpdatedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN indexedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE local_search_documents ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE local_search_documents SET sourceUpdatedAt = updatedAt, indexedAt = updatedAt, searchableText = body")
+                localSearchTriggerSql.forEach(db::execSQL)
+
+                db.execSQL("CREATE TEMP TABLE m3_drafts AS SELECT * FROM markdown_change_drafts")
+                db.execSQL("CREATE TEMP TABLE m3_draft_items AS SELECT * FROM markdown_change_draft_items")
+                db.execSQL("DROP TABLE markdown_change_draft_items")
+                db.execSQL("DROP TABLE markdown_change_drafts")
+                db.execSQL(
+                    """
+                    CREATE TABLE markdown_change_drafts (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        conversationId TEXT,
+                        projectId TEXT NOT NULL,
+                        sourceUserMessageId TEXT,
+                        assistantMessageId TEXT,
+                        status TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        rawResponse TEXT,
+                        errorMessage TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY(conversationId) REFERENCES conversations(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX index_markdown_change_drafts_conversationId ON markdown_change_drafts(conversationId)")
+                db.execSQL("CREATE INDEX index_markdown_change_drafts_projectId ON markdown_change_drafts(projectId)")
+                db.execSQL("CREATE INDEX index_markdown_change_drafts_sourceUserMessageId ON markdown_change_drafts(sourceUserMessageId)")
+                db.execSQL("INSERT INTO markdown_change_drafts SELECT * FROM m3_drafts")
+                db.execSQL(
+                    """
+                    CREATE TABLE markdown_change_draft_items (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        draftId TEXT NOT NULL,
+                        itemIndex INTEGER NOT NULL,
+                        operation TEXT NOT NULL,
+                        relativePath TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        proposedMarkdown TEXT NOT NULL,
+                        retained INTEGER NOT NULL,
+                        baselineSha256 TEXT,
+                        expectedAbsent INTEGER NOT NULL,
+                        applyStatus TEXT,
+                        applyErrorMessage TEXT,
+                        FOREIGN KEY(draftId) REFERENCES markdown_change_drafts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX index_markdown_change_draft_items_draftId ON markdown_change_draft_items(draftId)")
+                db.execSQL("CREATE UNIQUE INDEX index_markdown_change_draft_items_draftId_itemIndex ON markdown_change_draft_items(draftId,itemIndex)")
+                db.execSQL("INSERT INTO markdown_change_draft_items SELECT * FROM m3_draft_items")
+                db.execSQL("DROP TABLE m3_draft_items")
+                db.execSQL("DROP TABLE m3_drafts")
+
+                createM3Tables(db)
+                db.query("PRAGMA foreign_key_check").use { cursor ->
+                    if (cursor.moveToFirst()) error("foreign_key_check failed after M3 migration")
+                }
+            }
+        }
+
         val LOCAL_SEARCH_CALLBACK: Callback = object : Callback() {
             override fun onOpen(db: SupportSQLiteDatabase) {
                 ensureLocalSearchSchema(db)
             }
         }
     }
+}
+
+private fun createM3Tables(db: SupportSQLiteDatabase) {
+    db.execSQL("CREATE TABLE project_retrieval_runs (id TEXT NOT NULL PRIMARY KEY, executionId TEXT NOT NULL, projectId TEXT NOT NULL, query TEXT NOT NULL, selectedEvidenceIdsJson TEXT NOT NULL, status TEXT NOT NULL, citationVerificationStatus TEXT NOT NULL, unknownCitationTokensJson TEXT NOT NULL, createdAt INTEGER NOT NULL)")
+    db.execSQL("CREATE INDEX index_project_retrieval_runs_executionId ON project_retrieval_runs(executionId)")
+    db.execSQL("CREATE INDEX index_project_retrieval_runs_projectId ON project_retrieval_runs(projectId)")
+    db.execSQL("CREATE INDEX index_project_retrieval_runs_createdAt ON project_retrieval_runs(createdAt)")
+    db.execSQL("CREATE TABLE project_evidence_snapshots (id TEXT NOT NULL PRIMARY KEY, executionId TEXT NOT NULL, messageId TEXT, token TEXT NOT NULL, projectId TEXT NOT NULL, sourceType TEXT NOT NULL, authority TEXT NOT NULL, sourceKey TEXT NOT NULL, title TEXT NOT NULL, locatorLabel TEXT NOT NULL, relativePath TEXT, sourceMessageId TEXT, sourceSha256 TEXT NOT NULL, gitBlobId TEXT, excerpt TEXT NOT NULL, capturedAt INTEGER NOT NULL, FOREIGN KEY(messageId) REFERENCES messages(id) ON UPDATE NO ACTION ON DELETE SET NULL)")
+    db.execSQL("CREATE INDEX index_project_evidence_snapshots_executionId ON project_evidence_snapshots(executionId)")
+    db.execSQL("CREATE INDEX index_project_evidence_snapshots_messageId ON project_evidence_snapshots(messageId)")
+    db.execSQL("CREATE INDEX index_project_evidence_snapshots_projectId ON project_evidence_snapshots(projectId)")
+    db.execSQL("CREATE UNIQUE INDEX index_project_evidence_snapshots_executionId_token ON project_evidence_snapshots(executionId,token)")
+    db.execSQL("CREATE TABLE markdown_draft_origins (draftId TEXT NOT NULL PRIMARY KEY, sourceType TEXT NOT NULL, sourceId TEXT NOT NULL, sourceSha256 TEXT NOT NULL, sourceProjectId TEXT, createdAt INTEGER NOT NULL, FOREIGN KEY(draftId) REFERENCES markdown_change_drafts(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+    db.execSQL("CREATE INDEX index_markdown_draft_origins_sourceType ON markdown_draft_origins(sourceType)")
+    db.execSQL("CREATE INDEX index_markdown_draft_origins_sourceId ON markdown_draft_origins(sourceId)")
+    db.execSQL("CREATE INDEX index_markdown_draft_origins_sourceProjectId ON markdown_draft_origins(sourceProjectId)")
+    db.execSQL("CREATE UNIQUE INDEX index_markdown_draft_origins_sourceType_sourceId ON markdown_draft_origins(sourceType,sourceId)")
+    db.execSQL("CREATE TABLE context_fact_dedupe (projectId TEXT NOT NULL, semanticKey TEXT NOT NULL, evidenceHash TEXT NOT NULL, sourceId TEXT NOT NULL, status TEXT NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(projectId,semanticKey))")
+    db.execSQL("CREATE INDEX index_context_fact_dedupe_sourceId ON context_fact_dedupe(sourceId)")
+    db.execSQL("CREATE INDEX index_context_fact_dedupe_status ON context_fact_dedupe(status)")
+    db.execSQL("CREATE TABLE remote_run_completions (runId TEXT NOT NULL PRIMARY KEY, schemaVersion INTEGER NOT NULL, completionId TEXT NOT NULL, contentSha256 TEXT NOT NULL, payloadJson TEXT NOT NULL, verificationState TEXT NOT NULL, capturedAt INTEGER NOT NULL, FOREIGN KEY(runId) REFERENCES remote_runs(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+    db.execSQL("CREATE UNIQUE INDEX index_remote_run_completions_completionId ON remote_run_completions(completionId)")
+    db.execSQL("CREATE INDEX index_remote_run_completions_contentSha256 ON remote_run_completions(contentSha256)")
 }
 
 private fun ensureLocalSearchSchema(db: SupportSQLiteDatabase) {
@@ -1142,7 +1247,10 @@ private fun ensureLocalSearchSchema(db: SupportSQLiteDatabase) {
         USING FTS4(documentId TEXT NOT NULL, searchText TEXT NOT NULL, tokenize=unicode61)
         """.trimIndent(),
     )
-    localSearchTriggerSql.forEach(db::execSQL)
+    val supportsM3Columns = db.query(
+        "SELECT COUNT(*) FROM pragma_table_info('local_search_documents') WHERE name = 'sourceType'",
+    ).use { cursor -> cursor.moveToFirst() && cursor.getInt(0) == 1 }
+    if (supportsM3Columns) localSearchTriggerSql.forEach(db::execSQL)
 }
 
 private fun backfillLocalSearch(db: SupportSQLiteDatabase) {
@@ -1197,8 +1305,13 @@ private val localSearchTriggerSql = listOf(
     "DROP TRIGGER IF EXISTS local_search_citation_delete",
     """
     CREATE TRIGGER local_search_conversation_insert AFTER INSERT ON conversations BEGIN
-      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
-      SELECT 'conversation:' || NEW.id,'CONVERSATION',NEW.title,NEW.title,NEW.id,NULL,NEW.projectId,NEW.updatedAt
+      INSERT OR REPLACE INTO local_search_documents(
+        id,type,title,body,conversationId,messageId,projectId,updatedAt,
+        sourceType,authority,sourceKey,relativePath,headingPath,ordinal,searchableText,
+        sourceSha256,gitBlobId,sourceUpdatedAt,indexedAt,dirty
+      )
+      SELECT 'conversation:' || NEW.id,'CONVERSATION',NEW.title,NEW.title,NEW.id,NULL,NEW.projectId,NEW.updatedAt,
+             '','','conversation:' || NEW.id,NULL,'',0,NEW.title,'',NULL,NEW.updatedAt,NEW.updatedAt,0
       WHERE NEW.isArchived = 0;
       DELETE FROM local_search_fts WHERE documentId = 'conversation:' || NEW.id;
       INSERT INTO local_search_fts(documentId,searchText)
@@ -1209,13 +1322,26 @@ private val localSearchTriggerSql = listOf(
     CREATE TRIGGER local_search_conversation_update AFTER UPDATE ON conversations BEGIN
       DELETE FROM local_search_fts WHERE documentId = 'conversation:' || NEW.id;
       DELETE FROM local_search_documents WHERE id = 'conversation:' || NEW.id;
-      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
-      SELECT 'conversation:' || NEW.id,'CONVERSATION',NEW.title,NEW.title,NEW.id,NULL,NEW.projectId,NEW.updatedAt
+      INSERT OR REPLACE INTO local_search_documents(
+        id,type,title,body,conversationId,messageId,projectId,updatedAt,
+        sourceType,authority,sourceKey,relativePath,headingPath,ordinal,searchableText,
+        sourceSha256,gitBlobId,sourceUpdatedAt,indexedAt,dirty
+      )
+      SELECT 'conversation:' || NEW.id,'CONVERSATION',NEW.title,NEW.title,NEW.id,NULL,NEW.projectId,NEW.updatedAt,
+             '','','conversation:' || NEW.id,NULL,'',0,NEW.title,'',NULL,NEW.updatedAt,NEW.updatedAt,0
       WHERE NEW.isArchived = 0;
       INSERT INTO local_search_fts(documentId,searchText)
       SELECT 'conversation:' || NEW.id,NEW.title WHERE NEW.isArchived = 0;
-      UPDATE local_search_documents SET title = NEW.title, projectId = NEW.projectId
-      WHERE conversationId = NEW.id AND type != 'CONVERSATION';
+      DELETE FROM local_search_fts
+      WHERE NEW.isArchived != 0 AND documentId IN
+        (SELECT id FROM local_search_documents WHERE conversationId = NEW.id);
+      DELETE FROM local_search_documents
+      WHERE NEW.isArchived != 0 AND conversationId = NEW.id;
+      UPDATE local_search_documents
+      SET title = NEW.title,
+          projectId = NEW.projectId,
+          dirty = CASE WHEN type = 'MESSAGE' THEN 1 ELSE dirty END
+      WHERE NEW.isArchived = 0 AND conversationId = NEW.id AND type != 'CONVERSATION';
     END
     """.trimIndent(),
     """
@@ -1227,9 +1353,16 @@ private val localSearchTriggerSql = listOf(
     """.trimIndent(),
     """
     CREATE TRIGGER local_search_message_insert AFTER INSERT ON messages BEGIN
-      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
+      INSERT OR REPLACE INTO local_search_documents(
+        id,type,title,body,conversationId,messageId,projectId,updatedAt,
+        sourceType,authority,sourceKey,relativePath,headingPath,ordinal,searchableText,
+        sourceSha256,gitBlobId,sourceUpdatedAt,indexedAt,dirty
+      )
       SELECT 'message:' || NEW.id,'MESSAGE',conversations.title,NEW.content,NEW.conversationId,NEW.id,
-             conversations.projectId,NEW.updatedAt FROM conversations
+             conversations.projectId,NEW.updatedAt,'PROJECT_MESSAGE',
+             CASE WHEN NEW.role = 'USER' THEN 'USER_STATED' ELSE 'ASSISTANT_PROPOSAL' END,
+             'message:' || NEW.id,NULL,'',0,NEW.content,'',NULL,NEW.updatedAt,0,1
+      FROM conversations
       WHERE conversations.id = NEW.conversationId AND conversations.isArchived = 0
         AND NEW.role IN ('USER','ASSISTANT') AND TRIM(NEW.content) != '';
       DELETE FROM local_search_fts WHERE documentId = 'message:' || NEW.id;
@@ -1243,9 +1376,16 @@ private val localSearchTriggerSql = listOf(
     CREATE TRIGGER local_search_message_update AFTER UPDATE ON messages BEGIN
       DELETE FROM local_search_fts WHERE documentId = 'message:' || NEW.id;
       DELETE FROM local_search_documents WHERE id = 'message:' || NEW.id;
-      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
+      INSERT OR REPLACE INTO local_search_documents(
+        id,type,title,body,conversationId,messageId,projectId,updatedAt,
+        sourceType,authority,sourceKey,relativePath,headingPath,ordinal,searchableText,
+        sourceSha256,gitBlobId,sourceUpdatedAt,indexedAt,dirty
+      )
       SELECT 'message:' || NEW.id,'MESSAGE',conversations.title,NEW.content,NEW.conversationId,NEW.id,
-             conversations.projectId,NEW.updatedAt FROM conversations
+             conversations.projectId,NEW.updatedAt,'PROJECT_MESSAGE',
+             CASE WHEN NEW.role = 'USER' THEN 'USER_STATED' ELSE 'ASSISTANT_PROPOSAL' END,
+             'message:' || NEW.id,NULL,'',0,NEW.content,'',NULL,NEW.updatedAt,0,1
+      FROM conversations
       WHERE conversations.id = NEW.conversationId AND conversations.isArchived = 0
         AND NEW.role IN ('USER','ASSISTANT') AND TRIM(NEW.content) != '';
       INSERT INTO local_search_fts(documentId,searchText)
@@ -1263,10 +1403,17 @@ private val localSearchTriggerSql = listOf(
     """.trimIndent(),
     """
     CREATE TRIGGER local_search_citation_insert AFTER INSERT ON message_wiki_citations BEGIN
-      INSERT OR REPLACE INTO local_search_documents(id,type,title,body,conversationId,messageId,projectId,updatedAt)
+      INSERT OR REPLACE INTO local_search_documents(
+        id,type,title,body,conversationId,messageId,projectId,updatedAt,
+        sourceType,authority,sourceKey,relativePath,headingPath,ordinal,searchableText,
+        sourceSha256,gitBlobId,sourceUpdatedAt,indexedAt,dirty
+      )
       SELECT 'source:' || NEW.id,'MESSAGE_SOURCE',NEW.sourceTitle,
              NEW.wikiTitle || ' ' || NEW.sectionPath || ' ' || NEW.originalTextSnapshot,
-             messages.conversationId,NEW.messageId,conversations.projectId,NEW.createdAt
+             messages.conversationId,NEW.messageId,conversations.projectId,NEW.createdAt,
+             '','','source:' || NEW.id,NULL,'',0,
+             NEW.sourceTitle || ' ' || NEW.wikiTitle || ' ' || NEW.sectionPath || ' ' || NEW.originalTextSnapshot,
+             '',NULL,NEW.createdAt,NEW.createdAt,0
       FROM messages INNER JOIN conversations ON conversations.id = messages.conversationId
       WHERE messages.id = NEW.messageId AND conversations.isArchived = 0;
       DELETE FROM local_search_fts WHERE documentId = 'source:' || NEW.id;
