@@ -68,8 +68,8 @@ class LocalSearchRepository(
         require(limit in 1..100) { "搜索数量必须在 1 到 100 之间" }
         val match = LocalSearchTokenizer.matchExpression(normalized)
         val fts = if (match.isBlank()) emptyList() else dao.searchFts(match, limit)
-        val contains = dao.searchContains(normalized, limit)
-        (fts + contains)
+        val candidates = if (match.isBlank()) dao.searchContains(normalized, limit) else fts
+        candidates
             .distinctBy(LocalSearchDocumentEntity::id)
             .sortedWith(compareByDescending<LocalSearchDocumentEntity> { it.updatedAt }.thenBy { it.id })
             .take(limit)

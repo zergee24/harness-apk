@@ -91,6 +91,63 @@ class LocalSearchRepositoryInstrumentedTest {
     }
 
     @Test
+    fun tokenizedQueryUsesFtsAsAuthoritativeIndexInsteadOfScanningUnindexedDocuments() = runBlocking {
+        val db = database()
+        try {
+            val dao = db.localSearchDao()
+            val repository = LocalSearchRepository(dao, AppDispatchers(io = Dispatchers.IO))
+            dao.replaceDocument(
+                searchDocument(
+                    id = "message:fts-indexed",
+                    type = LocalSearchDocumentType.MESSAGE.name,
+                    title = "索引消息",
+                    body = "ftsauthoritativetoken",
+                ),
+                LocalSearchTokenizer.indexedText("索引消息", "ftsauthoritativetoken"),
+            )
+            dao.upsertDocument(
+                searchDocument(
+                    id = "message:unindexed",
+                    type = LocalSearchDocumentType.MESSAGE.name,
+                    title = "未建立索引的消息",
+                    body = "ftsauthoritativetoken",
+                ),
+            )
+
+            assertEquals(
+                listOf("message:fts-indexed"),
+                repository.search("ftsauthoritativetoken").map { it.id },
+            )
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun queryWithoutFtsTokensFallsBackToLiteralContainsSearch() = runBlocking {
+        val db = database()
+        try {
+            val dao = db.localSearchDao()
+            val repository = LocalSearchRepository(dao, AppDispatchers(io = Dispatchers.IO))
+            dao.upsertDocument(
+                searchDocument(
+                    id = "message:literal-only",
+                    type = LocalSearchDocumentType.MESSAGE.name,
+                    title = "符号消息",
+                    body = "处理标记 ###",
+                ),
+            )
+
+            assertEquals(
+                listOf("message:literal-only"),
+                repository.search("###").map { it.id },
+            )
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
     fun triggersIndexChineseMessagesAndSourcesAndDeleteWithPrimaryData() = runBlocking {
         val db = database()
         val repository = LocalSearchRepository(db.localSearchDao(), AppDispatchers(io = Dispatchers.IO))
