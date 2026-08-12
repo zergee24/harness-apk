@@ -162,7 +162,8 @@ class RoomRemoteSyncState(
                 val localStatus = remoteRunStatus(local.status)
                 val snapshotStatus = remoteRunStatus(remote.status)
                 val reconciledStatus = if (localStatus in terminalRunStatuses) localStatus else snapshotStatus
-                val frozenCompletion = remote.completionJson?.let { raw ->
+                val snapshotIsTerminal = snapshotStatus in terminalRunStatuses
+                val frozenCompletion = remote.completionJson?.takeIf { snapshotIsTerminal }?.let { raw ->
                     runCatching {
                         freezeRemoteCompletion(database, remote.runId, raw, System.currentTimeMillis())
                     }.getOrNull()

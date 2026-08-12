@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.security.MessageDigest
 
 data class RemoteCompletionEvidence(
     val summary: String,
@@ -52,6 +53,7 @@ data class RemoteTestEvidence(
     val exitCode: Int?,
     val evidenceId: String? = null,
     val evidenceSha256: String? = null,
+    val hasDeclaredStatus: Boolean = true,
 )
 
 data class RemoteFileEvidence(
@@ -88,7 +90,8 @@ internal fun parseRemoteCompletionEvidence(raw: String): RemoteCompletionEvidenc
     val root = Json.parseToJsonElement(raw).jsonObject
     val schemaVersion = root.long("schemaVersion")?.toInt() ?: 1
     require(schemaVersion in 1..2) { "不支持的 Remote completion schema：$schemaVersion" }
-    val files = (root["changedFiles"] as? JsonArray).orEmpty().mapNotNull { element ->
+    val rawFiles = (root["changedFiles"] as? JsonArray).orEmpty()
+    val files = rawFiles.mapNotNull { element ->
         val file = runCatching { element.jsonObject }.getOrNull() ?: return@mapNotNull null
         val path = file.string("path") ?: return@mapNotNull null
         RemoteFileEvidence(
@@ -98,7 +101,8 @@ internal fun parseRemoteCompletionEvidence(raw: String): RemoteCompletionEvidenc
             source = file.string("source"),
         )
     }
-    val tests = (root["tests"] as? JsonArray).orEmpty().mapNotNull { element ->
+    val rawTests = (root["tests"] as? JsonArray).orEmpty()
+    val tests = rawTests.mapNotNull { element ->
         val test = runCatching { element.jsonObject }.getOrNull() ?: return@mapNotNull null
         val command = test.string("command") ?: return@mapNotNull null
         RemoteTestEvidence(
@@ -107,6 +111,7 @@ internal fun parseRemoteCompletionEvidence(raw: String): RemoteCompletionEvidenc
             exitCode = test.long("exitCode")?.toInt(),
             evidenceId = test.string("evidenceId"),
             evidenceSha256 = test.string("evidenceSha256"),
+            hasDeclaredStatus = test.string("status") != null,
         )
     }
     val unresolved = (root["unresolved"] as? JsonArray).orEmpty().mapNotNull {
@@ -120,11 +125,15 @@ internal fun parseRemoteCompletionEvidence(raw: String): RemoteCompletionEvidenc
         )
     }
     val completionId = root.string("completionId")
-    val hasStableEvidence = files.all { !it.evidenceId.isNullOrBlank() && !it.evidenceSha256.isNullOrBlank() } &&
-        tests.all { !it.evidenceId.isNullOrBlank() && !it.evidenceSha256.isNullOrBlank() }
+    val hasStableEvidence = files.isNotEmpty() || tests.isNotEmpty()
+    val allEvidenceParsed = files.size == rawFiles.size && tests.size == rawTests.size
+    val allEvidenceVerifies = allEvidenceParsed && files.all(RemoteFileEvidence::hasValidContentIdentity) &&
+        tests.all(RemoteTestEvidence::hasValidContentIdentity)
     val verification = when {
         schemaVersion < 2 -> RemoteCompletionVerification.LEGACY_UNVERIFIED
-        !completionId.isNullOrBlank() && hasStableEvidence -> RemoteCompletionVerification.VERIFIED_V2
+        !completionId.isNullOrBlank() && hasStableEvidence && allEvidenceVerifies -> {
+            RemoteCompletionVerification.VERIFIED_V2
+        }
         else -> RemoteCompletionVerification.UNVERIFIED_V2
     }
     return RemoteCompletionEvidence(
@@ -141,6 +150,54 @@ internal fun parseRemoteCompletionEvidence(raw: String): RemoteCompletionEvidenc
         verification = verification,
     )
 }
+
+private fun RemoteFileEvidence.hasValidContentIdentity(): Boolean =
+    !source.isNullOrBlank() && hasStableEvidenceIdentity(evidenceId, evidenceSha256) &&
+        evidenceSha256.equals(fileEvidenceJson(path, source).sha256(), ignoreCase = true)
+
+private fun RemoteTestEvidence.hasValidContentIdentity(): Boolean =
+    hasDeclaredStatus && hasStableEvidenceIdentity(evidenceId, evidenceSha256) &&
+        evidenceSha256.equals(testEvidenceJson(command, status, exitCode).sha256(), ignoreCase = true)
+
+private fun fileEvidenceJson(path: String, source: String?): String = buildString {
+    append("{\"path\":")
+    append(path.jsonString())
+    source?.let {
+        append(",\"source\":")
+        append(it.jsonString())
+    }
+    append('}')
+}
+
+private fun testEvidenceJson(command: String, status: String, exitCode: Int?): String = buildString {
+    append("{\"command\":")
+    append(command.jsonString())
+    append(",\"status\":")
+    append(status.jsonString())
+    exitCode?.let {
+        append(",\"exitCode\":")
+        append(it)
+    }
+    append('}')
+}
+
+private fun String.jsonString(): String = Json.encodeToString(
+    kotlinx.serialization.serializer<String>(),
+    this,
+).replace("&", "\\u0026")
+    .replace("<", "\\u003c")
+    .replace(">", "\\u003e")
+    .replace("\u2028", "\\u2028")
+    .replace("\u2029", "\\u2029")
+
+private fun hasStableEvidenceIdentity(evidenceId: String?, evidenceSha256: String?): Boolean =
+    !evidenceId.isNullOrBlank() && evidenceSha256?.matches(SHA256_HEX) == true
+
+private fun String.sha256(): String = MessageDigest.getInstance("SHA-256")
+    .digest(encodeToByteArray())
+    .joinToString("") { byte -> "%02x".format(byte) }
+
+private val SHA256_HEX = Regex("^[0-9a-fA-F]{64}$")
 
 internal fun presentRemoteTimeline(event: RemoteRunEventEntity): RemoteTimelinePresentation {
     val payload = runCatching { Json.parseToJsonElement(event.payloadJson) as? JsonObject }.getOrNull()

@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.RemoteRunEntity
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -135,6 +136,40 @@ class RemoteEventReducerInstrumentedTest {
         db.close()
     }
 
+    @Test
+    fun runningEventCannotFreezeCompletionBeforeTerminalEvent() = runBlocking {
+        val db = database()
+        db.remoteDao().insertRun(run())
+        val reducer = RemoteEventReducer(db)
+        val premature = legacyCompletion("premature")
+        val terminal = legacyCompletion("terminal")
+
+        assertEquals(ReduceResult.APPLIED, reducer.apply(completionEvent(1L, "run.running", premature)))
+        assertNull(db.projectSearchDao().remoteCompletion("run-1"))
+        assertNull(db.remoteDao().run("run-1")?.completionJson)
+
+        assertEquals(ReduceResult.APPLIED, reducer.apply(completionEvent(2L, "run.completed", terminal)))
+        val frozen = requireNotNull(db.projectSearchDao().remoteCompletion("run-1"))
+        assertEquals(Json.parseToJsonElement(terminal).toString(), frozen.payloadJson)
+        assertEquals(frozen.payloadJson, db.remoteDao().run("run-1")?.completionJson)
+        db.close()
+    }
+
+    @Test
+    fun terminalLocalRunDoesNotFreezeCompletionFromLateRunningEvent() = runBlocking {
+        val db = database()
+        db.remoteDao().insertRun(run().copy(status = "COMPLETED", completedAt = 20L))
+
+        assertEquals(
+            ReduceResult.APPLIED,
+            RemoteEventReducer(db).apply(completionEvent(1L, "run.running", legacyCompletion("late-running"))),
+        )
+
+        assertNull(db.projectSearchDao().remoteCompletion("run-1"))
+        assertNull(db.remoteDao().run("run-1")?.completionJson)
+        db.close()
+    }
+
     private fun database(): AppDatabase {
         val context = ApplicationProvider.getApplicationContext<Context>()
         return Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
@@ -201,4 +236,22 @@ class RemoteEventReducerInstrumentedTest {
         },
         createdAt = 20L + sequence,
     )
+
+    private fun completionEvent(sequence: Long, type: String, completionJson: String) = RemoteLogicalEvent(
+        schemaVersion = 1,
+        eventId = "event-$sequence",
+        hostId = "host-1",
+        deviceId = "device-1",
+        runId = "run-1",
+        sequence = sequence,
+        type = type,
+        payload = buildJsonObject {
+            put("latestLine", type)
+            put("completion", Json.parseToJsonElement(completionJson))
+        },
+        createdAt = 20L + sequence,
+    )
+
+    private fun legacyCompletion(summary: String): String =
+        """{"summary":"$summary","changedFiles":[],"tests":[],"unresolved":[],"completedAt":20}"""
 }

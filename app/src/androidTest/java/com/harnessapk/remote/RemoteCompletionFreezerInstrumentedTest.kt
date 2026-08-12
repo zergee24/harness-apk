@@ -6,10 +6,12 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.RemoteRunEntity
+import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -40,6 +42,90 @@ class RemoteCompletionFreezerInstrumentedTest {
         Unit
     }
 
+    @Test
+    fun freezerUsesTheSameV2EvidenceValidationAsTheParser() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            database.remoteDao().insertRun(remoteRun())
+            val raw = """
+                {
+                  "schemaVersion":2,
+                  "completionId":"completion-invalid",
+                  "summary":"伪造哈希",
+                  "changedFiles":[{"evidenceId":"file-1","evidenceSha256":"${"a".repeat(64)}","path":"docs/result.md","source":"git"}],
+                  "tests":[],
+                  "unresolved":[],
+                  "completedAt":20
+                }
+            """.trimIndent()
+
+            freezeRemoteCompletion(database, "run-1", raw, capturedAt = 20L)
+
+            assertEquals(
+                RemoteCompletionVerification.UNVERIFIED_V2,
+                parseRemoteCompletionEvidence(raw).verification,
+            )
+            assertEquals(
+                parseRemoteCompletionEvidence(raw).verification.name,
+                database.projectSearchDao().remoteCompletion("run-1")?.verificationState,
+            )
+        } finally {
+            database.close()
+        }
+        Unit
+    }
+
+    @Test
+    fun terminalLocalRunDoesNotFreezeCompletionFromRunningSnapshot() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            database.remoteDao().insertRun(remoteRun())
+            val state = RoomRemoteSyncState(database, RemoteEventReducer(database))
+
+            state.applySnapshot(
+                snapshot(
+                    status = "RUNNING",
+                    completionJson = completionJson("completion-late-running", "late-running"),
+                    journalHead = 1L,
+                ),
+            )
+
+            assertNull(database.projectSearchDao().remoteCompletion("run-1"))
+            assertNull(database.remoteDao().run("run-1")?.completionJson)
+        } finally {
+            database.close()
+        }
+        Unit
+    }
+
+    @Test
+    fun runningSnapshotCannotFreezeCompletionBeforeTerminalSnapshot() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            database.remoteDao().insertRun(remoteRun().copy(status = "RUNNING", completedAt = null))
+            val state = RoomRemoteSyncState(database, RemoteEventReducer(database))
+            val premature = completionJson("completion-premature", "premature")
+            val terminal = completionJson("completion-terminal", "terminal")
+
+            state.applySnapshot(snapshot(status = "RUNNING", completionJson = premature, journalHead = 1L))
+
+            assertNull(database.projectSearchDao().remoteCompletion("run-1"))
+            assertNull(database.remoteDao().run("run-1")?.completionJson)
+
+            state.applySnapshot(snapshot(status = "COMPLETED", completionJson = terminal, journalHead = 2L))
+
+            val frozen = requireNotNull(database.projectSearchDao().remoteCompletion("run-1"))
+            assertEquals(Json.parseToJsonElement(terminal).toString(), frozen.payloadJson)
+            assertEquals(frozen.payloadJson, database.remoteDao().run("run-1")?.completionJson)
+        } finally {
+            database.close()
+        }
+        Unit
+    }
+
     private fun remoteRun() = RemoteRunEntity(
         id = "run-1",
         projectId = "project-1",
@@ -60,6 +146,32 @@ class RemoteCompletionFreezerInstrumentedTest {
         errorMessage = null,
     )
 
-    private fun completionJson(completionId: String, text: String): String =
-        """{"schemaVersion":2,"completionId":"$completionId","contentSha256":"ignored","finalAssistantText":"$text"}"""
+    private fun completionJson(completionId: String, text: String): String {
+        val path = "docs/$text.md"
+        val evidenceHash = sha256("""{"path":"$path","source":"git"}""")
+        return """{"schemaVersion":2,"completionId":"$completionId","summary":"$text","changedFiles":[{"evidenceId":"file-$text","evidenceSha256":"$evidenceHash","path":"$path","source":"git"}],"tests":[],"unresolved":[],"completedAt":20}"""
+    }
+
+    private fun snapshot(status: String, completionJson: String, journalHead: Long) = RemoteRunSnapshotEnvelope(
+        hostId = "host-1",
+        deviceId = "device-1",
+        journalHead = journalHead,
+        processEpoch = "epoch-1",
+        runs = listOf(
+            RemoteRunSnapshot(
+                runId = "run-1",
+                status = status,
+                threadId = "thread-1",
+                turnId = "turn-1",
+                latestLine = status,
+                completionJson = completionJson,
+                errorMessage = null,
+            ),
+        ),
+        approvals = emptyList(),
+    )
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.encodeToByteArray())
+        .joinToString("") { byte -> "%02x".format(byte) }
 }

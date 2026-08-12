@@ -128,7 +128,8 @@ class RemoteEventReducer(
         }
         val completedAt = if (isTerminal) run.completedAt ?: event.createdAt else run.completedAt
         val incomingCompletion = payload["completion"]?.takeUnless { it is JsonNull }?.toString()
-        val frozenCompletion = incomingCompletion?.let { raw ->
+        val incomingIsTerminal = event.type in setOf("run.completed", "run.failed", "run.cancelled")
+        val frozenCompletion = incomingCompletion?.takeIf { incomingIsTerminal }?.let { raw ->
             runCatching { freezeRemoteCompletion(database, run.id, raw, event.createdAt) }.getOrNull()
         }
         dao.upsertRun(

@@ -18,6 +18,7 @@ internal suspend fun freezeRemoteCompletion(
     val root = Json.parseToJsonElement(canonical).jsonObject
     val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 1
     require(schemaVersion in 1..2) { "unsupported completion schema $schemaVersion" }
+    val evidence = parseRemoteCompletionEvidence(canonical)
     val completionId = root["completionId"]?.jsonPrimitive?.contentOrNull
         ?.takeIf(String::isNotBlank)
         ?: "legacy-$runId"
@@ -30,7 +31,7 @@ internal suspend fun freezeRemoteCompletion(
             completionId = completionId,
             contentSha256 = sha,
             payloadJson = canonical,
-            verificationState = if (schemaVersion == 2) "VERIFIED_V2" else "LEGACY_UNVERIFIED",
+            verificationState = evidence.verification.name,
             capturedAt = capturedAt,
         ),
     )
