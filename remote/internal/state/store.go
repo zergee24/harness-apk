@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -49,6 +50,95 @@ type Data struct {
 	Pairings     map[string]*Pairing               `json:"pairings"`
 	Pending      map[string][]protocol.WireMessage `json:"pending,omitempty"`
 	PendingHosts map[string][]protocol.WireMessage `json:"pendingHosts,omitempty"`
+}
+
+const BridgeSchemaVersion = 2
+
+type BridgeData struct {
+	SchemaVersion           int                          `json:"schemaVersion"`
+	RelayURL                string                       `json:"relayUrl"`
+	HostID                  string                       `json:"hostId"`
+	HostName                string                       `json:"hostName"`
+	HostToken               string                       `json:"hostToken"`
+	Pending                 map[string]string            `json:"pendingPairingSecrets"`
+	DeviceSecrets           map[string]string            `json:"deviceSecrets"`
+	Sequences               map[string]uint64            `json:"sequences"`
+	PendingOutbound         map[string]map[string]string `json:"pendingOutbound,omitempty"`
+	NeedsInitialGapSnapshot bool                         `json:"needsInitialGapSnapshot,omitempty"`
+	JournalKey              string                       `json:"journalKey"`
+	RegisteredWorkspaces    []string                     `json:"registeredWorkspaces,omitempty"`
+}
+
+func LoadBridge(path string) (BridgeData, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return BridgeData{}, err
+	}
+	var data BridgeData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return BridgeData{}, err
+	}
+	migrated, err := normalizeBridge(&data, true)
+	if err != nil {
+		return BridgeData{}, err
+	}
+	if migrated {
+		if err := SaveBridge(path, data); err != nil {
+			return BridgeData{}, err
+		}
+	}
+	return data, nil
+}
+
+func SaveBridge(path string, data BridgeData) error {
+	if _, err := normalizeBridge(&data, false); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, raw, 0o600)
+}
+
+func normalizeBridge(data *BridgeData, loading bool) (bool, error) {
+	dirty := false
+	if data.Pending == nil {
+		data.Pending = map[string]string{}
+		dirty = true
+	}
+	if data.DeviceSecrets == nil {
+		data.DeviceSecrets = map[string]string{}
+		dirty = true
+	}
+	if data.Sequences == nil {
+		data.Sequences = map[string]uint64{}
+		dirty = true
+	}
+	if data.PendingOutbound == nil {
+		data.PendingOutbound = map[string]map[string]string{}
+		dirty = true
+	}
+	if data.SchemaVersion < BridgeSchemaVersion {
+		if loading && len(data.PendingOutbound) > 0 {
+			data.NeedsInitialGapSnapshot = true
+		}
+		data.PendingOutbound = map[string]map[string]string{}
+		data.SchemaVersion = BridgeSchemaVersion
+		dirty = true
+	}
+	if data.SchemaVersion != BridgeSchemaVersion {
+		return false, fmt.Errorf("unsupported bridge state schema %d", data.SchemaVersion)
+	}
+	if data.JournalKey == "" {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return false, err
+		}
+		data.JournalKey = base64.RawURLEncoding.EncodeToString(key)
+		dirty = true
+	}
+	return dirty, nil
 }
 
 type Store struct {
@@ -328,14 +418,36 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+	return writeAtomic(s.path, raw, 0o600)
+}
+
+func writeAtomic(path string, raw []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	tmp, err := os.OpenFile(path+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if _, err = tmp.Write(raw); err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		return err
+	}
+	if directory, err := os.Open(dir); err == nil {
+		defer directory.Close()
+		return directory.Sync()
+	}
+	return nil
 }
 
 func randomToken(size int) (string, error) {

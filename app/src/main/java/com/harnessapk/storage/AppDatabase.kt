@@ -40,8 +40,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageWikiCitationEntity::class,
         LocalSearchDocumentEntity::class,
         LocalSearchFtsEntity::class,
+        ProjectRemoteBindingEntity::class,
+        RemoteRunEntity::class,
+        RemoteRunEventEntity::class,
+        RemoteApprovalEntity::class,
+        RemoteCommandOutboxEntity::class,
+        RemoteSyncCursorEntity::class,
     ],
-    version = 21,
+    version = 22,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -59,6 +65,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun wikiDao(): WikiDao
     abstract fun conversationWikiDao(): ConversationWikiDao
     abstract fun localSearchDao(): LocalSearchDao
+    abstract fun remoteDao(): RemoteDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -962,6 +969,143 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 ensureLocalSearchSchema(db)
                 backfillLocalSearch(db)
+            }
+        }
+
+        val MIGRATION_21_22: Migration = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS project_remote_bindings (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        projectId TEXT NOT NULL,
+                        hostId TEXT NOT NULL,
+                        workspaceId TEXT NOT NULL,
+                        cwd TEXT NOT NULL,
+                        displayName TEXT NOT NULL,
+                        repositoryFingerprint TEXT NOT NULL,
+                        repositoryLabel TEXT,
+                        state TEXT NOT NULL,
+                        verifiedAt INTEGER NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_project_remote_bindings_projectId ON project_remote_bindings(projectId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_project_remote_bindings_hostId ON project_remote_bindings(hostId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_project_remote_bindings_workspaceId ON project_remote_bindings(workspaceId)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS remote_runs (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        projectId TEXT NOT NULL,
+                        projectNameSnapshot TEXT NOT NULL,
+                        bindingId TEXT NOT NULL,
+                        bindingSnapshotJson TEXT NOT NULL,
+                        hostId TEXT NOT NULL,
+                        threadId TEXT,
+                        turnId TEXT,
+                        objective TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        latestLine TEXT NOT NULL,
+                        lastLogicalSequence INTEGER NOT NULL,
+                        startedAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        completedAt INTEGER,
+                        completionJson TEXT,
+                        errorMessage TEXT
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_runs_projectId ON remote_runs(projectId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_runs_bindingId ON remote_runs(bindingId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_runs_hostId ON remote_runs(hostId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_runs_status ON remote_runs(status)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS remote_run_events (
+                        logicalEventId TEXT NOT NULL PRIMARY KEY,
+                        runId TEXT NOT NULL,
+                        hostId TEXT NOT NULL,
+                        deviceId TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        type TEXT NOT NULL,
+                        itemId TEXT,
+                        presentationKind TEXT NOT NULL,
+                        payloadJson TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        FOREIGN KEY(runId) REFERENCES remote_runs(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_run_events_runId ON remote_run_events(runId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_run_events_itemId ON remote_run_events(itemId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_remote_run_events_hostId_deviceId_sequence ON remote_run_events(hostId, deviceId, sequence)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS remote_approvals (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        runId TEXT NOT NULL,
+                        logicalEventId TEXT NOT NULL,
+                        serverRequestIdJson TEXT NOT NULL,
+                        processEpoch TEXT NOT NULL,
+                        method TEXT NOT NULL,
+                        itemId TEXT,
+                        actionType TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        commandPreview TEXT,
+                        detailsJson TEXT NOT NULL,
+                        availableDecisionsJson TEXT NOT NULL,
+                        risk TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        responseCommandId TEXT,
+                        requestedAt INTEGER NOT NULL,
+                        resolvedAt INTEGER,
+                        FOREIGN KEY(runId) REFERENCES remote_runs(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_approvals_runId ON remote_approvals(runId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_remote_approvals_logicalEventId ON remote_approvals(logicalEventId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_approvals_status ON remote_approvals(status)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS remote_command_outbox (
+                        commandId TEXT NOT NULL PRIMARY KEY,
+                        runId TEXT,
+                        type TEXT NOT NULL,
+                        payloadJson TEXT NOT NULL,
+                        payloadSha256 TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        attemptCount INTEGER NOT NULL,
+                        nextAttemptAt INTEGER NOT NULL,
+                        lastAttemptAt INTEGER,
+                        acknowledgedAt INTEGER,
+                        completedAt INTEGER,
+                        resultJson TEXT,
+                        lastError TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_command_outbox_runId ON remote_command_outbox(runId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_command_outbox_status ON remote_command_outbox(status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_command_outbox_nextAttemptAt ON remote_command_outbox(nextAttemptAt)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS remote_sync_cursors (
+                        hostId TEXT NOT NULL,
+                        deviceId TEXT NOT NULL,
+                        lastContiguousSequence INTEGER NOT NULL,
+                        gapFromSequence INTEGER,
+                        reconciliationState TEXT NOT NULL,
+                        lastSyncedAt INTEGER NOT NULL,
+                        PRIMARY KEY(hostId, deviceId)
+                    )
+                    """.trimIndent(),
+                )
             }
         }
 

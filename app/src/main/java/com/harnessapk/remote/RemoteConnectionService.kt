@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 class RemoteConnectionService : Service() {
     private val container by lazy { (application as HarnessApkApplication).container }
     private val scope by lazy { CoroutineScope(SupervisorJob() + container.dispatchers.io) }
+    private val notificationCoordinator = RemoteNotificationCoordinator()
 
     override fun onCreate() {
         super.onCreate()
@@ -39,7 +40,8 @@ class RemoteConnectionService : Service() {
         }
         scope.launch {
             container.remoteRepository.notifications.collect { alert ->
-                manager.notify(ALERT_ID, alertNotification(alert))
+                val plan = alert.toPlan()
+                manager.notify(plan.notificationId, alertNotification(plan))
             }
         }
     }
@@ -52,27 +54,67 @@ class RemoteConnectionService : Service() {
         .setSmallIcon(android.R.drawable.stat_sys_upload).setContentTitle("Harness Codex Remote")
         .setContentText(text).setOngoing(true).setOnlyAlertOnce(true).build()
 
-    private fun alertNotification(alert: RemoteNotification) = NotificationCompat.Builder(this, ALERT_CHANNEL)
-        .setSmallIcon(android.R.drawable.stat_notify_more)
-        .setContentTitle(alert.title)
-        .setContentText(alert.message)
-        .setAutoCancel(true)
-        .setContentIntent(
-            PendingIntent.getActivity(
-                this,
-                0,
-                Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    private fun RemoteNotification.toPlan(): RemoteNotificationPlan =
+        if (runId != null && approvalId != null) {
+            notificationCoordinator.approvalPlan(runId, approvalId, risk)
+        } else if (runId != null) {
+            notificationCoordinator.runPlan(runId, title, message)
+        } else {
+            notificationCoordinator.runPlan("legacy", title, message)
+        }
+
+    private fun alertNotification(plan: RemoteNotificationPlan): android.app.Notification {
+        val builder = NotificationCompat.Builder(this, ALERT_CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_notify_more)
+            .setContentTitle(plan.title)
+            .setContentText(plan.summary)
+            .setAutoCancel(true)
+            .setContentIntent(runPendingIntent(plan.runId, plan.notificationId))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+        plan.actions.forEachIndexed { index, action ->
+            val pendingIntent = when (action.kind) {
+                RemoteNotificationActionKind.VIEW -> runPendingIntent(plan.runId, plan.notificationId + index + 1)
+                RemoteNotificationActionKind.ALLOW_ONCE,
+                RemoteNotificationActionKind.DECLINE,
+                -> approvalPendingIntent(plan, action, plan.notificationId + index + 1)
+            }
+            builder.addAction(0, action.label, pendingIntent)
+        }
+        return builder.build()
+    }
+
+    private fun runPendingIntent(runId: String, requestCode: Int): PendingIntent = PendingIntent.getActivity(
+        this,
+        requestCode,
+        Intent(this, MainActivity::class.java)
+            .putExtra(MainActivity.EXTRA_REMOTE_RUN_ID, runId)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    private fun approvalPendingIntent(
+        plan: RemoteNotificationPlan,
+        action: RemoteNotificationAction,
+        requestCode: Int,
+    ): PendingIntent = PendingIntent.getBroadcast(
+        this,
+        requestCode,
+        Intent(this, RemoteNotificationActionReceiver::class.java)
+            .setAction(RemoteNotificationActionReceiver.ACTION_APPROVAL)
+            .putExtra(RemoteNotificationActionReceiver.EXTRA_RUN_ID, plan.runId)
+            .putExtra(RemoteNotificationActionReceiver.EXTRA_APPROVAL_ID, plan.approvalId)
+            .putExtra(RemoteNotificationActionReceiver.EXTRA_COMMAND_ID, action.commandId)
+            .putExtra(
+                RemoteNotificationActionReceiver.EXTRA_DECISION,
+                if (action.kind == RemoteNotificationActionKind.ALLOW_ONCE) ApprovalDecision.ALLOW_ONCE.name else ApprovalDecision.DENY.name,
             ),
-        )
-        .setPriority(NotificationCompat.PRIORITY_HIGH)
-        .build()
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
 
     companion object {
         private const val CHANNEL = "codex_remote"
         private const val ALERT_CHANNEL = "codex_remote_alerts"
         private const val ID = 1025
-        private const val ALERT_ID = 1026
         fun start(context: Context) = androidx.core.content.ContextCompat.startForegroundService(context, Intent(context, RemoteConnectionService::class.java))
     }
 }

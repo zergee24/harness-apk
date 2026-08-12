@@ -67,13 +67,15 @@ class HarnessApkAppStateTest {
     }
 
     @Test
-    fun homeTopBarOnlyReservesTheStatusBarInset() {
+    fun homeTopBarExposesSharedActivityEntryForLifeAndWork() {
         val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText().replace("\r\n", "\n")
         val topBarSource = source.substringAfter("topBar = {").substringBefore("},\n    ) { padding")
 
         assertTrue(topBarSource.contains("if (isHomeRoute)"))
-        assertTrue(topBarSource.contains("HomeStatusBarInset()"))
-        assertTrue(source.contains("private fun HomeStatusBarInset()"))
+        assertTrue(topBarSource.contains("TopAppBar("))
+        assertTrue(topBarSource.contains("mainMode == MainMode.LIFE || mainMode == MainMode.WORK"))
+        assertTrue(topBarSource.contains("navController.navigate(Routes.Activity)"))
+        assertTrue(topBarSource.contains("个待处理任务"))
         assertFalse(source.contains("private fun HomeTopBar("))
         assertFalse(source.contains("ModeSwitcher("))
         assertFalse(source.contains("onOpenSettings"))

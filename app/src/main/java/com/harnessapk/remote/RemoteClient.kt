@@ -30,7 +30,7 @@ class RemoteRepository(
     private val profileStore: RemoteProfileProvider,
     private val httpClient: OkHttpClient,
     private val scope: CoroutineScope,
-) {
+) : RemoteCommandSender, RemoteSyncSender {
     private val _state = MutableStateFlow(RemoteUiState())
     val state: StateFlow<RemoteUiState> = _state.asStateFlow()
     private val _notifications = MutableSharedFlow<RemoteNotification>(extraBufferCapacity = 8)
@@ -42,6 +42,18 @@ class RemoteRepository(
     private var explicitDisconnect = false
     private var reconnectAttempt = 0
     private val pendingCommands = mutableMapOf<String, String>()
+    @Volatile
+    private var syncCoordinator: RemoteSyncCoordinator? = null
+    @Volatile
+    private var connectedHandler: (suspend (hostId: String, deviceId: String) -> Unit)? = null
+
+    fun attachSyncCoordinator(coordinator: RemoteSyncCoordinator) {
+        syncCoordinator = coordinator
+    }
+
+    fun attachConnectedHandler(handler: suspend (hostId: String, deviceId: String) -> Unit) {
+        connectedHandler = handler
+    }
 
     fun connect() {
         val profile = profileStore.profile.value ?: return
@@ -64,6 +76,10 @@ class RemoteRepository(
     }
 
     fun refreshThreads() = send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))
+    fun requestWorkspaceCandidates() {
+        _state.value = _state.value.copy(workspaceCandidates = emptyList(), workspaceCandidatesLoaded = false)
+        send(RemoteCommand(type = "workspace.list", requestId = requestId("workspace.list")))
+    }
     fun selectThread(threadId: String) {
         _state.value = _state.value.copy(selectedThreadId = threadId, timeline = emptyList(), approvals = emptyList())
         send(RemoteCommand(type = "thread.read", requestId = requestId("thread.read"), threadId = threadId))
@@ -98,14 +114,24 @@ class RemoteRepository(
     private fun requestId(kind: String): String = "$kind:${UUID.randomUUID()}".also { pendingCommands[it] = kind }
 
     private fun send(command: RemoteCommand): Boolean {
+        return sendPayload(command.requestId, command.toJson())
+    }
+
+    override fun send(command: RebuiltRemoteCommand): Boolean =
+        sendPayload(command.commandId, command.payload)
+
+    override fun send(command: JsonObject): Boolean =
+        sendPayload(command.string("requestId") ?: "sync:${UUID.randomUUID()}", command)
+
+    private fun sendPayload(requestId: String, payload: JsonObject): Boolean {
         val profile = profileStore.profile.value
         if (profile == null) {
-            pendingCommands.remove(command.requestId)
+            pendingCommands.remove(requestId)
             return false
         }
         val activeSocket = socket
         if (activeSocket == null) {
-            pendingCommands.remove(command.requestId)
+            pendingCommands.remove(requestId)
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
             return false
         }
@@ -115,9 +141,9 @@ class RemoteRepository(
             pairingTicket = profile.pairingTicket.takeIf(String::isNotBlank), sequence = outgoingSequence.incrementAndGet(),
             expiresAt = now + 5 * 60_000L, nonce = "", ciphertext = "",
         )
-        val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, command.toJson())
+        val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, payload)
         if (!activeSocket.send(encrypted.toJson().toString())) {
-            pendingCommands.remove(command.requestId)
+            pendingCommands.remove(requestId)
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
             return false
         }
@@ -143,6 +169,13 @@ class RemoteRepository(
             _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED, errorMessage = null)
             send(RemoteCommand(type = "host.status", requestId = requestId("host.status")))
             refreshThreads()
+            val profile = profileStore.profile.value
+            if (profile != null) {
+                scope.launch {
+                    syncCoordinator?.resume(profile.hostId, profile.deviceId)
+                    connectedHandler?.invoke(profile.hostId, profile.deviceId)
+                }
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -190,8 +223,47 @@ class RemoteRepository(
         }
         sendAck(wire.messageId)
         if (!firstSeen) return
-        val event = parseRemoteEvent(RemoteCrypto.decrypt(profile.pairingSecret, wire))
-        handleEvent(event)
+        val plain = RemoteCrypto.decrypt(profile.pairingSecret, wire)
+        val root = Json.parseToJsonElement(plain).jsonObject
+        if (root["schemaVersion"] != null && root["eventId"] != null) {
+            val event = parseRemoteLogicalEvent(plain)
+            syncCoordinator?.let { coordinator ->
+                scope.launch {
+                    if (coordinator.onLogicalEvent(event) == ReduceResult.APPLIED) {
+                        notifyLogicalEvent(event)
+                    }
+                }
+            }
+        } else {
+            handleEvent(parseRemoteEvent(plain))
+        }
+    }
+
+    private fun notifyLogicalEvent(event: RemoteLogicalEvent) {
+        val payload = event.payload as? JsonObject ?: JsonObject(emptyMap())
+        when (event.type) {
+            "run.approval.requested" -> _notifications.tryEmit(
+                RemoteNotification(
+                    title = "Codex 等待审批",
+                    message = payload.string("target")?.let(::redactRemoteSensitiveText) ?: "Mac 上的任务需要你的确认",
+                    runId = event.runId,
+                    approvalId = payload.string("approvalId"),
+                    risk = maxRemoteApprovalRisk(
+                        parseRemoteApprovalRisk(payload.string("risk").orEmpty()),
+                        classifyRemoteApprovalRisk(
+                            payload.string("target").orEmpty(),
+                            payload.string("actionType").orEmpty(),
+                        ),
+                    ),
+                ),
+            )
+            "run.completed" -> _notifications.tryEmit(
+                RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果", runId = event.runId),
+            )
+            "run.failed" -> _notifications.tryEmit(
+                RemoteNotification("Codex 任务失败", "打开 Harness 查看失败详情", runId = event.runId),
+            )
+        }
     }
 
     internal fun handleEvent(event: RemoteEvent) {
@@ -203,6 +275,20 @@ class RemoteRepository(
                 _notifications.tryEmit(RemoteNotification("Codex 任务失败", message))
             }
             "rpc.response" -> handleRpcResponse(event)
+            "workspace.candidates" -> _state.value = _state.value.copy(
+                workspaceCandidates = parseWorkspaceCandidates(event),
+                workspaceCandidatesLoaded = true,
+            )
+            "sync.gap" -> {
+                val hostId = profileStore.profile.value?.hostId ?: return
+                syncCoordinator?.let { coordinator -> scope.launch { coordinator.onGap(hostId) } }
+            }
+            "sync.snapshot" -> {
+                val payload = event.payload as? JsonObject ?: return
+                syncCoordinator?.let { coordinator ->
+                    scope.launch { coordinator.onSnapshot(parseRemoteRunSnapshot(payload)) }
+                }
+            }
             "approval.request" -> handleApproval(event)
             "codex.event" -> handleCodexEvent(event)
         }

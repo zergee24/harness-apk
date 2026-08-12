@@ -70,6 +70,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.harnessapk.remote-br
 
 The bridge launches `codex app-server --listen stdio://`. The normal Codex login and workspace permissions on that Mac remain authoritative.
 
+The launch agent uses a restrictive umask and throttles restart loops. If `codex` is not available on the launchd `PATH`, add `--codex /absolute/path/to/codex` to `ProgramArguments`; do not copy login credentials into the plist.
+
 ## 3. Pair Harness
 
 Generate a five-minute, one-use QR code on the Mac:
@@ -100,6 +102,38 @@ Never commit these values. Build and install the APK, then grant notification pe
 - Pairing expires after five minutes and cannot be reused.
 - Wire messages expire after five minutes and are authenticated against routing metadata to prevent tampering.
 - The relay accepts messages up to 1 MiB and JSON HTTP bodies up to 64 KiB.
+
+### Bridge state v1 -> v2
+
+Bridge v2 adds an encrypted Logical Event journal plus command, route and workspace ledgers beside `bridge.json` in `~/.harness-remote`. On first load it preserves the host token, device secrets and transport sequences. Legacy pending outbound ciphertext has no stable Logical Event identity, so migration discards that queue and forces a Gap + Snapshot instead of guessing delivery.
+
+Before upgrading, stop the launch agent and take a permission-preserving backup of the whole state directory:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.harnessapk.remote-bridge.plist
+BRIDGE_STATE_DIR="${HOME}/.harness-remote"
+BRIDGE_BACKUP_DIR="${HOME}/.harness-remote-backup-$(date +%Y%m%d-%H%M%S)"
+cp -a "$BRIDGE_STATE_DIR" "$BRIDGE_BACKUP_DIR"
+chmod -R go-rwx "$BRIDGE_BACKUP_DIR"
+```
+
+Install the v2 binary, bootstrap the launch agent, then verify `bridge.json` has `schemaVersion: 2`, the logs contain no decode error, and the phone completes resume/Snapshot reconciliation. Keep the backup until one complete Run and one approval round trip have succeeded.
+
+Rollback must use a Bridge build that understands state v2. Stop the launch agent, move the current directory aside, restore the complete backup atomically at the directory level, and bootstrap the compatible build. Never delete only `logical-events.log`, `commands.json` or `routes.json`; the ledgers form one recovery set. A legacy v1-only binary is not a valid rollback target after migration.
+
+### M2 automated acceptance
+
+The automated suite refuses ADB 5037 and requires an isolated emulator server containing exactly one declared serial:
+
+```bash
+export ANDROID_HOME=/absolute/path/to/Android/sdk
+export HARNESS_M2_ADB_SERVER_PORT=5039
+export HARNESS_M2_SERIAL=emulator-15662
+export ADB_LOCAL_TRANSPORT_MAX_PORT=5553
+remote/scripts/m2-automated-acceptance.sh
+```
+
+The scenario manifest is `remote/testdata/m2-fault-matrix.json`. Entries marked `manualRequired` still require the target Honor phone, real Relay, Mac Bridge and Codex app-server; emulator results must not be recorded as substitutes for Push, OEM background limits, lock-screen approval or the real ten-minute disconnect.
 
 Run checks from `remote/`:
 

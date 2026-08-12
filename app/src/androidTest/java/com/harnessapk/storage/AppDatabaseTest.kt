@@ -52,6 +52,91 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseTest {
     @Test
+    fun migration21To22AddsRemoteRunStateWithoutChangingM1Data() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "migration-21-22-remote-${System.nanoTime()}.db"
+        createVersion15Fixture(context, name)
+        upgradeVersion15FixtureTo20(context, name)
+        seedVersion20SearchMigrationData(context, name)
+        upgradeVersion20FixtureTo21(context, name)
+
+        val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(AppDatabase.MIGRATION_21_22)
+            .addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK)
+            .build()
+        val sqlite = migrated.openHelper.writableDatabase
+
+        assertEquals(22, sqlite.version)
+        assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
+        assertEquals(
+            "{}",
+            sqlite.string("SELECT requestContextJson FROM chat_execution_entries WHERE id = 'entry-queue'"),
+        )
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agents WHERE id = 'agent-v2'"))
+        assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM wikis WHERE id = 'wiki-v20'"))
+        listOf(
+            "project_remote_bindings",
+            "remote_runs",
+            "remote_run_events",
+            "remote_approvals",
+            "remote_command_outbox",
+            "remote_sync_cursors",
+        ).forEach { table ->
+            assertEquals(
+                table,
+                1,
+                sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '$table'"),
+            )
+            assertEquals("$table must start empty", 0, sqlite.scalarInt("SELECT COUNT(*) FROM $table"))
+        }
+        sqlite.assertNoForeignKeyViolations()
+        migrated.close()
+        context.deleteDatabase(name)
+        Unit
+    }
+
+    @Test
+    fun remoteRunDeleteCascadesEventsAndApprovalsButUnbindKeepsRun() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val dao = db.remoteDao()
+        dao.insertBinding(remoteBinding())
+        dao.insertRun(remoteRun())
+        dao.insertEvent(remoteEvent(logicalEventId = "event-1", sequence = 1L))
+        dao.insertApproval(remoteApproval())
+
+        dao.deleteBindingById("binding-1")
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM remote_runs WHERE id = 'run-1'"))
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM remote_run_events WHERE runId = 'run-1'"))
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM remote_approvals WHERE runId = 'run-1'"))
+
+        dao.deleteRunById("run-1")
+        assertEquals(0, db.scalarInt("SELECT COUNT(*) FROM remote_run_events WHERE runId = 'run-1'"))
+        assertEquals(0, db.scalarInt("SELECT COUNT(*) FROM remote_approvals WHERE runId = 'run-1'"))
+        db.close()
+    }
+
+    @Test
+    fun duplicateHostDeviceLogicalSequenceIsRejected() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        val dao = db.remoteDao()
+        dao.insertRun(remoteRun())
+        dao.insertEvent(remoteEvent(logicalEventId = "event-1", sequence = 7L))
+
+        var rejected = false
+        try {
+            dao.insertEvent(remoteEvent(logicalEventId = "event-2", sequence = 7L))
+        } catch (_: android.database.sqlite.SQLiteConstraintException) {
+            rejected = true
+        }
+
+        assertTrue("(hostId, deviceId, sequence) must be unique", rejected)
+        assertEquals(1, db.scalarInt("SELECT COUNT(*) FROM remote_run_events"))
+        db.close()
+    }
+
+    @Test
     fun migration20To21BackfillsSearchAndPreservesExistingData() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-20-21-search-${System.nanoTime()}.db"
@@ -60,12 +145,12 @@ class AppDatabaseTest {
         seedVersion20SearchMigrationData(context, name)
 
         val migrated = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(AppDatabase.MIGRATION_20_21)
+            .addMigrations(AppDatabase.MIGRATION_20_21, AppDatabase.MIGRATION_21_22)
             .addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK)
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(21, sqlite.version)
+        assertEquals(22, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "{}",
@@ -104,11 +189,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
+                AppDatabase.MIGRATION_21_22,
             )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(21, sqlite.version)
+        assertEquals(22, sqlite.version)
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wikis'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wiki_versions'"))
         assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversation_wiki_mounts'"))
@@ -881,12 +967,13 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_17_18,
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
-                    AppDatabase.MIGRATION_20_21,
+                AppDatabase.MIGRATION_20_21,
+                AppDatabase.MIGRATION_21_22,
             )
             .build()
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(21, sqlite.version)
+        assertEquals(22, sqlite.version)
         assertEquals(6, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals(
             "daily-conversation|USER|默认使用中文",
@@ -1149,7 +1236,7 @@ class AppDatabaseTest {
         val migrated = version15
         val sqlite = migrated.openHelper.writableDatabase
 
-        assertEquals(21, sqlite.version)
+        assertEquals(22, sqlite.version)
         assertEquals(2, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         assertEquals("默认使用中文", sqlite.string("SELECT content FROM messages WHERE id = 'daily-message'"))
         assertEquals("notes/project.md", sqlite.string("SELECT relativePath FROM conversation_markdown_links"))
@@ -1205,11 +1292,12 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
+                AppDatabase.MIGRATION_21_22,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(21, sqlite.version)
+        assertEquals(22, sqlite.version)
         assertEquals(
             1,
             sqlite.scalarInt(
@@ -1395,13 +1483,14 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
+                AppDatabase.MIGRATION_21_22,
             )
             .build()
         val sqlite = db.openHelper.writableDatabase
         val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
 
         assertTrue("迁移耗时 ${elapsedMillis}ms，阻塞了会话页启动", elapsedMillis < 5_000)
-        assertEquals(21, sqlite.version)
+        assertEquals(22, sqlite.version)
         assertEquals(12_001, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
         assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
         db.conversationDao().insert(conversation("post-large-upgrade", updatedAt = 32L))
@@ -1429,6 +1518,7 @@ class AppDatabaseTest {
                 AppDatabase.MIGRATION_18_19,
                 AppDatabase.MIGRATION_19_20,
                 AppDatabase.MIGRATION_20_21,
+                AppDatabase.MIGRATION_21_22,
             )
             .build()
         db.openHelper.writableDatabase
@@ -1478,11 +1568,12 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_18_19,
                     AppDatabase.MIGRATION_19_20,
                     AppDatabase.MIGRATION_20_21,
+                    AppDatabase.MIGRATION_21_22,
                 )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(21, sqlite.version)
+            assertEquals(22, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -1519,17 +1610,18 @@ class AppDatabaseTest {
                     AppDatabase.MIGRATION_12_13,
                     AppDatabase.MIGRATION_13_14,
                     AppDatabase.MIGRATION_14_15,
-                AppDatabase.MIGRATION_15_16,
-                AppDatabase.MIGRATION_16_17,
-                AppDatabase.MIGRATION_17_18,
-                AppDatabase.MIGRATION_18_19,
-                AppDatabase.MIGRATION_19_20,
-                AppDatabase.MIGRATION_20_21,
-            )
+                    AppDatabase.MIGRATION_15_16,
+                    AppDatabase.MIGRATION_16_17,
+                    AppDatabase.MIGRATION_17_18,
+                    AppDatabase.MIGRATION_18_19,
+                    AppDatabase.MIGRATION_19_20,
+                    AppDatabase.MIGRATION_20_21,
+                    AppDatabase.MIGRATION_21_22,
+                )
                 .build()
             val sqlite = db.openHelper.writableDatabase
 
-            assertEquals(21, sqlite.version)
+            assertEquals(22, sqlite.version)
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM conversations"))
             assertEquals(4, sqlite.scalarInt("SELECT COUNT(*) FROM messages"))
             assertEquals(1, sqlite.scalarInt("SELECT COUNT(*) FROM agent_chunks"))
@@ -2180,6 +2272,105 @@ class AppDatabaseTest {
         )
         helper.close()
     }
+
+    private fun upgradeVersion20FixtureTo21(context: Context, name: String) {
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(
+                    object : SupportSQLiteOpenHelper.Callback(21) {
+                        override fun onConfigure(db: SupportSQLiteDatabase) {
+                            db.setForeignKeyConstraintsEnabled(true)
+                        }
+
+                        override fun onCreate(db: SupportSQLiteDatabase) {
+                            error("version 20 fixture must already exist")
+                        }
+
+                        override fun onUpgrade(
+                            db: SupportSQLiteDatabase,
+                            oldVersion: Int,
+                            newVersion: Int,
+                        ) {
+                            check(oldVersion == 20 && newVersion == 21)
+                            AppDatabase.MIGRATION_20_21.migrate(db)
+                        }
+                    },
+                )
+                .build(),
+        )
+        val db = helper.writableDatabase
+        check(db.version == 21)
+        helper.close()
+    }
+
+    private fun remoteBinding() = ProjectRemoteBindingEntity(
+        id = "binding-1",
+        projectId = "project-1",
+        hostId = "host-1",
+        workspaceId = "workspace-1",
+        cwd = "/workspace/project-1",
+        displayName = "Project One",
+        repositoryFingerprint = "fingerprint-1",
+        repositoryLabel = "owner/repo",
+        state = "VERIFIED",
+        verifiedAt = 10L,
+        createdAt = 10L,
+        updatedAt = 10L,
+    )
+
+    private fun remoteRun() = RemoteRunEntity(
+        id = "run-1",
+        projectId = "project-1",
+        projectNameSnapshot = "Project One",
+        bindingId = "binding-1",
+        bindingSnapshotJson = "{}",
+        hostId = "host-1",
+        threadId = "thread-1",
+        turnId = "turn-1",
+        objective = "Implement M2",
+        status = "RUNNING",
+        latestLine = "Started",
+        lastLogicalSequence = 0L,
+        startedAt = 10L,
+        updatedAt = 10L,
+        completedAt = null,
+        completionJson = null,
+        errorMessage = null,
+    )
+
+    private fun remoteEvent(logicalEventId: String, sequence: Long) = RemoteRunEventEntity(
+        logicalEventId = logicalEventId,
+        runId = "run-1",
+        hostId = "host-1",
+        deviceId = "device-1",
+        sequence = sequence,
+        type = "RUN_STARTED",
+        itemId = null,
+        presentationKind = "STATUS",
+        payloadJson = "{}",
+        createdAt = 10L,
+    )
+
+    private fun remoteApproval() = RemoteApprovalEntity(
+        id = "approval-1",
+        runId = "run-1",
+        logicalEventId = "event-1",
+        serverRequestIdJson = "1",
+        processEpoch = "epoch-1",
+        method = "item/commandExecution/requestApproval",
+        itemId = "item-1",
+        actionType = "COMMAND_EXECUTION",
+        target = "./gradlew test",
+        commandPreview = "./gradlew test",
+        detailsJson = "{}",
+        availableDecisionsJson = "[\"accept\",\"decline\"]",
+        risk = "LOW",
+        status = "PENDING",
+        responseCommandId = null,
+        requestedAt = 10L,
+        resolvedAt = null,
+    )
 
     private fun createVersion11Fixture(
         context: Context,

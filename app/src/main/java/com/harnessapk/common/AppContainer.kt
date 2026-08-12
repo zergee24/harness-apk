@@ -4,6 +4,8 @@ import android.content.Context
 import android.os.StatFs
 import androidx.room.Room
 import androidx.room.withTransaction
+import com.harnessapk.activity.ActivityRepository
+import com.harnessapk.activity.RoomActivityFeedSource
 import com.harnessapk.agent.AgentRepository
 import com.harnessapk.agent.AgentContextAssembler
 import com.harnessapk.agent.AgentLifecycleCoordinator
@@ -91,6 +93,18 @@ import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import com.harnessapk.remote.AliyunPushManager
 import com.harnessapk.remote.RemoteEnrollmentClient
+import com.harnessapk.remote.RemoteBindingRepository
+import com.harnessapk.remote.RemoteApprovalCommandCoordinator
+import com.harnessapk.remote.RemoteCommandOutbox
+import com.harnessapk.remote.RemoteRunLauncher
+import com.harnessapk.remote.RemoteRunCommandCoordinator
+import com.harnessapk.remote.RemoteTransport
+import com.harnessapk.remote.RoomRemoteCommandStore
+import com.harnessapk.remote.RoomRemoteRunCommandState
+import com.harnessapk.remote.RoomApprovalResponseWriter
+import com.harnessapk.remote.RemoteEventReducer
+import com.harnessapk.remote.RemoteSyncCoordinator
+import com.harnessapk.remote.RoomRemoteSyncState
 import com.harnessapk.remote.RemoteProfileStore
 import com.harnessapk.remote.RemoteRepository
 import com.harnessapk.ui.HomeModeStore
@@ -128,6 +142,7 @@ class AppContainer(
         AppDatabase.MIGRATION_18_19,
         AppDatabase.MIGRATION_19_20,
         AppDatabase.MIGRATION_20_21,
+        AppDatabase.MIGRATION_21_22,
     ).addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)
@@ -150,6 +165,28 @@ class AppContainer(
     val remoteEnrollmentClient = RemoteEnrollmentClient(remoteHttpClient)
     val aliyunPushManager = AliyunPushManager(appContext)
     val remoteRepository = RemoteRepository(remoteProfileStore, remoteHttpClient, applicationScope)
+    val remoteBindingRepository = RemoteBindingRepository(database.remoteDao())
+    val remoteCommandOutbox = RemoteCommandOutbox(RoomRemoteCommandStore(database.remoteDao()))
+    val remoteApprovalCommandCoordinator = RemoteApprovalCommandCoordinator(
+        remoteCommandOutbox,
+        RoomApprovalResponseWriter(database.remoteDao()),
+    )
+    val remoteRunLauncher = RemoteRunLauncher(database, remoteCommandOutbox)
+    val remoteRunCommandCoordinator = RemoteRunCommandCoordinator(
+        remoteCommandOutbox,
+        RoomRemoteRunCommandState(database.remoteDao()),
+    )
+    val remoteTransport = RemoteTransport(remoteCommandOutbox, remoteRepository)
+    val remoteEventReducer = RemoteEventReducer(database)
+    val remoteSyncCoordinator = RemoteSyncCoordinator(
+        RoomRemoteSyncState(database, remoteEventReducer),
+        remoteRepository,
+    )
+    val activityRepository = ActivityRepository(RoomActivityFeedSource(database))
+    init {
+        remoteRepository.attachSyncCoordinator(remoteSyncCoordinator)
+        remoteRepository.attachConnectedHandler { _, _ -> remoteTransport.flush() }
+    }
     val gitEngine = JGitEngine()
     val providerRepository = ProviderRepository(
         dao = database.providerProfileDao(),

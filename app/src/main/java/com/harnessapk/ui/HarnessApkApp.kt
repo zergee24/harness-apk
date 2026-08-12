@@ -6,23 +6,23 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,6 +47,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -61,6 +63,9 @@ import com.harnessapk.project.Project
 import com.harnessapk.ui.capture.CaptureDestinationSheet
 import com.harnessapk.ui.capture.CaptureTransferOverlay
 import com.harnessapk.ui.agent.AgentPackagesScreen
+import com.harnessapk.ui.activity.RemoteRunObjectiveSheet
+import com.harnessapk.ui.activity.ActivityScreen
+import com.harnessapk.ui.activity.RunDetailScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.chat.ConversationWikiTopBarAction
 import com.harnessapk.ui.conversation.ConversationListScreen
@@ -106,6 +111,8 @@ object Routes {
     const val Updates = "updates"
     const val RemoteSettings = "remote-settings"
     const val RemoteControl = "remote-control"
+    const val Activity = "activity"
+    const val RemoteRunPattern = "remote-run/{runId}"
     const val ChatPattern =
         "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}"
 
@@ -126,6 +133,8 @@ object Routes {
             ),
         )
     }
+
+    fun remoteRun(runId: String): String = "remote-run/${Uri.encode(runId)}"
 }
 
 internal fun chatRouteQuery(
@@ -161,6 +170,8 @@ fun HarnessApkApp(
     onIncomingAgentBundleUriConsumed: () -> Unit = {},
     incomingWikiPackageUri: Uri? = null,
     onIncomingWikiPackageUriConsumed: () -> Unit = {},
+    incomingRemoteRunId: String? = null,
+    onIncomingRemoteRunConsumed: () -> Unit = {},
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -179,6 +190,9 @@ fun HarnessApkApp(
     var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
+    var remoteProjectToStart by remember { mutableStateOf<Project?>(null) }
+    var remoteRunStartBusy by remember { mutableStateOf(false) }
+    var remoteRunStartError by remember { mutableStateOf<String?>(null) }
     val isHomeRoute = route == Routes.Conversations || route == null
     val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
     val homeModeStore = container.homeModeStore
@@ -199,6 +213,9 @@ fun HarnessApkApp(
     var captureActionBusy by remember { mutableStateOf(false) }
     var captureActionError by remember { mutableStateOf<String?>(null) }
     val remoteProfile by container.remoteProfileStore.profile.collectAsState()
+    val activityState by container.activityRepository.state.collectAsState(
+        initial = com.harnessapk.activity.ActivityState(),
+    )
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
@@ -279,6 +296,7 @@ fun HarnessApkApp(
         Routes.Updates -> "更新"
         Routes.RemoteSettings -> "Codex 远程节点"
         Routes.RemoteControl -> "远程控制"
+        Routes.Activity -> "任务动态"
         Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
     }
@@ -301,6 +319,12 @@ fun HarnessApkApp(
         incomingWikiPackageUri?.toString()?.let { uri ->
             dispatchWikiPackageImport(WikiPackageImportEvent.ExternalPackageReceived(uri))
             onIncomingWikiPackageUriConsumed()
+        }
+    }
+    LaunchedEffect(incomingRemoteRunId) {
+        incomingRemoteRunId?.let { runId ->
+            navController.navigate(Routes.remoteRun(runId)) { launchSingleTop = true }
+            onIncomingRemoteRunConsumed()
         }
     }
     val onCreateConversation: () -> Unit = {
@@ -374,7 +398,29 @@ fun HarnessApkApp(
         modifier = Modifier.testTag("theme-${effectiveThemeMode.name}"),
         topBar = {
             if (isHomeRoute) {
-                HomeStatusBarInset()
+                TopAppBar(
+                    title = { Text(topLevelTitle(mainMode, currentProjectName)) },
+                    actions = {
+                        if (mainMode == MainMode.LIFE || mainMode == MainMode.WORK) {
+                            IconButton(
+                                onClick = { navController.navigate(Routes.Activity) },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "${activityState.pendingCount} 个待处理任务"
+                                },
+                            ) {
+                                BadgedBox(
+                                    badge = {
+                                        if (activityState.pendingCount > 0) {
+                                            Badge { Text(activityState.pendingCount.coerceAtMost(99).toString()) }
+                                        }
+                                    },
+                                ) {
+                                    Icon(Icons.Outlined.Notifications, contentDescription = null)
+                                }
+                            }
+                        }
+                    },
+                )
             } else {
                 TopAppBar(
                     title = { Text(title) },
@@ -509,6 +555,11 @@ fun HarnessApkApp(
                             onOpenSession = { conversationId ->
                                 navController.navigate(Routes.chat(conversationId = conversationId))
                             },
+                            onStartRemoteRun = { project ->
+                                remoteRunStartError = null
+                                remoteProjectToStart = project
+                            },
+                            onOpenRemoteRun = { runId -> navController.navigate(Routes.remoteRun(runId)) },
                             onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                             modifier = Modifier.weight(1f),
                         )
@@ -762,6 +813,25 @@ fun HarnessApkApp(
             composable(Routes.RemoteControl) {
                 RemoteScreen(container = container, contentPadding = padding)
             }
+            composable(Routes.Activity) {
+                ActivityScreen(
+                    container = container,
+                    contentPadding = padding,
+                    onOpenChat = { navController.navigate(Routes.chat(it)) },
+                    onOpenRun = { navController.navigate(Routes.remoteRun(it)) },
+                )
+            }
+            composable(
+                route = Routes.RemoteRunPattern,
+                arguments = listOf(navArgument("runId") { type = NavType.StringType }),
+            ) { entry ->
+                RunDetailScreen(
+                    container = container,
+                    runId = entry.arguments?.getString("runId").orEmpty(),
+                    contentPadding = padding,
+                    onBack = navController::popBackStack,
+                )
+            }
             composable(Routes.GlobalSearch) {
                 GlobalSearchScreen(
                     container = container,
@@ -788,6 +858,39 @@ fun HarnessApkApp(
         state = captureTransferState,
         onDismissError = container.captureImportCoordinator::clearTransferError,
     )
+    remoteProjectToStart?.let { project ->
+        RemoteRunObjectiveSheet(
+            projectName = project.name,
+            busy = remoteRunStartBusy,
+            errorMessage = remoteRunStartError,
+            onDismiss = {
+                if (!remoteRunStartBusy) remoteProjectToStart = null
+            },
+            onSend = { objective ->
+                scope.launch {
+                    remoteRunStartBusy = true
+                    remoteRunStartError = null
+                    runCatching {
+                        val binding = withContext(container.dispatchers.io) {
+                            requireNotNull(container.remoteBindingRepository.bindingForProject(project.id)) {
+                                "项目尚未绑定 Mac 工作区"
+                            }
+                        }
+                        container.remoteRunLauncher.launch(project, binding, objective)
+                    }.onSuccess { launched ->
+                        remoteProjectToStart = null
+                        navController.navigate(Routes.remoteRun(launched.run.id))
+                        scope.launch(container.dispatchers.io) {
+                            container.remoteTransport.flush()
+                        }
+                    }.onFailure { error ->
+                        remoteRunStartError = error.message ?: "任务排队失败"
+                    }
+                    remoteRunStartBusy = false
+                }
+            },
+        )
+    }
     captureDraft?.let { draft ->
         CaptureDestinationSheet(
             draft = draft,
@@ -841,11 +944,6 @@ internal fun chatTopBarTitle(
     ?.title
     ?.takeIf { it.isNotBlank() }
     ?: "对话"
-
-@Composable
-private fun HomeStatusBarInset() {
-    Box(modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars))
-}
 
 @Composable
 private fun RemoteEntryCard(
