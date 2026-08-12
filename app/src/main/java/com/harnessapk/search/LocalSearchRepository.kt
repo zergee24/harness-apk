@@ -12,13 +12,20 @@ class LocalSearchRepository(
 ) {
     suspend fun rebuildTokens(projects: List<Project> = emptyList()) = withContext(dispatchers.io) {
         dao.listDocuments().forEach { document ->
-            dao.replaceFts(document.id, LocalSearchTokenizer.indexedText(document.title, document.body))
+            val searchText = if (
+                document.sourceType in PROJECT_DERIVED_SOURCE_TYPES && document.searchableText.isNotBlank()
+            ) {
+                document.searchableText
+            } else {
+                LocalSearchTokenizer.indexedText(document.title, document.body)
+            }
+            dao.replaceFts(document.id, searchText)
         }
         if (projects.isNotEmpty()) replaceProjects(projects)
     }
 
     suspend fun replaceProjects(projects: List<Project>) = withContext(dispatchers.io) {
-        dao.deleteProjectFts()
+        dao.deleteProjectNameFts()
         dao.deleteProjectDocuments()
         projects.forEach { project ->
             val document = LocalSearchDocumentEntity(
@@ -67,6 +74,10 @@ class LocalSearchRepository(
             .sortedWith(compareByDescending<LocalSearchDocumentEntity> { it.updatedAt }.thenBy { it.id })
             .take(limit)
             .map { it.toResult(normalized) }
+    }
+
+    private companion object {
+        val PROJECT_DERIVED_SOURCE_TYPES = setOf("CONTEXT", "MARKDOWN", "RUN_EVIDENCE")
     }
 }
 

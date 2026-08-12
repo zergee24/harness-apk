@@ -346,8 +346,6 @@ class AppContainer(
         },
         onProjectDelete = { projectId ->
             ProjectIndexWorker.cancel(appContext, projectId)
-            projectMarkdownIndexer.deleteProject(projectId)
-            localSearchRepository.deleteProject(projectId)
         },
         onProjectContentChanged = { project -> ProjectIndexWorker.enqueue(appContext, project.id) },
     )

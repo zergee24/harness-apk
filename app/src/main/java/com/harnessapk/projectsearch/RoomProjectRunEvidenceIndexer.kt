@@ -13,6 +13,7 @@ class RoomProjectRunEvidenceIndexer(
     private val localSearchDao: LocalSearchDao,
 ) {
     suspend fun refreshProject(projectId: String) {
+        val activeSourceKeys = mutableSetOf<String>()
         remoteDao.completedRunsForProject(projectId).forEach { run ->
             val raw = run.completionJson ?: return@forEach
             val completion = runCatching { parseRemoteCompletionEvidence(raw) }.getOrNull() ?: return@forEach
@@ -32,10 +33,9 @@ class RoomProjectRunEvidenceIndexer(
                     add(Entry("unresolved-${index + 1}-${item.sha256().take(12)}", "遗留项", item, item.sha256()))
                 }
             }
-            val activeKeys = mutableSetOf<String>()
             entries.forEachIndexed { ordinal, entry ->
                 val sourceKey = prefix + entry.id
-                activeKeys += sourceKey
+                activeSourceKeys += sourceKey
                 val document = LocalSearchDocumentEntity(
                     id = "project:$projectId:${sourceKey.sha256().take(32)}",
                     type = ProjectSourceType.RUN_EVIDENCE.name,
@@ -65,9 +65,9 @@ class RoomProjectRunEvidenceIndexer(
                     listOf(document.searchableText),
                 )
             }
-            (localSearchDao.runEvidenceSourceKeys(projectId, prefix).toSet() - activeKeys).forEach { stale ->
-                localSearchDao.replaceProjectSourceDocuments(projectId, stale, emptyList(), emptyList())
-            }
+        }
+        (localSearchDao.runEvidenceSourceKeys(projectId).toSet() - activeSourceKeys).forEach { stale ->
+            localSearchDao.replaceProjectSourceDocuments(projectId, stale, emptyList(), emptyList())
         }
     }
 

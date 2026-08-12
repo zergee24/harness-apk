@@ -30,6 +30,7 @@ class DeleteProjectUseCase private constructor(
         withContext(NonCancellable) {
             database.withTransaction {
                 beforeDatabaseCleanup.beforeDatabaseCleanup()
+                database.localSearchDao().deleteProjectSearchIndex(projectId)
                 database.remoteDao().deleteBindingByProject(projectId)
                 database.conversationDao().clearProject(projectId)
                 database.conversationMarkdownLinkDao().deleteForProject(projectId)

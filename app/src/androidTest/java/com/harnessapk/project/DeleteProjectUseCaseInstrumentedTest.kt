@@ -11,8 +11,11 @@ import com.harnessapk.storage.AgentEntity
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.ConversationEntity
 import com.harnessapk.storage.ConversationMarkdownLinkEntity
+import com.harnessapk.storage.LocalSearchDocumentEntity
 import com.harnessapk.storage.MarkdownChangeDraftEntity
 import com.harnessapk.storage.MessageEntity
+import com.harnessapk.storage.ProjectEvidenceSnapshotEntity
+import com.harnessapk.storage.RemoteRunEntity
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.UUID
@@ -92,6 +95,57 @@ class DeleteProjectUseCaseInstrumentedTest {
         assertEquals(3, retainedConversation.agentVersion)
         assertEquals(listOf("retained.md"), database.conversationMarkdownLinkDao().listForConversation("retained").map { it.relativePath })
         assertEquals("FAILED", database.markdownChangeDraftDao().findDraft("retained-draft")!!.status)
+    }
+
+    @Test
+    fun deletingProjectRemovesSearchIndexesButKeepsRunAndHistoricalEvidence() = runBlocking {
+        val project = projectRepository.createProject("索引清理项目")
+        val retainedProject = projectRepository.createProject("保留索引项目")
+        val dao = database.localSearchDao()
+        listOf(
+            searchDocument("project:${project.id}", project.id, "PROJECT_NAME", "", "删除项目名"),
+            searchDocument("project:${project.id}:context", project.id, "CONTEXT", "CONTEXT", "删除 context"),
+            searchDocument("project:${project.id}:markdown", project.id, "MARKDOWN", "MARKDOWN", "删除 markdown"),
+            searchDocument("project:${project.id}:run", project.id, "RUN_EVIDENCE", "RUN_EVIDENCE", "删除 run"),
+            searchDocument("project:${retainedProject.id}:context", retainedProject.id, "CONTEXT", "CONTEXT", "保留 context"),
+        ).forEach { document -> dao.replaceDocument(document, document.body) }
+        database.remoteDao().insertRun(remoteRun(project.id))
+        database.projectSearchDao().insertEvidenceSnapshots(
+            listOf(
+                ProjectEvidenceSnapshotEntity(
+                    id = "historical-snapshot",
+                    executionId = "execution-1",
+                    messageId = null,
+                    token = "P1",
+                    projectId = project.id,
+                    sourceType = "RUN_EVIDENCE",
+                    authority = "VERIFIED_RUN",
+                    sourceKey = "run:run-1:completion",
+                    title = "历史完成证据",
+                    locatorLabel = "完成摘要",
+                    relativePath = null,
+                    sourceMessageId = null,
+                    sourceSha256 = "b".repeat(64),
+                    gitBlobId = null,
+                    excerpt = "历史快照",
+                    capturedAt = 10L,
+                ),
+            ),
+        )
+
+        useCase.delete(project.id)
+
+        assertTrue(dao.listDocuments().none { it.projectId == project.id })
+        assertEquals(
+            0,
+            database.openHelper.writableDatabase.query(
+                "SELECT COUNT(*) FROM local_search_fts WHERE documentId LIKE ?",
+                arrayOf("project:${project.id}%"),
+            ).use { cursor -> cursor.moveToFirst(); cursor.getInt(0) },
+        )
+        assertTrue(dao.listDocuments().any { it.projectId == retainedProject.id })
+        assertEquals("run-1", database.remoteDao().run("run-1")?.id)
+        assertEquals("historical-snapshot", database.projectSearchDao().evidenceById("historical-snapshot")?.id)
     }
 
     @Test
@@ -276,4 +330,48 @@ class DeleteProjectUseCaseInstrumentedTest {
             ),
         )
     }
+
+    private fun searchDocument(
+        id: String,
+        projectId: String,
+        type: String,
+        sourceType: String,
+        body: String,
+    ) = LocalSearchDocumentEntity(
+        id = id,
+        type = type,
+        title = body,
+        body = body,
+        conversationId = null,
+        messageId = null,
+        projectId = projectId,
+        updatedAt = 10L,
+        sourceType = sourceType,
+        authority = "REVIEWED_ARTIFACT",
+        sourceKey = id,
+        searchableText = body,
+        sourceSha256 = "a".repeat(64),
+        sourceUpdatedAt = 10L,
+        indexedAt = 10L,
+    )
+
+    private fun remoteRun(projectId: String) = RemoteRunEntity(
+        id = "run-1",
+        projectId = projectId,
+        projectNameSnapshot = "索引清理项目",
+        bindingId = "binding-1",
+        bindingSnapshotJson = "{}",
+        hostId = "host-1",
+        threadId = "thread-1",
+        turnId = "turn-1",
+        objective = "历史任务",
+        status = "COMPLETED",
+        latestLine = "done",
+        lastLogicalSequence = 1L,
+        startedAt = 10L,
+        updatedAt = 20L,
+        completedAt = 20L,
+        completionJson = null,
+        errorMessage = null,
+    )
 }

@@ -35,8 +35,8 @@ interface LocalSearchDao {
     @Query("SELECT DISTINCT sourceKey FROM local_search_documents WHERE projectId = :projectId AND sourceType IN ('CONTEXT','MARKDOWN')")
     suspend fun markdownSourceKeys(projectId: String): List<String>
 
-    @Query("SELECT DISTINCT sourceKey FROM local_search_documents WHERE projectId = :projectId AND sourceType = 'RUN_EVIDENCE' AND sourceKey LIKE :prefix || '%'")
-    suspend fun runEvidenceSourceKeys(projectId: String, prefix: String): List<String>
+    @Query("SELECT DISTINCT sourceKey FROM local_search_documents WHERE projectId = :projectId AND sourceType = 'RUN_EVIDENCE'")
+    suspend fun runEvidenceSourceKeys(projectId: String): List<String>
 
     @Query(
         """
@@ -57,17 +57,44 @@ interface LocalSearchDao {
     @Query("DELETE FROM local_search_documents WHERE projectId = :projectId AND sourceType IN ('CONTEXT','MARKDOWN')")
     suspend fun deleteProjectMarkdownDocuments(projectId: String)
 
+    @Query(
+        """
+        DELETE FROM local_search_fts
+        WHERE documentId IN (
+            SELECT id FROM local_search_documents
+            WHERE projectId = :projectId
+              AND (type = 'PROJECT_NAME' OR sourceType IN ('CONTEXT','MARKDOWN','RUN_EVIDENCE'))
+        )
+        """,
+    )
+    suspend fun deleteProjectSearchFts(projectId: String)
+
+    @Query(
+        """
+        DELETE FROM local_search_documents
+        WHERE projectId = :projectId
+          AND (type = 'PROJECT_NAME' OR sourceType IN ('CONTEXT','MARKDOWN','RUN_EVIDENCE'))
+        """,
+    )
+    suspend fun deleteProjectSearchDocuments(projectId: String)
+
     @Query("DELETE FROM local_search_documents WHERE type = 'PROJECT_NAME'")
     suspend fun deleteProjectDocuments()
 
-    @Query("DELETE FROM local_search_fts WHERE documentId LIKE 'project:%'")
-    suspend fun deleteProjectFts()
+    @Query(
+        """
+        DELETE FROM local_search_fts
+        WHERE documentId IN (SELECT id FROM local_search_documents WHERE type = 'PROJECT_NAME')
+        """,
+    )
+    suspend fun deleteProjectNameFts()
 
     @Query(
         """
         SELECT documents.* FROM local_search_documents AS documents
         INNER JOIN local_search_fts AS searchIndex ON searchIndex.documentId = documents.id
-        WHERE local_search_fts MATCH :match
+        WHERE documents.type IN ('CONVERSATION','MESSAGE','MESSAGE_SOURCE','PROJECT_NAME')
+          AND local_search_fts MATCH :match
         ORDER BY documents.updatedAt DESC, documents.id ASC
         LIMIT :limit
         """,
@@ -77,7 +104,8 @@ interface LocalSearchDao {
     @Query(
         """
         SELECT * FROM local_search_documents
-        WHERE title LIKE '%' || :query || '%' OR body LIKE '%' || :query || '%'
+        WHERE type IN ('CONVERSATION','MESSAGE','MESSAGE_SOURCE','PROJECT_NAME')
+          AND (title LIKE '%' || :query || '%' OR body LIKE '%' || :query || '%')
         ORDER BY updatedAt DESC, id ASC
         LIMIT :limit
         """,
@@ -94,6 +122,12 @@ interface LocalSearchDao {
     suspend fun replaceDocument(entity: LocalSearchDocumentEntity, searchText: String) {
         upsertDocument(entity)
         replaceFts(entity.id, searchText)
+    }
+
+    @Transaction
+    suspend fun deleteProjectSearchIndex(projectId: String) {
+        deleteProjectSearchFts(projectId)
+        deleteProjectSearchDocuments(projectId)
     }
 
     @Transaction
