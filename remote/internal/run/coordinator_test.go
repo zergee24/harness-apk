@@ -80,6 +80,74 @@ func TestFingerprintMismatchStopsBeforeThreadStart(t *testing.T) {
 	}
 }
 
+func TestRunStartReplacesStaleRecentThreadBeforeStartingTurn(t *testing.T) {
+	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
+	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	app := &fakeRunAppServer{script: map[string][]fakeRunAppResponse{
+		"thread/list": {{result: json.RawMessage(`{"data":[{"id":"thread-stale","cwd":"/workspace","updatedAt":10}]}`)}},
+		"turn/start": {
+			{err: errors.New(`app-server error: {"code":-32600,"message":"thread not found: thread-stale"}`)},
+			{result: json.RawMessage(`{"turn":{"id":"turn-new"}}`)},
+		},
+		"thread/start": {{result: json.RawMessage(`{"thread":{"id":"thread-new"}}`)}},
+	}}
+	coordinator := Coordinator{
+		Cache: cache, Routes: routes, App: app, HostID: "host-1",
+		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
+			return candidate("fingerprint-1"), true
+		},
+		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("fingerprint-1"), nil },
+		Emit:             func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
+	}
+
+	result, err := coordinator.Start(context.Background(), startCommand())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.ThreadID != "thread-new" || result.TurnID != "turn-new" {
+		t.Fatalf("result = %#v", result)
+	}
+	if app.calls["turn/start"] != 2 || app.calls["thread/start"] != 1 {
+		t.Fatalf("calls = %#v", app.calls)
+	}
+	turnParams := app.paramsHistory["turn/start"]
+	if turnParams[0].(map[string]any)["threadId"] != "thread-stale" ||
+		turnParams[1].(map[string]any)["threadId"] != "thread-new" {
+		t.Fatalf("turn/start params = %#v", turnParams)
+	}
+	route, ok := routes.ByRun("run-1")
+	if !ok || route.ThreadID != "thread-new" || route.TurnID != "turn-new" {
+		t.Fatalf("route = %#v ok=%v", route, ok)
+	}
+}
+
+func TestRunStartDoesNotRetryAmbiguousTurnFailure(t *testing.T) {
+	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
+	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	app := &fakeRunAppServer{script: map[string][]fakeRunAppResponse{
+		"thread/list": {{result: json.RawMessage(`{"data":[{"id":"thread-1","cwd":"/workspace","updatedAt":10}]}`)}},
+		"turn/start":  {{err: errors.New("connection closed before response")}},
+	}}
+	coordinator := Coordinator{
+		Cache: cache, Routes: routes, App: app, HostID: "host-1",
+		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
+			return candidate("fingerprint-1"), true
+		},
+		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("fingerprint-1"), nil },
+		Emit:             func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
+	}
+
+	_, err := coordinator.Start(context.Background(), startCommand())
+
+	if !errors.Is(err, ErrCommandUnknown) {
+		t.Fatalf("error = %v, want command unknown", err)
+	}
+	if app.calls["turn/start"] != 1 || app.calls["thread/start"] != 0 {
+		t.Fatalf("ambiguous failure was retried: %#v", app.calls)
+	}
+}
+
 func TestUnknownTurnStartReconcilesWithoutAutomaticReplay(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "commands.json")
 	cache, _ := commandcache.Open(path)
@@ -121,9 +189,16 @@ func candidate(fingerprint string) workspace.Candidate {
 }
 
 type fakeRunAppServer struct {
-	responses map[string]json.RawMessage
-	calls     map[string]int
-	params    map[string]any
+	responses     map[string]json.RawMessage
+	script        map[string][]fakeRunAppResponse
+	calls         map[string]int
+	params        map[string]any
+	paramsHistory map[string][]any
+}
+
+type fakeRunAppResponse struct {
+	result json.RawMessage
+	err    error
 }
 
 func (f *fakeRunAppServer) Call(_ context.Context, method string, params any) (json.RawMessage, error) {
@@ -135,6 +210,15 @@ func (f *fakeRunAppServer) Call(_ context.Context, method string, params any) (j
 		f.params = map[string]any{}
 	}
 	f.params[method] = params
+	if f.paramsHistory == nil {
+		f.paramsHistory = map[string][]any{}
+	}
+	f.paramsHistory[method] = append(f.paramsHistory[method], params)
+	if scripted := f.script[method]; len(scripted) > 0 {
+		response := scripted[0]
+		f.script[method] = scripted[1:]
+		return response.result, response.err
+	}
 	if response := f.responses[method]; response != nil {
 		return response, nil
 	}

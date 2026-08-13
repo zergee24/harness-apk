@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/workspace"
@@ -122,6 +123,7 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 	if err != nil {
 		return StartResult{}, c.fail(command.CommandID, err)
 	}
+	reusedRecentThread := threadID != ""
 	if threadID == "" {
 		result, callErr := c.App.Call(ctx, "thread/start", map[string]any{"cwd": current.CWD})
 		if callErr != nil {
@@ -137,12 +139,31 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 		return StartResult{}, c.unknown(command.CommandID, err)
 	}
 
-	turnResult, err := c.App.Call(ctx, "turn/start", map[string]any{
-		"threadId":            threadID,
-		"input":               []map[string]string{{"type": "text", "text": command.Objective}},
-		"clientUserMessageId": command.CommandID,
-		"outputSchema":        completionOutputSchema(),
-	})
+	turnParams := func(threadID string) map[string]any {
+		return map[string]any{
+			"threadId":            threadID,
+			"input":               []map[string]string{{"type": "text", "text": command.Objective}},
+			"clientUserMessageId": command.CommandID,
+			"outputSchema":        completionOutputSchema(),
+		}
+	}
+	turnResult, err := c.App.Call(ctx, "turn/start", turnParams(threadID))
+	if err != nil && reusedRecentThread && isThreadNotFoundError(err, threadID) {
+		result, callErr := c.App.Call(ctx, "thread/start", map[string]any{"cwd": current.CWD})
+		if callErr != nil {
+			return StartResult{}, c.unknown(command.CommandID, callErr)
+		}
+		threadID, callErr = decodeThreadStartID(result)
+		if callErr != nil {
+			return StartResult{}, c.unknown(command.CommandID, callErr)
+		}
+		route.ThreadID = threadID
+		route.TurnID = ""
+		if callErr = c.Routes.Put(route); callErr != nil {
+			return StartResult{}, c.unknown(command.CommandID, callErr)
+		}
+		turnResult, err = c.App.Call(ctx, "turn/start", turnParams(threadID))
+	}
 	if err != nil {
 		return StartResult{}, c.unknown(command.CommandID, err)
 	}
@@ -168,6 +189,10 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 		return StartResult{}, err
 	}
 	return result, nil
+}
+
+func isThreadNotFoundError(err error, threadID string) bool {
+	return err != nil && threadID != "" && strings.Contains(err.Error(), "thread not found: "+threadID)
 }
 
 func validateStartCommand(hostID string, command StartCommand) error {
