@@ -13,6 +13,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.harnessapk.remote.WorkspaceCandidate
@@ -80,5 +81,43 @@ class ProjectRemoteBindingSheetTest {
         listOf("token-user", "secret-token", "access_token", "leak", candidate.cwd).forEach { secret ->
             composeRule.onAllNodesWithText(secret, substring = true).assertCountEquals(0)
         }
+    }
+
+    @Test
+    fun manyCandidatesAt320DpAndLargeFontCanScrollToPrimaryAction() {
+        val candidates = (1..12).map { index ->
+            WorkspaceCandidate(
+                workspaceId = "workspace-$index",
+                displayName = "harness-apk-$index",
+                cwd = "/Users/private-user/Documents/harness-apk-$index",
+                repositoryLabel = "github.com/acme/harness-apk-$index",
+                branch = "test",
+                repositoryFingerprint = "fingerprint-$index",
+                lastUsedAt = index.toLong(),
+            )
+        }
+        composeRule.setContent {
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, 1.3f)) {
+                HarnessApkTheme {
+                    Box(Modifier.width(320.dp)) {
+                        ProjectRemoteBindingSheet(
+                            projectName = "Harness APK",
+                            hostName = "Tony 的 Mac",
+                            candidates = candidates,
+                            candidatesLoaded = true,
+                            existingBinding = null,
+                            onDismiss = {},
+                            onBind = { _, _ -> },
+                        )
+                    }
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("remote-binding-primary")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .assertHeightIsAtLeast(48.dp)
     }
 }
