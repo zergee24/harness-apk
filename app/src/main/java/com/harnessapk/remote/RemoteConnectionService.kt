@@ -14,6 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -21,6 +22,7 @@ class RemoteConnectionService : Service() {
     private val container by lazy { (application as HarnessApkApplication).container }
     private val scope by lazy { CoroutineScope(SupervisorJob() + container.dispatchers.io) }
     private val notificationCoordinator = RemoteNotificationCoordinator()
+    private var visibleApprovalNotificationIds = emptySet<Int>()
 
     override fun onCreate() {
         super.onCreate()
@@ -30,12 +32,27 @@ class RemoteConnectionService : Service() {
         startForeground(ID, notification("正在连接 Mac"))
         container.remoteRepository.connect()
         scope.launch {
-            container.remoteRepository.state.collectLatest { state ->
+            combine(
+                container.remoteRepository.state,
+                container.database.remoteDao().observeOpenRuns(),
+            ) { state, openRuns -> state to openRuns.map { it.status } }
+                .collectLatest { (state, openRunStatuses) ->
                 manager.notify(ID, notification(if (state.isWorking) "Codex 正在工作" else "正在同步远程状态"))
-                if (!state.isWorking && state.activeTurnId == null) {
+                if (!shouldKeepRemoteConnectionAlive(state, openRunStatuses)) {
                     delay(5_000)
-                    if (!container.remoteRepository.state.value.isWorking) stopSelf()
+                    stopSelf()
                 }
+            }
+        }
+        scope.launch {
+            container.database.remoteDao().observePendingApprovals().collect { approvals ->
+                val plans = pendingApprovalNotificationPlans(approvals, notificationCoordinator)
+                val nextIds = plans.mapTo(mutableSetOf()) { it.notificationId }
+                (visibleApprovalNotificationIds - nextIds).forEach(manager::cancel)
+                plans.forEach { plan ->
+                    manager.notify(plan.notificationId, alertNotification(plan))
+                }
+                visibleApprovalNotificationIds = nextIds
             }
         }
         scope.launch {
@@ -46,7 +63,13 @@ class RemoteConnectionService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        container.remoteRepository.connect()
+        if (shouldFlushRemoteOutboxOnServiceStart(container.remoteRepository.state.value.connectionStatus)) {
+            scope.launch { container.remoteTransport.flush() }
+        }
+        return START_NOT_STICKY
+    }
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() { scope.cancel(); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy() }
 

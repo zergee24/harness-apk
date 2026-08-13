@@ -60,6 +60,7 @@ import com.harnessapk.HarnessApkApplication
 import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.chat.Conversation
 import com.harnessapk.project.Project
+import com.harnessapk.remote.RemoteConnectionService
 import com.harnessapk.ui.capture.CaptureDestinationSheet
 import com.harnessapk.ui.capture.CaptureTransferOverlay
 import com.harnessapk.ui.agent.AgentPackagesScreen
@@ -194,7 +195,8 @@ fun HarnessApkApp(
     var remoteRunStartBusy by remember { mutableStateOf(false) }
     var remoteRunStartError by remember { mutableStateOf<String?>(null) }
     val isHomeRoute = route == Routes.Conversations || route == null
-    val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
+    val context = LocalContext.current
+    val container = (context.applicationContext as HarnessApkApplication).container
     val homeModeStore = container.homeModeStore
     var mainMode by rememberSaveable { mutableStateOf(homeModeStore.mode.value) }
     var themeSourceMode by rememberSaveable { mutableStateOf(homeModeStore.themeSourceMode.value) }
@@ -879,6 +881,7 @@ fun HarnessApkApp(
                         container.remoteRunLauncher.launch(project, binding, objective)
                     }.onSuccess { launched ->
                         remoteProjectToStart = null
+                        RemoteConnectionService.start(context)
                         navController.navigate(Routes.remoteRun(launched.run.id))
                         scope.launch(container.dispatchers.io) {
                             container.remoteTransport.flush()

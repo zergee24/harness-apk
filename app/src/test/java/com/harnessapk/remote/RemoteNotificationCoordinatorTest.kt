@@ -9,6 +9,51 @@ import org.junit.Test
 
 class RemoteNotificationCoordinatorTest {
     @Test
+    fun persistedOpenRunKeepsConnectionAliveAfterProcessStateIsLost() {
+        val disconnectedState = RemoteUiState()
+
+        assertEquals(
+            true,
+            shouldKeepRemoteConnectionAlive(
+                state = disconnectedState,
+                openRunStatuses = listOf(RemoteRunStatus.WAITING_APPROVAL.name),
+            ),
+        )
+        assertEquals(
+            false,
+            shouldKeepRemoteConnectionAlive(
+                state = disconnectedState,
+                openRunStatuses = emptyList(),
+            ),
+        )
+    }
+
+    @Test
+    fun persistedPendingApprovalIsRebuiltIntoSafeNotification() {
+        val plans = pendingApprovalNotificationPlans(listOf(approval(risk = "LOW")))
+
+        assertEquals(1, plans.size)
+        assertEquals("approval-1", plans.single().approvalId)
+        assertEquals(
+            setOf(RemoteNotificationActionKind.VIEW, RemoteNotificationActionKind.DECLINE),
+            plans.single().actions.mapTo(mutableSetOf()) { it.kind },
+        )
+        assertEquals(
+            emptyList<RemoteNotificationPlan>(),
+            pendingApprovalNotificationPlans(
+                listOf(approval(risk = "LOW").copy(responseCommandId = "approval:approval-1:decline")),
+            ),
+        )
+    }
+
+    @Test
+    fun onlineServiceStartFlushesOutboxButConnectingServiceWaitsForConnectedCallback() {
+        assertEquals(true, shouldFlushRemoteOutboxOnServiceStart(RemoteConnectionStatus.CONNECTED))
+        assertEquals(false, shouldFlushRemoteOutboxOnServiceStart(RemoteConnectionStatus.CONNECTING))
+        assertEquals(false, shouldFlushRemoteOutboxOnServiceStart(RemoteConnectionStatus.DISCONNECTED))
+    }
+
+    @Test
     fun duplicateNotificationDeclineCreatesOneOutboxCommand() = runBlocking {
         val store = RecordingCommandStore()
         val coordinator = RemoteApprovalCommandCoordinator(

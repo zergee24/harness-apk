@@ -107,6 +107,7 @@ fun RunDetailScreen(
     var remoteDraftStatus by rememberSaveable(runId) { mutableStateOf<String?>(null) }
     var remoteDraftItems by remember(runId) { mutableStateOf<List<MarkdownChangeDraftItemEntity>>(emptyList()) }
     LaunchedEffect(runId) {
+        RemoteConnectionService.start(context)
         container.database.projectSearchDao()
             .draftOriginForSource(MarkdownDraftOriginType.REMOTE_RUN.name, runId)
             ?.let { origin ->

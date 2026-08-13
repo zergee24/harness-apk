@@ -1,5 +1,7 @@
 package com.harnessapk.remote
 
+import com.harnessapk.storage.RemoteApprovalEntity
+
 enum class RemoteNotificationActionKind {
     VIEW,
     ALLOW_ONCE,
@@ -66,5 +68,26 @@ class RemoteNotificationCoordinator {
             actions = listOf(RemoteNotificationAction(RemoteNotificationActionKind.VIEW, "查看", null)),
         )
 }
+
+internal fun shouldKeepRemoteConnectionAlive(
+    state: RemoteUiState,
+    openRunStatuses: List<String>,
+): Boolean = state.isWorking || state.activeTurnId != null || openRunStatuses.isNotEmpty()
+
+internal fun pendingApprovalNotificationPlans(
+    approvals: List<RemoteApprovalEntity>,
+    coordinator: RemoteNotificationCoordinator = RemoteNotificationCoordinator(),
+): List<RemoteNotificationPlan> = approvals
+    .filter { it.status == "PENDING" && it.responseCommandId == null }
+    .map { approval ->
+        coordinator.approvalPlan(
+            runId = approval.runId,
+            approvalId = approval.id,
+            risk = parseRemoteApprovalRisk(approval.risk),
+        )
+    }
+
+internal fun shouldFlushRemoteOutboxOnServiceStart(status: RemoteConnectionStatus): Boolean =
+    status == RemoteConnectionStatus.CONNECTED
 
 private fun stableNotificationId(identity: String): Int = identity.hashCode() and Int.MAX_VALUE
