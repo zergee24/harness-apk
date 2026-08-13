@@ -19,6 +19,35 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class RemoteEventReducerInstrumentedTest {
     @Test
+    fun legacyThreadLogicalEventAdvancesCursorWithoutCreatingM2RunState() = runBlocking {
+        val db = database()
+        val event = RemoteLogicalEvent(
+            schemaVersion = 1,
+            eventId = "legacy-event-1",
+            hostId = "host-1",
+            deviceId = "device-1",
+            runId = "legacy:thread-1",
+            sequence = 1L,
+            type = "run.timeline",
+            payload = buildJsonObject {
+                put("presentationKind", "STATUS")
+                put("latestLine", "旧远程线程仍在运行")
+            },
+            createdAt = 20L,
+        )
+
+        val reducer = RemoteEventReducer(db)
+        val result = reducer.apply(event)
+
+        assertEquals(ReduceResult.IGNORED, result)
+        assertEquals(ReduceResult.DUPLICATE, reducer.apply(event))
+        assertEquals(1L, db.remoteDao().cursor("host-1", "device-1")?.lastContiguousSequence)
+        assertEquals(0, db.remoteDao().eventsForRun("legacy:thread-1").size)
+        assertNull(db.remoteDao().run("legacy:thread-1"))
+        db.close()
+    }
+
+    @Test
     fun sameLogicalEventDoesNotDuplicateTimelineOrApproval() = runBlocking {
         val db = database()
         db.remoteDao().insertRun(run())

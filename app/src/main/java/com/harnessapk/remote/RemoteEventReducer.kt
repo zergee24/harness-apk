@@ -15,6 +15,7 @@ enum class ReduceResult {
     APPLIED,
     DUPLICATE,
     GAP,
+    IGNORED,
 }
 
 class RemoteEventReducer(
@@ -32,6 +33,9 @@ class RemoteEventReducer(
             reconciliationState = "IN_SYNC",
             lastSyncedAt = 0L,
         )
+        if (event.runId.startsWith(LEGACY_RUN_PREFIX) && event.sequence <= cursor.lastContiguousSequence) {
+            return@withTransaction ReduceResult.DUPLICATE
+        }
         val expectedSequence = cursor.lastContiguousSequence + 1L
         if (event.sequence != expectedSequence) {
             dao.upsertCursor(
@@ -45,7 +49,19 @@ class RemoteEventReducer(
             return@withTransaction ReduceResult.GAP
         }
 
-        val run = requireNotNull(dao.run(event.runId)) { "unknown remote run ${event.runId}" }
+        val run = dao.run(event.runId)
+        if (run == null && event.runId.startsWith(LEGACY_RUN_PREFIX)) {
+            dao.upsertCursor(
+                cursor.copy(
+                    lastContiguousSequence = event.sequence,
+                    gapFromSequence = null,
+                    reconciliationState = "IN_SYNC",
+                    lastSyncedAt = event.createdAt,
+                ),
+            )
+            return@withTransaction ReduceResult.IGNORED
+        }
+        requireNotNull(run) { "unknown remote run ${event.runId}" }
         dao.insertEvent(event.toEntity())
         reduceDomainState(run, event)
         dao.upsertCursor(
@@ -199,6 +215,8 @@ class RemoteEventReducer(
         else -> fallback
     }
 }
+
+private const val LEGACY_RUN_PREFIX = "legacy:"
 
 private fun RemoteLogicalEvent.toEntity() = RemoteRunEventEntity(
     logicalEventId = eventId,

@@ -46,6 +46,22 @@ class RemoteSyncCoordinatorTest {
     }
 
     @Test
+    fun ignoredLegacyEventIsAcknowledgedAfterCursorAdvances() = runBlocking {
+        val state = FakeRemoteSyncState(
+            applyResults = ArrayDeque(listOf(ReduceResult.IGNORED)),
+            cursor = RemoteSyncPosition(1L, null, "IN_SYNC"),
+        )
+        val sender = RecordingSyncSender()
+
+        RemoteSyncCoordinator(state, sender).onLogicalEvent(
+            logicalEvent(sequence = 1L).copy(runId = "legacy:thread-1"),
+        )
+
+        assertEquals(listOf("event.ack"), sender.commands.mapNotNull { it.string("type") })
+        assertTrue(state.applyCompletedBeforeSend)
+    }
+
+    @Test
     fun outOfOrderEventRequestsSnapshotAndDoesNotAckAcrossGap() = runBlocking {
         val state = FakeRemoteSyncState(
             applyResults = ArrayDeque(listOf(ReduceResult.GAP)),

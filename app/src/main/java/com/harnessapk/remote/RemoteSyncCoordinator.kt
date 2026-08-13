@@ -90,7 +90,7 @@ class RemoteSyncCoordinator(
     suspend fun onLogicalEvent(event: RemoteLogicalEvent): ReduceResult {
         val result = state.apply(event)
         when (result) {
-            ReduceResult.APPLIED, ReduceResult.DUPLICATE -> {
+            ReduceResult.APPLIED, ReduceResult.DUPLICATE, ReduceResult.IGNORED -> {
                 val position = state.position(event.hostId, event.deviceId)
                 if (position.gapFromSequence == null) {
                     sender.send(
