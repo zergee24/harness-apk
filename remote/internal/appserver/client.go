@@ -10,6 +10,8 @@ import (
 	"sync"
 )
 
+const maxMessageBytes = 64 << 20
+
 type Message struct {
 	ID     json.RawMessage `json:"id"`
 	Method string          `json:"method"`
@@ -109,7 +111,7 @@ func (c *Client) Respond(request ServerRequestRef, result any) error {
 
 func (c *Client) readLoop(ctx context.Context) {
 	scanner := bufio.NewScanner(c.reader)
-	scanner.Buffer(make([]byte, 64<<10), 4<<20)
+	scanner.Buffer(make([]byte, 64<<10), maxMessageBytes)
 	for scanner.Scan() {
 		var message Message
 		if err := json.Unmarshal(scanner.Bytes(), &message); err != nil {

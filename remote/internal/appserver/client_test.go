@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,5 +61,58 @@ func TestCallCorrelatesResponseWithoutBlockingEventDispatch(t *testing.T) {
 		t.Fatal(err)
 	case <-time.After(time.Second):
 		t.Fatal("call response was not correlated")
+	}
+}
+
+func TestCallAcceptsLargeThreadListResponse(t *testing.T) {
+	serverOutputReader, serverOutputWriter := io.Pipe()
+	clientOutputReader, clientOutputWriter := io.Pipe()
+	client := NewClient(serverOutputReader, clientOutputWriter, "epoch-1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.Start(ctx)
+
+	resultCh := make(chan json.RawMessage, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, err := client.Call(ctx, "thread/list", map[string]any{"limit": 50})
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	outgoing, err := bufio.NewReader(clientOutputReader).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(outgoing, &request); err != nil {
+		t.Fatal(err)
+	}
+	largeTitle := strings.Repeat("x", 5<<20)
+	response, err := json.Marshal(map[string]any{
+		"id": request.ID,
+		"result": map[string]any{
+			"data": []map[string]any{{"id": "thread-large", "title": largeTitle}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = serverOutputWriter.Write(append(response, '\n')) }()
+
+	select {
+	case result := <-resultCh:
+		if len(result) <= 4<<20 {
+			t.Fatalf("result length = %d", len(result))
+		}
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("large response was not resolved")
 	}
 }
