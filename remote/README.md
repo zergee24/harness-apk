@@ -135,12 +135,13 @@ M3 keeps Wire v1 and Logical Event v1. Capability negotiation is an additive enc
     "completion-evidence.v2",
     "turn-command-idempotency.v1",
     "thread-history-pagination.v1",
-    "thread-latest-user-message.v1"
+    "thread-latest-user-message.v1",
+    "thread-execution-status.v1"
   ]
 }
 ```
 
-Older phones may ignore this payload. Newer phones require all three M2 run capabilities before enabling project Run, and must fail closed for an unsupported payload schema. Missing `completion-evidence.v2`, `turn-command-idempotency.v1`, `thread-history-pagination.v1`, or `thread-latest-user-message.v1` means the corresponding behavior must stay disabled; capability absence is not permission to guess support. The latest-user-message capability uses bounded `thread/turns/list` summary pages and is requested lazily only for visible phone cards; it does not load every thread's full history during list refresh.
+Older phones may ignore this payload. Newer phones require all three M2 run capabilities before enabling project Run, and must fail closed for an unsupported payload schema. Missing `completion-evidence.v2`, `turn-command-idempotency.v1`, `thread-history-pagination.v1`, `thread-latest-user-message.v1`, or `thread-execution-status.v1` means the corresponding behavior must stay disabled; capability absence is not permission to guess support. The latest-user-message and execution-status capabilities share a bounded `thread/turns/list` summary request. Android requests it lazily only for visible cards, polls active cards every three seconds, and stops after a terminal state; it does not load every thread's full history during list refresh. Execution states are additive `RUNNING`, `COMPLETED`, `FAILED`, `INTERRUPTED`, and fail-closed `UNKNOWN`. An app-server turn persisted as `interrupted` without `completedAt` is treated as still running because an external Codex writer may still own it; a persisted `interrupted` turn with `completedAt` is terminal.
 
 Bridge state v2 now treats these files as one recovery set beside `bridge.json`:
 

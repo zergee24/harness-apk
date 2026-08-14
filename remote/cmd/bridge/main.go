@@ -515,6 +515,7 @@ func hostStatusPayload() json.RawMessage {
 			"turn-command-idempotency.v1",
 			"thread-history-pagination.v1",
 			"thread-latest-user-message.v1",
+			"thread-execution-status.v1",
 		},
 	})
 }
@@ -534,10 +535,39 @@ func mobileThreadSummaryResult(threadID string, pageRaw json.RawMessage) (json.R
 		return nil, fmt.Errorf("decode latest thread summary for mobile: %w", err)
 	}
 	latestUserMessage := ""
+	execution := map[string]any{"state": "UNKNOWN"}
+	executionSet := false
 	for _, rawTurn := range page.Data {
 		turn, ok := rawTurn.(map[string]any)
 		if !ok {
 			continue
+		}
+		if !executionSet {
+			turnID, _ := turn["id"].(string)
+			status, _ := turn["status"].(string)
+			startedAt, _ := jsonNumberInt64(turn["startedAt"])
+			completedAt, completed := jsonNumberInt64(turn["completedAt"])
+			state := map[string]string{
+				"completed":  "COMPLETED",
+				"failed":     "FAILED",
+				"inProgress": "RUNNING",
+			}[status]
+			if status == "interrupted" {
+				state = "INTERRUPTED"
+				if !completed {
+					state = "RUNNING"
+				}
+			}
+			if state == "" {
+				state = "UNKNOWN"
+			}
+			execution = map[string]any{
+				"state": state, "turnId": turnID, "startedAt": startedAt, "completedAt": nil,
+			}
+			if completed {
+				execution["completedAt"] = completedAt
+			}
+			executionSet = true
 		}
 		items, _ := turn["items"].([]any)
 		for _, rawItem := range items {
@@ -557,7 +587,20 @@ func mobileThreadSummaryResult(threadID string, pageRaw json.RawMessage) (json.R
 	return json.Marshal(map[string]any{
 		"threadId":          threadID,
 		"latestUserMessage": latestUserMessage,
+		"execution":         execution,
 	})
+}
+
+func jsonNumberInt64(value any) (int64, bool) {
+	switch number := value.(type) {
+	case float64:
+		return int64(number), true
+	case json.Number:
+		parsed, err := number.Int64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func (b *bridge) requestMobileThreadSummary(ctx context.Context, deviceID string, command protocol.Command) error {

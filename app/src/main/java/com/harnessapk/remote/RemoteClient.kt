@@ -120,8 +120,12 @@ class RemoteRepository(
     }
     fun loadThreadSummary(threadId: String) {
         val current = _state.value
-        if (!remoteFeatureAvailability(current.capabilities).canLoadLatestUserMessage) return
-        if (current.threads.firstOrNull { it.id == threadId }?.latestUserMessage != null) return
+        val availability = remoteFeatureAvailability(current.capabilities)
+        val thread = current.threads.firstOrNull { it.id == threadId } ?: return
+        val needsLatestUserMessage = availability.canLoadLatestUserMessage && thread.latestUserMessage == null
+        val needsExecution = availability.canLoadThreadExecutionStatus &&
+            (thread.execution.state == RemoteThreadExecutionState.UNKNOWN || thread.execution.state.isActive)
+        if (!needsLatestUserMessage && !needsExecution) return
         if (!requestedThreadSummaries.add(threadId)) return
         if (!send(RemoteCommand(type = "thread.summary", requestId = requestId("thread.summary", threadId), threadId = threadId))) {
             requestedThreadSummaries.remove(threadId)
@@ -147,6 +151,7 @@ class RemoteRepository(
             isOlderTimelineLoading = false,
             errorMessage = null,
         )
+        loadThreadSummary(threadId)
         if (!send(RemoteCommand(type = "thread.read", requestId = requestId("thread.read", threadId, selectionGeneration = generation), threadId = threadId))) {
             _state.value = _state.value.copy(isTimelineLoading = false)
         }
@@ -468,8 +473,15 @@ class RemoteRepository(
                 val previousById = _state.value.threads.associateBy(RemoteThread::id)
                 val refreshed = parseThreads(event).map { thread ->
                     val previous = previousById[thread.id]
-                    if (thread.latestUserMessage == null && previous?.updatedAt == thread.updatedAt) {
-                        thread.copy(latestUserMessage = previous.latestUserMessage)
+                    if (previous?.updatedAt == thread.updatedAt) {
+                        thread.copy(
+                            latestUserMessage = thread.latestUserMessage ?: previous.latestUserMessage,
+                            execution = if (thread.execution.state == RemoteThreadExecutionState.UNKNOWN) {
+                                previous.execution
+                            } else {
+                                thread.execution
+                            },
+                        )
                     } else {
                         thread
                     }
@@ -484,12 +496,33 @@ class RemoteRepository(
                 val result = event.payload?.jsonObject?.get("result") as? JsonObject
                 val threadId = result?.string("threadId")
                 val latestUserMessage = result?.string("latestUserMessage")
-                if (threadId != null && latestUserMessage != null) {
+                val execution = parseRemoteThreadExecution(result?.get("execution") as? JsonObject)
+                if (threadId != null) {
                     requestedThreadSummaries.remove(threadId)
-                    _state.value = _state.value.copy(
-                        threads = _state.value.threads.map { thread ->
-                            if (thread.id == threadId) thread.copy(latestUserMessage = latestUserMessage.take(240)) else thread
+                    val current = _state.value
+                    val selected = current.selectedThreadId == threadId
+                    _state.value = current.copy(
+                        threads = current.threads.map { thread ->
+                            if (thread.id == threadId) {
+                                thread.copy(
+                                    latestUserMessage = latestUserMessage?.take(240) ?: thread.latestUserMessage,
+                                    execution = execution,
+                                )
+                            } else {
+                                thread
+                            }
                         },
+                        activeThreadId = when {
+                            selected && execution.state.isActive -> threadId
+                            selected && current.activeThreadId == threadId -> null
+                            else -> current.activeThreadId
+                        },
+                        activeTurnId = when {
+                            selected && execution.state.isActive -> execution.turnId
+                            selected && current.activeThreadId == threadId -> null
+                            else -> current.activeTurnId
+                        },
+                        isWorking = if (selected) execution.state.isActive else current.isWorking,
                     )
                 }
             }
@@ -573,28 +606,58 @@ class RemoteRepository(
         val params = raw["params"]?.jsonObject ?: JsonObject(emptyMap())
         val eventThreadId = params.string("threadId")
         when (method) {
+            "thread/status/changed" -> {
+                val current = _state.value
+                val execution = parseRemoteThreadStatus(params["status"] as? JsonObject)
+                val selected = eventThreadId != null && eventThreadId == current.selectedThreadId
+                _state.value = current.copy(
+                    threads = current.threads.withExecution(eventThreadId, execution),
+                    activeThreadId = when {
+                        selected && execution.state.isActive -> eventThreadId
+                        selected && current.activeThreadId == eventThreadId -> null
+                        else -> current.activeThreadId
+                    },
+                    activeTurnId = if (selected && !execution.state.isActive) null else current.activeTurnId,
+                    isWorking = if (selected) execution.state.isActive else current.isWorking,
+                )
+                return
+            }
             "turn/started" -> {
                 val activeThreadId = eventThreadId ?: _state.value.selectedThreadId
+                val turnId = params["turn"]?.jsonObject?.string("id")
                 _state.value = _state.value.copy(
                     activeThreadId = activeThreadId,
-                    activeTurnId = params["turn"]?.jsonObject?.string("id"),
+                    activeTurnId = turnId,
                     isWorking = activeThreadId != null && activeThreadId == _state.value.selectedThreadId,
+                    threads = _state.value.threads.withExecution(
+                        activeThreadId,
+                        RemoteThreadExecution(RemoteThreadExecutionState.RUNNING, turnId = turnId),
+                    ),
                 )
                 return
             }
             "turn/completed" -> {
                 val current = _state.value
+                val completedThreadId = eventThreadId ?: current.activeThreadId
+                val execution = parseRemoteTurnExecution(
+                    params["turn"] as? JsonObject,
+                    fallback = RemoteThreadExecutionState.COMPLETED,
+                )
                 val completesActiveTurn = eventThreadId == null ||
                     current.activeThreadId == null ||
                     eventThreadId == current.activeThreadId
-                if (completesActiveTurn) {
-                    _state.value = current.copy(
-                        activeThreadId = null,
-                        activeTurnId = null,
-                        isWorking = false,
-                    )
+                _state.value = current.copy(
+                    activeThreadId = current.activeThreadId.takeUnless { completesActiveTurn },
+                    activeTurnId = current.activeTurnId.takeUnless { completesActiveTurn },
+                    isWorking = current.isWorking && !completesActiveTurn,
+                    threads = current.threads.withExecution(completedThreadId, execution),
+                )
+                val notification = when (execution.state) {
+                    RemoteThreadExecutionState.FAILED -> RemoteNotification("Codex 任务失败", "打开 Harness 查看失败详情")
+                    RemoteThreadExecutionState.INTERRUPTED -> RemoteNotification("Codex 已停止", "远程任务已中断")
+                    else -> RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果")
                 }
-                _notifications.tryEmit(RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果"))
+                _notifications.tryEmit(notification)
                 refreshThreads()
                 return
             }
@@ -608,6 +671,15 @@ class RemoteRepository(
         }
     }
 
+    private fun List<RemoteThread>.withExecution(
+        threadId: String?,
+        execution: RemoteThreadExecution,
+    ): List<RemoteThread> = if (threadId == null) {
+        this
+    } else {
+        map { thread -> if (thread.id == threadId) thread.copy(execution = execution) else thread }
+    }
+
     private fun handleApproval(event: RemoteEvent) {
         val raw = event.payload?.jsonObject ?: return
         val params = raw["params"]?.jsonObject ?: return
@@ -616,10 +688,26 @@ class RemoteRepository(
         val command = params["command"]?.let { value ->
             if (value is JsonPrimitive) value.contentOrNull else value.toString()
         }
-        _state.value = _state.value.copy(approvals = _state.value.approvals + RemoteApproval(
-            requestId = id, method = raw.string("method").orEmpty(), threadId = params.string("threadId"),
-            turnId = params.string("turnId"), reason = params.string("reason") ?: "Codex 请求执行受保护操作", command = command,
-        ))
+        val current = _state.value
+        val threadId = params.string("threadId")
+        val turnId = params.string("turnId")
+        _state.value = current.copy(
+            approvals = current.approvals + RemoteApproval(
+                requestId = id,
+                method = raw.string("method").orEmpty(),
+                threadId = threadId,
+                turnId = turnId,
+                reason = params.string("reason") ?: "Codex 请求执行受保护操作",
+                command = command,
+            ),
+            threads = current.threads.withExecution(
+                threadId,
+                RemoteThreadExecution(RemoteThreadExecutionState.WAITING_APPROVAL, turnId = turnId),
+            ),
+            activeThreadId = threadId ?: current.activeThreadId,
+            activeTurnId = turnId ?: current.activeTurnId,
+            isWorking = threadId == null || threadId == current.selectedThreadId,
+        )
         _notifications.tryEmit(RemoteNotification("Codex 等待审批", "Mac 上的任务需要你的确认"))
     }
 

@@ -175,6 +175,7 @@ data class RemoteFeatureAvailability(
     val canOpenLegacyHistory: Boolean,
     val canUseM3CompletionEvidence: Boolean,
     val canLoadLatestUserMessage: Boolean,
+    val canLoadThreadExecutionStatus: Boolean,
 )
 
 private val requiredM2RunCapabilities = setOf(
@@ -189,6 +190,7 @@ internal fun remoteFeatureAvailability(capabilities: Set<String>): RemoteFeature
         canOpenLegacyHistory = true,
         canUseM3CompletionEvidence = "completion-evidence.v2" in capabilities,
         canLoadLatestUserMessage = "thread-latest-user-message.v1" in capabilities,
+        canLoadThreadExecutionStatus = "thread-execution-status.v1" in capabilities,
     )
 
 internal fun parseRemoteHostCapabilities(event: RemoteEvent): Set<String> {
@@ -250,7 +252,30 @@ data class RemoteThread(
     val updatedAt: Long,
     val status: String,
     val latestUserMessage: String? = null,
+    val execution: RemoteThreadExecution = RemoteThreadExecution(RemoteThreadExecutionState.UNKNOWN),
 )
+
+enum class RemoteThreadExecutionState {
+    RUNNING,
+    WAITING_APPROVAL,
+    WAITING_USER,
+    COMPLETED,
+    FAILED,
+    INTERRUPTED,
+    UNKNOWN,
+}
+
+data class RemoteThreadExecution(
+    val state: RemoteThreadExecutionState,
+    val turnId: String? = null,
+    val startedAtMillis: Long? = null,
+    val completedAtMillis: Long? = null,
+)
+
+internal val RemoteThreadExecutionState.isActive: Boolean
+    get() = this == RemoteThreadExecutionState.RUNNING ||
+        this == RemoteThreadExecutionState.WAITING_APPROVAL ||
+        this == RemoteThreadExecutionState.WAITING_USER
 
 data class RemoteTimelineItem(
     val id: String,
@@ -340,6 +365,7 @@ internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
     return data.mapNotNull { element ->
         val item = element.jsonObject
         val id = item.string("id") ?: return@mapNotNull null
+        val rawStatus = item["status"] as? JsonObject
         RemoteThread(
             id = id,
             title = item.string("name")?.take(60)
@@ -347,10 +373,58 @@ internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
                 ?: "未命名线程",
             preview = item.string("preview").orEmpty().take(240), cwd = item.string("cwd"),
             updatedAt = (item.long("updatedAt") ?: 0L) * 1000L,
-            status = item["status"]?.jsonObject?.string("type").orEmpty(),
+            status = rawStatus?.string("type").orEmpty(),
             latestUserMessage = item.string("latestUserMessage")?.take(240),
+            execution = parseRemoteThreadStatus(rawStatus),
         )
     }
+}
+
+internal fun parseRemoteThreadStatus(status: JsonObject?): RemoteThreadExecution {
+    val flags = (status?.get("activeFlags") as? JsonArray).orEmpty()
+        .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        .toSet()
+    val state = when (status?.string("type")) {
+        "active" -> when {
+            "waitingOnApproval" in flags -> RemoteThreadExecutionState.WAITING_APPROVAL
+            "waitingOnUserInput" in flags -> RemoteThreadExecutionState.WAITING_USER
+            else -> RemoteThreadExecutionState.RUNNING
+        }
+        "systemError" -> RemoteThreadExecutionState.FAILED
+        else -> RemoteThreadExecutionState.UNKNOWN
+    }
+    return RemoteThreadExecution(state)
+}
+
+internal fun parseRemoteThreadExecution(value: JsonObject?): RemoteThreadExecution {
+    val state = value?.string("state")?.let { raw ->
+        RemoteThreadExecutionState.entries.firstOrNull { it.name == raw }
+    } ?: RemoteThreadExecutionState.UNKNOWN
+    return RemoteThreadExecution(
+        state = state,
+        turnId = value?.string("turnId")?.takeIf(String::isNotBlank),
+        startedAtMillis = value?.long("startedAt")?.times(1_000L),
+        completedAtMillis = value?.long("completedAt")?.times(1_000L),
+    )
+}
+
+internal fun parseRemoteTurnExecution(
+    value: JsonObject?,
+    fallback: RemoteThreadExecutionState = RemoteThreadExecutionState.UNKNOWN,
+): RemoteThreadExecution {
+    val state = when (value?.string("status")) {
+        "inProgress" -> RemoteThreadExecutionState.RUNNING
+        "completed" -> RemoteThreadExecutionState.COMPLETED
+        "failed" -> RemoteThreadExecutionState.FAILED
+        "interrupted" -> RemoteThreadExecutionState.INTERRUPTED
+        else -> fallback
+    }
+    return RemoteThreadExecution(
+        state = state,
+        turnId = value?.string("id")?.takeIf(String::isNotBlank),
+        startedAtMillis = value?.long("startedAt")?.times(1_000L),
+        completedAtMillis = value?.long("completedAt")?.times(1_000L),
+    )
 }
 
 internal fun parseWorkspaceCandidates(event: RemoteEvent): List<WorkspaceCandidate> {

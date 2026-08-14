@@ -61,8 +61,11 @@ import com.harnessapk.common.AppContainer
 import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.RemoteTimelineItem
 import com.harnessapk.remote.RemoteThread
+import com.harnessapk.remote.RemoteThreadExecution
+import com.harnessapk.remote.RemoteThreadExecutionState
 import com.harnessapk.remote.RemoteUiState
 import com.harnessapk.remote.WorkspaceCandidate
+import com.harnessapk.remote.isActive
 import com.harnessapk.remote.remoteFeatureAvailability
 import com.harnessapk.ui.markdown.MarkdownMessage
 import kotlinx.coroutines.delay
@@ -92,7 +95,7 @@ fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
 private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     var showCreate by remember { mutableStateOf(false) }
     val profile by container.remoteProfileStore.profile.collectAsState()
-    val latestUserMessageLoadingEnabled = remoteFeatureAvailability(state.capabilities).canLoadLatestUserMessage
+    val featureAvailability = remoteFeatureAvailability(state.capabilities)
     Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
         RemoteThreadListHeader(
             hostName = profile?.hostName.orEmpty(),
@@ -142,7 +145,8 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
                 items(state.threads, key = { it.id }) { thread ->
                     RemoteThreadCard(
                         thread = thread,
-                        latestUserMessageLoadingEnabled = latestUserMessageLoadingEnabled,
+                        latestUserMessageLoadingEnabled = featureAvailability.canLoadLatestUserMessage,
+                        executionStatusLoadingEnabled = featureAvailability.canLoadThreadExecutionStatus,
                         onLoadLatestUserMessage = container.remoteRepository::loadThreadSummary,
                         onClick = { container.remoteRepository.selectThread(thread.id) },
                     )
@@ -211,11 +215,28 @@ internal fun RemoteThreadCard(
     onClick: () -> Unit,
     nowMillis: Long = System.currentTimeMillis(),
     latestUserMessageLoadingEnabled: Boolean = true,
+    executionStatusLoadingEnabled: Boolean = false,
     onLoadLatestUserMessage: (String) -> Unit = {},
 ) {
-    LaunchedEffect(thread.id, thread.updatedAt, thread.latestUserMessage, latestUserMessageLoadingEnabled) {
-        if (latestUserMessageLoadingEnabled && thread.latestUserMessage == null) {
+    LaunchedEffect(
+        thread.id,
+        thread.updatedAt,
+        thread.latestUserMessage,
+        thread.execution,
+        latestUserMessageLoadingEnabled,
+        executionStatusLoadingEnabled,
+    ) {
+        val needsSummary = latestUserMessageLoadingEnabled && thread.latestUserMessage == null
+        val needsExecution = executionStatusLoadingEnabled &&
+            (thread.execution.state == RemoteThreadExecutionState.UNKNOWN || thread.execution.state.isActive)
+        if (needsSummary || needsExecution) {
             onLoadLatestUserMessage(thread.id)
+        }
+        if (executionStatusLoadingEnabled && thread.execution.state.isActive) {
+            while (true) {
+                delay(3_000L)
+                onLoadLatestUserMessage(thread.id)
+            }
         }
     }
     val preview = remoteThreadPreviewText(thread.latestUserMessage ?: thread.preview)
@@ -232,13 +253,21 @@ internal fun RemoteThreadCard(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                thread.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    thread.title,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                RemoteExecutionStatusBadge(thread.execution)
+            }
             if (preview.isNotBlank() && preview != thread.title) {
                 Text(
                     preview,
@@ -270,6 +299,47 @@ internal fun RemoteThreadCard(
             }
         }
     }
+}
+
+@Composable
+internal fun RemoteExecutionStatusBadge(execution: RemoteThreadExecution) {
+    val label = remoteExecutionStatusLabel(execution.state)
+    val active = execution.state.isActive
+    val containerColor = when (execution.state) {
+        RemoteThreadExecutionState.FAILED -> MaterialTheme.colorScheme.errorContainer
+        RemoteThreadExecutionState.UNKNOWN -> MaterialTheme.colorScheme.surfaceVariant
+        else -> if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer
+    }
+    val contentColor = when (execution.state) {
+        RemoteThreadExecutionState.FAILED -> MaterialTheme.colorScheme.onErrorContainer
+        RemoteThreadExecutionState.UNKNOWN -> MaterialTheme.colorScheme.onSurfaceVariant
+        else -> if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer
+    }
+    Surface(
+        modifier = Modifier.semantics { contentDescription = "会话状态：$label" },
+        shape = MaterialTheme.shapes.small,
+        color = containerColor,
+        contentColor = contentColor,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (active) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+            Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+        }
+    }
+}
+
+internal fun remoteExecutionStatusLabel(state: RemoteThreadExecutionState): String = when (state) {
+    RemoteThreadExecutionState.RUNNING -> "执行中"
+    RemoteThreadExecutionState.WAITING_APPROVAL -> "等待审批"
+    RemoteThreadExecutionState.WAITING_USER -> "等待回复"
+    RemoteThreadExecutionState.COMPLETED -> "已完成"
+    RemoteThreadExecutionState.FAILED -> "失败"
+    RemoteThreadExecutionState.INTERRUPTED -> "已中断"
+    RemoteThreadExecutionState.UNKNOWN -> "状态未同步"
 }
 
 internal fun remoteThreadPreviewText(raw: String): String {
@@ -307,10 +377,18 @@ internal fun formatRemoteUpdatedAt(updatedAt: Long, nowMillis: Long): String {
 @Composable
 private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     val context = LocalContext.current
+    val selectedExecution = state.threads
+        .firstOrNull { it.id == state.selectedThreadId }
+        ?.execution
+        ?.takeUnless { it.state == RemoteThreadExecutionState.UNKNOWN && state.isWorking }
+        ?: RemoteThreadExecution(
+            state = if (state.isWorking) RemoteThreadExecutionState.RUNNING else RemoteThreadExecutionState.UNKNOWN,
+            turnId = state.activeTurnId,
+        )
     var workingStartedAtMillis by remember(state.selectedThreadId) { mutableStateOf<Long?>(null) }
-    LaunchedEffect(state.selectedThreadId, state.isWorking) {
-        workingStartedAtMillis = if (state.isWorking) {
-            workingStartedAtMillis ?: System.currentTimeMillis()
+    LaunchedEffect(state.selectedThreadId, selectedExecution) {
+        workingStartedAtMillis = if (selectedExecution.state.isActive) {
+            selectedExecution.startedAtMillis ?: workingStartedAtMillis ?: System.currentTimeMillis()
         } else {
             null
         }
@@ -318,9 +396,14 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
     Column(Modifier.fillMaxSize().padding(padding)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             Box(Modifier)
-            if (state.isWorking) IconButton(onClick = container.remoteRepository::interrupt) { Icon(Icons.Outlined.Cancel, "停止") }
+            if (selectedExecution.state.isActive) {
+                IconButton(onClick = container.remoteRepository::interrupt) { Icon(Icons.Outlined.Cancel, "停止") }
+            }
         }
-        workingStartedAtMillis?.let { RemoteWorkingBanner(startedAtMillis = it) }
+        RemoteExecutionStatusBanner(
+            execution = selectedExecution,
+            startedAtMillis = workingStartedAtMillis,
+        )
         RemoteTimelineList(
             threadId = state.selectedThreadId.orEmpty(),
             items = state.timeline,
@@ -348,6 +431,51 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             com.harnessapk.remote.RemoteConnectionService.start(context)
             if (state.isWorking) container.remoteRepository.steer(text) else container.remoteRepository.startTurn(text)
         })
+    }
+}
+
+@Composable
+internal fun RemoteExecutionStatusBanner(
+    execution: RemoteThreadExecution,
+    startedAtMillis: Long? = execution.startedAtMillis,
+) {
+    val label = remoteExecutionStatusLabel(execution.state)
+    if (execution.state == RemoteThreadExecutionState.RUNNING) {
+        Box(Modifier.semantics { contentDescription = "当前会话状态：$label" }) {
+            RemoteWorkingBanner(startedAtMillis = startedAtMillis ?: System.currentTimeMillis())
+        }
+        return
+    }
+    val (title, description) = when (execution.state) {
+        RemoteThreadExecutionState.WAITING_APPROVAL -> "等待审批" to "需要你处理后，Codex 才会继续"
+        RemoteThreadExecutionState.WAITING_USER -> "等待你的回复" to "补充信息后，Codex 会继续当前任务"
+        RemoteThreadExecutionState.COMPLETED -> "任务已完成" to "可以继续发送消息开始下一轮"
+        RemoteThreadExecutionState.FAILED -> "执行失败" to "查看最后一条消息后可继续重试"
+        RemoteThreadExecutionState.INTERRUPTED -> "任务已中断" to "可以继续发送消息重新开始"
+        RemoteThreadExecutionState.UNKNOWN -> "状态尚未同步" to "正在从 Mac 获取最新执行状态"
+        RemoteThreadExecutionState.RUNNING -> error("handled above")
+    }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .semantics { contentDescription = "当前会话状态：$label" },
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (execution.state.isActive) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            Column {
+                Text(title, style = MaterialTheme.typography.labelLarge)
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 

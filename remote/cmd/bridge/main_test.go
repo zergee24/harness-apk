@@ -64,6 +64,7 @@ func TestHostStatusAdvertisesAdditiveM2AndM3Capabilities(t *testing.T) {
 		"turn-command-idempotency.v1",
 		"thread-history-pagination.v1",
 		"thread-latest-user-message.v1",
+		"thread-execution-status.v1",
 	}
 	if !reflect.DeepEqual(payload.Capabilities, want) {
 		t.Fatalf("capabilities=%#v", payload.Capabilities)
@@ -404,6 +405,67 @@ func TestMobileThreadSummaryResultUsesLatestUserMessageWithoutReadingFullHistory
 	}
 	if summary.ThreadID != "thread-1" || summary.LatestUserMessage != "这是最新一句用户的话" {
 		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestMobileThreadSummaryResultReportsUnfinishedLatestTurnAsRunning(t *testing.T) {
+	raw := json.RawMessage(`{"data":[
+		{"id":"turn-active","status":"interrupted","startedAt":1234,"completedAt":null,"items":[
+			{"id":"user-active","type":"userMessage","text":"请继续执行"}
+		],"itemsView":"summary"},
+		{"id":"turn-completed","status":"completed","startedAt":1000,"completedAt":1100,"items":[]}
+	]}`)
+
+	projected, err := mobileThreadSummaryResult("thread-1", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary struct {
+		Execution struct {
+			State       string `json:"state"`
+			TurnID      string `json:"turnId"`
+			StartedAt   int64  `json:"startedAt"`
+			CompletedAt *int64 `json:"completedAt"`
+		} `json:"execution"`
+	}
+	if err := json.Unmarshal(projected, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Execution.State != "RUNNING" || summary.Execution.TurnID != "turn-active" ||
+		summary.Execution.StartedAt != 1234 || summary.Execution.CompletedAt != nil {
+		t.Fatalf("execution=%#v", summary.Execution)
+	}
+}
+
+func TestMobileThreadSummaryResultMapsPersistedTerminalTurnStates(t *testing.T) {
+	for _, test := range []struct {
+		status string
+		want   string
+	}{
+		{status: "completed", want: "COMPLETED"},
+		{status: "failed", want: "FAILED"},
+		{status: "interrupted", want: "INTERRUPTED"},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			projected, err := mobileThreadSummaryResult("thread-1", json.RawMessage(fmt.Sprintf(
+				`{"data":[{"id":"turn-1","status":%q,"startedAt":1000,"completedAt":1100,"items":[]}]}`,
+				test.status,
+			)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var summary struct {
+				Execution struct {
+					State string `json:"state"`
+				} `json:"execution"`
+			}
+			if err := json.Unmarshal(projected, &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.Execution.State != test.want {
+				t.Fatalf("state=%q want=%q", summary.Execution.State, test.want)
+			}
+		})
 	}
 }
 

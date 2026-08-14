@@ -58,6 +58,33 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun approvalRequestMarksTheConversationAsWaitingForApproval() {
+        val repository = repository()
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"thread-a","preview":"任务 A","updatedAt":2}]}}""",
+                ),
+            ),
+        )
+        repository.selectThread("thread-a")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "approval.request",
+                payload = Json.parseToJsonElement(
+                    """{"id":7,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-a","turnId":"turn-a","reason":"Run command","command":"git status"}}""",
+                ),
+            ),
+        )
+
+        assertEquals(RemoteThreadExecutionState.WAITING_APPROVAL, repository.state.value.threads.single().execution.state)
+        assertTrue(repository.state.value.isWorking)
+    }
+
+    @Test
     fun structuredUserMessageContentRendersAsPlainConversationText() {
         val repository = repository()
         repository.selectThread("thread-a")
@@ -122,6 +149,35 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun realtimeTurnStartMarksItsConversationRunningBeforeTheUserOpensIt() {
+        val repository = repository()
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[
+                        {"id":"thread-a","preview":"任务 A","updatedAt":2},
+                        {"id":"thread-b","preview":"任务 B","updatedAt":1}
+                    ]}}""",
+                ),
+            ),
+        )
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"inProgress"}}}""",
+                ),
+            ),
+        )
+
+        assertEquals(RemoteThreadExecutionState.RUNNING, repository.state.value.threads[0].execution.state)
+        assertEquals(RemoteThreadExecutionState.UNKNOWN, repository.state.value.threads[1].execution.state)
+    }
+
+    @Test
     fun completionForBackgroundThreadClearsItsSteeringState() {
         val repository = repository()
         repository.selectThread("thread-a")
@@ -148,6 +204,66 @@ class RemoteRepositoryTest {
         repository.selectThread("thread-a")
 
         assertFalse(repository.state.value.isWorking)
+    }
+
+    @Test
+    fun realtimeFailedTurnKeepsAVisibleFailedTerminalState() {
+        val repository = repository()
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"thread-a","preview":"任务 A","updatedAt":2}]}}""",
+                ),
+            ),
+        )
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"thread-a","turn":{"id":"turn-a"}}}""",
+                ),
+            ),
+        )
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"failed","startedAt":10,"completedAt":20}}}""",
+                ),
+            ),
+        )
+
+        val execution = repository.state.value.threads.single().execution
+        assertEquals(RemoteThreadExecutionState.FAILED, execution.state)
+        assertEquals(20_000L, execution.completedAtMillis)
+    }
+
+    @Test
+    fun threadStatusChangeDistinguishesWaitingForUserFromGenericRunning() {
+        val repository = repository()
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"thread-a","preview":"任务 A","updatedAt":2}]}}""",
+                ),
+            ),
+        )
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"thread/status/changed","params":{"threadId":"thread-a","status":{"type":"active","activeFlags":["waitingOnUserInput"]}}}""",
+                ),
+            ),
+        )
+
+        assertEquals(RemoteThreadExecutionState.WAITING_USER, repository.state.value.threads.single().execution.state)
     }
 
     @Test
@@ -504,6 +620,20 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun threadListPreservesActiveExecutionAndWaitingFlags() {
+        val threads = parseThreads(
+            RemoteEvent(
+                type = "rpc.response",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"thread-1","preview":"等待处理","updatedAt":1,"status":{"type":"active","activeFlags":["waitingOnApproval"]}}]}}""",
+                ),
+            ),
+        )
+
+        assertEquals(RemoteThreadExecutionState.WAITING_APPROVAL, threads.single().execution.state)
+    }
+
+    @Test
     fun lazyThreadSummaryResponseUpdatesOnlyItsMatchingConversationCard() {
         val repository = repository()
         repository.handleEvent(
@@ -534,6 +664,65 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun lazyThreadSummaryRestoresRunningStateWhenOpeningAnAlreadyActiveConversation() {
+        val repository = repository()
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"thread-1","preview":"正在执行","updatedAt":2,"status":{"type":"notLoaded"}}]}}""",
+                ),
+            ),
+        )
+        repository.selectThread("thread-1")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.summary:request",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"threadId":"thread-1","latestUserMessage":"继续执行","execution":{"state":"RUNNING","turnId":"turn-1","startedAt":1234,"completedAt":null}}}""",
+                ),
+            ),
+        )
+
+        assertEquals(RemoteThreadExecutionState.RUNNING, repository.state.value.threads.single().execution.state)
+        assertEquals("turn-1", repository.state.value.activeTurnId)
+        assertTrue(repository.state.value.isWorking)
+    }
+
+    @Test
+    fun lazyThreadSummaryKeepsTerminalStateAndClearsSteeringAfterCompletion() {
+        val repository = repository()
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"thread-1","preview":"执行任务","updatedAt":2}]}}""",
+                ),
+            ),
+        )
+        repository.selectThread("thread-1")
+        fun summary(state: String, completedAt: String) = RemoteEvent(
+            type = "rpc.response",
+            requestId = "thread.summary:$state",
+            payload = Json.parseToJsonElement(
+                """{"result":{"threadId":"thread-1","latestUserMessage":"执行任务","execution":{"state":"$state","turnId":"turn-1","startedAt":1234,"completedAt":$completedAt}}}""",
+            ),
+        )
+        repository.handleEvent(summary("RUNNING", "null"))
+
+        repository.handleEvent(summary("COMPLETED", "1300"))
+
+        assertEquals(RemoteThreadExecutionState.COMPLETED, repository.state.value.threads.single().execution.state)
+        assertEquals(null, repository.state.value.activeThreadId)
+        assertEquals(null, repository.state.value.activeTurnId)
+        assertFalse(repository.state.value.isWorking)
+    }
+
+    @Test
     fun threadListRefreshKeepsHydratedSummaryUntilConversationChanges() {
         val repository = repository()
         fun list(updatedAt: Int) = RemoteEvent(
@@ -549,16 +738,18 @@ class RemoteRepositoryTest {
                 type = "rpc.response",
                 requestId = "thread.summary:request",
                 payload = Json.parseToJsonElement(
-                    """{"result":{"threadId":"thread-1","latestUserMessage":"最近一句"}}""",
+                    """{"result":{"threadId":"thread-1","latestUserMessage":"最近一句","execution":{"state":"COMPLETED","turnId":"turn-1","startedAt":1,"completedAt":2}}}""",
                 ),
             ),
         )
 
         repository.handleEvent(list(updatedAt = 2))
         assertEquals("最近一句", repository.state.value.threads.single().latestUserMessage)
+        assertEquals(RemoteThreadExecutionState.COMPLETED, repository.state.value.threads.single().execution.state)
 
         repository.handleEvent(list(updatedAt = 3))
         assertEquals(null, repository.state.value.threads.single().latestUserMessage)
+        assertEquals(RemoteThreadExecutionState.UNKNOWN, repository.state.value.threads.single().execution.state)
     }
 
     @Test

@@ -22,6 +22,8 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.remote.RemoteTimelineItem
 import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.RemoteThread
+import com.harnessapk.remote.RemoteThreadExecution
+import com.harnessapk.remote.RemoteThreadExecutionState
 import com.harnessapk.remote.WorkspaceCandidate
 import com.harnessapk.ui.theme.HarnessApkTheme
 import org.junit.Rule
@@ -88,6 +90,29 @@ class RemoteScreenComposeTest {
         composeRule.onNodeWithText("刚刚").assertIsDisplayed()
         composeRule.onAllNodesWithText("<codex_delegation>", substring = true).assertCountEquals(0)
         composeRule.onAllNodesWithText("/Users/tony/.codex/worktrees", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun threadCardMakesRunningStateVisibleWithoutOpeningTheConversation() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteThreadCard(
+                    thread = RemoteThread(
+                        id = "thread-running",
+                        title = "正在执行的任务",
+                        preview = "检查完整自动化",
+                        cwd = "/workspace",
+                        updatedAt = 1_000L,
+                        status = "active",
+                        execution = RemoteThreadExecution(RemoteThreadExecutionState.RUNNING),
+                    ),
+                    onClick = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("执行中").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("会话状态：执行中").assertIsDisplayed()
     }
 
     @Test
@@ -168,6 +193,46 @@ class RemoteScreenComposeTest {
         composeRule.runOnIdle {
             org.junit.Assert.assertEquals(listOf("thread-capability"), requests)
         }
+    }
+
+    @Test
+    fun activeThreadCardPollsLazilyAndStopsAfterTerminalState() {
+        composeRule.mainClock.autoAdvance = false
+        val requests = mutableListOf<String>()
+        val thread = mutableStateOf(
+            RemoteThread(
+                id = "thread-polling",
+                title = "执行状态轮询",
+                preview = "检查状态",
+                cwd = "/workspace",
+                updatedAt = 1_000L,
+                status = "active",
+                latestUserMessage = "检查状态",
+                execution = RemoteThreadExecution(RemoteThreadExecutionState.RUNNING),
+            ),
+        )
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteThreadCard(
+                    thread = thread.value,
+                    executionStatusLoadingEnabled = true,
+                    onLoadLatestUserMessage = { requests += it },
+                    onClick = {},
+                )
+            }
+        }
+
+        composeRule.runOnIdle { org.junit.Assert.assertEquals(1, requests.size) }
+        composeRule.mainClock.advanceTimeBy(3_000L)
+        composeRule.runOnIdle {
+            org.junit.Assert.assertEquals(2, requests.size)
+            thread.value = thread.value.copy(
+                status = "idle",
+                execution = RemoteThreadExecution(RemoteThreadExecutionState.COMPLETED),
+            )
+        }
+        composeRule.mainClock.advanceTimeBy(6_000L)
+        composeRule.runOnIdle { org.junit.Assert.assertEquals(2, requests.size) }
     }
 
     @Test
@@ -309,6 +374,24 @@ class RemoteScreenComposeTest {
 
         composeRule.onNodeWithText("Codex 正在处理 · 已等待 47 秒").assertIsDisplayed()
         composeRule.onNodeWithText("收到新内容后会继续实时显示").assertIsDisplayed()
+    }
+
+    @Test
+    fun terminalStatusBannerKeepsCompletionVisibleInsideConversation() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteExecutionStatusBanner(
+                    execution = RemoteThreadExecution(
+                        state = RemoteThreadExecutionState.COMPLETED,
+                        completedAtMillis = 48_000L,
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("任务已完成").assertIsDisplayed()
+        composeRule.onNodeWithText("可以继续发送消息开始下一轮").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("当前会话状态：已完成").assertIsDisplayed()
     }
 
     @Test
