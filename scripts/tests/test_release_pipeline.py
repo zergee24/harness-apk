@@ -73,5 +73,38 @@ class UploadOrderTest(unittest.TestCase):
             self.assertEqual([asset, root / "update.json"], ordered)
 
 
+class VersionCodeResolutionTest(unittest.TestCase):
+    def resolve(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "scripts/resolve_ci_version_code.py", *args],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_test_channel_base_can_advance_past_manually_installed_builds(self):
+        result = self.resolve(
+            "--base-version-code", "2000000",
+            "--run-number", "90",
+            "--channel", "test",
+            "--test-base", "2000004",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("2000094", result.stdout.strip())
+
+    def test_explicit_version_code_still_wins_over_channel_base(self):
+        result = self.resolve(
+            "--base-version-code", "2000000",
+            "--run-number", "90",
+            "--channel", "test",
+            "--test-base", "2000004",
+            "--override", "3000001",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("3000001", result.stdout.strip())
+
+
 if __name__ == "__main__":
     unittest.main()

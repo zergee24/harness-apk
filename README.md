@@ -165,5 +165,5 @@ OSS_ACL=public-read
 
 - `versionName` 按产品版本走，例如 `0.2.0`；测试包自动显示为 `0.2.0-debug`。
 - `versionCode` 按机器更新版本走，必须递增。当前基础 code 使用 `2000000` 这类格式，对应 `0.2.0`。
-- GitHub Actions 的 `test` / `prod` 通道在未显式传 `version_code` 时，默认使用 `基础 versionCode + GitHub run number`，所以同一个 `versionName` 可以重复打包并触发更新。
+- GitHub Actions 的 `test` / `prod` 通道在未显式传 `version_code` 时，默认使用 `通道基础 versionCode + GitHub run number`。通道基础值优先读取仓库变量 `TEST_VERSION_CODE_BASE` / `PROD_VERSION_CODE_BASE`，未配置时回退到 Gradle 基础值；真机验收包提前占用构建号后，应提高对应通道基础值以保持后续发布严格递增。
 - 本地打测试包时，如需强制让手机收到更新，传 `--version-code` 或环境变量 `APK_VERSION_CODE`。
