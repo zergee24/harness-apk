@@ -286,6 +286,8 @@ data class RemoteUiState(
     val isWorking: Boolean = false,
     val isThreadListLoading: Boolean = false,
     val isTimelineLoading: Boolean = false,
+    val olderTimelineCursor: String? = null,
+    val isOlderTimelineLoading: Boolean = false,
     val isCreatingThread: Boolean = false,
     val workspaceCandidates: List<WorkspaceCandidate> = emptyList(),
     val workspaceCandidatesLoaded: Boolean = false,

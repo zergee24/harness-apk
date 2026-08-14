@@ -61,6 +61,7 @@ func TestHostStatusAdvertisesAdditiveM2AndM3Capabilities(t *testing.T) {
 		"logical-replay.v1",
 		"completion-evidence.v2",
 		"turn-command-idempotency.v1",
+		"thread-history-pagination.v1",
 	}
 	if !reflect.DeepEqual(payload.Capabilities, want) {
 		t.Fatalf("capabilities=%#v", payload.Capabilities)
@@ -245,6 +246,173 @@ func TestMobileThreadReadResultKeepsLatestConversationAndBoundsLargeToolOutput(t
 	}
 	if len(decoded.Thread.Turns) == 0 || len(decoded.Thread.Turns[len(decoded.Thread.Turns)-1].Items) != 2 {
 		t.Fatalf("projected shape is not compatible with thread/read: %s", projected)
+	}
+}
+
+func TestThreadReadUsesPaginatedSummaryHistoryInsteadOfFullRollout(t *testing.T) {
+	reader, serverWriter := io.Pipe()
+	requests := make(chan struct {
+		Method string
+		Params map[string]any
+	}, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	client := appserverrpc.NewClient(reader, writerFunc(func(requestRaw []byte) (int, error) {
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params map[string]any  `json:"params"`
+		}
+		if err := json.Unmarshal(requestRaw, &request); err != nil {
+			return 0, err
+		}
+		requests <- struct {
+			Method string
+			Params map[string]any
+		}{Method: request.Method, Params: request.Params}
+		result := `{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}`
+		if request.Method == "thread/turns/list" {
+			result = `{"data":[{"id":"turn-new","items":[]}],"nextCursor":"older-page"}`
+		}
+		_, err := serverWriter.Write([]byte(fmt.Sprintf(`{"id":%s,"result":%s}`+"\n", request.ID, result)))
+		return len(requestRaw), err
+	}), "epoch-page")
+	client.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		_ = serverWriter.Close()
+		_ = reader.Close()
+	})
+	b := &bridge{
+		app:  &appProcess{client: client},
+		path: filepath.Join(t.TempDir(), "state.json"),
+		state: bridgeState{
+			DeviceSecrets:   map[string]string{"device-1": "invalid-on-purpose"},
+			Sequences:       map[string]uint64{},
+			PendingOutbound: map[string]map[string]string{},
+		},
+	}
+
+	if err := b.executeCommand(ctx, "device-1", protocol.Command{
+		Type: "thread.read", RequestID: "request-1", ThreadID: "thread-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := <-requests
+	if first.Method != "thread/read" || first.Params["includeTurns"] != false {
+		t.Fatalf("first request=%s params=%#v; mobile history must read metadata only", first.Method, first.Params)
+	}
+	second := <-requests
+	if second.Method != "thread/turns/list" || second.Params["itemsView"] != "summary" || second.Params["sortDirection"] != "desc" {
+		t.Fatalf("second request=%s params=%#v; mobile history must use descending summary pages", second.Method, second.Params)
+	}
+}
+
+func TestMobileThreadHistoryResultRestoresChronologicalOrderAndCursor(t *testing.T) {
+	result, err := mobileThreadHistoryResult(
+		json.RawMessage(`{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}`),
+		json.RawMessage(`{"data":[{"id":"turn-new","items":[{"id":"agent-new","type":"agentMessage","text":"new"}]},{"id":"turn-old","items":[{"id":"user-old","type":"userMessage","text":"old"}]}],"nextCursor":"cursor-older"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Thread struct {
+			Turns []struct {
+				ID string `json:"id"`
+			} `json:"turns"`
+		} `json:"thread"`
+		MobileHistory struct {
+			OlderCursor string `json:"olderCursor"`
+			HasOlder    bool   `json:"hasOlder"`
+		} `json:"mobileHistory"`
+	}
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{decoded.Thread.Turns[0].ID, decoded.Thread.Turns[1].ID}; !reflect.DeepEqual(got, []string{"turn-old", "turn-new"}) {
+		t.Fatalf("turn order=%#v", got)
+	}
+	if decoded.MobileHistory.OlderCursor != "cursor-older" || !decoded.MobileHistory.HasOlder {
+		t.Fatalf("mobile history=%#v", decoded.MobileHistory)
+	}
+}
+
+func TestMobileThreadHistoryResultBoundsSummaryTextAndDropsUnapprovedFields(t *testing.T) {
+	hugeText := strings.Repeat("private-summary-", 100_000)
+	page, err := json.Marshal(map[string]any{
+		"data": []any{
+			map[string]any{
+				"id": "turn-new",
+				"items": []any{
+					map[string]any{
+						"id": "agent-new", "type": "agentMessage", "text": hugeText,
+						"privatePayload": hugeText, "status": "completed",
+					},
+				},
+			},
+		},
+		"nextCursor": "cursor-older",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := mobileThreadHistoryResult(
+		json.RawMessage(`{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}`),
+		page,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) > maxMobileThreadResultBytes || bytes.Contains(result, []byte("privatePayload")) {
+		t.Fatalf("paginated mobile history was not projected and bounded: %d bytes", len(result))
+	}
+	if !bytes.Contains(result, []byte("内容过长，已截断")) || !bytes.Contains(result, []byte("cursor-older")) {
+		t.Fatalf("paginated history lost truncation marker or cursor: %s", result)
+	}
+}
+
+func TestMobileThreadHistoryResultKeepsEveryTurnCoveredByReturnedCursor(t *testing.T) {
+	hugeText := strings.Repeat("summary-near-limit-", 8_000)
+	turns := make([]any, 0, mobileThreadHistoryPageSize)
+	for index := 0; index < mobileThreadHistoryPageSize; index++ {
+		turns = append(turns, map[string]any{
+			"id": fmt.Sprintf("turn-%d", index),
+			"items": []any{
+				map[string]any{"id": fmt.Sprintf("user-%d", index), "type": "userMessage", "text": hugeText},
+				map[string]any{"id": fmt.Sprintf("agent-%d", index), "type": "agentMessage", "text": hugeText},
+			},
+		})
+	}
+	page, err := json.Marshal(map[string]any{"data": turns, "nextCursor": "next-page"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := mobileThreadHistoryResult(
+		json.RawMessage(`{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}`),
+		page,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Thread struct {
+			Turns []struct {
+				ID string `json:"id"`
+			} `json:"turns"`
+		} `json:"thread"`
+		MobileHistory struct {
+			OlderCursor string `json:"olderCursor"`
+		} `json:"mobileHistory"`
+	}
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(result) > maxMobileThreadResultBytes || len(decoded.Thread.Turns) != mobileThreadHistoryPageSize {
+		t.Fatalf("cursor skipped projected-out turns: bytes=%d turns=%d", len(result), len(decoded.Thread.Turns))
+	}
+	if decoded.MobileHistory.OlderCursor != "next-page" {
+		t.Fatalf("older cursor=%q", decoded.MobileHistory.OlderCursor)
 	}
 }
 

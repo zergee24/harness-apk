@@ -2,6 +2,8 @@ package com.harnessapk.ui.remote
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.Modifier
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
@@ -109,6 +111,97 @@ class RemoteScreenComposeTest {
 
         composeRule.runOnIdle { loading.value = false }
         composeRule.onNodeWithText("这个会话还没有消息").assertIsDisplayed()
+    }
+
+    @Test
+    fun timelineOffersExplicitOlderHistoryPageWithoutReplacingConversation() {
+        var requests = 0
+        composeRule.setContent {
+            HarnessApkTheme {
+                Box(Modifier.height(600.dp)) {
+                    RemoteTimelineList(
+                        threadId = "thread-1",
+                        items = listOf(
+                            RemoteTimelineItem("user-1", "userMessage", "最近问题"),
+                            RemoteTimelineItem("agent-1", "agentMessage", "最近回答"),
+                        ),
+                        loading = false,
+                        canLoadOlder = true,
+                        loadingOlder = false,
+                        onLoadOlder = { requests++ },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("加载更早内容").assertIsDisplayed().performClick()
+        composeRule.runOnIdle { org.junit.Assert.assertEquals(1, requests) }
+        composeRule.onNodeWithText("最近回答").assertIsDisplayed()
+    }
+
+    @Test
+    fun timelineCanContinuePastAnEmptyRenderableSummaryPage() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                Box(Modifier.height(600.dp)) {
+                    RemoteTimelineList(
+                        threadId = "thread-1",
+                        items = emptyList(),
+                        loading = false,
+                        canLoadOlder = true,
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("加载更早内容").assertIsDisplayed()
+    }
+
+    @Test
+    fun prependingOlderPageKeepsThePreviousFirstMessageVisible() {
+        val recent = (1..12).map { index ->
+            RemoteTimelineItem("recent-$index", "agentMessage", "原有消息 $index\n第二行内容", "completed")
+        }
+        val items = mutableStateOf(recent)
+        val loadingOlder = mutableStateOf(false)
+        lateinit var timelineState: LazyListState
+        var anchorOffsetBefore = 0
+        composeRule.setContent {
+            HarnessApkTheme {
+                Box(Modifier.height(400.dp)) {
+                    timelineState = rememberLazyListState()
+                    RemoteTimelineList(
+                        threadId = "thread-1",
+                        items = items.value,
+                        loading = false,
+                        canLoadOlder = true,
+                        loadingOlder = loadingOlder.value,
+                        onLoadOlder = { loadingOlder.value = true },
+                        listState = timelineState,
+                    )
+                }
+            }
+        }
+
+        composeRule.runOnIdle { timelineState.requestScrollToItem(0) }
+        composeRule.waitForIdle()
+        composeRule.runOnIdle {
+            anchorOffsetBefore = timelineState.layoutInfo.visibleItemsInfo.single { it.key == "recent-1" }.offset
+        }
+        composeRule.onNodeWithText("加载更早内容").performClick()
+        composeRule.onNodeWithText("正在加载更早内容…").assertIsDisplayed()
+        composeRule.runOnIdle {
+            items.value = (1..12).map { index ->
+                RemoteTimelineItem("older-$index", "userMessage", "更早消息 $index\n第二行内容", "completed")
+            } + recent
+            loadingOlder.value = false
+        }
+        composeRule.waitForIdle()
+
+        composeRule.runOnIdle {
+            val anchorAfter = timelineState.layoutInfo.visibleItemsInfo.single { it.key == "recent-1" }
+            org.junit.Assert.assertEquals(anchorOffsetBefore, anchorAfter.offset)
+        }
     }
 
     @Test

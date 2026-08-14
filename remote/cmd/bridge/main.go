@@ -371,6 +371,7 @@ func (b *bridge) run(ctx context.Context) error {
 		"clientInfo": map[string]string{
 			"name": "harness_remote_bridge", "title": "Harness Remote Bridge", "version": "0.2.0",
 		},
+		"capabilities": map[string]bool{"experimentalApi": true},
 	}); err != nil {
 		return err
 	}
@@ -454,7 +455,7 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		}, "")
 	case "thread.list":
 		return b.requestAppServer(ctx, deviceID, command, "thread/list", map[string]any{
-			"limit": 50, "sortKey": "updated_at", "sortDirection": "desc",
+			"limit": 20, "sortKey": "updated_at", "sortDirection": "desc",
 			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
 		})
 	case "workspace.list":
@@ -468,7 +469,7 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	case "run.snapshot":
 		return b.sendRunSnapshot(ctx, deviceID, command.OpenRunIDs, command.RequestID)
 	case "thread.read":
-		return b.requestAppServer(ctx, deviceID, command, "thread/read", map[string]any{"threadId": command.ThreadID, "includeTurns": true})
+		return b.requestMobileThreadHistory(ctx, deviceID, command)
 	case "thread.start":
 		return b.requestAppServer(ctx, deviceID, command, "thread/start", map[string]any{"cwd": command.CWD})
 	case "turn.start":
@@ -503,8 +504,114 @@ func hostStatusPayload() json.RawMessage {
 			"logical-replay.v1",
 			"completion-evidence.v2",
 			"turn-command-idempotency.v1",
+			"thread-history-pagination.v1",
 		},
 	})
+}
+
+const (
+	mobileThreadHistoryPageSize    = 8
+	maxMobilePaginatedTextBytes    = 24 << 10
+	maxMobilePaginatedItemsPerTurn = 2
+)
+
+func (b *bridge) requestMobileThreadHistory(ctx context.Context, deviceID string, command protocol.Command) error {
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		metadata, err := b.app.client.Call(callCtx, "thread/read", map[string]any{
+			"threadId": command.ThreadID, "includeTurns": false,
+		})
+		if err == nil {
+			params := map[string]any{
+				"threadId": command.ThreadID, "limit": mobileThreadHistoryPageSize,
+				"sortDirection": "desc", "itemsView": "summary",
+			}
+			if cursor := mobileHistoryCursor(command.Params); cursor != "" {
+				params["cursor"] = cursor
+			}
+			var page json.RawMessage
+			page, err = b.app.client.Call(callCtx, "thread/turns/list", params)
+			if err == nil {
+				metadata, err = mobileThreadHistoryResult(metadata, page)
+			}
+		}
+		if err != nil {
+			_ = b.sendEvent(ctx, deviceID, protocol.Event{
+				Type: "rpc.response", RequestID: command.RequestID,
+				Payload: mustJSON(map[string]any{"error": err.Error()}), CreatedAt: time.Now().UnixMilli(),
+			}, "")
+			return
+		}
+		_ = b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "rpc.response", RequestID: command.RequestID,
+			Payload: mustJSON(map[string]any{"result": json.RawMessage(metadata)}), CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}()
+	return nil
+}
+
+func mobileHistoryCursor(raw json.RawMessage) string {
+	var params struct {
+		Cursor string `json:"cursor"`
+	}
+	_ = json.Unmarshal(raw, &params)
+	return params.Cursor
+}
+
+func mobileThreadHistoryResult(metadataRaw, pageRaw json.RawMessage) (json.RawMessage, error) {
+	var metadata map[string]any
+	if err := json.Unmarshal(metadataRaw, &metadata); err != nil {
+		return nil, fmt.Errorf("decode thread metadata for mobile: %w", err)
+	}
+	thread, ok := metadata["thread"].(map[string]any)
+	if !ok {
+		return nil, errors.New("thread metadata for mobile is missing thread")
+	}
+	var page struct {
+		Data       []any   `json:"data"`
+		NextCursor *string `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(pageRaw, &page); err != nil {
+		return nil, fmt.Errorf("decode paginated thread history for mobile: %w", err)
+	}
+	for left, right := 0, len(page.Data)-1; left < right; left, right = left+1, right-1 {
+		page.Data[left], page.Data[right] = page.Data[right], page.Data[left]
+	}
+	thread["turns"] = projectMobilePaginatedTurns(page.Data)
+	metadata["mobileHistory"] = map[string]any{
+		"olderCursor": page.NextCursor,
+		"hasOlder":    page.NextCursor != nil && *page.NextCursor != "",
+	}
+	merged, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("encode paginated thread history for mobile: %w", err)
+	}
+	return mobileThreadReadResult(merged)
+}
+
+func projectMobilePaginatedTurns(turns []any) []map[string]any {
+	projectedTurns := make([]map[string]any, 0, len(turns))
+	for _, rawTurn := range turns {
+		turn, ok := rawTurn.(map[string]any)
+		if !ok {
+			continue
+		}
+		items, _ := turn["items"].([]any)
+		if len(items) > maxMobilePaginatedItemsPerTurn {
+			items = []any{items[0], items[len(items)-1]}
+		}
+		projectedItems := make([]map[string]any, 0, len(items))
+		for _, rawItem := range items {
+			if item, ok := rawItem.(map[string]any); ok {
+				projectedItems = append(projectedItems, mobileTimelineItemWithTextLimit(item, maxMobilePaginatedTextBytes))
+			}
+		}
+		projectedTurn := map[string]any{"items": projectedItems}
+		copyJSONFields(projectedTurn, turn, "id", "status", "itemsView")
+		projectedTurns = append(projectedTurns, projectedTurn)
+	}
+	return projectedTurns
 }
 
 func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string, command protocol.Command) error {
@@ -1142,31 +1249,44 @@ func mobileThreadReadResult(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	projectedThread := map[string]any{"turns": projectedTurns}
 	copyJSONFields(projectedThread, thread, "id", "cwd", "name", "preview", "status", "updatedAt")
-	return json.Marshal(map[string]any{"thread": projectedThread})
+	projectedResponse := map[string]any{"thread": projectedThread}
+	copyJSONFields(projectedResponse, response, "mobileHistory")
+	return json.Marshal(projectedResponse)
 }
 
 func mobileTimelineItem(item map[string]any) map[string]any {
+	return mobileTimelineItemWithTextLimit(item, maxMobileTimelineTextBytes)
+}
+
+func mobileTimelineItemWithTextLimit(item map[string]any, maxTextBytes int) map[string]any {
 	projected := map[string]any{}
 	copyJSONFields(projected, item, "id", "type", "status")
 	kind, _ := item["type"].(string)
 	switch kind {
 	case "userMessage", "agentMessage", "reasoning":
-		projected["text"] = truncateUTF8(mobileMessageText(item), maxMobileTimelineTextBytes)
+		projected["text"] = truncateUTF8(mobileMessageText(item), maxTextBytes)
 	case "commandExecution":
 		if command, exists := item["command"]; exists {
-			projected["command"] = boundedMobileValue(command, 16<<10)
+			projected["command"] = boundedMobileValue(command, minInt(16<<10, maxTextBytes))
 		}
 		copyJSONFields(projected, item, "cwd", "exitCode", "durationMs")
 	case "fileChange":
 		if changes, exists := item["changes"]; exists {
-			projected["changes"] = boundedMobileValue(changes, 48<<10)
+			projected["changes"] = boundedMobileValue(changes, minInt(48<<10, maxTextBytes))
 		}
 	default:
 		if text := mobileMessageText(item); text != "" {
-			projected["text"] = truncateUTF8(text, maxMobileTimelineTextBytes)
+			projected["text"] = truncateUTF8(text, maxTextBytes)
 		}
 	}
 	return projected
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func mobileMessageText(item map[string]any) string {

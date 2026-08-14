@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
@@ -141,6 +142,9 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             threadId = state.selectedThreadId.orEmpty(),
             items = state.timeline,
             loading = state.isTimelineLoading,
+            canLoadOlder = state.olderTimelineCursor != null,
+            loadingOlder = state.isOlderTimelineLoading,
+            onLoadOlder = container.remoteRepository::loadOlderHistory,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         )
         state.approvals.forEach { approval ->
@@ -199,6 +203,10 @@ internal fun RemoteTimelineList(
     threadId: String,
     items: List<RemoteTimelineItem>,
     loading: Boolean,
+    canLoadOlder: Boolean = false,
+    loadingOlder: Boolean = false,
+    onLoadOlder: () -> Unit = {},
+    listState: LazyListState = rememberLazyListState(),
     modifier: Modifier = Modifier,
 ) {
     if (loading && items.isEmpty()) {
@@ -210,26 +218,48 @@ internal fun RemoteTimelineList(
         }
         return
     }
-    if (!loading && items.isEmpty()) {
+    if (!loading && items.isEmpty() && !canLoadOlder && !loadingOlder) {
         Box(modifier, contentAlignment = androidx.compose.ui.Alignment.Center) {
             Text("这个会话还没有消息", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         return
     }
-    val listState = rememberLazyListState()
     var positionedAtLatest by remember(threadId) { mutableStateOf(false) }
     var previousItemCount by remember(threadId) { mutableIntStateOf(0) }
-    LaunchedEffect(threadId, items.size, loading) {
+    var previousLastItemId by remember(threadId) { mutableStateOf<String?>(null) }
+    var prependAnchorId by remember(threadId) { mutableStateOf<String?>(null) }
+    var prependAnchorOffset by remember(threadId) { mutableIntStateOf(0) }
+    LaunchedEffect(threadId, items.size, loading, loadingOlder) {
+        val historyHeaderCount = if (canLoadOlder || loadingOlder) 1 else 0
+        if (loadingOlder && prependAnchorId == null) {
+            listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index >= historyHeaderCount }?.let { visible ->
+                prependAnchorId = items.getOrNull(visible.index - historyHeaderCount)?.id
+                prependAnchorOffset = visible.offset
+            }
+        }
         if (!loading && items.isNotEmpty()) {
+            val anchorId = prependAnchorId
+            if (!loadingOlder && anchorId != null) {
+                val anchorIndex = items.indexOfFirst { it.id == anchorId }
+                if (anchorIndex >= 0) {
+                    listState.scrollToItem(historyHeaderCount + anchorIndex, -prependAnchorOffset)
+                }
+                prependAnchorId = null
+                previousItemCount = items.size
+                previousLastItemId = items.lastOrNull()?.id
+                return@LaunchedEffect
+            }
             val wasNearLatest = previousItemCount == 0 ||
-                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index.orZero() >= previousItemCount - 2
+                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index.orZero() >= historyHeaderCount + previousItemCount - 2
+            val olderPageWasPrepended = previousLastItemId != null && items.lastOrNull()?.id == previousLastItemId
             if (!positionedAtLatest) {
-                listState.scrollToItem(items.lastIndex)
+                listState.scrollToItem(historyHeaderCount + items.lastIndex)
                 positionedAtLatest = true
-            } else if (items.size > previousItemCount && wasNearLatest) {
-                listState.animateScrollToItem(items.lastIndex)
+            } else if (items.size > previousItemCount && !olderPageWasPrepended && wasNearLatest) {
+                listState.animateScrollToItem(historyHeaderCount + items.lastIndex)
             }
             previousItemCount = items.size
+            previousLastItemId = items.lastOrNull()?.id
         }
     }
     LazyColumn(
@@ -238,6 +268,17 @@ internal fun RemoteTimelineList(
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (canLoadOlder || loadingOlder) {
+            item(key = "load-older-history") {
+                OutlinedButton(
+                    onClick = onLoadOlder,
+                    enabled = canLoadOlder && !loadingOlder,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (loadingOlder) "正在加载更早内容…" else "加载更早内容")
+                }
+            }
+        }
         items(items, key = { it.id }) { TimelineCard(it) }
     }
 }

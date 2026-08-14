@@ -167,6 +167,187 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun olderThreadPagePrependsWithoutReplacingLatestHistory() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read:request-1",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"thread":{"id":"thread-a","turns":[{"id":"turn-new","items":[{"id":"agent-new","type":"agentMessage","text":"最新消息"}]}]},"mobileHistory":{"olderCursor":"cursor-older"}}}""",
+                ),
+            ),
+        )
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read.older:request-2",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"thread":{"id":"thread-a","turns":[{"id":"turn-old","items":[{"id":"user-old","type":"userMessage","text":"更早消息"}]}]},"mobileHistory":{"olderCursor":null}}}""",
+                ),
+            ),
+        )
+
+        assertEquals(listOf("user-old", "agent-new"), repository.state.value.timeline.map { it.id })
+        assertEquals(listOf("更早消息", "最新消息"), repository.state.value.timeline.map { it.text })
+    }
+
+    @Test
+    fun olderThreadPageFromPreviousSelectionCannotPolluteCurrentConversation() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+        repository.selectThread("thread-b")
+        val stateBeforeStaleResponse = repository.state.value
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read.older:stale-request",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"thread":{"id":"thread-a","turns":[{"id":"turn-old","items":[{"id":"user-old","type":"userMessage","text":"旧会话内容"}]}]},"mobileHistory":{"olderCursor":null}}}""",
+                ),
+            ),
+        )
+
+        assertEquals(stateBeforeStaleResponse, repository.state.value)
+    }
+
+    @Test
+    fun historySnapshotCannotOverwriteNewerRealtimeItem() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"item/completed","params":{"threadId":"thread-a","item":{"id":"agent-new","type":"agentMessage","text":"实时完整回答","status":"completed"}}}""",
+                ),
+            ),
+        )
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read:late-snapshot",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"thread":{"id":"thread-a","turns":[{"id":"turn-new","items":[{"id":"user-new","type":"userMessage","text":"最近问题"},{"id":"agent-new","type":"agentMessage","text":"旧摘要","status":"streaming"}]}]},"mobileHistory":{"olderCursor":"older"}}}""",
+                ),
+            ),
+        )
+
+        assertEquals(listOf("最近问题", "实时完整回答"), repository.state.value.timeline.map { it.text })
+        assertEquals("completed", repository.state.value.timeline.last().status)
+    }
+
+    @Test
+    fun unchangedOlderCursorWithNoNewItemsStopsPagination() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+        val unchangedPage =
+            """{"result":{"thread":{"id":"thread-a","turns":[{"id":"turn-new","items":[{"id":"agent-new","type":"agentMessage","text":"最新消息"}]}]},"mobileHistory":{"olderCursor":"same-cursor"}}}"""
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read:initial",
+                payload = Json.parseToJsonElement(unchangedPage),
+            ),
+        )
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read.older:repeated",
+                payload = Json.parseToJsonElement(unchangedPage),
+            ),
+        )
+
+        assertEquals(null, repository.state.value.olderTimelineCursor)
+        assertEquals(listOf("agent-new"), repository.state.value.timeline.map { it.id })
+    }
+
+    @Test
+    fun staleThreadReadErrorCannotStopTheNewSelectionLoadingState() {
+        val repository = repository()
+        repository.selectThread("thread-b")
+        val stateField = RemoteRepository::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutableState = stateField.get(repository) as MutableStateFlow<RemoteUiState>
+        mutableState.value = mutableState.value.copy(isTimelineLoading = true, errorMessage = null)
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pending["thread.read:stale"] = PendingRemoteCommand("thread.read", threadId = "thread-a")
+        val stateBeforeStaleError = repository.state.value
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read:stale",
+                payload = Json.parseToJsonElement("""{"error":{"message":"old thread failed"}}"""),
+            ),
+        )
+
+        assertEquals(stateBeforeStaleError, repository.state.value)
+    }
+
+    @Test
+    fun staleSuccessFromAnEarlierVisitCannotPolluteAReselectedThread() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+        repository.selectThread("thread-b")
+        repository.selectThread("thread-a")
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pending["thread.read:stale-cycle"] = PendingRemoteCommand(
+            kind = "thread.read",
+            threadId = "thread-a",
+            selectionGeneration = 1,
+        )
+        val stateBeforeStaleResponse = repository.state.value
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read:stale-cycle",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"thread":{"id":"thread-a","turns":[{"id":"old-turn","items":[{"id":"old-item","type":"agentMessage","text":"旧访问周期"}]}]},"mobileHistory":{"olderCursor":"old-cursor"}}}""",
+                ),
+            ),
+        )
+
+        assertEquals(stateBeforeStaleResponse, repository.state.value)
+    }
+
+    @Test
+    fun staleErrorFromAnEarlierVisitCannotStopAReselectedThreadLoading() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+        repository.selectThread("thread-b")
+        repository.selectThread("thread-a")
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pending["thread.read:stale-cycle-error"] = PendingRemoteCommand(
+            kind = "thread.read",
+            threadId = "thread-a",
+            selectionGeneration = 1,
+        )
+        val stateBeforeStaleError = repository.state.value
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.read:stale-cycle-error",
+                payload = Json.parseToJsonElement("""{"error":{"message":"old visit failed"}}"""),
+            ),
+        )
+
+        assertEquals(stateBeforeStaleError, repository.state.value)
+    }
+
+    @Test
     fun threadListPreviewsAreBoundedForReadableCardsAndSemantics() {
         val preview = "x".repeat(2_000)
         val threads = parseThreads(
@@ -210,8 +391,8 @@ class RemoteRepositoryTest {
         assertFalse(repository.state.value.timeline.any { it.text.startsWith("[") || it.text.startsWith("{") })
     }
 
-    private fun repository(): RemoteRepository = RemoteRepository(
-        profileStore = FakeRemoteProfileProvider(profile),
+    private fun repository(remoteProfile: RemoteProfile = profile): RemoteRepository = RemoteRepository(
+        profileStore = FakeRemoteProfileProvider(remoteProfile),
         httpClient = OkHttpClient(),
         scope = CoroutineScope(SupervisorJob()),
     )
