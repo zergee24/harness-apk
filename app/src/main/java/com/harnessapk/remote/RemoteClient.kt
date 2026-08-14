@@ -98,6 +98,8 @@ class RemoteRepository(
         selectionGeneration += 1
         _state.value = _state.value.copy(
             connectionStatus = RemoteConnectionStatus.DISCONNECTED,
+            activeThreadId = null,
+            activeTurnId = null,
             isWorking = false,
             isThreadListLoading = false,
             isTimelineLoading = false,
@@ -115,7 +117,8 @@ class RemoteRepository(
         }
     }
     fun requestWorkspaceCandidates() {
-        _state.value = _state.value.copy(workspaceCandidates = emptyList(), workspaceCandidatesLoaded = false)
+        val current = _state.value
+        _state.value = current.copy(workspaceCandidatesLoaded = current.workspaceCandidates.isNotEmpty())
         if (!send(RemoteCommand(type = "workspace.list", requestId = requestId("workspace.list")))) {
             _state.value = _state.value.copy(workspaceCandidatesLoaded = true)
         }
@@ -127,6 +130,7 @@ class RemoteRepository(
             selectedThreadId = threadId,
             timeline = emptyList(),
             approvals = emptyList(),
+            isWorking = _state.value.activeThreadId == threadId,
             isTimelineLoading = true,
             olderTimelineCursor = null,
             isOlderTimelineLoading = false,
@@ -157,6 +161,7 @@ class RemoteRepository(
             selectedThreadId = null,
             timeline = emptyList(),
             approvals = emptyList(),
+            isWorking = false,
             isTimelineLoading = false,
             olderTimelineCursor = null,
             isOlderTimelineLoading = false,
@@ -171,9 +176,11 @@ class RemoteRepository(
     }
     fun startTurn(text: String) {
         val threadId = _state.value.selectedThreadId ?: return
-        val requestId = requestId("turn.start")
+        val requestId = requestId("turn.start", threadId)
         if (send(RemoteCommand(type = "turn.start", requestId = requestId, threadId = threadId, text = text))) {
             _state.value = _state.value.copy(
+                activeThreadId = threadId,
+                activeTurnId = null,
                 isWorking = true,
                 timeline = _state.value.timeline + RemoteTimelineItem("pending-user:$requestId", "userMessage", text, "sending"),
             )
@@ -376,6 +383,8 @@ class RemoteRepository(
                 val message = event.message ?: "Codex 远程任务失败"
                 _state.value = _state.value.copy(
                     errorMessage = redactRemoteSensitiveText(message).take(240),
+                    activeThreadId = null,
+                    activeTurnId = null,
                     isWorking = false,
                     isThreadListLoading = false,
                     isTimelineLoading = false,
@@ -418,7 +427,16 @@ class RemoteRepository(
         }
         val requestedOlderCursor = pending?.olderCursor ?: _state.value.olderTimelineCursor
         if (event.payload?.jsonObject?.get("error") != null) {
-            _state.value = completedCommandState(kind).copy(errorMessage = remoteRpcErrorMessage(event.payload))
+            val completed = completedCommandState(kind)
+            val failedActiveTurnStart = kind == "turn.start" &&
+                pendingThreadId != null &&
+                completed.activeThreadId == pendingThreadId
+            _state.value = completed.copy(
+                activeThreadId = completed.activeThreadId.takeUnless { failedActiveTurnStart },
+                activeTurnId = completed.activeTurnId.takeUnless { failedActiveTurnStart },
+                isWorking = completed.isWorking && !failedActiveTurnStart,
+                errorMessage = remoteRpcErrorMessage(event.payload),
+            )
             _notifications.tryEmit(RemoteNotification("Codex 任务失败", "Mac 返回了错误，请打开 Harness 查看详情"))
             return
         }
@@ -441,7 +459,7 @@ class RemoteRepository(
                         selectedThreadId = id,
                         timeline = emptyList(),
                         approvals = emptyList(),
-                        isWorking = false,
+                        isWorking = _state.value.activeThreadId == id,
                         isCreatingThread = false,
                         isTimelineLoading = false,
                         olderTimelineCursor = null,
@@ -459,7 +477,12 @@ class RemoteRepository(
                 ?: run { _state.value = _state.value.copy(isOlderTimelineLoading = false) }
             "turn.start" -> {
                 val turnId = event.payload?.jsonObject?.get("result")?.jsonObject?.get("turn")?.jsonObject?.string("id")
-                _state.value = _state.value.copy(activeTurnId = turnId, isWorking = true)
+                val threadId = pendingThreadId ?: _state.value.selectedThreadId
+                _state.value = _state.value.copy(
+                    activeThreadId = threadId,
+                    activeTurnId = turnId,
+                    isWorking = threadId != null && threadId == _state.value.selectedThreadId,
+                )
             }
         }
     }
@@ -506,14 +529,36 @@ class RemoteRepository(
         val raw = event.payload?.jsonObject ?: return
         val method = raw.string("method") ?: event.method.orEmpty()
         val params = raw["params"]?.jsonObject ?: JsonObject(emptyMap())
-        if (!matchesSelectedThread(params.string("threadId"))) return
+        val eventThreadId = params.string("threadId")
         when (method) {
-            "turn/started" -> _state.value = _state.value.copy(activeTurnId = params["turn"]?.jsonObject?.string("id"), isWorking = true)
+            "turn/started" -> {
+                val activeThreadId = eventThreadId ?: _state.value.selectedThreadId
+                _state.value = _state.value.copy(
+                    activeThreadId = activeThreadId,
+                    activeTurnId = params["turn"]?.jsonObject?.string("id"),
+                    isWorking = activeThreadId != null && activeThreadId == _state.value.selectedThreadId,
+                )
+                return
+            }
             "turn/completed" -> {
-                _state.value = _state.value.copy(activeTurnId = null, isWorking = false)
+                val current = _state.value
+                val completesActiveTurn = eventThreadId == null ||
+                    current.activeThreadId == null ||
+                    eventThreadId == current.activeThreadId
+                if (completesActiveTurn) {
+                    _state.value = current.copy(
+                        activeThreadId = null,
+                        activeTurnId = null,
+                        isWorking = false,
+                    )
+                }
                 _notifications.tryEmit(RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果"))
                 refreshThreads()
+                return
             }
+        }
+        if (!matchesSelectedThread(eventThreadId)) return
+        when (method) {
             "item/started", "item/completed" -> params["item"]?.let { item ->
                 timelineItem(item)?.let { addOrReplaceTimeline(it) }
             }
@@ -545,15 +590,18 @@ class RemoteRepository(
         val item = element.jsonObject
         val id = item.string("id") ?: return null
         val kind = item.string("type").orEmpty()
+        val status = item.string("status")
         val text = when (kind) {
             "agentMessage", "userMessage" -> item.string("text") ?: remoteMessageContentText(item["content"])
             "commandExecution" -> remoteCommandText(item["command"])
             "fileChange" -> remoteFileChangeText(item["changes"])
-            "reasoning" -> item.string("summary") ?: item.string("text") ?: "Codex 正在分析"
+            "reasoning" -> item.string("summary")?.takeIf(String::isNotBlank)
+                ?: item.string("text")?.takeIf(String::isNotBlank)
+                ?: if (status in setOf("streaming", "inProgress", "running")) "Codex 正在分析" else return null
             "webSearch" -> item.string("query") ?: item.string("text") ?: "Codex 正在查找资料"
             else -> item.string("text") ?: item.string("status") ?: "远程事件更新"
         }
-        return RemoteTimelineItem(id, kind, text, item.string("status"))
+        return RemoteTimelineItem(id, kind, text, status)
     }
 
     private fun remoteCommandText(command: JsonElement?): String = when (command) {

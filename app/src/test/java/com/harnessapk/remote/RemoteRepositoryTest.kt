@@ -99,6 +99,104 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun switchingThreadsDoesNotOfferSteeringForAnotherThreadsActiveTurn() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"thread-a","turn":{"id":"turn-a"}}}""",
+                ),
+            ),
+        )
+        assertTrue(repository.state.value.isWorking)
+
+        repository.clearSelection()
+        repository.selectThread("thread-b")
+        assertFalse(repository.state.value.isWorking)
+
+        repository.clearSelection()
+        repository.selectThread("thread-a")
+        assertTrue(repository.state.value.isWorking)
+    }
+
+    @Test
+    fun completionForBackgroundThreadClearsItsSteeringState() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"thread-a","turn":{"id":"turn-a"}}}""",
+                ),
+            ),
+        )
+        repository.clearSelection()
+        repository.selectThread("thread-b")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-a"}}}""",
+                ),
+            ),
+        )
+        repository.clearSelection()
+        repository.selectThread("thread-a")
+
+        assertFalse(repository.state.value.isWorking)
+    }
+
+    @Test
+    fun failedTurnStartClearsOnlyItsOptimisticWorkingState() {
+        val repository = repository()
+        val stateField = RemoteRepository::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutableState = stateField.get(repository) as MutableStateFlow<RemoteUiState>
+        mutableState.value = mutableState.value.copy(
+            selectedThreadId = "thread-a",
+            activeThreadId = "thread-a",
+            isWorking = true,
+        )
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pending["turn.start:failed"] = PendingRemoteCommand("turn.start", threadId = "thread-a")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "turn.start:failed",
+                payload = Json.parseToJsonElement("""{"error":{"message":"turn rejected"}}"""),
+            ),
+        )
+
+        assertFalse(repository.state.value.isWorking)
+        assertEquals(null, repository.state.value.activeThreadId)
+        assertEquals(null, repository.state.value.activeTurnId)
+    }
+
+    @Test
+    fun completedReasoningWithoutReadableSummaryDoesNotCreateAnEmptyCard() {
+        val repository = repository()
+        repository.selectThread("thread-a")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"item/completed","params":{"threadId":"thread-a","item":{"id":"reasoning-1","type":"reasoning","summary":"","text":"","status":"completed"}}}""",
+                ),
+            ),
+        )
+
+        assertTrue(repository.state.value.timeline.isEmpty())
+    }
+
+    @Test
     fun serverUserItemReplacesMatchingOptimisticMessage() {
         val optimistic = RemoteTimelineItem(
             id = "pending-user:turn.start:request-1",
@@ -143,6 +241,32 @@ class RemoteRepositoryTest {
         assertEquals("thread-new", repository.state.value.selectedThreadId)
         assertTrue(repository.state.value.timeline.isEmpty())
         assertEquals(null, repository.state.value.errorMessage)
+    }
+
+    @Test
+    fun refreshingWorkspaceCandidatesKeepsTheLastSuccessfulChoicesVisible() {
+        val repository = repository()
+        val cached = WorkspaceCandidate(
+            workspaceId = "workspace-1",
+            displayName = "Harness APK",
+            cwd = "/Users/tony/Documents/harness-apk",
+            repositoryLabel = "harness-apk",
+            branch = "test",
+            repositoryFingerprint = "fingerprint",
+            lastUsedAt = 1L,
+        )
+        val stateField = RemoteRepository::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutableState = stateField.get(repository) as MutableStateFlow<RemoteUiState>
+        mutableState.value = mutableState.value.copy(
+            workspaceCandidates = listOf(cached),
+            workspaceCandidatesLoaded = true,
+        )
+
+        repository.requestWorkspaceCandidates()
+
+        assertEquals(listOf(cached), repository.state.value.workspaceCandidates)
+        assertTrue(repository.state.value.workspaceCandidatesLoaded)
     }
 
     @Test

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -40,12 +41,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
@@ -55,6 +59,7 @@ import com.harnessapk.remote.RemoteTimelineItem
 import com.harnessapk.remote.RemoteUiState
 import com.harnessapk.remote.WorkspaceCandidate
 import com.harnessapk.ui.markdown.MarkdownMessage
+import kotlinx.coroutines.delay
 
 @Composable
 fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
@@ -77,10 +82,11 @@ fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
 @Composable
 private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     var showCreate by remember { mutableStateOf(false) }
+    val profile by container.remoteProfileStore.profile.collectAsState()
     Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 12.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Column {
-                Text("${container.remoteProfileStore.profile.value?.hostName} · ${connectionLabel(state.connectionStatus)}", style = MaterialTheme.typography.titleMedium)
+                Text("${profile?.hostName} · ${connectionLabel(state.connectionStatus)}", style = MaterialTheme.typography.titleMedium)
                 state.errorMessage?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 3)
                 }
@@ -133,11 +139,20 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
 @Composable
 private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     val context = LocalContext.current
+    var workingStartedAtMillis by remember(state.selectedThreadId) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(state.selectedThreadId, state.isWorking) {
+        workingStartedAtMillis = if (state.isWorking) {
+            workingStartedAtMillis ?: System.currentTimeMillis()
+        } else {
+            null
+        }
+    }
     Column(Modifier.fillMaxSize().padding(padding)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             Box(Modifier)
             if (state.isWorking) IconButton(onClick = container.remoteRepository::interrupt) { Icon(Icons.Outlined.Cancel, "停止") }
         }
+        workingStartedAtMillis?.let { RemoteWorkingBanner(startedAtMillis = it) }
         RemoteTimelineList(
             threadId = state.selectedThreadId.orEmpty(),
             items = state.timeline,
@@ -165,6 +180,44 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             com.harnessapk.remote.RemoteConnectionService.start(context)
             if (state.isWorking) container.remoteRepository.steer(text) else container.remoteRepository.startTurn(text)
         })
+    }
+}
+
+@Composable
+internal fun RemoteWorkingBanner(
+    startedAtMillis: Long,
+    nowMillis: Long? = null,
+) {
+    var clockMillis by remember(startedAtMillis, nowMillis) {
+        mutableLongStateOf(nowMillis ?: System.currentTimeMillis())
+    }
+    LaunchedEffect(startedAtMillis, nowMillis) {
+        if (nowMillis != null) {
+            clockMillis = nowMillis
+            return@LaunchedEffect
+        }
+        while (true) {
+            clockMillis = System.currentTimeMillis()
+            delay(1_000L)
+        }
+    }
+    val elapsedSeconds = ((clockMillis - startedAtMillis) / 1_000L).coerceAtLeast(0L)
+    Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            Column {
+                Text("Codex 正在处理 · 已等待 $elapsedSeconds 秒", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "收到新内容后会继续实时显示",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -227,9 +280,11 @@ internal fun RemoteTimelineList(
     var positionedAtLatest by remember(threadId) { mutableStateOf(false) }
     var previousItemCount by remember(threadId) { mutableIntStateOf(0) }
     var previousLastItemId by remember(threadId) { mutableStateOf<String?>(null) }
+    var previousLastItemRevision by remember(threadId) { mutableStateOf<String?>(null) }
     var prependAnchorId by remember(threadId) { mutableStateOf<String?>(null) }
     var prependAnchorOffset by remember(threadId) { mutableIntStateOf(0) }
-    LaunchedEffect(threadId, items.size, loading, loadingOlder) {
+    val lastItemRevision = items.lastOrNull()?.let { "${it.id}:${it.status}:${it.text.length}" }
+    LaunchedEffect(threadId, items.size, lastItemRevision, loading, loadingOlder) {
         val historyHeaderCount = if (canLoadOlder || loadingOlder) 1 else 0
         if (loadingOlder && prependAnchorId == null) {
             listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index >= historyHeaderCount }?.let { visible ->
@@ -247,19 +302,28 @@ internal fun RemoteTimelineList(
                 prependAnchorId = null
                 previousItemCount = items.size
                 previousLastItemId = items.lastOrNull()?.id
+                previousLastItemRevision = lastItemRevision
                 return@LaunchedEffect
             }
             val wasNearLatest = previousItemCount == 0 ||
                 listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index.orZero() >= historyHeaderCount + previousItemCount - 2
-            val olderPageWasPrepended = previousLastItemId != null && items.lastOrNull()?.id == previousLastItemId
+            val olderPageWasPrepended = items.size > previousItemCount &&
+                previousLastItemId != null && items.lastOrNull()?.id == previousLastItemId
             if (!positionedAtLatest) {
-                listState.scrollToItem(historyHeaderCount + items.lastIndex)
+                listState.scrollToItem(historyHeaderCount + items.lastIndex, listState.latestViewportOffset())
                 positionedAtLatest = true
-            } else if (items.size > previousItemCount && !olderPageWasPrepended && wasNearLatest) {
-                listState.animateScrollToItem(historyHeaderCount + items.lastIndex)
+            } else if (
+                !olderPageWasPrepended && wasNearLatest &&
+                (items.size > previousItemCount || lastItemRevision != previousLastItemRevision)
+            ) {
+                listState.animateScrollToItem(
+                    historyHeaderCount + items.lastIndex,
+                    listState.latestViewportOffset(),
+                )
             }
             previousItemCount = items.size
             previousLastItemId = items.lastOrNull()?.id
+            previousLastItemRevision = lastItemRevision
         }
     }
     LazyColumn(
@@ -285,6 +349,9 @@ internal fun RemoteTimelineList(
 
 private fun Int?.orZero(): Int = this ?: 0
 
+private fun LazyListState.latestViewportOffset(): Int =
+    (layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset).coerceAtLeast(0)
+
 @Composable
 internal fun TimelineCard(item: RemoteTimelineItem) {
     Card(Modifier.fillMaxWidth()) {
@@ -292,13 +359,30 @@ internal fun TimelineCard(item: RemoteTimelineItem) {
             Text(remoteTimelineKindLabel(item.kind), style = MaterialTheme.typography.labelMedium)
             when (item.kind) {
                 "agentMessage", "userMessage" -> MarkdownMessage(item.text)
-                "commandExecution" -> Text(item.text, fontFamily = FontFamily.Monospace)
+                "commandExecution" -> RemoteCommandText(item)
                 "fileChange" -> MarkdownMessage(item.text)
                 else -> Text(item.text)
             }
             remoteTimelineStatusLabel(item.status)?.let { status ->
                 Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+    }
+}
+
+@Composable
+private fun RemoteCommandText(item: RemoteTimelineItem) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    val canExpand = item.text.length > 160 || item.text.lineSequence().count() > 3
+    Text(
+        item.text,
+        fontFamily = FontFamily.Monospace,
+        maxLines = if (expanded) Int.MAX_VALUE else 3,
+        overflow = TextOverflow.Ellipsis,
+    )
+    if (canExpand) {
+        TextButton(onClick = { expanded = !expanded }) {
+            Text(if (expanded) "收起命令" else "查看完整命令")
         }
     }
 }

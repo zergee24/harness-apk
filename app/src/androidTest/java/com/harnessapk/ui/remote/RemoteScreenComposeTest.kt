@@ -55,6 +55,48 @@ class RemoteScreenComposeTest {
     }
 
     @Test
+    fun growingStreamingReplyKeepsItsBottomAboveTheComposer() {
+        val initial = (1..20).map { index ->
+            RemoteTimelineItem("old-$index", "userMessage", "历史消息 $index", "completed")
+        } + RemoteTimelineItem("agent-live", "agentMessage", "开始回答", "streaming")
+        val items = mutableStateOf(initial)
+        lateinit var timelineState: LazyListState
+        composeRule.setContent {
+            HarnessApkTheme {
+                Box(Modifier.height(420.dp)) {
+                    timelineState = rememberLazyListState()
+                    RemoteTimelineList(
+                        threadId = "thread-live",
+                        items = items.value,
+                        loading = false,
+                        listState = timelineState,
+                    )
+                }
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.runOnIdle {
+            items.value = initial.dropLast(1) + RemoteTimelineItem(
+                "agent-live",
+                "agentMessage",
+                "# READY\n\n- 第一项说明\n- 第二项说明\n- 第三项说明\n- 第四项说明",
+                "completed",
+            )
+        }
+        composeRule.waitForIdle()
+
+        composeRule.runOnIdle {
+            val layout = timelineState.layoutInfo
+            val latest = layout.visibleItemsInfo.single { it.key == "agent-live" }
+            org.junit.Assert.assertTrue(
+                "latest bottom=${latest.offset + latest.size}, viewport=${layout.viewportEndOffset}",
+                latest.offset + latest.size <= layout.viewportEndOffset,
+            )
+        }
+    }
+
+    @Test
     fun timelineCardRendersConversationWithLocalizedLabelsAndMarkdown() {
         composeRule.setContent {
             HarnessApkTheme {
@@ -78,6 +120,25 @@ class RemoteScreenComposeTest {
     }
 
     @Test
+    fun longCommandIsCompactByDefaultAndCanBeExpandedOnDemand() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                TimelineCard(
+                    RemoteTimelineItem(
+                        id = "command-long",
+                        kind = "commandExecution",
+                        text = "git status && ".repeat(30),
+                        status = "failed",
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("查看完整命令").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("收起命令").assertIsDisplayed()
+    }
+
+    @Test
     fun composerImeActionSendsMessageAndClearsInput() {
         val sent = mutableListOf<String>()
         composeRule.setContent {
@@ -93,6 +154,18 @@ class RemoteScreenComposeTest {
         composeRule.runOnIdle { org.junit.Assert.assertEquals(listOf("Reply READY"), sent) }
         composeRule.onNodeWithTag("remote-composer-input")
             .assert(androidx.compose.ui.test.SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.EditableText, androidx.compose.ui.text.AnnotatedString("")))
+    }
+
+    @Test
+    fun workingBannerExplainsLongWaitInsteadOfLeavingOnlyAStopIcon() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteWorkingBanner(startedAtMillis = 1_000L, nowMillis = 48_000L)
+            }
+        }
+
+        composeRule.onNodeWithText("Codex 正在处理 · 已等待 47 秒").assertIsDisplayed()
+        composeRule.onNodeWithText("收到新内容后会继续实时显示").assertIsDisplayed()
     }
 
     @Test
