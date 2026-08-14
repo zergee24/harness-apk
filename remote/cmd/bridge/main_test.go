@@ -68,6 +68,135 @@ func TestHostStatusAdvertisesAdditiveM2AndM3Capabilities(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateSavePreservesPairingCreatedAfterBridgeStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	initial := bridgeState{
+		SchemaVersion: 2, RelayURL: "https://relay.example.com", HostID: "host-1", HostName: "Mac", HostToken: "token",
+		Pending: map[string]string{}, DeviceSecrets: map[string]string{"phone-old": protocol.EncodeSecret(bytes.Repeat([]byte{1}, 32))},
+		Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{},
+	}
+	if err := saveBridgeState(path, initial); err != nil {
+		t.Fatal(err)
+	}
+	runningState, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{state: runningState, path: path}
+	external, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external.Pending["ticket-new"] = protocol.EncodeSecret(bytes.Repeat([]byte{2}, 32))
+	if err := saveBridgeState(path, external); err != nil {
+		t.Fatal(err)
+	}
+
+	bridge.mu.Lock()
+	bridge.state.Sequences["phone-old"] = 3
+	err = bridge.persistStateLocked()
+	bridge.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	saved, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Pending["ticket-new"] == "" || saved.Sequences["phone-old"] != 3 {
+		t.Fatalf("pending=%v sequence=%d", saved.Pending["ticket-new"] != "", saved.Sequences["phone-old"])
+	}
+}
+
+func TestRunningBridgeClaimsPairingCreatedAfterStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	initial := bridgeState{
+		SchemaVersion: 2, RelayURL: "https://relay.example.com", HostID: "host-1", HostName: "Mac", HostToken: "token",
+		Pending: map[string]string{}, DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{},
+		PendingOutbound: map[string]map[string]string{},
+	}
+	if err := saveBridgeState(path, initial); err != nil {
+		t.Fatal(err)
+	}
+	runningState, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{state: runningState, path: path}
+	wantSecret := protocol.EncodeSecret(bytes.Repeat([]byte{7}, 32))
+	external, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external.Pending["ticket-new"] = wantSecret
+	if err := saveBridgeState(path, external); err != nil {
+		t.Fatal(err)
+	}
+
+	bridge.mu.Lock()
+	gotSecret, err := bridge.claimPairingSecretLocked("ticket-new", "phone-new")
+	bridge.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSecret != wantSecret {
+		t.Fatalf("secret mismatch")
+	}
+	saved, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.DeviceSecrets["phone-new"] != wantSecret || saved.Pending["ticket-new"] != "" {
+		t.Fatalf("device enrolled=%v pending removed=%v", saved.DeviceSecrets["phone-new"] == wantSecret, saved.Pending["ticket-new"] == "")
+	}
+}
+
+func TestPairingClaimWriteFailureLeavesRuntimeStateUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	wantSecret := protocol.EncodeSecret(bytes.Repeat([]byte{9}, 32))
+	initial := bridgeState{
+		SchemaVersion: 2, RelayURL: "https://relay.example.com", HostID: "host-1", HostName: "Mac", HostToken: "token",
+		Pending: map[string]string{"ticket-new": wantSecret}, DeviceSecrets: map[string]string{},
+		Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{}, JournalKey: "journal-key",
+	}
+	if err := saveBridgeState(path, initial); err != nil {
+		t.Fatal(err)
+	}
+	runningState, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{
+		state: runningState,
+		path:  path,
+		updateState: func(_ string, update func(*bridgeState) error) error {
+			onDisk, loadErr := loadBridgeState(path)
+			if loadErr != nil {
+				return loadErr
+			}
+			if updateErr := update(&onDisk); updateErr != nil {
+				return updateErr
+			}
+			return errors.New("injected atomic write failure")
+		},
+	}
+
+	bridge.mu.Lock()
+	_, err = bridge.claimPairingSecretLocked("ticket-new", "phone-new")
+	bridge.mu.Unlock()
+	if err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if bridge.state.DeviceSecrets["phone-new"] != "" || bridge.state.Pending["ticket-new"] != wantSecret {
+		t.Fatalf(
+			"runtime mutated after failed persistence: device=%v pending=%v",
+			bridge.state.DeviceSecrets["phone-new"] != "",
+			bridge.state.Pending["ticket-new"] == wantSecret,
+		)
+	}
+}
+
 func TestDuplicateApprovalResponseCallsAppServerAndEmitsResultOnce(t *testing.T) {
 	cache, err := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
 	if err != nil {

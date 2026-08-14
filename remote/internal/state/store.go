@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/harnessapk/remote/internal/protocol"
@@ -99,6 +100,29 @@ func SaveBridge(path string, data BridgeData) error {
 		return err
 	}
 	return writeAtomic(path, raw, 0o600)
+}
+
+func UpdateBridge(path string, update func(*BridgeData) error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	data, err := LoadBridge(path)
+	if err != nil {
+		return err
+	}
+	if err := update(&data); err != nil {
+		return err
+	}
+	return SaveBridge(path, data)
 }
 
 func normalizeBridge(data *BridgeData, loading bool) (bool, error) {

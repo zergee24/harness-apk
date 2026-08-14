@@ -51,6 +51,7 @@ type bridge struct {
 	terminals    *completion.TerminalRunStore
 	workspaces   *workspace.Registry
 	seen         map[string]time.Time
+	updateState  func(string, func(*bridgeState) error) error
 }
 
 type appProcess struct {
@@ -150,8 +151,11 @@ func runPair(defaultPath string, args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	state.Pending[pairing.Ticket] = protocol.EncodeSecret(secret)
-	if err := saveBridgeState(*statePath, state); err != nil {
+	if err := bridgestate.UpdateBridge(*statePath, func(current *bridgeState) error {
+		current.Pending[pairing.Ticket] = protocol.EncodeSecret(secret)
+		state = *current
+		return nil
+	}); err != nil {
 		log.Fatal(err)
 	}
 	payload := protocol.PairingPayload{Version: protocol.Version, RelayURL: state.RelayURL, HostID: state.HostID, HostName: state.HostName, PairingTicket: pairing.Ticket, PairingSecret: protocol.EncodeSecret(secret), ExpiresAt: pairing.ExpiresAt}
@@ -193,21 +197,24 @@ func runWorkspace(defaultPath string, args []string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		paths := make(map[string]struct{}, len(state.RegisteredWorkspaces)+1)
-		for _, registered := range state.RegisteredWorkspaces {
-			paths[registered] = struct{}{}
-		}
-		if remaining[0] == "add" {
-			paths[cwd] = struct{}{}
-		} else {
-			delete(paths, cwd)
-		}
-		state.RegisteredWorkspaces = state.RegisteredWorkspaces[:0]
-		for registered := range paths {
-			state.RegisteredWorkspaces = append(state.RegisteredWorkspaces, registered)
-		}
-		sort.Strings(state.RegisteredWorkspaces)
-		if err := saveBridgeState(*statePath, state); err != nil {
+		if err := bridgestate.UpdateBridge(*statePath, func(current *bridgeState) error {
+			paths := make(map[string]struct{}, len(current.RegisteredWorkspaces)+1)
+			for _, registered := range current.RegisteredWorkspaces {
+				paths[registered] = struct{}{}
+			}
+			if remaining[0] == "add" {
+				paths[cwd] = struct{}{}
+			} else {
+				delete(paths, cwd)
+			}
+			current.RegisteredWorkspaces = current.RegisteredWorkspaces[:0]
+			for registered := range paths {
+				current.RegisteredWorkspaces = append(current.RegisteredWorkspaces, registered)
+			}
+			sort.Strings(current.RegisteredWorkspaces)
+			state = *current
+			return nil
+		}); err != nil {
 			log.Fatal(err)
 		}
 	default:
@@ -402,11 +409,11 @@ func (b *bridge) handleWire(ctx context.Context, raw []byte) error {
 	b.mu.Lock()
 	secretEncoded := b.state.DeviceSecrets[wire.DeviceID]
 	if secretEncoded == "" && wire.PairingTicket != "" {
-		secretEncoded = b.state.Pending[wire.PairingTicket]
-		if secretEncoded != "" {
-			b.state.DeviceSecrets[wire.DeviceID] = secretEncoded
-			delete(b.state.Pending, wire.PairingTicket)
-			_ = saveBridgeState(b.path, b.state)
+		var err error
+		secretEncoded, err = b.claimPairingSecretLocked(wire.PairingTicket, wire.DeviceID)
+		if err != nil {
+			b.mu.Unlock()
+			return err
 		}
 	}
 	if _, duplicate := b.seen[wire.MessageID]; duplicate {
@@ -441,7 +448,7 @@ func (b *bridge) acknowledge(deviceID, messageID string) {
 	if pending := b.state.PendingOutbound[deviceID]; pending != nil {
 		if _, exists := pending[messageID]; exists {
 			delete(pending, messageID)
-			_ = saveBridgeState(b.path, b.state)
+			_ = b.persistStateLocked()
 		}
 	}
 }
@@ -875,7 +882,7 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 	}
 	b.mu.Lock()
 	b.state.NeedsInitialGapSnapshot = false
-	err := saveBridgeState(b.path, b.state)
+	err := b.persistStateLocked()
 	b.mu.Unlock()
 	return err
 }
@@ -945,7 +952,7 @@ func (b *bridge) transmitJournaledEvent(ctx context.Context, event protocol.Logi
 	encoded := b.state.DeviceSecrets[event.DeviceID]
 	b.state.Sequences[event.DeviceID]++
 	transportSequence := b.state.Sequences[event.DeviceID]
-	stateErr := saveBridgeState(b.path, b.state)
+	stateErr := b.persistStateLocked()
 	b.mu.Unlock()
 	if stateErr != nil {
 		return stateErr
@@ -2197,7 +2204,7 @@ func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.
 	encoded := b.state.DeviceSecrets[deviceID]
 	b.state.Sequences[deviceID]++
 	sequence := b.state.Sequences[deviceID]
-	_ = saveBridgeState(b.path, b.state)
+	_ = b.persistStateLocked()
 	b.mu.Unlock()
 	secret, err := protocol.DecodeSecret(encoded)
 	if err != nil {
@@ -2218,7 +2225,7 @@ func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.
 		b.state.PendingOutbound[deviceID] = pending
 	}
 	pending[wire.MessageID] = string(raw)
-	_ = saveBridgeState(b.path, b.state)
+	_ = b.persistStateLocked()
 	b.mu.Unlock()
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
@@ -2246,7 +2253,7 @@ func (b *bridge) resendPending(ctx context.Context) error {
 		b.mu.Unlock()
 		return nil
 	}
-	_ = saveBridgeState(b.path, b.state)
+	_ = b.persistStateLocked()
 	b.mu.Unlock()
 	if len(wires) == 0 {
 		return nil
@@ -2270,6 +2277,96 @@ func (b *bridge) deviceSecrets() map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+func (b *bridge) persistStateLocked() error {
+	candidate := cloneBridgeState(b.state)
+	var persisted bridgeState
+	err := b.updateBridge(func(onDisk *bridgeState) error {
+		for ticket, secret := range onDisk.Pending {
+			if _, exists := candidate.Pending[ticket]; !exists {
+				candidate.Pending[ticket] = secret
+			}
+		}
+		for deviceID, secret := range onDisk.DeviceSecrets {
+			if _, exists := candidate.DeviceSecrets[deviceID]; !exists {
+				candidate.DeviceSecrets[deviceID] = secret
+			}
+		}
+		candidate.RegisteredWorkspaces = append([]string(nil), onDisk.RegisteredWorkspaces...)
+		*onDisk = candidate
+		persisted = cloneBridgeState(candidate)
+		return nil
+	})
+	if err == nil {
+		b.state = persisted
+	}
+	return err
+}
+
+func (b *bridge) claimPairingSecretLocked(ticket, deviceID string) (string, error) {
+	candidate := cloneBridgeState(b.state)
+	var secret string
+	var persisted bridgeState
+	err := b.updateBridge(func(onDisk *bridgeState) error {
+		for pendingTicket, pendingSecret := range onDisk.Pending {
+			if _, exists := candidate.Pending[pendingTicket]; !exists {
+				candidate.Pending[pendingTicket] = pendingSecret
+			}
+		}
+		for existingDeviceID, existingSecret := range onDisk.DeviceSecrets {
+			if _, exists := candidate.DeviceSecrets[existingDeviceID]; !exists {
+				candidate.DeviceSecrets[existingDeviceID] = existingSecret
+			}
+		}
+		candidate.RegisteredWorkspaces = append([]string(nil), onDisk.RegisteredWorkspaces...)
+		secret = candidate.Pending[ticket]
+		if secret != "" {
+			candidate.DeviceSecrets[deviceID] = secret
+			delete(candidate.Pending, ticket)
+		}
+		*onDisk = candidate
+		persisted = cloneBridgeState(candidate)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	b.state = persisted
+	return secret, nil
+}
+
+func (b *bridge) updateBridge(update func(*bridgeState) error) error {
+	if b.updateState != nil {
+		return b.updateState(b.path, update)
+	}
+	return bridgestate.UpdateBridge(b.path, update)
+}
+
+func cloneBridgeState(source bridgeState) bridgeState {
+	cloned := source
+	cloned.Pending = make(map[string]string, len(source.Pending))
+	for key, value := range source.Pending {
+		cloned.Pending[key] = value
+	}
+	cloned.DeviceSecrets = make(map[string]string, len(source.DeviceSecrets))
+	for key, value := range source.DeviceSecrets {
+		cloned.DeviceSecrets[key] = value
+	}
+	cloned.Sequences = make(map[string]uint64, len(source.Sequences))
+	for key, value := range source.Sequences {
+		cloned.Sequences[key] = value
+	}
+	cloned.PendingOutbound = make(map[string]map[string]string, len(source.PendingOutbound))
+	for deviceID, pending := range source.PendingOutbound {
+		clonedPending := make(map[string]string, len(pending))
+		for messageID, raw := range pending {
+			clonedPending[messageID] = raw
+		}
+		cloned.PendingOutbound[deviceID] = clonedPending
+	}
+	cloned.RegisteredWorkspaces = append([]string(nil), source.RegisteredWorkspaces...)
+	return cloned
 }
 
 func startAppServer(codex string) (*appProcess, error) {
