@@ -63,6 +63,7 @@ import com.harnessapk.remote.RemoteTimelineItem
 import com.harnessapk.remote.RemoteThread
 import com.harnessapk.remote.RemoteUiState
 import com.harnessapk.remote.WorkspaceCandidate
+import com.harnessapk.remote.remoteFeatureAvailability
 import com.harnessapk.ui.markdown.MarkdownMessage
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
@@ -91,6 +92,7 @@ fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
 private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     var showCreate by remember { mutableStateOf(false) }
     val profile by container.remoteProfileStore.profile.collectAsState()
+    val latestUserMessageLoadingEnabled = remoteFeatureAvailability(state.capabilities).canLoadLatestUserMessage
     Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
         RemoteThreadListHeader(
             hostName = profile?.hostName.orEmpty(),
@@ -140,6 +142,8 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
                 items(state.threads, key = { it.id }) { thread ->
                     RemoteThreadCard(
                         thread = thread,
+                        latestUserMessageLoadingEnabled = latestUserMessageLoadingEnabled,
+                        onLoadLatestUserMessage = container.remoteRepository::loadThreadSummary,
                         onClick = { container.remoteRepository.selectThread(thread.id) },
                     )
                 }
@@ -206,8 +210,15 @@ internal fun RemoteThreadCard(
     thread: RemoteThread,
     onClick: () -> Unit,
     nowMillis: Long = System.currentTimeMillis(),
+    latestUserMessageLoadingEnabled: Boolean = true,
+    onLoadLatestUserMessage: (String) -> Unit = {},
 ) {
-    val preview = remoteThreadPreviewText(thread.preview)
+    LaunchedEffect(thread.id, thread.updatedAt, thread.latestUserMessage, latestUserMessageLoadingEnabled) {
+        if (latestUserMessageLoadingEnabled && thread.latestUserMessage == null) {
+            onLoadLatestUserMessage(thread.id)
+        }
+    }
+    val preview = remoteThreadPreviewText(thread.latestUserMessage ?: thread.preview)
     val workspace = remoteWorkspaceLabel(thread.cwd)
     Surface(
         onClick = onClick,

@@ -174,6 +174,7 @@ data class RemoteFeatureAvailability(
     val canStartM2Run: Boolean,
     val canOpenLegacyHistory: Boolean,
     val canUseM3CompletionEvidence: Boolean,
+    val canLoadLatestUserMessage: Boolean,
 )
 
 private val requiredM2RunCapabilities = setOf(
@@ -187,6 +188,7 @@ internal fun remoteFeatureAvailability(capabilities: Set<String>): RemoteFeature
         canStartM2Run = capabilities.containsAll(requiredM2RunCapabilities),
         canOpenLegacyHistory = true,
         canUseM3CompletionEvidence = "completion-evidence.v2" in capabilities,
+        canLoadLatestUserMessage = "thread-latest-user-message.v1" in capabilities,
     )
 
 internal fun parseRemoteHostCapabilities(event: RemoteEvent): Set<String> {
@@ -247,6 +249,7 @@ data class RemoteThread(
     val cwd: String?,
     val updatedAt: Long,
     val status: String,
+    val latestUserMessage: String? = null,
 )
 
 data class RemoteTimelineItem(
@@ -345,6 +348,7 @@ internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
             preview = item.string("preview").orEmpty().take(240), cwd = item.string("cwd"),
             updatedAt = (item.long("updatedAt") ?: 0L) * 1000L,
             status = item["status"]?.jsonObject?.string("type").orEmpty(),
+            latestUserMessage = item.string("latestUserMessage")?.take(240),
         )
     }
 }

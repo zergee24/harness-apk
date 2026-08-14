@@ -489,6 +489,107 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun threadListAcceptsLatestUserMessageWithoutBreakingLegacyPreview() {
+        val threads = parseThreads(
+            RemoteEvent(
+                type = "rpc.response",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"thread-1","preview":"最早一句","latestUserMessage":"最新一句","updatedAt":1}]}}""",
+                ),
+            ),
+        )
+
+        assertEquals("最早一句", threads.single().preview)
+        assertEquals("最新一句", threads.single().latestUserMessage)
+    }
+
+    @Test
+    fun lazyThreadSummaryResponseUpdatesOnlyItsMatchingConversationCard() {
+        val repository = repository()
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[
+                        {"id":"thread-1","preview":"第一条旧摘要","updatedAt":2},
+                        {"id":"thread-2","preview":"另一条旧摘要","updatedAt":1}
+                    ]}}""",
+                ),
+            ),
+        )
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.summary:request",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"threadId":"thread-1","latestUserMessage":"最近的用户问题"}}""",
+                ),
+            ),
+        )
+
+        assertEquals("最近的用户问题", repository.state.value.threads[0].latestUserMessage)
+        assertEquals(null, repository.state.value.threads[1].latestUserMessage)
+    }
+
+    @Test
+    fun threadListRefreshKeepsHydratedSummaryUntilConversationChanges() {
+        val repository = repository()
+        fun list(updatedAt: Int) = RemoteEvent(
+            type = "rpc.response",
+            requestId = "thread.list:refresh-$updatedAt",
+            payload = Json.parseToJsonElement(
+                """{"result":{"data":[{"id":"thread-1","preview":"最早一句","updatedAt":$updatedAt}]}}""",
+            ),
+        )
+        repository.handleEvent(list(updatedAt = 2))
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.summary:request",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"threadId":"thread-1","latestUserMessage":"最近一句"}}""",
+                ),
+            ),
+        )
+
+        repository.handleEvent(list(updatedAt = 2))
+        assertEquals("最近一句", repository.state.value.threads.single().latestUserMessage)
+
+        repository.handleEvent(list(updatedAt = 3))
+        assertEquals(null, repository.state.value.threads.single().latestUserMessage)
+    }
+
+    @Test
+    fun backgroundThreadSummaryDoesNotClearAnUnrelatedVisibleError() {
+        val repository = repository()
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"thread-1","preview":"最早一句","updatedAt":1}]}}""",
+                ),
+            ),
+        )
+        repository.handleEvent(RemoteEvent(type = "error", message = "需要用户处理的错误"))
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.summary:request",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"threadId":"thread-1","latestUserMessage":"最近一句"}}""",
+                ),
+            ),
+        )
+
+        assertEquals("需要用户处理的错误", repository.state.value.errorMessage)
+        assertEquals("最近一句", repository.state.value.threads.single().latestUserMessage)
+    }
+
+    @Test
     fun commandAndFileEventsRenderAsReadableSummariesInsteadOfRawJson() {
         val repository = repository()
         repository.selectThread("thread-a")

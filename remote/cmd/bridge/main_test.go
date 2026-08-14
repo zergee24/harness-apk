@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	appserverrpc "github.com/harnessapk/remote/internal/appserver"
 	"github.com/harnessapk/remote/internal/commandcache"
@@ -62,6 +63,7 @@ func TestHostStatusAdvertisesAdditiveM2AndM3Capabilities(t *testing.T) {
 		"completion-evidence.v2",
 		"turn-command-idempotency.v1",
 		"thread-history-pagination.v1",
+		"thread-latest-user-message.v1",
 	}
 	if !reflect.DeepEqual(payload.Capabilities, want) {
 		t.Fatalf("capabilities=%#v", payload.Capabilities)
@@ -378,6 +380,33 @@ func TestMobileThreadReadResultKeepsLatestConversationAndBoundsLargeToolOutput(t
 	}
 }
 
+func TestMobileThreadSummaryResultUsesLatestUserMessageWithoutReadingFullHistory(t *testing.T) {
+	raw := json.RawMessage(`{"data":[
+		{"id":"turn-latest","items":[
+			{"id":"user-latest","type":"userMessage","content":[{"type":"text","text":"这是最新一句用户的话"}]},
+			{"id":"agent-latest","type":"agentMessage","text":"最新回复"}
+		],"itemsView":"summary"},
+		{"id":"turn-older","items":[
+			{"id":"user-older","type":"userMessage","text":"这是最早一句用户的话"}
+		],"itemsView":"summary"}
+	]}`)
+
+	projected, err := mobileThreadSummaryResult("thread-1", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary struct {
+		ThreadID          string `json:"threadId"`
+		LatestUserMessage string `json:"latestUserMessage"`
+	}
+	if err := json.Unmarshal(projected, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.ThreadID != "thread-1" || summary.LatestUserMessage != "这是最新一句用户的话" {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
 func TestThreadReadUsesPaginatedSummaryHistoryInsteadOfFullRollout(t *testing.T) {
 	reader, serverWriter := io.Pipe()
 	requests := make(chan struct {
@@ -434,6 +463,64 @@ func TestThreadReadUsesPaginatedSummaryHistoryInsteadOfFullRollout(t *testing.T)
 	second := <-requests
 	if second.Method != "thread/turns/list" || second.Params["itemsView"] != "summary" || second.Params["sortDirection"] != "desc" {
 		t.Fatalf("second request=%s params=%#v; mobile history must use descending summary pages", second.Method, second.Params)
+	}
+}
+
+func TestThreadSummaryReadsOnlyRecentSummaryTurns(t *testing.T) {
+	reader, serverWriter := io.Pipe()
+	requests := make(chan struct {
+		Method string
+		Params map[string]any
+	}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	client := appserverrpc.NewClient(reader, writerFunc(func(requestRaw []byte) (int, error) {
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params map[string]any  `json:"params"`
+		}
+		if err := json.Unmarshal(requestRaw, &request); err != nil {
+			return 0, err
+		}
+		requests <- struct {
+			Method string
+			Params map[string]any
+		}{Method: request.Method, Params: request.Params}
+		result := `{"data":[{"id":"turn-new","items":[{"id":"user-new","type":"userMessage","text":"最新问题"}],"itemsView":"summary"}]}`
+		_, err := serverWriter.Write([]byte(fmt.Sprintf(`{"id":%s,"result":%s}`+"\n", request.ID, result)))
+		return len(requestRaw), err
+	}), "epoch-summary")
+	client.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		_ = serverWriter.Close()
+		_ = reader.Close()
+	})
+	b := &bridge{
+		app:  &appProcess{client: client},
+		path: filepath.Join(t.TempDir(), "state.json"),
+		state: bridgeState{
+			DeviceSecrets:   map[string]string{"device-1": "invalid-on-purpose"},
+			Sequences:       map[string]uint64{},
+			PendingOutbound: map[string]map[string]string{},
+		},
+	}
+
+	if err := b.executeCommand(ctx, "device-1", protocol.Command{
+		Type: "thread.summary", RequestID: "summary-1", ThreadID: "thread-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case request := <-requests:
+		if request.Method != "thread/turns/list" || request.Params["threadId"] != "thread-1" ||
+			request.Params["itemsView"] != "summary" || request.Params["sortDirection"] != "desc" ||
+			request.Params["limit"] != float64(3) {
+			t.Fatalf("request=%s params=%#v", request.Method, request.Params)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("thread.summary did not request a bounded summary page")
 	}
 }
 

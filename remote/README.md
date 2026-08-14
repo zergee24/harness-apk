@@ -133,12 +133,14 @@ M3 keeps Wire v1 and Logical Event v1. Capability negotiation is an additive enc
     "run.lifecycle.v1",
     "logical-replay.v1",
     "completion-evidence.v2",
-    "turn-command-idempotency.v1"
+    "turn-command-idempotency.v1",
+    "thread-history-pagination.v1",
+    "thread-latest-user-message.v1"
   ]
 }
 ```
 
-Older phones may ignore this payload. Newer phones require all three M2 run capabilities before enabling project Run, and must fail closed for an unsupported payload schema. Missing `completion-evidence.v2` or `turn-command-idempotency.v1` means the corresponding M3 behavior must stay disabled; capability absence is not permission to guess support.
+Older phones may ignore this payload. Newer phones require all three M2 run capabilities before enabling project Run, and must fail closed for an unsupported payload schema. Missing `completion-evidence.v2`, `turn-command-idempotency.v1`, `thread-history-pagination.v1`, or `thread-latest-user-message.v1` means the corresponding behavior must stay disabled; capability absence is not permission to guess support. The latest-user-message capability uses bounded `thread/turns/list` summary pages and is requested lazily only for visible phone cards; it does not load every thread's full history during list refresh.
 
 Bridge state v2 now treats these files as one recovery set beside `bridge.json`:
 

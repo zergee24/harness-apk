@@ -72,6 +72,7 @@ class RemoteProtocolContractTest {
         assertFalse(availability.canStartM2Run)
         assertTrue(availability.canOpenLegacyHistory)
         assertFalse(availability.canUseM3CompletionEvidence)
+        assertFalse(availability.canLoadLatestUserMessage)
     }
 
     @Test
@@ -82,11 +83,13 @@ class RemoteProtocolContractTest {
                 "run.lifecycle.v1",
                 "logical-replay.v1",
                 "completion-evidence.v2",
+                "thread-latest-user-message.v1",
             ),
         )
 
         assertTrue(availability.canStartM2Run)
         assertTrue(availability.canUseM3CompletionEvidence)
+        assertTrue(availability.canLoadLatestUserMessage)
     }
 
     @Test

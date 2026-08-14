@@ -465,6 +465,8 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 			"limit": 20, "sortKey": "updated_at", "sortDirection": "desc",
 			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
 		})
+	case "thread.summary":
+		return b.requestMobileThreadSummary(ctx, deviceID, command)
 	case "workspace.list":
 		return b.requestWorkspaceCandidates(ctx, deviceID, command)
 	case "run.start":
@@ -512,6 +514,7 @@ func hostStatusPayload() json.RawMessage {
 			"completion-evidence.v2",
 			"turn-command-idempotency.v1",
 			"thread-history-pagination.v1",
+			"thread-latest-user-message.v1",
 		},
 	})
 }
@@ -520,7 +523,74 @@ const (
 	mobileThreadHistoryPageSize    = 8
 	maxMobilePaginatedTextBytes    = 24 << 10
 	maxMobilePaginatedItemsPerTurn = 2
+	maxMobileThreadSummaryBytes    = 4 << 10
 )
+
+func mobileThreadSummaryResult(threadID string, pageRaw json.RawMessage) (json.RawMessage, error) {
+	var page struct {
+		Data []any `json:"data"`
+	}
+	if err := json.Unmarshal(pageRaw, &page); err != nil {
+		return nil, fmt.Errorf("decode latest thread summary for mobile: %w", err)
+	}
+	latestUserMessage := ""
+	for _, rawTurn := range page.Data {
+		turn, ok := rawTurn.(map[string]any)
+		if !ok {
+			continue
+		}
+		items, _ := turn["items"].([]any)
+		for _, rawItem := range items {
+			item, ok := rawItem.(map[string]any)
+			if !ok || item["type"] != "userMessage" {
+				continue
+			}
+			latestUserMessage = truncateUTF8(strings.TrimSpace(mobileMessageText(item)), maxMobileThreadSummaryBytes)
+			if latestUserMessage != "" {
+				break
+			}
+		}
+		if latestUserMessage != "" {
+			break
+		}
+	}
+	return json.Marshal(map[string]any{
+		"threadId":          threadID,
+		"latestUserMessage": latestUserMessage,
+	})
+}
+
+func (b *bridge) requestMobileThreadSummary(ctx context.Context, deviceID string, command protocol.Command) error {
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if command.ThreadID == "" {
+			_ = b.sendEvent(ctx, deviceID, protocol.Event{
+				Type: "rpc.response", RequestID: command.RequestID,
+				Payload: mustJSON(map[string]any{"error": "thread.summary requires threadId"}), CreatedAt: time.Now().UnixMilli(),
+			}, "")
+			return
+		}
+		page, err := b.app.client.Call(callCtx, "thread/turns/list", map[string]any{
+			"threadId": command.ThreadID, "limit": 3, "sortDirection": "desc", "itemsView": "summary",
+		})
+		if err == nil {
+			page, err = mobileThreadSummaryResult(command.ThreadID, page)
+		}
+		if err != nil {
+			_ = b.sendEvent(ctx, deviceID, protocol.Event{
+				Type: "rpc.response", RequestID: command.RequestID,
+				Payload: mustJSON(map[string]any{"error": err.Error()}), CreatedAt: time.Now().UnixMilli(),
+			}, "")
+			return
+		}
+		_ = b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "rpc.response", RequestID: command.RequestID,
+			Payload: mustJSON(map[string]any{"result": json.RawMessage(page)}), CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}()
+	return nil
+}
 
 func (b *bridge) requestMobileThreadHistory(ctx context.Context, deviceID string, command protocol.Command) error {
 	go func() {

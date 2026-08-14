@@ -63,6 +63,7 @@ class RemoteRepository(
     private var explicitDisconnect = false
     private var reconnectAttempt = 0
     private val pendingCommands = mutableMapOf<String, PendingRemoteCommand>()
+    private val requestedThreadSummaries = mutableSetOf<String>()
     private var selectionGeneration = 0L
     @Volatile
     private var syncCoordinator: RemoteSyncCoordinator? = null
@@ -95,6 +96,7 @@ class RemoteRepository(
         socket?.close(1000, "user disconnected")
         socket = null
         pendingCommands.clear()
+        requestedThreadSummaries.clear()
         selectionGeneration += 1
         _state.value = _state.value.copy(
             connectionStatus = RemoteConnectionStatus.DISCONNECTED,
@@ -114,6 +116,15 @@ class RemoteRepository(
         _state.value = _state.value.copy(isThreadListLoading = true, errorMessage = null)
         if (!send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))) {
             _state.value = _state.value.copy(isThreadListLoading = false)
+        }
+    }
+    fun loadThreadSummary(threadId: String) {
+        val current = _state.value
+        if (!remoteFeatureAvailability(current.capabilities).canLoadLatestUserMessage) return
+        if (current.threads.firstOrNull { it.id == threadId }?.latestUserMessage != null) return
+        if (!requestedThreadSummaries.add(threadId)) return
+        if (!send(RemoteCommand(type = "thread.summary", requestId = requestId("thread.summary", threadId), threadId = threadId))) {
+            requestedThreadSummaries.remove(threadId)
         }
     }
     fun requestWorkspaceCandidates() {
@@ -415,7 +426,7 @@ class RemoteRepository(
     private fun handleRpcResponse(event: RemoteEvent) {
         val pending = pendingCommands.remove(event.requestId)
             ?: event.requestId?.substringBefore(':')?.takeIf {
-                it in setOf("thread.list", "thread.start", "thread.read", "thread.read.older", "turn.start")
+                it in setOf("thread.list", "thread.summary", "thread.start", "thread.read", "thread.read.older", "turn.start")
             }?.let(::PendingRemoteCommand)
         val kind = pending?.kind
         val pendingThreadId = pending?.threadId
@@ -427,6 +438,10 @@ class RemoteRepository(
         }
         val requestedOlderCursor = pending?.olderCursor ?: _state.value.olderTimelineCursor
         if (event.payload?.jsonObject?.get("error") != null) {
+            if (kind == "thread.summary") {
+                pendingThreadId?.let(requestedThreadSummaries::remove)
+                return
+            }
             val completed = completedCommandState(kind)
             val failedActiveTurnStart = kind == "turn.start" &&
                 pendingThreadId != null &&
@@ -445,12 +460,39 @@ class RemoteRepository(
                 ?.get("thread")?.jsonObject?.string("id")
             if (responseThreadId != null && responseThreadId != _state.value.selectedThreadId) return
         }
-        _state.value = _state.value.copy(errorMessage = null)
+        if (kind != "thread.summary") {
+            _state.value = _state.value.copy(errorMessage = null)
+        }
         when (kind) {
-            "thread.list" -> _state.value = _state.value.copy(
-                threads = parseThreads(event),
-                isThreadListLoading = false,
-            )
+            "thread.list" -> {
+                val previousById = _state.value.threads.associateBy(RemoteThread::id)
+                val refreshed = parseThreads(event).map { thread ->
+                    val previous = previousById[thread.id]
+                    if (thread.latestUserMessage == null && previous?.updatedAt == thread.updatedAt) {
+                        thread.copy(latestUserMessage = previous.latestUserMessage)
+                    } else {
+                        thread
+                    }
+                }
+                requestedThreadSummaries.retainAll(refreshed.mapTo(mutableSetOf(), RemoteThread::id))
+                _state.value = _state.value.copy(
+                    threads = refreshed,
+                    isThreadListLoading = false,
+                )
+            }
+            "thread.summary" -> {
+                val result = event.payload?.jsonObject?.get("result") as? JsonObject
+                val threadId = result?.string("threadId")
+                val latestUserMessage = result?.string("latestUserMessage")
+                if (threadId != null && latestUserMessage != null) {
+                    requestedThreadSummaries.remove(threadId)
+                    _state.value = _state.value.copy(
+                        threads = _state.value.threads.map { thread ->
+                            if (thread.id == threadId) thread.copy(latestUserMessage = latestUserMessage.take(240)) else thread
+                        },
+                    )
+                }
+            }
             "thread.start" -> {
                 val id = event.payload?.jsonObject?.get("result")?.jsonObject?.get("thread")?.jsonObject?.string("id")
                 if (id != null) {

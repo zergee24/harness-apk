@@ -73,6 +73,7 @@ class RemoteScreenComposeTest {
                         cwd = "/Users/tony/.codex/worktrees/0e43/harness-apk",
                         updatedAt = updatedAt,
                         status = "idle",
+                        latestUserMessage = "这是最近一句用户输入",
                     ),
                     nowMillis = updatedAt + 30_000L,
                     onClick = {},
@@ -81,7 +82,8 @@ class RemoteScreenComposeTest {
         }
 
         composeRule.onNodeWithContentDescription("打开远程会话：M3 独立实施与验收").assertIsDisplayed()
-        composeRule.onNodeWithText("任务：完整执行 M3，并验证所有自动化 Gate。").assertIsDisplayed()
+        composeRule.onNodeWithText("这是最近一句用户输入").assertIsDisplayed()
+        composeRule.onAllNodesWithText("任务：完整执行 M3，并验证所有自动化 Gate。").assertCountEquals(0)
         composeRule.onNodeWithText("0e43 / harness-apk").assertIsDisplayed()
         composeRule.onNodeWithText("刚刚").assertIsDisplayed()
         composeRule.onAllNodesWithText("<codex_delegation>", substring = true).assertCountEquals(0)
@@ -102,6 +104,70 @@ class RemoteScreenComposeTest {
             "任务：完整执行 M3，并验证所有自动化 Gate。",
             remoteThreadPreviewText(truncated),
         )
+    }
+
+    @Test
+    fun visibleThreadCardRequestsLatestUserMessageOnlyWhileMissing() {
+        val requests = mutableListOf<String>()
+        val thread = mutableStateOf(
+            RemoteThread(
+                id = "thread-lazy",
+                title = "懒加载会话",
+                preview = "最早一句",
+                cwd = "/workspace",
+                updatedAt = 1_000L,
+                status = "idle",
+            ),
+        )
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteThreadCard(
+                    thread = thread.value,
+                    onLoadLatestUserMessage = { requests += it },
+                    onClick = {},
+                )
+            }
+        }
+
+        composeRule.runOnIdle {
+            org.junit.Assert.assertEquals(listOf("thread-lazy"), requests)
+            thread.value = thread.value.copy(latestUserMessage = "最新一句")
+        }
+        composeRule.runOnIdle {
+            org.junit.Assert.assertEquals(listOf("thread-lazy"), requests)
+        }
+    }
+
+    @Test
+    fun threadCardStartsLazySummaryAfterBridgeCapabilityArrives() {
+        val requests = mutableListOf<String>()
+        val enabled = mutableStateOf(false)
+        val thread = RemoteThread(
+            id = "thread-capability",
+            title = "能力晚到的会话",
+            preview = "最早一句",
+            cwd = "/workspace",
+            updatedAt = 1_000L,
+            status = "idle",
+        )
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteThreadCard(
+                    thread = thread,
+                    latestUserMessageLoadingEnabled = enabled.value,
+                    onLoadLatestUserMessage = { requests += it },
+                    onClick = {},
+                )
+            }
+        }
+
+        composeRule.runOnIdle {
+            org.junit.Assert.assertTrue(requests.isEmpty())
+            enabled.value = true
+        }
+        composeRule.runOnIdle {
+            org.junit.Assert.assertEquals(listOf("thread-capability"), requests)
+        }
     }
 
     @Test
