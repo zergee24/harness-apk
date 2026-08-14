@@ -395,6 +395,85 @@ class RemoteScreenComposeTest {
     }
 
     @Test
+    fun activeDetailPollsUntilBridgeReportsTerminalState() {
+        composeRule.mainClock.autoAdvance = false
+        val requests = mutableListOf<String>()
+        val thread = mutableStateOf(
+            RemoteThread(
+                id = "thread-detail-polling",
+                title = "详情状态恢复",
+                preview = "执行测试",
+                cwd = "/workspace",
+                updatedAt = 1_000L,
+                status = "active",
+                execution = RemoteThreadExecution(RemoteThreadExecutionState.RUNNING),
+            ),
+        )
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteThreadDetailStatus(
+                    thread = thread.value,
+                    execution = thread.value.execution,
+                    executionStatusLoadingEnabled = true,
+                    onLoadThreadSummary = { requests += it },
+                )
+            }
+        }
+
+        composeRule.runOnIdle { org.junit.Assert.assertEquals(1, requests.size) }
+        composeRule.mainClock.advanceTimeBy(3_000L)
+        composeRule.runOnIdle {
+            org.junit.Assert.assertEquals(2, requests.size)
+            thread.value = thread.value.copy(
+                status = "idle",
+                execution = RemoteThreadExecution(RemoteThreadExecutionState.COMPLETED),
+            )
+        }
+        composeRule.mainClock.advanceTimeBy(6_000L)
+        composeRule.runOnIdle { org.junit.Assert.assertEquals(2, requests.size) }
+        composeRule.onNodeWithText("任务已完成").assertIsDisplayed()
+    }
+
+    @Test
+    fun unknownDetailRetriesRecoveryInsteadOfStayingUnsyncedForever() {
+        composeRule.mainClock.autoAdvance = false
+        val requests = mutableListOf<String>()
+        val thread = mutableStateOf(
+            RemoteThread(
+                id = "thread-detail-recovery",
+                title = "终态恢复",
+                preview = "等待同步",
+                cwd = "/workspace",
+                updatedAt = 2_000L,
+                status = "notLoaded",
+            ),
+        )
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteThreadDetailStatus(
+                    thread = thread.value,
+                    execution = thread.value.execution,
+                    executionStatusLoadingEnabled = true,
+                    onLoadThreadSummary = { requests += it },
+                )
+            }
+        }
+
+        composeRule.runOnIdle { org.junit.Assert.assertEquals(1, requests.size) }
+        composeRule.mainClock.advanceTimeBy(10_000L)
+        composeRule.runOnIdle {
+            org.junit.Assert.assertEquals(2, requests.size)
+            thread.value = thread.value.copy(
+                status = "idle",
+                execution = RemoteThreadExecution(RemoteThreadExecutionState.COMPLETED),
+            )
+        }
+        composeRule.mainClock.advanceTimeBy(20_000L)
+        composeRule.runOnIdle { org.junit.Assert.assertEquals(2, requests.size) }
+        composeRule.onNodeWithContentDescription("当前会话状态：已完成").assertIsDisplayed()
+    }
+
+    @Test
     fun timelineExplainsLoadingAndEmptyStatesInsteadOfShowingBlankPage() {
         val loading = mutableStateOf(true)
         composeRule.setContent {

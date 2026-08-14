@@ -218,27 +218,12 @@ internal fun RemoteThreadCard(
     executionStatusLoadingEnabled: Boolean = false,
     onLoadLatestUserMessage: (String) -> Unit = {},
 ) {
-    LaunchedEffect(
-        thread.id,
-        thread.updatedAt,
-        thread.latestUserMessage,
-        thread.execution,
-        latestUserMessageLoadingEnabled,
-        executionStatusLoadingEnabled,
-    ) {
-        val needsSummary = latestUserMessageLoadingEnabled && thread.latestUserMessage == null
-        val needsExecution = executionStatusLoadingEnabled &&
-            (thread.execution.state == RemoteThreadExecutionState.UNKNOWN || thread.execution.state.isActive)
-        if (needsSummary || needsExecution) {
-            onLoadLatestUserMessage(thread.id)
-        }
-        if (executionStatusLoadingEnabled && thread.execution.state.isActive) {
-            while (true) {
-                delay(3_000L)
-                onLoadLatestUserMessage(thread.id)
-            }
-        }
-    }
+    RemoteThreadSummaryLoader(
+        thread = thread,
+        latestUserMessageLoadingEnabled = latestUserMessageLoadingEnabled,
+        executionStatusLoadingEnabled = executionStatusLoadingEnabled,
+        onLoadThreadSummary = onLoadLatestUserMessage,
+    )
     val preview = remoteThreadPreviewText(thread.latestUserMessage ?: thread.preview)
     val workspace = remoteWorkspaceLabel(thread.cwd)
     Surface(
@@ -296,6 +281,47 @@ internal fun RemoteThreadCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun RemoteThreadSummaryLoader(
+    thread: RemoteThread?,
+    latestUserMessageLoadingEnabled: Boolean,
+    executionStatusLoadingEnabled: Boolean,
+    retryUnknownExecution: Boolean = false,
+    onLoadThreadSummary: (String) -> Unit,
+) {
+    LaunchedEffect(
+        thread?.id,
+        thread?.updatedAt,
+        thread?.latestUserMessage,
+        thread?.execution,
+        latestUserMessageLoadingEnabled,
+        executionStatusLoadingEnabled,
+        retryUnknownExecution,
+    ) {
+        thread ?: return@LaunchedEffect
+        val needsSummary = latestUserMessageLoadingEnabled && thread.latestUserMessage == null
+        val needsExecution = executionStatusLoadingEnabled &&
+            (thread.execution.state == RemoteThreadExecutionState.UNKNOWN || thread.execution.state.isActive)
+        if (needsSummary || needsExecution) {
+            onLoadThreadSummary(thread.id)
+        }
+        if (executionStatusLoadingEnabled && thread.execution.state.isActive) {
+            while (true) {
+                delay(3_000L)
+                onLoadThreadSummary(thread.id)
+            }
+        }
+        if (executionStatusLoadingEnabled && retryUnknownExecution &&
+            thread.execution.state == RemoteThreadExecutionState.UNKNOWN
+        ) {
+            while (true) {
+                delay(10_000L)
+                onLoadThreadSummary(thread.id)
             }
         }
     }
@@ -377,22 +403,15 @@ internal fun formatRemoteUpdatedAt(updatedAt: Long, nowMillis: Long): String {
 @Composable
 private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     val context = LocalContext.current
-    val selectedExecution = state.threads
-        .firstOrNull { it.id == state.selectedThreadId }
+    val selectedThread = state.threads.firstOrNull { it.id == state.selectedThreadId }
+    val selectedExecution = selectedThread
         ?.execution
         ?.takeUnless { it.state == RemoteThreadExecutionState.UNKNOWN && state.isWorking }
         ?: RemoteThreadExecution(
             state = if (state.isWorking) RemoteThreadExecutionState.RUNNING else RemoteThreadExecutionState.UNKNOWN,
             turnId = state.activeTurnId,
         )
-    var workingStartedAtMillis by remember(state.selectedThreadId) { mutableStateOf<Long?>(null) }
-    LaunchedEffect(state.selectedThreadId, selectedExecution) {
-        workingStartedAtMillis = if (selectedExecution.state.isActive) {
-            selectedExecution.startedAtMillis ?: workingStartedAtMillis ?: System.currentTimeMillis()
-        } else {
-            null
-        }
-    }
+    val executionStatusLoadingEnabled = remoteFeatureAvailability(state.capabilities).canLoadThreadExecutionStatus
     Column(Modifier.fillMaxSize().padding(padding)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             Box(Modifier)
@@ -400,9 +419,11 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
                 IconButton(onClick = container.remoteRepository::interrupt) { Icon(Icons.Outlined.Cancel, "停止") }
             }
         }
-        RemoteExecutionStatusBanner(
+        RemoteThreadDetailStatus(
+            thread = selectedThread,
             execution = selectedExecution,
-            startedAtMillis = workingStartedAtMillis,
+            executionStatusLoadingEnabled = executionStatusLoadingEnabled,
+            onLoadThreadSummary = container.remoteRepository::loadThreadSummary,
         )
         RemoteTimelineList(
             threadId = state.selectedThreadId.orEmpty(),
@@ -432,6 +453,34 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             if (state.isWorking) container.remoteRepository.steer(text) else container.remoteRepository.startTurn(text)
         })
     }
+}
+
+@Composable
+internal fun RemoteThreadDetailStatus(
+    thread: RemoteThread?,
+    execution: RemoteThreadExecution,
+    executionStatusLoadingEnabled: Boolean,
+    onLoadThreadSummary: (String) -> Unit,
+) {
+    RemoteThreadSummaryLoader(
+        thread = thread,
+        latestUserMessageLoadingEnabled = false,
+        executionStatusLoadingEnabled = executionStatusLoadingEnabled,
+        retryUnknownExecution = true,
+        onLoadThreadSummary = onLoadThreadSummary,
+    )
+    var workingStartedAtMillis by remember(thread?.id) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(thread?.id, execution) {
+        workingStartedAtMillis = if (execution.state.isActive) {
+            execution.startedAtMillis ?: workingStartedAtMillis ?: System.currentTimeMillis()
+        } else {
+            null
+        }
+    }
+    RemoteExecutionStatusBanner(
+        execution = execution,
+        startedAtMillis = workingStartedAtMillis,
+    )
 }
 
 @Composable
