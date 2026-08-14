@@ -999,7 +999,6 @@ internal fun ProjectScreen(
                     selectProject(it.id)
                     searchQuery = ""
                 },
-                onCreateProject = { showNewProjectDialog = true },
                 onOpenGlobalSearch = onOpenGlobalSearch,
                 onCloneRepository = { showCloneRepositoryDialog = true },
                 onCreateSession = {
@@ -1297,7 +1296,6 @@ private fun ProjectHeader(
     projects: List<Project>,
     overview: ProjectWorkbenchOverview,
     onSelectProject: (Project) -> Unit,
-    onCreateProject: () -> Unit,
     onOpenGlobalSearch: () -> Unit,
     onCloneRepository: () -> Unit,
     onCreateSession: () -> Unit,
@@ -1400,41 +1398,27 @@ private fun ProjectHeader(
     ) {
         Box {
             if (selectedProject == null) {
-                Column(
+                Row(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "未选择项目",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(
-                                text = "创建项目后从会话开始长期工作",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        IconButton(onClick = onOpenGlobalSearch) {
-                            Icon(Icons.Outlined.Search, contentDescription = "全局搜索")
-                        }
-                        overflowMenu()
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "项目工作台",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = "会话、文件与交付物集中在这里",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                    Button(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = HarnessSpacing.primaryControlHeight),
-                        onClick = onCreateProject,
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = null)
-                        Text("新建项目")
+                    IconButton(onClick = onOpenGlobalSearch) {
+                        Icon(Icons.Outlined.Search, contentDescription = "全局搜索")
                     }
+                    overflowMenu()
                 }
             } else {
                 ProjectWorkbenchHeader(
@@ -1813,8 +1797,8 @@ private fun EmptyProjectConversationState(onCreateSession: () -> Unit) {
 @Composable
 private fun EmptyProjectState(onCreateProject: () -> Unit) {
     ActionableEmptyState(
-        title = "还没有项目",
-        message = "项目用于长期沉淀上下文、会话和交付物。",
+        title = "从一个项目开始",
+        message = "为长期工作建立独立空间，继续会话、管理文件，也可以交给 Mac。",
         actionLabel = "新建项目",
         onAction = onCreateProject,
         icon = Icons.Outlined.Folder,

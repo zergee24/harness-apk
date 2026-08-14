@@ -2,6 +2,7 @@ package com.harnessapk.ui.remote
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.Modifier
@@ -11,6 +12,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performImeAction
@@ -18,6 +20,8 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
 import com.harnessapk.remote.RemoteTimelineItem
+import com.harnessapk.remote.RemoteConnectionStatus
+import com.harnessapk.remote.RemoteThread
 import com.harnessapk.remote.WorkspaceCandidate
 import com.harnessapk.ui.theme.HarnessApkTheme
 import org.junit.Rule
@@ -26,6 +30,79 @@ import org.junit.Test
 class RemoteScreenComposeTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun threadListHeaderMakesHostStatusAndPrimaryActionObvious() {
+        var createRequests = 0
+        composeRule.setContent {
+            HarnessApkTheme {
+                Box(Modifier.width(320.dp)) {
+                    RemoteThreadListHeader(
+                        hostName = "Tony Mac mini",
+                        connectionStatus = RemoteConnectionStatus.CONNECTED,
+                        creating = false,
+                        onRefresh = {},
+                        onCreate = { createRequests++ },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("Tony Mac mini").assertIsDisplayed()
+        composeRule.onNodeWithText("在线").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("刷新远程会话").assertIsDisplayed()
+        composeRule.onNodeWithText("新建会话").performClick()
+        composeRule.runOnIdle { org.junit.Assert.assertEquals(1, createRequests) }
+    }
+
+    @Test
+    fun threadCardPrioritizesReadableSummaryOverRawPayloadAndPath() {
+        val updatedAt = 1_000_000L
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteThreadCard(
+                    thread = RemoteThread(
+                        id = "thread-1",
+                        title = "M3 独立实施与验收",
+                        preview = """
+                            <codex_delegation>
+                              <source_thread_id>019fe1cf</source_thread_id>
+                              <input>任务：完整执行 M3，并验证所有自动化 Gate。</input>
+                            </codex_delegation>
+                        """.trimIndent(),
+                        cwd = "/Users/tony/.codex/worktrees/0e43/harness-apk",
+                        updatedAt = updatedAt,
+                        status = "idle",
+                    ),
+                    nowMillis = updatedAt + 30_000L,
+                    onClick = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("打开远程会话：M3 独立实施与验收").assertIsDisplayed()
+        composeRule.onNodeWithText("任务：完整执行 M3，并验证所有自动化 Gate。").assertIsDisplayed()
+        composeRule.onNodeWithText("0e43 / harness-apk").assertIsDisplayed()
+        composeRule.onNodeWithText("刚刚").assertIsDisplayed()
+        composeRule.onAllNodesWithText("<codex_delegation>", substring = true).assertCountEquals(0)
+        composeRule.onAllNodesWithText("/Users/tony/.codex/worktrees", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun truncatedDelegationPreviewStillStartsAtReadableInput() {
+        val truncated = """
+            <codex_delegation>
+              <source_thread_id>019fe1cf</source_thread_id>
+              <input>任务：完整执行 M3，并验证所有自动化 Gate。
+
+            项目：/Users/tony/Documents/harness-apk
+        """.trimIndent()
+
+        org.junit.Assert.assertEquals(
+            "任务：完整执行 M3，并验证所有自动化 Gate。",
+            remoteThreadPreviewText(truncated),
+        )
+    }
 
     @Test
     fun openingThreadHistoryPositionsLatestMessageOnScreen() {
@@ -302,6 +379,7 @@ class RemoteScreenComposeTest {
             }
         }
 
+        composeRule.onNodeWithText("新建远程会话").assertIsDisplayed()
         composeRule.onNodeWithText("Harness APK").performClick()
         composeRule.runOnIdle {
             org.junit.Assert.assertEquals(listOf("/Users/tony/Documents/harness-apk"), selected)

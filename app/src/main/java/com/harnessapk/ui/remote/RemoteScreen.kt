@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,9 +29,11 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,6 +49,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
@@ -56,10 +60,14 @@ import androidx.activity.compose.BackHandler
 import com.harnessapk.common.AppContainer
 import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.RemoteTimelineItem
+import com.harnessapk.remote.RemoteThread
 import com.harnessapk.remote.RemoteUiState
 import com.harnessapk.remote.WorkspaceCandidate
 import com.harnessapk.ui.markdown.MarkdownMessage
 import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
@@ -83,41 +91,57 @@ fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
 private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     var showCreate by remember { mutableStateOf(false) }
     val profile by container.remoteProfileStore.profile.collectAsState()
-    Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 12.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column {
-                Text("${profile?.hostName} · ${connectionLabel(state.connectionStatus)}", style = MaterialTheme.typography.titleMedium)
-                state.errorMessage?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 3)
-                }
-            }
-            Row {
-                IconButton(onClick = container.remoteRepository::refreshThreads) { Icon(Icons.Outlined.Refresh, "刷新") }
-                FilledIconButton(
-                    onClick = {
-                        showCreate = true
-                        container.remoteRepository.requestWorkspaceCandidates()
-                    },
-                    enabled = !state.isCreatingThread,
-                ) { Icon(Icons.Outlined.Add, "新建线程") }
-            }
+    Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+        RemoteThreadListHeader(
+            hostName = profile?.hostName.orEmpty(),
+            connectionStatus = state.connectionStatus,
+            creating = state.isCreatingThread,
+            onRefresh = container.remoteRepository::refreshThreads,
+            onCreate = {
+                showCreate = true
+                container.remoteRepository.requestWorkspaceCandidates()
+            },
+        )
+        state.errorMessage?.let {
+            Text(
+                it,
+                modifier = Modifier.padding(top = 8.dp),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 3,
+            )
         }
-        if (state.connectionStatus == RemoteConnectionStatus.CONNECTING || state.isThreadListLoading) {
-            Row(Modifier.fillMaxWidth().padding(top = 24.dp), horizontalArrangement = Arrangement.Center) {
-                CircularProgressIndicator()
+        val loading = state.connectionStatus == RemoteConnectionStatus.CONNECTING || state.isThreadListLoading
+        if (loading) {
+            LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+        }
+        if (state.threads.isNotEmpty()) {
+            Text(
+                "最近会话",
+                modifier = Modifier.padding(top = 18.dp, bottom = 4.dp),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        if (loading && state.threads.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text("正在读取 Mac 会话…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text("正在读取 Mac 会话…", modifier = Modifier.fillMaxWidth().wrapContentSize())
         } else if (state.connectionStatus == RemoteConnectionStatus.CONNECTED && state.threads.isEmpty()) {
-            Text("Mac 上还没有会话", modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp).wrapContentSize())
-        }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 12.dp)) {
-            items(state.threads, key = { it.id }) { thread ->
-                Card(onClick = { container.remoteRepository.selectThread(thread.id) }, modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(thread.title, style = MaterialTheme.typography.titleMedium)
-                        if (thread.preview.isNotBlank()) Text(thread.preview, maxLines = 2)
-                        Text(thread.cwd ?: thread.status, style = MaterialTheme.typography.bodySmall)
-                    }
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text("Mac 上还没有会话", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(vertical = 10.dp),
+            ) {
+                items(state.threads, key = { it.id }) { thread ->
+                    RemoteThreadCard(
+                        thread = thread,
+                        onClick = { container.remoteRepository.selectThread(thread.id) },
+                    )
                 }
             }
         }
@@ -133,6 +157,139 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
             candidatesLoaded = state.workspaceCandidatesLoaded,
             creating = state.isCreatingThread,
         )
+    }
+}
+
+@Composable
+internal fun RemoteThreadListHeader(
+    hostName: String,
+    connectionStatus: RemoteConnectionStatus,
+    creating: Boolean,
+    onRefresh: () -> Unit,
+    onCreate: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                hostName.ifBlank { "Mac Bridge" },
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                connectionLabel(connectionStatus),
+                style = MaterialTheme.typography.labelMedium,
+                color = if (connectionStatus == RemoteConnectionStatus.CONNECTED) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        IconButton(onClick = onRefresh) {
+            Icon(Icons.Outlined.Refresh, contentDescription = "刷新远程会话")
+        }
+        Button(onClick = onCreate, enabled = !creating) {
+            Icon(Icons.Outlined.Add, contentDescription = null)
+            Text("新建会话")
+        }
+    }
+}
+
+@Composable
+internal fun RemoteThreadCard(
+    thread: RemoteThread,
+    onClick: () -> Unit,
+    nowMillis: Long = System.currentTimeMillis(),
+) {
+    val preview = remoteThreadPreviewText(thread.preview)
+    val workspace = remoteWorkspaceLabel(thread.cwd)
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = "打开远程会话：${thread.title}" },
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                thread.title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (preview.isNotBlank() && preview != thread.title) {
+                Text(
+                    preview,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    formatRemoteUpdatedAt(thread.updatedAt, nowMillis),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text("·", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                Text(
+                    workspace,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+internal fun remoteThreadPreviewText(raw: String): String {
+    val delegation = raw.contains("<codex_delegation", ignoreCase = true)
+    val inputMarker = Regex("<input>", RegexOption.IGNORE_CASE).find(raw)
+    if (delegation && inputMarker == null) return ""
+    val scoped = inputMarker?.let { marker ->
+        raw.substring(marker.range.last + 1).substringBefore("</input>")
+    } ?: raw
+    val readable = if (delegation) scoped.replace(Regex("<[^>]*>?"), " ") else scoped
+    val firstMeaningfulLine = readable.lineSequence()
+        .map(String::trim)
+        .firstOrNull(String::isNotBlank)
+        .orEmpty()
+    return firstMeaningfulLine.replace(Regex("\\s+"), " ").take(180).trimEnd()
+}
+
+internal fun remoteWorkspaceLabel(cwd: String?): String {
+    val parts = cwd.orEmpty().trim().trimEnd('/').split('/').filter(String::isNotBlank)
+    return parts.takeLast(2).joinToString(" / ").ifBlank { "工作目录未知" }
+}
+
+internal fun formatRemoteUpdatedAt(updatedAt: Long, nowMillis: Long): String {
+    if (updatedAt <= 0L) return "时间未知"
+    val elapsed = (nowMillis - updatedAt).coerceAtLeast(0L)
+    return when {
+        elapsed < 60_000L -> "刚刚"
+        elapsed < 3_600_000L -> "${elapsed / 60_000L} 分钟前"
+        elapsed < 86_400_000L -> "${elapsed / 3_600_000L} 小时前"
+        elapsed < 172_800_000L -> "昨天"
+        else -> SimpleDateFormat("M月d日", Locale.CHINA).format(Date(updatedAt))
     }
 }
 
@@ -416,7 +573,7 @@ internal fun CreateThreadDialog(
 ) {
     var cwd by remember { mutableStateOf("") }
     AlertDialog(
-        onDismissRequest = onDismiss, title = { Text("新建远程线程") },
+        onDismissRequest = onDismiss, title = { Text("新建远程会话") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("最近使用的 Mac 工作区", style = MaterialTheme.typography.labelLarge)

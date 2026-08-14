@@ -2,25 +2,23 @@ package com.harnessapk.ui
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -31,6 +29,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,7 +41,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -79,7 +77,6 @@ import com.harnessapk.ui.search.SearchSettingsScreen
 import com.harnessapk.ui.search.GlobalSearchScreen
 import com.harnessapk.ui.settings.SettingsScreen
 import com.harnessapk.ui.skills.SkillsScreen
-import com.harnessapk.ui.theme.HarnessSpacing
 import com.harnessapk.ui.theme.ModeTheme
 import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
@@ -404,6 +401,13 @@ fun HarnessApkApp(
                 TopAppBar(
                     title = { Text(topLevelTitle(mainMode, currentProjectName)) },
                     actions = {
+                        if (mainMode == MainMode.WORK && remoteProfile != null) {
+                            TextButton(onClick = { navController.navigate(Routes.RemoteControl) }) {
+                                Icon(Icons.Outlined.Dns, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("远程")
+                            }
+                        }
                         if (mainMode == MainMode.LIFE || mainMode == MainMode.WORK) {
                             IconButton(
                                 onClick = { navController.navigate(Routes.Activity) },
@@ -522,15 +526,6 @@ fun HarnessApkApp(
                             .fillMaxSize()
                             .padding(top = padding.calculateTopPadding()),
                     ) {
-                        val profile = remoteProfile
-                        if (profile != null) {
-                            RemoteEntryCard(
-                                hostName = profile.hostName,
-                                onClick = { navController.navigate(Routes.RemoteControl) },
-                                modifier = Modifier
-                                    .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 8.dp),
-                            )
-                        }
                         ProjectScreen(
                             container = container,
                             contentPadding = PaddingValues(
@@ -952,32 +947,3 @@ internal fun chatTopBarTitle(
     ?.title
     ?.takeIf { it.isNotBlank() }
     ?: "对话"
-
-@Composable
-private fun RemoteEntryCard(
-    hostName: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    ElevatedCard(onClick = onClick, modifier = modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Icon(Icons.Outlined.Dns, contentDescription = null)
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Codex 远程控制", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    text = hostName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Icon(
-                Icons.AutoMirrored.Outlined.KeyboardArrowRight,
-                contentDescription = "进入远程控制",
-            )
-        }
-    }
-}

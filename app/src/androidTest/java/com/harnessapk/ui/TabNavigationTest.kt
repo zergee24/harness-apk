@@ -6,7 +6,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -54,7 +56,23 @@ class TabNavigationTest {
         }
         composeRule.onNodeWithTag("nav-WORK").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("还没有项目").assertExists()
+        composeRule.onNodeWithText("从一个项目开始").assertExists()
+    }
+
+    @Test
+    fun emptyWorkHomeHasOnePrimaryProjectAction() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                HarnessApkApp()
+            }
+        }
+
+        composeRule.onNodeWithTag("nav-WORK").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("项目工作台").assertExists()
+        composeRule.onNodeWithText("从一个项目开始").assertExists()
+        composeRule.onAllNodesWithText("新建项目").assertCountEquals(1)
     }
 
     @Test
