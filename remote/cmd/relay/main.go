@@ -19,6 +19,8 @@ import (
 	"github.com/harnessapk/remote/internal/state"
 )
 
+const maxWireMessageBytes = 8 << 20
+
 type client struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
@@ -190,7 +192,7 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	conn.SetReadLimit(1 << 20)
+	conn.SetReadLimit(maxWireMessageBytes)
 	c := &client{conn: conn}
 	s.setClient(role, id, c)
 	if role == "host" {
@@ -221,7 +223,7 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		if kind != websocket.MessageText || len(raw) > 1<<20 {
+		if kind != websocket.MessageText || len(raw) > maxWireMessageBytes {
 			continue
 		}
 		var message protocol.WireMessage

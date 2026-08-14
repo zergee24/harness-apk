@@ -7,15 +7,20 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -33,15 +38,21 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.BackHandler
 import com.harnessapk.common.AppContainer
 import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.RemoteTimelineItem
 import com.harnessapk.remote.RemoteUiState
+import com.harnessapk.remote.WorkspaceCandidate
 import com.harnessapk.ui.markdown.MarkdownMessage
 
 @Composable
@@ -55,6 +66,9 @@ fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
         }
         return
     }
+    BackHandler(enabled = state.selectedThreadId != null) {
+        container.remoteRepository.clearSelection()
+    }
     if (state.selectedThreadId == null) RemoteThreadList(container, state, contentPadding)
     else RemoteThreadDetail(container, state, contentPadding)
 }
@@ -66,14 +80,29 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Column {
                 Text("${container.remoteProfileStore.profile.value?.hostName} · ${connectionLabel(state.connectionStatus)}", style = MaterialTheme.typography.titleMedium)
-                state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                state.errorMessage?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 3)
+                }
             }
             Row {
                 IconButton(onClick = container.remoteRepository::refreshThreads) { Icon(Icons.Outlined.Refresh, "刷新") }
-                FilledIconButton(onClick = { showCreate = true }) { Icon(Icons.Outlined.Add, "新建线程") }
+                FilledIconButton(
+                    onClick = {
+                        showCreate = true
+                        container.remoteRepository.requestWorkspaceCandidates()
+                    },
+                    enabled = !state.isCreatingThread,
+                ) { Icon(Icons.Outlined.Add, "新建线程") }
             }
         }
-        if (state.connectionStatus == RemoteConnectionStatus.CONNECTING) CircularProgressIndicator()
+        if (state.connectionStatus == RemoteConnectionStatus.CONNECTING || state.isThreadListLoading) {
+            Row(Modifier.fillMaxWidth().padding(top = 24.dp), horizontalArrangement = Arrangement.Center) {
+                CircularProgressIndicator()
+            }
+            Text("正在读取 Mac 会话…", modifier = Modifier.fillMaxWidth().wrapContentSize())
+        } else if (state.connectionStatus == RemoteConnectionStatus.CONNECTED && state.threads.isEmpty()) {
+            Text("Mac 上还没有会话", modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp).wrapContentSize())
+        }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 12.dp)) {
             items(state.threads, key = { it.id }) { thread ->
                 Card(onClick = { container.remoteRepository.selectThread(thread.id) }, modifier = Modifier.fillMaxWidth()) {
@@ -86,26 +115,34 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
             }
         }
     }
-    if (showCreate) CreateThreadDialog(onDismiss = { showCreate = false }) { cwd ->
-        showCreate = false; container.remoteRepository.createThread(cwd)
+    if (showCreate) {
+        CreateThreadDialog(
+            onDismiss = { if (!state.isCreatingThread) showCreate = false },
+            onCreate = { cwd ->
+                showCreate = false
+                container.remoteRepository.createThread(cwd)
+            },
+            candidates = state.workspaceCandidates,
+            candidatesLoaded = state.workspaceCandidatesLoaded,
+            creating = state.isCreatingThread,
+        )
     }
 }
 
 @Composable
 private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     val context = LocalContext.current
-    var input by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(padding)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            IconButton(onClick = container.remoteRepository::clearSelection) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+            Box(Modifier)
             if (state.isWorking) IconButton(onClick = container.remoteRepository::interrupt) { Icon(Icons.Outlined.Cancel, "停止") }
         }
-        LazyColumn(
+        RemoteTimelineList(
+            threadId = state.selectedThreadId.orEmpty(),
+            items = state.timeline,
+            loading = state.isTimelineLoading,
             modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(state.timeline, key = { it.id }) { TimelineCard(it) }
-        }
+        )
         state.approvals.forEach { approval ->
             Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -120,46 +157,183 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
                 }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(value = input, onValueChange = { input = it }, modifier = Modifier.weight(1f), label = { Text(if (state.isWorking) "引导当前任务" else "发送给 Codex") })
-            FilledIconButton(onClick = {
-                val text = input.trim(); if (text.isNotEmpty()) {
-                    com.harnessapk.remote.RemoteConnectionService.start(context)
-                    if (state.isWorking) container.remoteRepository.steer(text) else container.remoteRepository.startTurn(text)
-                    input = ""
-                }
-            }) { Icon(Icons.Outlined.Send, "发送") }
-        }
+        RemoteComposer(isWorking = state.isWorking, onSubmit = { text ->
+            com.harnessapk.remote.RemoteConnectionService.start(context)
+            if (state.isWorking) container.remoteRepository.steer(text) else container.remoteRepository.startTurn(text)
+        })
     }
 }
 
 @Composable
-private fun TimelineCard(item: RemoteTimelineItem) {
+internal fun RemoteComposer(
+    isWorking: Boolean,
+    onSubmit: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var input by remember { mutableStateOf("") }
+    fun submit() {
+        val text = input.trim()
+        if (text.isEmpty()) return
+        onSubmit(text)
+        input = ""
+    }
+    Row(
+        modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedTextField(
+            value = input,
+            onValueChange = { input = it },
+            modifier = Modifier.weight(1f).testTag("remote-composer-input"),
+            label = { Text(if (isWorking) "引导当前任务" else "发送给 Codex") },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { submit() }),
+            maxLines = 5,
+        )
+        FilledIconButton(onClick = ::submit) { Icon(Icons.AutoMirrored.Outlined.Send, "发送") }
+    }
+}
+
+@Composable
+internal fun RemoteTimelineList(
+    threadId: String,
+    items: List<RemoteTimelineItem>,
+    loading: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    if (loading && items.isEmpty()) {
+        Box(modifier, contentAlignment = androidx.compose.ui.Alignment.Center) {
+            Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+                CircularProgressIndicator()
+                Text("正在读取 Mac 会话…", modifier = Modifier.padding(top = 12.dp))
+            }
+        }
+        return
+    }
+    if (!loading && items.isEmpty()) {
+        Box(modifier, contentAlignment = androidx.compose.ui.Alignment.Center) {
+            Text("这个会话还没有消息", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+    val listState = rememberLazyListState()
+    var positionedAtLatest by remember(threadId) { mutableStateOf(false) }
+    var previousItemCount by remember(threadId) { mutableIntStateOf(0) }
+    LaunchedEffect(threadId, items.size, loading) {
+        if (!loading && items.isNotEmpty()) {
+            val wasNearLatest = previousItemCount == 0 ||
+                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index.orZero() >= previousItemCount - 2
+            if (!positionedAtLatest) {
+                listState.scrollToItem(items.lastIndex)
+                positionedAtLatest = true
+            } else if (items.size > previousItemCount && wasNearLatest) {
+                listState.animateScrollToItem(items.lastIndex)
+            }
+            previousItemCount = items.size
+        }
+    }
+    LazyColumn(
+        state = listState,
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(items, key = { it.id }) { TimelineCard(it) }
+    }
+}
+
+private fun Int?.orZero(): Int = this ?: 0
+
+@Composable
+internal fun TimelineCard(item: RemoteTimelineItem) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(item.kind, style = MaterialTheme.typography.labelMedium)
-            if (item.kind == "agentMessage" || item.kind == "userMessage") {
-                MarkdownMessage(item.text)
-            } else {
-                Text(item.text)
+            Text(remoteTimelineKindLabel(item.kind), style = MaterialTheme.typography.labelMedium)
+            when (item.kind) {
+                "agentMessage", "userMessage" -> MarkdownMessage(item.text)
+                "commandExecution" -> Text(item.text, fontFamily = FontFamily.Monospace)
+                "fileChange" -> MarkdownMessage(item.text)
+                else -> Text(item.text)
             }
-            item.status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            remoteTimelineStatusLabel(item.status)?.let { status ->
+                Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
 
+internal fun remoteTimelineKindLabel(kind: String): String = when (kind) {
+    "userMessage" -> "你"
+    "agentMessage" -> "Codex"
+    "commandExecution" -> "命令"
+    "fileChange" -> "文件变更"
+    "reasoning" -> "思考"
+    else -> "远程事件"
+}
+
+internal fun remoteTimelineStatusLabel(status: String?): String? = when (status) {
+    null, "" -> null
+    "sending" -> "发送中"
+    "streaming", "inProgress", "running" -> "进行中"
+    "completed", "succeeded" -> "已完成"
+    "failed" -> "失败"
+    "cancelled", "canceled" -> "已停止"
+    else -> status
+}
+
 @Composable
-private fun CreateThreadDialog(onDismiss: () -> Unit, onCreate: (String) -> Unit) {
+internal fun CreateThreadDialog(
+    onDismiss: () -> Unit,
+    onCreate: (String) -> Unit,
+    candidates: List<WorkspaceCandidate>,
+    candidatesLoaded: Boolean,
+    creating: Boolean,
+) {
     var cwd by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss, title = { Text("新建远程线程") },
-        text = { OutlinedTextField(value = cwd, onValueChange = { cwd = it }, label = { Text("Mac 上的项目绝对路径") }) },
-        confirmButton = { TextButton(onClick = { if (cwd.isNotBlank()) onCreate(cwd) }) { Text("创建") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("最近使用的 Mac 工作区", style = MaterialTheme.typography.labelLarge)
+                if (!candidatesLoaded) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CircularProgressIndicator()
+                        Text("正在读取…")
+                    }
+                } else if (candidates.isEmpty()) {
+                    Text("没有可用记录，也可以手动输入路径", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    candidates.take(5).forEach { candidate ->
+                        OutlinedButton(
+                            onClick = { onCreate(candidate.cwd) },
+                            enabled = !creating,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(Modifier.fillMaxWidth()) {
+                                Text(candidate.displayName)
+                                Text(candidate.cwd, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = cwd,
+                    onValueChange = { cwd = it },
+                    enabled = !creating,
+                    label = { Text("或输入 Mac 项目绝对路径") },
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { if (cwd.isNotBlank()) onCreate(cwd) }, enabled = cwd.isNotBlank() && !creating) {
+                Text(if (creating) "创建中…" else "创建")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !creating) { Text("取消") } },
     )
 }
 
-private fun connectionLabel(status: RemoteConnectionStatus): String = when (status) {
+internal fun connectionLabel(status: RemoteConnectionStatus): String = when (status) {
     RemoteConnectionStatus.CONNECTED -> "在线"
     RemoteConnectionStatus.CONNECTING -> "连接中"
     RemoteConnectionStatus.ERROR -> "连接异常"

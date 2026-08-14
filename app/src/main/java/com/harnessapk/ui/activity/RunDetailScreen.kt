@@ -216,7 +216,9 @@ fun RunDetailScreen(
                 Text("任务记录不存在或已删除")
             } else {
                 Text(remoteRunStatusLabel(current.status), style = MaterialTheme.typography.titleMedium)
-                Text(current.latestLine, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                remoteRunSecondaryLine(current.status, current.latestLine)?.let { latestLine ->
+                    Text(latestLine, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 Text("任务目标", style = MaterialTheme.typography.labelLarge)
                 Text(current.objective, style = MaterialTheme.typography.bodyLarge)
                 if (current.threadId != null) {
@@ -687,3 +689,7 @@ internal fun remoteRunStatusLabel(status: String): String = when (status) {
     "CANCELLED" -> "已停止"
     else -> "状态未知"
 }
+
+internal fun remoteRunSecondaryLine(status: String, latestLine: String): String? = latestLine
+    .trim()
+    .takeIf { it.isNotEmpty() && it != remoteRunStatusLabel(status) }

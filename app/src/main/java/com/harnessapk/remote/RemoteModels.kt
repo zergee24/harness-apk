@@ -284,6 +284,9 @@ data class RemoteUiState(
     val timeline: List<RemoteTimelineItem> = emptyList(),
     val approvals: List<RemoteApproval> = emptyList(),
     val isWorking: Boolean = false,
+    val isThreadListLoading: Boolean = false,
+    val isTimelineLoading: Boolean = false,
+    val isCreatingThread: Boolean = false,
     val workspaceCandidates: List<WorkspaceCandidate> = emptyList(),
     val workspaceCandidatesLoaded: Boolean = false,
     val capabilities: Set<String> = emptySet(),
@@ -333,8 +336,10 @@ internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
         val id = item.string("id") ?: return@mapNotNull null
         RemoteThread(
             id = id,
-            title = item.string("name") ?: item.string("preview")?.take(60) ?: "未命名线程",
-            preview = item.string("preview").orEmpty(), cwd = item.string("cwd"),
+            title = item.string("name")?.take(60)
+                ?: item.string("preview")?.lineSequence()?.firstOrNull()?.take(60)
+                ?: "未命名线程",
+            preview = item.string("preview").orEmpty().take(240), cwd = item.string("cwd"),
             updatedAt = (item.long("updatedAt") ?: 0L) * 1000L,
             status = item["status"]?.jsonObject?.string("type").orEmpty(),
         )

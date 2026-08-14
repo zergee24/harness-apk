@@ -101,7 +101,7 @@ Never commit these values. Build and install the APK, then grant notification pe
 - Bridge logs: `/tmp/harness-remote-bridge.log` and `/tmp/harness-remote-bridge.error.log`
 - Pairing expires after five minutes and cannot be reused.
 - Wire messages expire after five minutes and are authenticated against routing metadata to prevent tampering.
-- The relay accepts messages up to 1 MiB and JSON HTTP bodies up to 64 KiB.
+- The relay accepts encrypted Wire messages up to 8 MiB and JSON HTTP bodies up to 64 KiB. Bridge projections keep mobile thread history and live events substantially below that transport ceiling.
 
 ### Bridge state v1 -> v2
 

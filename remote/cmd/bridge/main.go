@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	appserverrpc "github.com/harnessapk/remote/internal/appserver"
@@ -1066,6 +1067,9 @@ func (b *bridge) requestAppServerAfter(
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		result, err := b.app.client.Call(callCtx, method, params)
+		if err == nil && method == "thread/read" {
+			result, err = mobileThreadReadResult(result)
+		}
 		if err == nil && after != nil {
 			err = after(result)
 		}
@@ -1085,6 +1089,168 @@ func (b *bridge) requestAppServerAfter(
 		}, "")
 	}()
 	return nil
+}
+
+const (
+	maxMobileThreadResultBytes = 512 << 10
+	maxMobileTimelineItems     = 128
+	maxMobileTimelineTextBytes = 64 << 10
+)
+
+// mobileThreadReadResult turns the app-server's unbounded thread model into the
+// stable, recent timeline needed by the phone UI. Authoritative Remote Run
+// reconciliation and completion evidence continue to read the full response.
+func mobileThreadReadResult(raw json.RawMessage) (json.RawMessage, error) {
+	var response map[string]any
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return nil, fmt.Errorf("decode thread/read for mobile: %w", err)
+	}
+	thread, ok := response["thread"].(map[string]any)
+	if !ok {
+		return nil, errors.New("thread/read mobile response is missing thread")
+	}
+	turns, _ := thread["turns"].([]any)
+	projectedTurns := make([]map[string]any, 0, len(turns))
+	usedBytes, itemCount := 0, 0
+	for turnIndex := len(turns) - 1; turnIndex >= 0 && itemCount < maxMobileTimelineItems; turnIndex-- {
+		turn, ok := turns[turnIndex].(map[string]any)
+		if !ok {
+			continue
+		}
+		items, _ := turn["items"].([]any)
+		projectedItems := make([]map[string]any, 0, len(items))
+		for itemIndex := len(items) - 1; itemIndex >= 0 && itemCount < maxMobileTimelineItems; itemIndex-- {
+			item, ok := items[itemIndex].(map[string]any)
+			if !ok {
+				continue
+			}
+			projected := mobileTimelineItem(item)
+			encoded, _ := json.Marshal(projected)
+			if usedBytes+len(encoded) > maxMobileThreadResultBytes && itemCount > 0 {
+				break
+			}
+			projectedItems = append([]map[string]any{projected}, projectedItems...)
+			usedBytes += len(encoded)
+			itemCount++
+		}
+		if len(projectedItems) == 0 {
+			continue
+		}
+		projectedTurn := map[string]any{"items": projectedItems}
+		copyJSONFields(projectedTurn, turn, "id", "status")
+		projectedTurns = append([]map[string]any{projectedTurn}, projectedTurns...)
+	}
+	projectedThread := map[string]any{"turns": projectedTurns}
+	copyJSONFields(projectedThread, thread, "id", "cwd", "name", "preview", "status", "updatedAt")
+	return json.Marshal(map[string]any{"thread": projectedThread})
+}
+
+func mobileTimelineItem(item map[string]any) map[string]any {
+	projected := map[string]any{}
+	copyJSONFields(projected, item, "id", "type", "status")
+	kind, _ := item["type"].(string)
+	switch kind {
+	case "userMessage", "agentMessage", "reasoning":
+		projected["text"] = truncateUTF8(mobileMessageText(item), maxMobileTimelineTextBytes)
+	case "commandExecution":
+		if command, exists := item["command"]; exists {
+			projected["command"] = boundedMobileValue(command, 16<<10)
+		}
+		copyJSONFields(projected, item, "cwd", "exitCode", "durationMs")
+	case "fileChange":
+		if changes, exists := item["changes"]; exists {
+			projected["changes"] = boundedMobileValue(changes, 48<<10)
+		}
+	default:
+		if text := mobileMessageText(item); text != "" {
+			projected["text"] = truncateUTF8(text, maxMobileTimelineTextBytes)
+		}
+	}
+	return projected
+}
+
+func mobileMessageText(item map[string]any) string {
+	if text, ok := item["text"].(string); ok {
+		return text
+	}
+	content, _ := item["content"].([]any)
+	parts := make([]string, 0, len(content))
+	for _, rawPart := range content {
+		part, ok := rawPart.(map[string]any)
+		if !ok {
+			continue
+		}
+		if text, ok := part["text"].(string); ok && text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func mobileCodexEventEnvelope(message appserverrpc.Message, processEpoch string) (json.RawMessage, bool) {
+	var params map[string]any
+	if json.Unmarshal(message.Params, &params) != nil {
+		return nil, false
+	}
+	projectedParams := map[string]any{}
+	copyJSONFields(projectedParams, params, "threadId", "turnId", "itemId")
+	switch message.Method {
+	case "turn/started", "turn/completed":
+		if turn, ok := params["turn"].(map[string]any); ok {
+			projectedTurn := map[string]any{}
+			copyJSONFields(projectedTurn, turn, "id", "status")
+			projectedParams["turn"] = projectedTurn
+		}
+	case "item/started", "item/completed":
+		item, ok := params["item"].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		projectedParams["item"] = mobileTimelineItem(item)
+	case "item/agentMessage/delta":
+		delta, _ := params["delta"].(string)
+		projectedParams["delta"] = truncateUTF8(delta, 32<<10)
+	default:
+		return nil, false
+	}
+	raw, err := json.Marshal(map[string]any{
+		"id": message.ID, "method": message.Method, "params": projectedParams,
+		"processEpoch": processEpoch,
+	})
+	return raw, err == nil
+}
+
+func copyJSONFields(target, source map[string]any, fields ...string) {
+	for _, field := range fields {
+		if value, exists := source[field]; exists {
+			target[field] = value
+		}
+	}
+}
+
+func boundedMobileValue(value any, maxBytes int) any {
+	if text, ok := value.(string); ok {
+		return truncateUTF8(text, maxBytes)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "内容无法显示"
+	}
+	if len(raw) <= maxBytes {
+		return value
+	}
+	return truncateUTF8(string(raw), maxBytes)
+}
+
+func truncateUTF8(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	end := maxBytes - len("\n\n…内容过长，已截断")
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end] + "\n\n…内容过长，已截断"
 }
 
 func (b *bridge) snapshotForRoute(ctx context.Context, route runstate.Route) (runSnapshot, error) {
@@ -1293,15 +1459,8 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 			_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, logicalType, payload)
 		}
 	}
-	envelope := map[string]any{
-		"id": message.ID, "method": message.Method, "params": json.RawMessage(message.Params),
-		"processEpoch": b.app.client.ProcessEpoch(),
-	}
-	if approvalID != "" {
-		envelope["approvalId"] = approvalID
-	}
-	raw, err := json.Marshal(envelope)
-	if err != nil {
+	raw, mobileEvent := mobileCodexEventEnvelope(message, b.app.client.ProcessEpoch())
+	if !mobileEvent {
 		return
 	}
 	for _, deviceID := range b.eventTargets(message.Params) {

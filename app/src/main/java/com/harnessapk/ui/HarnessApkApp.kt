@@ -215,6 +215,7 @@ fun HarnessApkApp(
     var captureActionBusy by remember { mutableStateOf(false) }
     var captureActionError by remember { mutableStateOf<String?>(null) }
     val remoteProfile by container.remoteProfileStore.profile.collectAsState()
+    val remoteUiState by container.remoteRepository.state.collectAsState()
     val activityState by container.activityRepository.state.collectAsState(
         initial = com.harnessapk.activity.ActivityState(),
     )
@@ -430,6 +431,10 @@ fun HarnessApkApp(
                         if (canGoBack) {
                             IconButton(
                                 onClick = {
+                                    if (route == Routes.RemoteControl && remoteUiState.selectedThreadId != null) {
+                                        container.remoteRepository.clearSelection()
+                                        return@IconButton
+                                    }
                                     when (route) {
                                         Routes.AgentPackages -> {
                                             dispatchAgentPackageImport(

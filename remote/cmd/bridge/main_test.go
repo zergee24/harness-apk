@@ -200,6 +200,85 @@ func TestTurnSnapshotExtractsStructuredCompletionAndLastAgentMessage(t *testing.
 	}
 }
 
+func TestMobileThreadReadResultKeepsLatestConversationAndBoundsLargeToolOutput(t *testing.T) {
+	hugeOutput := strings.Repeat("tool-output-", 180_000)
+	raw, err := json.Marshal(map[string]any{
+		"thread": map[string]any{
+			"id": "thread-1", "cwd": "/workspace/harness-apk",
+			"turns": []any{
+				map[string]any{"id": "turn-old", "status": map[string]any{"type": "completed"}, "items": []any{
+					map[string]any{"id": "tool-old", "type": "commandExecution", "command": "run tests", "aggregatedOutput": hugeOutput, "status": "completed"},
+				}},
+				map[string]any{"id": "turn-latest", "status": map[string]any{"type": "completed"}, "items": []any{
+					map[string]any{"id": "user-latest", "type": "userMessage", "content": []any{map[string]any{"type": "text", "text": "请检查渲染"}}},
+					map[string]any{"id": "agent-latest", "type": "agentMessage", "text": "# READY\n\n**渲染正常**", "status": "completed"},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	projected, err := mobileThreadReadResult(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projected) > 640<<10 {
+		t.Fatalf("mobile thread response is still too large: %d bytes", len(projected))
+	}
+	if bytes.Contains(projected, []byte(hugeOutput[:1024])) {
+		t.Fatal("unbounded tool output remained in mobile history")
+	}
+	if !bytes.Contains(projected, []byte("请检查渲染")) || !bytes.Contains(projected, []byte("渲染正常")) {
+		t.Fatalf("latest conversation was lost: %s", projected)
+	}
+	var decoded struct {
+		Thread struct {
+			Turns []struct {
+				Items []map[string]any `json:"items"`
+			} `json:"turns"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(projected, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Thread.Turns) == 0 || len(decoded.Thread.Turns[len(decoded.Thread.Turns)-1].Items) != 2 {
+		t.Fatalf("projected shape is not compatible with thread/read: %s", projected)
+	}
+}
+
+func TestMobileCodexEventEnvelopeWhitelistsTimelineAndBoundsItemPayload(t *testing.T) {
+	hugeOutput := strings.Repeat("private-tool-output-", 100_000)
+	params, err := json.Marshal(map[string]any{
+		"threadId": "thread-1", "turnId": "turn-1",
+		"item": map[string]any{
+			"id": "item-1", "type": "commandExecution", "command": "git status",
+			"aggregatedOutput": hugeOutput, "status": "completed", "exitCode": 0,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, ok := mobileCodexEventEnvelope(appserverrpc.Message{
+		Method: "item/completed", Params: params,
+	}, "epoch-1")
+	if !ok {
+		t.Fatal("timeline event was dropped")
+	}
+	if len(envelope) > 96<<10 || bytes.Contains(envelope, []byte("private-tool-output")) {
+		t.Fatalf("mobile event remained unbounded: %d bytes", len(envelope))
+	}
+	if !bytes.Contains(envelope, []byte("git status")) || !bytes.Contains(envelope, []byte(`"exitCode":0`)) {
+		t.Fatalf("command summary was lost: %s", envelope)
+	}
+	if _, ok := mobileCodexEventEnvelope(appserverrpc.Message{
+		Method: "account/updated", Params: json.RawMessage(`{"profile":"large internal payload"}`),
+	}, "epoch-1"); ok {
+		t.Fatal("unrelated app-server event was forwarded to the phone")
+	}
+}
+
 func TestRouteForParamsUsesThreadAndTurnAcrossMultipleProjectBindings(t *testing.T) {
 	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
 	if err != nil {

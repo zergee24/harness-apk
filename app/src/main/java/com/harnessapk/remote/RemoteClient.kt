@@ -26,6 +26,20 @@ import okhttp3.WebSocketListener
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
+internal fun remoteRpcErrorMessage(payload: JsonElement?): String {
+    val error = (payload as? JsonObject)?.get("error")
+    val raw = when (error) {
+        is JsonObject -> error.string("message")
+        is JsonPrimitive -> error.contentOrNull
+        else -> null
+    }.orEmpty()
+    return when {
+        raw.contains("not materialized", ignoreCase = true) -> "会话正在初始化，请先发送第一条消息"
+        raw.contains("token too long", ignoreCase = true) -> "会话内容过大，Mac Bridge 需要升级后重试"
+        else -> "Mac 返回错误，请稍后重试"
+    }
+}
+
 class RemoteRepository(
     private val profileStore: RemoteProfileProvider,
     private val httpClient: OkHttpClient,
@@ -75,28 +89,61 @@ class RemoteRepository(
         _state.value = _state.value.copy(
             connectionStatus = RemoteConnectionStatus.DISCONNECTED,
             isWorking = false,
+            isThreadListLoading = false,
+            isTimelineLoading = false,
+            isCreatingThread = false,
             capabilities = emptySet(),
         )
     }
 
-    fun refreshThreads() = send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))
+    fun refreshThreads() {
+        _state.value = _state.value.copy(isThreadListLoading = true, errorMessage = null)
+        if (!send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))) {
+            _state.value = _state.value.copy(isThreadListLoading = false)
+        }
+    }
     fun requestWorkspaceCandidates() {
         _state.value = _state.value.copy(workspaceCandidates = emptyList(), workspaceCandidatesLoaded = false)
-        send(RemoteCommand(type = "workspace.list", requestId = requestId("workspace.list")))
+        if (!send(RemoteCommand(type = "workspace.list", requestId = requestId("workspace.list")))) {
+            _state.value = _state.value.copy(workspaceCandidatesLoaded = true)
+        }
     }
     fun selectThread(threadId: String) {
-        _state.value = _state.value.copy(selectedThreadId = threadId, timeline = emptyList(), approvals = emptyList())
-        send(RemoteCommand(type = "thread.read", requestId = requestId("thread.read"), threadId = threadId))
+        _state.value = _state.value.copy(
+            selectedThreadId = threadId,
+            timeline = emptyList(),
+            approvals = emptyList(),
+            isTimelineLoading = true,
+            errorMessage = null,
+        )
+        if (!send(RemoteCommand(type = "thread.read", requestId = requestId("thread.read"), threadId = threadId))) {
+            _state.value = _state.value.copy(isTimelineLoading = false)
+        }
     }
 
-    fun clearSelection() { _state.value = _state.value.copy(selectedThreadId = null, timeline = emptyList(), approvals = emptyList()) }
-    fun createThread(cwd: String) = send(RemoteCommand(type = "thread.start", requestId = requestId("thread.start"), cwd = cwd.trim()))
+    fun clearSelection() {
+        val refreshAfterClear = _state.value.connectionStatus == RemoteConnectionStatus.CONNECTED
+        _state.value = _state.value.copy(
+            selectedThreadId = null,
+            timeline = emptyList(),
+            approvals = emptyList(),
+            isTimelineLoading = false,
+        )
+        if (refreshAfterClear) refreshThreads()
+    }
+    fun createThread(cwd: String) {
+        _state.value = _state.value.copy(isCreatingThread = true, errorMessage = null)
+        if (!send(RemoteCommand(type = "thread.start", requestId = requestId("thread.start"), cwd = cwd.trim()))) {
+            _state.value = _state.value.copy(isCreatingThread = false)
+        }
+    }
     fun startTurn(text: String) {
         val threadId = _state.value.selectedThreadId ?: return
-        if (send(RemoteCommand(type = "turn.start", requestId = requestId("turn.start"), threadId = threadId, text = text))) {
+        val requestId = requestId("turn.start")
+        if (send(RemoteCommand(type = "turn.start", requestId = requestId, threadId = threadId, text = text))) {
             _state.value = _state.value.copy(
                 isWorking = true,
-                timeline = _state.value.timeline + RemoteTimelineItem(UUID.randomUUID().toString(), "userMessage", text),
+                timeline = _state.value.timeline + RemoteTimelineItem("pending-user:$requestId", "userMessage", text, "sending"),
             )
         }
     }
@@ -202,6 +249,9 @@ class RemoteRepository(
         _state.value = _state.value.copy(
             connectionStatus = if (explicitDisconnect) RemoteConnectionStatus.DISCONNECTED else RemoteConnectionStatus.ERROR,
             errorMessage = reason,
+            isThreadListLoading = false,
+            isTimelineLoading = false,
+            isCreatingThread = false,
             capabilities = emptySet(),
         )
         if (explicitDisconnect) return
@@ -279,10 +329,17 @@ class RemoteRepository(
             "host.status" -> _state.value = _state.value.copy(
                 connectionStatus = RemoteConnectionStatus.CONNECTED,
                 capabilities = parseRemoteHostCapabilities(event),
+                errorMessage = null,
             )
             "error" -> {
                 val message = event.message ?: "Codex 远程任务失败"
-                _state.value = _state.value.copy(errorMessage = message, isWorking = false)
+                _state.value = _state.value.copy(
+                    errorMessage = redactRemoteSensitiveText(message).take(240),
+                    isWorking = false,
+                    isThreadListLoading = false,
+                    isTimelineLoading = false,
+                    isCreatingThread = false,
+                )
                 _notifications.tryEmit(RemoteNotification("Codex 任务失败", message))
             }
             "rpc.response" -> handleRpcResponse(event)
@@ -307,19 +364,37 @@ class RemoteRepository(
 
     private fun handleRpcResponse(event: RemoteEvent) {
         val kind = pendingCommands.remove(event.requestId)
+            ?: event.requestId?.substringBefore(':')?.takeIf {
+                it in setOf("thread.list", "thread.start", "thread.read", "turn.start")
+            }
         if (event.payload?.jsonObject?.get("error") != null) {
-            _state.value = _state.value.copy(errorMessage = event.payload.toString())
+            _state.value = completedCommandState(kind).copy(errorMessage = remoteRpcErrorMessage(event.payload))
             _notifications.tryEmit(RemoteNotification("Codex 任务失败", "Mac 返回了错误，请打开 Harness 查看详情"))
             return
         }
+        _state.value = _state.value.copy(errorMessage = null)
         when (kind) {
-            "thread.list" -> _state.value = _state.value.copy(threads = parseThreads(event))
+            "thread.list" -> _state.value = _state.value.copy(
+                threads = parseThreads(event),
+                isThreadListLoading = false,
+            )
             "thread.start" -> {
                 val id = event.payload?.jsonObject?.get("result")?.jsonObject?.get("thread")?.jsonObject?.string("id")
-                if (id != null) selectThread(id)
-                refreshThreads()
+                if (id != null) {
+                    _state.value = _state.value.copy(
+                        selectedThreadId = id,
+                        timeline = emptyList(),
+                        approvals = emptyList(),
+                        isWorking = false,
+                        isCreatingThread = false,
+                        isTimelineLoading = false,
+                    )
+                } else {
+                    _state.value = _state.value.copy(isCreatingThread = false)
+                }
             }
             "thread.read" -> event.payload?.let(::applyThreadHistory)
+                ?: run { _state.value = _state.value.copy(isTimelineLoading = false) }
             "turn.start" -> {
                 val turnId = event.payload?.jsonObject?.get("result")?.jsonObject?.get("turn")?.jsonObject?.string("id")
                 _state.value = _state.value.copy(activeTurnId = turnId, isWorking = true)
@@ -328,11 +403,22 @@ class RemoteRepository(
     }
 
     private fun applyThreadHistory(payload: JsonElement) {
-        val thread = payload.jsonObject["result"]?.jsonObject?.get("thread")?.jsonObject ?: return
+        val thread = payload.jsonObject["result"]?.jsonObject?.get("thread")?.jsonObject
+            ?: run {
+                _state.value = _state.value.copy(isTimelineLoading = false)
+                return
+            }
         val items = thread["turns"]?.jsonArray?.toList().orEmpty().flatMap { turn ->
             turn.jsonObject["items"]?.jsonArray?.toList().orEmpty().mapNotNull(::timelineItem)
         }
-        _state.value = _state.value.copy(timeline = items)
+        _state.value = _state.value.copy(timeline = items, isTimelineLoading = false)
+    }
+
+    private fun completedCommandState(kind: String?): RemoteUiState = when (kind) {
+        "thread.list" -> _state.value.copy(isThreadListLoading = false)
+        "thread.read" -> _state.value.copy(isTimelineLoading = false)
+        "thread.start" -> _state.value.copy(isCreatingThread = false)
+        else -> _state.value
     }
 
     private fun handleCodexEvent(event: RemoteEvent) {
@@ -350,7 +436,7 @@ class RemoteRepository(
             "item/started", "item/completed" -> params["item"]?.let { item ->
                 timelineItem(item)?.let { addOrReplaceTimeline(it) }
             }
-            "item/agentMessage/delta" -> appendAgentDelta(params.string("delta").orEmpty())
+            "item/agentMessage/delta" -> appendAgentDelta(params.string("itemId"), params.string("delta").orEmpty())
         }
     }
 
@@ -379,29 +465,85 @@ class RemoteRepository(
         val id = item.string("id") ?: return null
         val kind = item.string("type").orEmpty()
         val text = when (kind) {
-            "agentMessage", "userMessage" -> item.string("text") ?: item["content"]?.toString().orEmpty()
-            "commandExecution" -> item["command"]?.let { if (it is JsonPrimitive) it.contentOrNull else it.toString() }.orEmpty()
-            "fileChange" -> item["changes"]?.toString().orEmpty()
-            else -> item.string("text") ?: item.toString()
+            "agentMessage", "userMessage" -> item.string("text") ?: remoteMessageContentText(item["content"])
+            "commandExecution" -> remoteCommandText(item["command"])
+            "fileChange" -> remoteFileChangeText(item["changes"])
+            "reasoning" -> item.string("summary") ?: item.string("text") ?: "Codex 正在分析"
+            "webSearch" -> item.string("query") ?: item.string("text") ?: "Codex 正在查找资料"
+            else -> item.string("text") ?: item.string("status") ?: "远程事件更新"
         }
         return RemoteTimelineItem(id, kind, text, item.string("status"))
     }
 
-    private fun addOrReplaceTimeline(item: RemoteTimelineItem) {
-        val current = _state.value.timeline
-        val next = if (current.any { it.id == item.id }) current.map { if (it.id == item.id) item else it } else current + item
-        _state.value = _state.value.copy(timeline = next)
+    private fun remoteCommandText(command: JsonElement?): String = when (command) {
+        is JsonPrimitive -> command.contentOrNull.orEmpty()
+        is kotlinx.serialization.json.JsonArray -> command.mapNotNull {
+            (it as? JsonPrimitive)?.contentOrNull
+        }.joinToString(" ")
+        else -> ""
+    }.let(::redactRemoteSensitiveText)
+
+    private fun remoteFileChangeText(changes: JsonElement?): String {
+        val entries = (changes as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull { change ->
+            val item = change as? JsonObject ?: return@mapNotNull null
+            val path = item.string("path")?.let(::redactRemoteSensitiveText)?.takeIf(String::isNotBlank)
+                ?: return@mapNotNull null
+            val action = when ((item.string("kind") ?: item.string("type")).orEmpty().lowercase()) {
+                "create", "add", "added" -> "新建"
+                "delete", "remove", "deleted" -> "删除"
+                "rename", "renamed" -> "重命名"
+                else -> "修改"
+            }
+            "$action `$path`"
+        }
+        return entries.joinToString("\n").ifBlank {
+            val count = (changes as? kotlinx.serialization.json.JsonArray)?.size ?: 0
+            if (count > 0) "$count 个文件变更" else "文件变更"
+        }
     }
 
-    private fun appendAgentDelta(delta: String) {
+    private fun remoteMessageContentText(content: JsonElement?): String = when (content) {
+        is JsonPrimitive -> content.contentOrNull.orEmpty()
+        is kotlinx.serialization.json.JsonArray -> content.mapNotNull { part ->
+            when (part) {
+                is JsonPrimitive -> part.contentOrNull
+                is JsonObject -> part.string("text") ?: part.string("content")
+                else -> null
+            }?.takeIf(String::isNotBlank)
+        }.joinToString("\n")
+        else -> ""
+    }
+
+    private fun addOrReplaceTimeline(item: RemoteTimelineItem) {
+        _state.value = _state.value.copy(timeline = mergeRemoteTimeline(_state.value.timeline, item))
+    }
+
+    private fun appendAgentDelta(itemId: String?, delta: String) {
         if (delta.isEmpty()) return
         val current = _state.value.timeline
-        val last = current.lastOrNull()
-        val next = if (last?.kind == "agentMessage" && last.status == "streaming") {
-            current.dropLast(1) + last.copy(text = last.text + delta)
-        } else current + RemoteTimelineItem("stream:${UUID.randomUUID()}", "agentMessage", delta, "streaming")
+        val stableId = itemId?.takeIf(String::isNotBlank)
+            ?: "stream:${_state.value.selectedThreadId}:${_state.value.activeTurnId ?: "pending"}"
+        val existing = current.firstOrNull { it.id == stableId }
+        val streaming = existing?.copy(text = existing.text + delta, status = "streaming")
+            ?: RemoteTimelineItem(stableId, "agentMessage", delta, "streaming")
+        val next = if (existing == null) current + streaming else current.map { if (it.id == stableId) streaming else it }
         _state.value = _state.value.copy(timeline = next)
     }
+}
+
+internal fun mergeRemoteTimeline(
+    current: List<RemoteTimelineItem>,
+    item: RemoteTimelineItem,
+): List<RemoteTimelineItem> {
+    val existingIndex = current.indexOfFirst { it.id == item.id }
+    if (existingIndex >= 0) return current.toMutableList().also { it[existingIndex] = item }
+    if (item.kind == "userMessage") {
+        val pendingIndex = current.indexOfLast {
+            it.kind == "userMessage" && it.status == "sending" && it.text == item.text
+        }
+        if (pendingIndex >= 0) return current.toMutableList().also { it[pendingIndex] = item }
+    }
+    return current + item
 }
 
 private fun RemoteWireMessage.toJson(): JsonObject = buildJsonObject {
