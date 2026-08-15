@@ -326,6 +326,102 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun successfulTurnStartStopsShowingTheOptimisticMessageAsSending() {
+        val repository = repositoryWithPendingTurnStart("turn.start:success")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "turn.start:success",
+                payload = Json.parseToJsonElement("""{"result":{"turn":{"id":"turn-real"}}}"""),
+            ),
+        )
+
+        assertEquals("sent", repository.state.value.timeline.single().status)
+        assertTrue(repository.state.value.isWorking)
+        assertEquals("turn-real", repository.state.value.activeTurnId)
+    }
+
+    @Test
+    fun failedTurnStartShowsFailureInsteadOfPermanentSending() {
+        val repository = repositoryWithPendingTurnStart("turn.start:failed")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "turn.start:failed",
+                payload = Json.parseToJsonElement(
+                    """{"error":{"message":"thread could not be resumed"},"retrySafe":false}""",
+                ),
+            ),
+        )
+
+        assertEquals("sendFailed", repository.state.value.timeline.single().status)
+        assertFalse(repository.state.value.isWorking)
+        assertEquals(null, repository.state.value.activeThreadId)
+    }
+
+    @Test
+    fun unknownTurnStartShowsReconciliationInsteadOfPermanentSending() {
+        val repository = repositoryWithPendingTurnStart("turn.start:unknown")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "turn.start:unknown",
+                payload = Json.parseToJsonElement(
+                    """{"outcome":"UNKNOWN","status":"RECONCILING","retrySafe":false,"requiresSnapshot":true}""",
+                ),
+            ),
+        )
+
+        assertEquals("reconciling", repository.state.value.timeline.single().status)
+        assertFalse(repository.state.value.isWorking)
+        assertEquals(null, repository.state.value.activeThreadId)
+    }
+
+    @Test
+    fun stalePreviousCompletionDoesNotOverwriteAJustStartedTurn() {
+        val repository = repository()
+        val stateField = RemoteRepository::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutableState = stateField.get(repository) as MutableStateFlow<RemoteUiState>
+        mutableState.value = mutableState.value.copy(
+            selectedThreadId = "thread-a",
+            threads = listOf(
+                RemoteThread(
+                    id = "thread-a",
+                    title = "任务 A",
+                    preview = "继续任务",
+                    cwd = "/workspace",
+                    updatedAt = 1L,
+                    status = "active",
+                    execution = RemoteThreadExecution(
+                        state = RemoteThreadExecutionState.RUNNING,
+                        startedAtMillis = 2_000L,
+                    ),
+                ),
+            ),
+        )
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pending["thread.summary:stale"] = PendingRemoteCommand("thread.summary", threadId = "thread-a")
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.summary:stale",
+                payload = Json.parseToJsonElement(
+                    """{"result":{"threadId":"thread-a","latestUserMessage":"上一轮","execution":{"state":"COMPLETED","turnId":"turn-old","startedAt":1,"completedAt":1}}}""",
+                ),
+            ),
+        )
+
+        assertEquals(RemoteThreadExecutionState.RUNNING, repository.state.value.threads.single().execution.state)
+    }
+
+    @Test
     fun successfulHostStatusClearsStaleConnectionError() {
         val repository = repository()
         repository.handleEvent(RemoteEvent(type = "error", message = "temporary failure"))
@@ -357,6 +453,26 @@ class RemoteRepositoryTest {
         assertEquals("thread-new", repository.state.value.selectedThreadId)
         assertTrue(repository.state.value.timeline.isEmpty())
         assertEquals(null, repository.state.value.errorMessage)
+    }
+
+    private fun repositoryWithPendingTurnStart(requestId: String): RemoteRepository {
+        val repository = repository()
+        val stateField = RemoteRepository::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutableState = stateField.get(repository) as MutableStateFlow<RemoteUiState>
+        mutableState.value = mutableState.value.copy(
+            selectedThreadId = "thread-a",
+            activeThreadId = "thread-a",
+            isWorking = true,
+            timeline = listOf(
+                RemoteTimelineItem("pending-user:$requestId", "userMessage", "继续任务", "sending"),
+            ),
+        )
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pending[requestId] = PendingRemoteCommand("turn.start", threadId = "thread-a")
+        return repository
     }
 
     @Test

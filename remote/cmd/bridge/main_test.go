@@ -824,6 +824,58 @@ func TestLegacyTurnStartBackfillsRealTurnIDBeforeRouting(t *testing.T) {
 	}
 }
 
+func TestLegacyTurnStartResumesPersistedThreadBeforeSafeRetry(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests []appServerTestRequest
+	app := appProcessScripted(t, func(request appServerTestRequest) (json.RawMessage, json.RawMessage) {
+		requests = append(requests, request)
+		switch len(requests) {
+		case 1:
+			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
+		case 2:
+			return json.RawMessage(`{"thread":{"id":"thread-1"}}`), nil
+		default:
+			return json.RawMessage(`{"turn":{"id":"turn-real"}}`), nil
+		}
+	})
+	b := &bridge{
+		app: app, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	command := protocol.Command{
+		Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "继续任务",
+	}
+
+	result, outcome, err := b.executeTurnStartOnce(
+		context.Background(), "phone-1", command, legacyTurnStartParams(command),
+	)
+
+	if err != nil || outcome != turnRPCSucceeded || string(result) != `{"turn":{"id":"turn-real"}}` {
+		t.Fatalf("result=%s outcome=%q err=%v", result, outcome, err)
+	}
+	if got := []string{requests[0].Method, requests[1].Method, requests[2].Method}; !reflect.DeepEqual(got, []string{"turn/start", "thread/resume", "turn/start"}) {
+		t.Fatalf("methods=%v", got)
+	}
+	if requests[1].Params["threadId"] != "thread-1" || requests[1].Params["excludeTurns"] != true {
+		t.Fatalf("resume params=%#v", requests[1].Params)
+	}
+	for _, index := range []int{0, 2} {
+		if requests[index].Params["clientUserMessageId"] != "request-1" {
+			t.Fatalf("turn params[%d]=%#v", index, requests[index].Params)
+		}
+	}
+	if route, ok := routes.ByThreadTurn("thread-1", "turn-real"); !ok || route.DeviceID != "phone-1" {
+		t.Fatalf("route=%#v ok=%v", route, ok)
+	}
+}
+
 func TestLegacyTurnSteerClaimsExpectedTurnID(t *testing.T) {
 	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
 	if err != nil {
@@ -1196,6 +1248,45 @@ func TestBuildCompletionEvidenceMarksWorkspaceCaptureFailureUnverified(t *testin
 type writerFunc func([]byte) (int, error)
 
 func (function writerFunc) Write(raw []byte) (int, error) { return function(raw) }
+
+type appServerTestRequest struct {
+	ID     json.RawMessage
+	Method string
+	Params map[string]any
+}
+
+func appProcessScripted(
+	t *testing.T,
+	respond func(appServerTestRequest) (json.RawMessage, json.RawMessage),
+) *appProcess {
+	t.Helper()
+	reader, serverWriter := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	client := appserverrpc.NewClient(reader, writerFunc(func(requestRaw []byte) (int, error) {
+		var request appServerTestRequest
+		if err := json.Unmarshal(requestRaw, &request); err != nil {
+			return 0, err
+		}
+		result, responseError := respond(request)
+		var response string
+		if len(responseError) > 0 {
+			response = fmt.Sprintf(`{"id":%s,"error":%s}`+"\n", request.ID, responseError)
+		} else {
+			response = fmt.Sprintf(`{"id":%s,"result":%s}`+"\n", request.ID, result)
+		}
+		if _, err := serverWriter.Write([]byte(response)); err != nil {
+			return 0, err
+		}
+		return len(requestRaw), nil
+	}), "epoch-1")
+	client.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		_ = serverWriter.Close()
+		_ = reader.Close()
+	})
+	return &appProcess{client: client}
+}
 
 func appProcessReturning(t *testing.T, result json.RawMessage) *appProcess {
 	return appProcessReturningCounted(t, result, nil)

@@ -482,7 +482,7 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	case "thread.start":
 		return b.requestAppServer(ctx, deviceID, command, "thread/start", map[string]any{"cwd": command.CWD})
 	case "turn.start":
-		return b.requestTurnStart(ctx, deviceID, command, map[string]any{"threadId": command.ThreadID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
+		return b.requestTurnStart(ctx, deviceID, command, legacyTurnStartParams(command))
 	case "turn.steer":
 		if err := b.claimThread(command, deviceID); err != nil {
 			return err
@@ -1132,6 +1132,18 @@ func legacyTurnStartCacheIdentity(command protocol.Command) (string, string) {
 	return "legacy-turn-start:" + identity, hex.EncodeToString(digest[:])
 }
 
+func legacyTurnStartParams(command protocol.Command) map[string]any {
+	return map[string]any{
+		"threadId":            command.ThreadID,
+		"input":               []map[string]string{{"type": "text", "text": command.Text}},
+		"clientUserMessageId": firstNonEmpty(command.CommandID, command.RequestID),
+	}
+}
+
+func isThreadNotFoundError(err error, threadID string) bool {
+	return err != nil && threadID != "" && strings.Contains(err.Error(), "thread not found: "+threadID)
+}
+
 func (b *bridge) requestTurnStart(
 	ctx context.Context,
 	deviceID string,
@@ -1183,7 +1195,20 @@ func (b *bridge) executeTurnStartOnce(
 		return nil, turnRPCFailed, errors.Join(err, persistErr)
 	}
 	result, err := b.app.client.Call(ctx, "turn/start", params)
+	if err != nil && isThreadNotFoundError(err, command.ThreadID) {
+		if _, resumeErr := b.app.client.Call(ctx, "thread/resume", map[string]any{
+			"threadId": command.ThreadID, "excludeTurns": true,
+		}); resumeErr != nil {
+			_, persistErr := b.commandCache.Fail(cacheID, resumeErr)
+			return nil, turnRPCFailed, errors.Join(resumeErr, persistErr)
+		}
+		result, err = b.app.client.Call(ctx, "turn/start", params)
+	}
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "app-server error:") {
+			_, persistErr := b.commandCache.Fail(cacheID, err)
+			return nil, turnRPCFailed, errors.Join(err, persistErr)
+		}
 		_, persistErr := b.commandCache.MarkUnknown(cacheID, err)
 		return nil, turnRPCUnknown, errors.Join(err, persistErr)
 	}

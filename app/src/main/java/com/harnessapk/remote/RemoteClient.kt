@@ -199,6 +199,13 @@ class RemoteRepository(
                 activeTurnId = null,
                 isWorking = true,
                 timeline = _state.value.timeline + RemoteTimelineItem("pending-user:$requestId", "userMessage", text, "sending"),
+                threads = _state.value.threads.withExecution(
+                    threadId,
+                    RemoteThreadExecution(
+                        state = RemoteThreadExecutionState.RUNNING,
+                        startedAtMillis = System.currentTimeMillis(),
+                    ),
+                ),
             )
         }
     }
@@ -442,6 +449,24 @@ class RemoteRepository(
             if (staleThread || staleSelection) return
         }
         val requestedOlderCursor = pending?.olderCursor ?: _state.value.olderTimelineCursor
+        val response = event.payload as? JsonObject
+        if (kind == "turn.start" && response?.string("outcome") == "UNKNOWN") {
+            val threadId = pendingThreadId ?: _state.value.selectedThreadId
+            val current = _state.value
+            _state.value = current.copy(
+                activeThreadId = current.activeThreadId.takeUnless { it == threadId },
+                activeTurnId = current.activeTurnId.takeUnless { current.activeThreadId == threadId },
+                isWorking = current.isWorking && current.selectedThreadId != threadId,
+                timeline = current.timeline.withPendingTurnStatus(event.requestId, "reconciling"),
+                threads = current.threads.withExecution(
+                    threadId,
+                    RemoteThreadExecution(RemoteThreadExecutionState.UNKNOWN),
+                ),
+                errorMessage = "发送结果待确认，正在从 Mac 恢复状态",
+            )
+            threadId?.let(requestedThreadSummaries::remove)
+            return
+        }
         if (event.payload?.jsonObject?.get("error") != null) {
             if (kind == "thread.summary") {
                 pendingThreadId?.let(requestedThreadSummaries::remove)
@@ -455,6 +480,18 @@ class RemoteRepository(
                 activeThreadId = completed.activeThreadId.takeUnless { failedActiveTurnStart },
                 activeTurnId = completed.activeTurnId.takeUnless { failedActiveTurnStart },
                 isWorking = completed.isWorking && !failedActiveTurnStart,
+                timeline = completed.timeline.withPendingTurnStatus(
+                    event.requestId,
+                    if (kind == "turn.start") "sendFailed" else null,
+                ),
+                threads = if (failedActiveTurnStart) {
+                    completed.threads.withExecution(
+                        pendingThreadId,
+                        RemoteThreadExecution(RemoteThreadExecutionState.FAILED),
+                    )
+                } else {
+                    completed.threads
+                },
                 errorMessage = remoteRpcErrorMessage(event.payload),
             )
             _notifications.tryEmit(RemoteNotification("Codex 任务失败", "Mac 返回了错误，请打开 Harness 查看详情"))
@@ -506,7 +543,7 @@ class RemoteRepository(
                             if (thread.id == threadId) {
                                 thread.copy(
                                     latestUserMessage = latestUserMessage?.take(240) ?: thread.latestUserMessage,
-                                    execution = execution,
+                                    execution = reconcileRemoteThreadExecution(thread.execution, execution),
                                 )
                             } else {
                                 thread
@@ -553,10 +590,23 @@ class RemoteRepository(
             "turn.start" -> {
                 val turnId = event.payload?.jsonObject?.get("result")?.jsonObject?.get("turn")?.jsonObject?.string("id")
                 val threadId = pendingThreadId ?: _state.value.selectedThreadId
+                val startedAtMillis = _state.value.threads.firstOrNull { it.id == threadId }
+                    ?.execution
+                    ?.startedAtMillis
+                    ?: System.currentTimeMillis()
                 _state.value = _state.value.copy(
                     activeThreadId = threadId,
                     activeTurnId = turnId,
                     isWorking = threadId != null && threadId == _state.value.selectedThreadId,
+                    timeline = _state.value.timeline.withPendingTurnStatus(event.requestId, "sent"),
+                    threads = _state.value.threads.withExecution(
+                        threadId,
+                        RemoteThreadExecution(
+                            state = RemoteThreadExecutionState.RUNNING,
+                            turnId = turnId,
+                            startedAtMillis = startedAtMillis,
+                        ),
+                    ),
                 )
             }
         }
@@ -790,6 +840,27 @@ class RemoteRepository(
     }
 }
 
+private fun List<RemoteTimelineItem>.withPendingTurnStatus(
+    requestId: String?,
+    status: String?,
+): List<RemoteTimelineItem> {
+    if (requestId == null || status == null) return this
+    val pendingId = "pending-user:$requestId"
+    return map { item -> if (item.id == pendingId) item.copy(status = status) else item }
+}
+
+private fun reconcileRemoteThreadExecution(
+    current: RemoteThreadExecution,
+    incoming: RemoteThreadExecution,
+): RemoteThreadExecution {
+    val incomingIsOlderTerminal = current.state.isActive &&
+        !incoming.state.isActive &&
+        current.startedAtMillis != null &&
+        incoming.completedAtMillis != null &&
+        incoming.completedAtMillis < current.startedAtMillis
+    return if (incomingIsOlderTerminal) current else incoming
+}
+
 internal fun mergeRemoteTimeline(
     current: List<RemoteTimelineItem>,
     item: RemoteTimelineItem,
@@ -798,7 +869,7 @@ internal fun mergeRemoteTimeline(
     if (existingIndex >= 0) return current.toMutableList().also { it[existingIndex] = item }
     if (item.kind == "userMessage") {
         val pendingIndex = current.indexOfLast {
-            it.kind == "userMessage" && it.status == "sending" && it.text == item.text
+            it.kind == "userMessage" && it.status in setOf("sending", "sent", "reconciling") && it.text == item.text
         }
         if (pendingIndex >= 0) return current.toMutableList().also { it[pendingIndex] = item }
     }
@@ -816,7 +887,7 @@ internal fun mergeRemoteHistoryPage(
         .map(RemoteTimelineItem::text)
         .toSet()
     val reconciledCurrent = current.filterNot {
-        it.kind == "userMessage" && it.status == "sending" && it.text in pageUserTexts
+        it.kind == "userMessage" && it.status in setOf("sending", "sent", "reconciling") && it.text in pageUserTexts
     }
     val currentById = reconciledCurrent.associateBy(RemoteTimelineItem::id)
     val pageWithRealtimeWins = uniquePage.map { currentById[it.id] ?: it }

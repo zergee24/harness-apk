@@ -744,6 +744,9 @@ internal fun remoteTimelineKindLabel(kind: String): String = when (kind) {
 internal fun remoteTimelineStatusLabel(status: String?): String? = when (status) {
     null, "" -> null
     "sending" -> "发送中"
+    "sent" -> null
+    "reconciling" -> "发送结果待确认"
+    "sendFailed" -> "发送失败"
     "streaming", "inProgress", "running" -> "进行中"
     "completed", "succeeded" -> "已完成"
     "failed" -> "失败"
