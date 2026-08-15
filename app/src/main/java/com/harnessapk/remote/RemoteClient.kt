@@ -112,6 +112,7 @@ class RemoteRepository(
             isOlderTimelineLoading = false,
             isCreatingThread = false,
             capabilities = emptySet(),
+            backends = emptyList(),
         )
     }
 
@@ -253,6 +254,7 @@ class RemoteRepository(
             pendingCommands.remove(requestId)
             return false
         }
+        val effectivePayload = injectBackendId(payload, _state.value.selectedBackendId)
         val activeSocket = socket
         if (activeSocket == null) {
             pendingCommands.remove(requestId)
@@ -265,7 +267,7 @@ class RemoteRepository(
             pairingTicket = profile.pairingTicket.takeIf(String::isNotBlank), sequence = outgoingSequence.incrementAndGet(),
             expiresAt = now + 5 * 60_000L, nonce = "", ciphertext = "",
         )
-        val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, payload)
+        val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, effectivePayload)
         if (!activeSocket.send(encrypted.toJson().toString())) {
             pendingCommands.remove(requestId)
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
@@ -327,6 +329,7 @@ class RemoteRepository(
             isOlderTimelineLoading = false,
             isCreatingThread = false,
             capabilities = emptySet(),
+            backends = emptyList(),
         )
         if (explicitDisconnect) return
         reconnectJob?.cancel()
@@ -371,12 +374,15 @@ class RemoteRepository(
         }
     }
 
+    private fun backendDisplayName(backendId: String?): String =
+        _state.value.backends.firstOrNull { it.id == backendId }?.name ?: "Codex"
+
     private fun notifyLogicalEvent(event: RemoteLogicalEvent) {
         val payload = event.payload as? JsonObject ?: JsonObject(emptyMap())
         when (event.type) {
             "run.approval.requested" -> _notifications.tryEmit(
                 RemoteNotification(
-                    title = "Codex 等待审批",
+                    title = "${backendDisplayName(event.backendId)} 等待审批",
                     message = payload.string("target")?.let(::redactRemoteSensitiveText) ?: "Mac 上的任务需要你的确认",
                     runId = event.runId,
                     approvalId = payload.string("approvalId"),
@@ -390,21 +396,32 @@ class RemoteRepository(
                 ),
             )
             "run.completed" -> _notifications.tryEmit(
-                RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果", runId = event.runId),
+                RemoteNotification("${backendDisplayName(event.backendId)} 已完成", "远程任务已结束，点击查看结果", runId = event.runId),
             )
             "run.failed" -> _notifications.tryEmit(
-                RemoteNotification("Codex 任务失败", "打开 Harness 查看失败详情", runId = event.runId),
+                RemoteNotification("${backendDisplayName(event.backendId)} 任务失败", "打开 Harness 查看失败详情", runId = event.runId),
             )
         }
     }
 
     internal fun handleEvent(event: RemoteEvent) {
         when (event.type) {
-            "host.status" -> _state.value = _state.value.copy(
-                connectionStatus = RemoteConnectionStatus.CONNECTED,
-                capabilities = parseRemoteHostCapabilities(event),
-                errorMessage = null,
-            )
+            "host.status" -> {
+                val parsed = parseRemoteBackends(event)
+                val hostCapabilities = parseRemoteHostCapabilities(event)
+                val backends = parsed.ifEmpty { fallbackRemoteBackends(hostCapabilities) }
+                val current = _state.value
+                val selected = reconcileSelectedBackend(current.selectedBackendId, backends)
+                val capabilities = backends.firstOrNull { it.id == selected }?.capabilities
+                    ?: hostCapabilities
+                _state.value = current.copy(
+                    connectionStatus = RemoteConnectionStatus.CONNECTED,
+                    backends = backends,
+                    selectedBackendId = selected,
+                    capabilities = capabilities,
+                    errorMessage = null,
+                )
+            }
             "error" -> {
                 val message = event.message ?: "Codex 远程任务失败"
                 _state.value = _state.value.copy(
@@ -433,9 +450,43 @@ class RemoteRepository(
                     scope.launch { coordinator.onSnapshot(parseRemoteRunSnapshot(payload)) }
                 }
             }
-            "approval.request" -> handleApproval(event)
-            "codex.event" -> handleCodexEvent(event)
+            "approval.request" -> {
+                if (matchesSelectedBackend(event)) handleApproval(event)
+            }
+            "codex.event" -> {
+                if (matchesSelectedBackend(event)) handleCodexEvent(event)
+            }
         }
+    }
+
+    /** Events from another backend are ignored; legacy events carry no id. */
+    private fun matchesSelectedBackend(event: RemoteEvent): Boolean {
+        val backendId = event.backendId ?: return true
+        return backendId == _state.value.selectedBackendId
+    }
+
+    /** Switches the active backend and reloads its thread list. */
+    fun selectBackend(backendId: String) {
+        val current = _state.value
+        if (current.backends.none { it.id == backendId } || current.selectedBackendId == backendId) return
+        selectionGeneration += 1
+        requestedThreadSummaries.clear()
+        pendingCommands.clear()
+        val capabilities = current.backends.firstOrNull { it.id == backendId }?.capabilities.orEmpty()
+        _state.value = current.copy(
+            selectedBackendId = backendId,
+            capabilities = capabilities,
+            threads = emptyList(),
+            selectedThreadId = null,
+            activeThreadId = null,
+            activeTurnId = null,
+            timeline = emptyList(),
+            approvals = emptyList(),
+            isWorking = false,
+            olderTimelineCursor = null,
+            isOlderTimelineLoading = false,
+        )
+        refreshThreads()
     }
 
     private fun handleRpcResponse(event: RemoteEvent) {

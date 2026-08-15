@@ -826,8 +826,9 @@ internal fun ProjectScreen(
             remoteBinding = null
             openRemoteRun = null
         } else {
+            val selectedBackend = remoteState.selectedBackendId
             val remoteState = withContext(container.dispatchers.io) {
-                container.remoteBindingRepository.bindingForProject(projectId) to
+                container.remoteBindingRepository.bindingForProject(projectId, selectedBackend) to
                     container.database.remoteDao().latestOpenRunForProject(projectId)
             }
             remoteBinding = remoteState.first
@@ -965,6 +966,7 @@ internal fun ProjectScreen(
                         withContext(container.dispatchers.io) {
                             container.remoteBindingRepository.bind(
                                 projectId = bindingProject.id,
+                                backendId = remoteState.selectedBackendId,
                                 hostId = bindingProfile.hostId,
                                 candidate = candidate,
                                 confirmFingerprintChange = confirmed,

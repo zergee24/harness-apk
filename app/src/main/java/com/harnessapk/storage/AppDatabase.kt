@@ -52,7 +52,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ContextFactDedupeEntity::class,
         RemoteRunCompletionEntity::class,
     ],
-    version = 23,
+    version = 24,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -1188,6 +1188,22 @@ abstract class AppDatabase : RoomDatabase() {
                 db.query("PRAGMA foreign_key_check").use { cursor ->
                     if (cursor.moveToFirst()) error("foreign_key_check failed after M3 migration")
                 }
+            }
+        }
+
+        val MIGRATION_23_24: Migration = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // M4: per-backend identity on remote runs and project bindings.
+                db.execSQL("ALTER TABLE remote_runs ADD COLUMN backendId TEXT NOT NULL DEFAULT 'codex'")
+                db.execSQL("ALTER TABLE project_remote_bindings ADD COLUMN backendId TEXT NOT NULL DEFAULT 'codex'")
+                db.execSQL("DROP INDEX IF EXISTS index_project_remote_bindings_projectId")
+                db.execSQL(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS index_project_remote_bindings_projectId_backendId
+                    ON project_remote_bindings(projectId, backendId)
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_runs_backendId ON remote_runs(backendId)")
             }
         }
 

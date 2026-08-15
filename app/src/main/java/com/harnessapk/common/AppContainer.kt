@@ -171,6 +171,7 @@ class AppContainer(
         AppDatabase.MIGRATION_20_21,
         AppDatabase.MIGRATION_21_22,
         AppDatabase.MIGRATION_22_23,
+        AppDatabase.MIGRATION_23_24,
     ).addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK).build()
     val apiKeyCipher = ApiKeyCipher()
     val settingsStore = AppSettingsStore(appContext)

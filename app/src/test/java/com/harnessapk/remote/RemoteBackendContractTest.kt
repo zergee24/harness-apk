@@ -113,3 +113,62 @@ class RemoteBackendContractTest {
         )
     }
 }
+
+class RemoteBackendSelectionTest {
+
+    @Test
+    fun injectBackendIdAddsSelectedBackendWhenAbsent() {
+        val payload = buildJsonObject {
+            put("type", JsonPrimitive("thread.list"))
+            put("requestId", JsonPrimitive("r1"))
+        }
+        val injected = injectBackendId(payload, "dsh").toString()
+        assertTrue(injected.contains("\"backendId\":\"dsh\""))
+    }
+
+    @Test
+    fun injectBackendIdPreservesExistingBackend() {
+        val payload = buildJsonObject {
+            put("type", JsonPrimitive("run.start"))
+            put("requestId", JsonPrimitive("r2"))
+            put("backendId", JsonPrimitive("codex"))
+        }
+        val injected = injectBackendId(payload, "dsh").toString()
+        assertTrue(injected.contains("\"backendId\":\"codex\""))
+        assertFalse(injected.contains("\"backendId\":\"dsh\""))
+    }
+
+    @Test
+    fun fallbackBackendsForLegacyHostStatus() {
+        val fallback = fallbackRemoteBackends(setOf("run.lifecycle.v1", "approvals.v1"))
+        assertEquals(1, fallback.size)
+        assertEquals("codex", fallback[0].id)
+        assertEquals("Codex", fallback[0].name)
+        assertTrue("approvals.v1" in fallback[0].capabilities)
+    }
+
+    @Test
+    fun reconcileSelectedBackendFallsBackToCodexWhenMissing() {
+        val backends = listOf(RemoteBackend("codex", "Codex", emptySet()), RemoteBackend("dsh", "DeepSeek Harness", emptySet()))
+        assertEquals("dsh", reconcileSelectedBackend("dsh", backends))
+        assertEquals("codex", reconcileSelectedBackend("aux", backends))
+        assertEquals("codex", reconcileSelectedBackend("codex", emptyList()))
+    }
+
+    @Test
+    fun parseRemoteLogicalEventReadsBackendId() {
+        val event = parseRemoteLogicalEvent(
+            """{"schemaVersion":1,"eventId":"e1","hostId":"h","deviceId":"d","runId":"r","backendId":"dsh","sequence":3,"type":"run.timeline","payload":{"latestLine":"正在整理结果"},"createdAt":123}""",
+        )
+        assertEquals("dsh", event.backendId)
+        assertEquals("run.timeline", event.type)
+    }
+
+    @Test
+    fun legacyLogicalEventWithoutBackendIdParsesNull() {
+        val event = parseRemoteLogicalEvent(
+            """{"schemaVersion":1,"eventId":"e2","hostId":"h","deviceId":"d","runId":"r","sequence":4,"type":"run.completed","payload":{},"createdAt":124}""",
+        )
+        assertNull(event.backendId)
+    }
+}

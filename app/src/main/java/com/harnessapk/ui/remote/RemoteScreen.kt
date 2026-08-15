@@ -59,6 +59,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import com.harnessapk.common.AppContainer
+import androidx.compose.material3.FilterChip
+import com.harnessapk.remote.RemoteBackend
 import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.RemoteTimelineItem
 import com.harnessapk.remote.RemoteThread
@@ -108,6 +110,13 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
                 container.remoteRepository.requestWorkspaceCandidates()
             },
         )
+        if (state.backends.size > 1) {
+            BackendSwitcher(
+                backends = state.backends,
+                selectedBackendId = state.selectedBackendId,
+                onSelect = container.remoteRepository::selectBackend,
+            )
+        }
         state.errorMessage?.let {
             Text(
                 it,
@@ -835,4 +844,30 @@ internal fun connectionLabel(status: RemoteConnectionStatus): String = when (sta
     RemoteConnectionStatus.CONNECTING -> "连接中"
     RemoteConnectionStatus.ERROR -> "连接异常"
     RemoteConnectionStatus.DISCONNECTED -> "离线"
+}
+
+/** M4: switches the active backend when the Mac exposes more than one. */
+@Composable
+internal fun BackendSwitcher(
+    backends: List<RemoteBackend>,
+    selectedBackendId: String,
+    onSelect: (String) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        backends.forEach { backend ->
+            FilterChip(
+                selected = backend.id == selectedBackendId,
+                onClick = { onSelect(backend.id) },
+                label = { Text(backend.name, maxLines = 1) },
+                leadingIcon = {
+                    if (backend.id == selectedBackendId) {
+                        Text("✓", style = MaterialTheme.typography.labelMedium)
+                    }
+                },
+            )
+        }
+    }
 }

@@ -208,6 +208,7 @@ data class RemoteLogicalEvent(
     val hostId: String,
     val deviceId: String,
     val runId: String,
+    val backendId: String? = null,
     val sequence: Long,
     val type: String,
     val payload: JsonElement?,
@@ -227,6 +228,7 @@ internal fun parseRemoteLogicalEvent(raw: String): RemoteLogicalEvent {
         hostId = root.requiredString("hostId"),
         deviceId = root.requiredString("deviceId"),
         runId = root.requiredString("runId"),
+        backendId = root.string("backendId"),
         sequence = sequence,
         type = root.requiredString("type"),
         payload = root["payload"]?.takeUnless { it is JsonNull },
@@ -336,6 +338,8 @@ data class RemoteNotification(
 data class RemoteUiState(
     val connectionStatus: RemoteConnectionStatus = RemoteConnectionStatus.DISCONNECTED,
     val errorMessage: String? = null,
+    val backends: List<RemoteBackend> = emptyList(),
+    val selectedBackendId: String = DEFAULT_BACKEND_ID,
     val threads: List<RemoteThread> = emptyList(),
     val selectedThreadId: String? = null,
     val activeThreadId: String? = null,
@@ -352,6 +356,39 @@ data class RemoteUiState(
     val workspaceCandidatesLoaded: Boolean = false,
     val capabilities: Set<String> = emptySet(),
 )
+
+const val DEFAULT_BACKEND_ID = "codex"
+
+/**
+ * The legacy single-backend view used when a host.status payload predates M4
+ * (no `backends` array): one codex backend carrying the host-level
+ * capabilities.
+ */
+internal fun fallbackRemoteBackends(hostCapabilities: Set<String>): List<RemoteBackend> = listOf(
+    RemoteBackend(
+        id = DEFAULT_BACKEND_ID,
+        name = "Codex",
+        capabilities = hostCapabilities,
+    ),
+)
+
+/** Keeps the selected backend valid after a host.status refresh. */
+internal fun reconcileSelectedBackend(
+    selected: String,
+    backends: List<RemoteBackend>,
+): String = if (backends.any { it.id == selected }) selected else DEFAULT_BACKEND_ID
+
+/**
+ * Attaches the selected backend id to a command payload unless it already
+ * carries one (outbox replays keep their original backend).
+ */
+internal fun injectBackendId(payload: JsonObject, backendId: String): JsonObject {
+    if (payload.containsKey("backendId")) return payload
+    return buildJsonObject {
+        payload.forEach { (key, value) -> put(key, value) }
+        put("backendId", JsonPrimitive(backendId))
+    }
+}
 
 internal fun parsePairingPayload(raw: String, now: Long = System.currentTimeMillis()): RemotePairingPayload {
     val root = Json.parseToJsonElement(raw.trim()).jsonObject

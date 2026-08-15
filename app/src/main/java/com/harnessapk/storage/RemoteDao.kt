@@ -15,14 +15,17 @@ interface RemoteDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertBinding(binding: ProjectRemoteBindingEntity)
 
-    @Query("SELECT * FROM project_remote_bindings WHERE projectId = :projectId LIMIT 1")
-    suspend fun bindingForProject(projectId: String): ProjectRemoteBindingEntity?
+    @Query("SELECT * FROM project_remote_bindings WHERE projectId = :projectId AND backendId = :backendId LIMIT 1")
+    suspend fun bindingForProject(projectId: String, backendId: String): ProjectRemoteBindingEntity?
 
     @Query("DELETE FROM project_remote_bindings WHERE id = :bindingId")
     suspend fun deleteBindingById(bindingId: String)
 
+    @Query("DELETE FROM project_remote_bindings WHERE projectId = :projectId AND backendId = :backendId")
+    suspend fun deleteBindingByProject(projectId: String, backendId: String)
+
     @Query("DELETE FROM project_remote_bindings WHERE projectId = :projectId")
-    suspend fun deleteBindingByProject(projectId: String)
+    suspend fun deleteBindingsByProject(projectId: String)
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertRun(run: RemoteRunEntity)

@@ -41,6 +41,7 @@ class RemoteRunLauncher(
             bindingId = binding.id,
             bindingSnapshotJson = canonicalJson(bindingSnapshot),
             hostId = binding.hostId,
+            backendId = binding.backendId,
             threadId = null,
             turnId = null,
             objective = normalizedObjective,
@@ -88,6 +89,7 @@ class RemoteRunLauncher(
 
     private fun bindingSnapshot(binding: ProjectRemoteBindingEntity): JsonObject = buildJsonObject {
         put("bindingId", binding.id)
+        put("backendId", binding.backendId)
         put("hostId", binding.hostId)
         put("workspaceId", binding.workspaceId)
         put("displayName", binding.displayName)
