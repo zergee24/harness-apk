@@ -761,6 +761,7 @@ internal fun remoteTimelineKindLabel(kind: String): String = when (kind) {
     "commandExecution" -> "命令"
     "fileChange" -> "文件变更"
     "reasoning" -> "思考"
+    "continuation" -> "大会话续聊"
     else -> "远程事件"
 }
 

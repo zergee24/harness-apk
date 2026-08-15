@@ -37,7 +37,7 @@ internal fun remoteRpcErrorMessage(payload: JsonElement?): String {
         raw.contains("not materialized", ignoreCase = true) -> "会话正在初始化，请先发送第一条消息"
         raw.contains("token too long", ignoreCase = true) -> "会话内容过大，Mac Bridge 需要升级后重试"
         raw.contains("too large to resume remotely", ignoreCase = true) ->
-            "历史会话内容过大，请在同一工作目录新建会话继续"
+            "Mac Bridge 版本过旧，请升级后重试大会话"
         raw.contains("deadline exceeded", ignoreCase = true) -> "Mac 恢复会话超时，请稍后重试或新建会话"
         else -> "Mac 返回错误，请稍后重试"
     }
@@ -594,26 +594,80 @@ class RemoteRepository(
             }
                 ?: run { _state.value = _state.value.copy(isOlderTimelineLoading = false) }
             "turn.start" -> {
-                val turnId = event.payload?.jsonObject?.get("result")?.jsonObject?.get("turn")?.jsonObject?.string("id")
-                val threadId = pendingThreadId ?: _state.value.selectedThreadId
-                val startedAtMillis = _state.value.threads.firstOrNull { it.id == threadId }
+                val result = event.payload?.jsonObject?.get("result") as? JsonObject
+                val turnId = result?.get("turn")?.jsonObject?.string("id")
+                val continuation = (result?.get("continuation") as? JsonObject)?.takeIf {
+                    val sourceThreadId = it.string("continuedFromThreadId")
+                    val continuationThreadId = it.string("threadId")
+                    continuationThreadId?.isNotBlank() == true && sourceThreadId == pendingThreadId
+                }
+                val threadId = continuation?.string("threadId") ?: pendingThreadId ?: _state.value.selectedThreadId
+                val current = _state.value
+                val startedAtMillis = current.threads.firstOrNull { it.id == threadId }
                     ?.execution
                     ?.startedAtMillis
                     ?: System.currentTimeMillis()
-                _state.value = _state.value.copy(
-                    activeThreadId = threadId,
-                    activeTurnId = turnId,
-                    isWorking = threadId != null && threadId == _state.value.selectedThreadId,
-                    timeline = _state.value.timeline.withPendingTurnStatus(event.requestId, "sent"),
-                    threads = _state.value.threads.withExecution(
-                        threadId,
-                        RemoteThreadExecution(
-                            state = RemoteThreadExecutionState.RUNNING,
-                            turnId = turnId,
-                            startedAtMillis = startedAtMillis,
-                        ),
-                    ),
+                val execution = RemoteThreadExecution(
+                    state = RemoteThreadExecutionState.RUNNING,
+                    turnId = turnId,
+                    startedAtMillis = startedAtMillis,
                 )
+                val sentTimeline = current.timeline.withPendingTurnStatus(event.requestId, "sent")
+                if (continuation != null && threadId != null) {
+                    val sourceThreadId = continuation.string("continuedFromThreadId").orEmpty()
+                    val pendingItemId = event.requestId?.let { "pending-user:$it" }
+                    val pendingItem = sentTimeline.firstOrNull { it.id == pendingItemId }
+                    val sourceThread = current.threads.firstOrNull { it.id == sourceThreadId }
+                    val continuationThread = current.threads.firstOrNull { it.id == threadId }?.copy(
+                        execution = execution,
+                    ) ?: RemoteThread(
+                        id = threadId,
+                        title = sourceThread?.title?.takeIf(String::isNotBlank)?.let { "$it · 续聊" } ?: "大会话续聊",
+                        preview = pendingItem?.text.orEmpty(),
+                        cwd = continuation.string("cwd") ?: sourceThread?.cwd,
+                        updatedAt = System.currentTimeMillis(),
+                        status = "active",
+                        latestUserMessage = pendingItem?.text,
+                        execution = execution,
+                    )
+                    val sourcePreserved = current.threads
+                        .filterNot { it.id == threadId }
+                        .map { thread ->
+                            if (thread.id == sourceThreadId) {
+                                thread.copy(execution = RemoteThreadExecution(RemoteThreadExecutionState.UNKNOWN))
+                            } else {
+                                thread
+                            }
+                        }
+                    selectionGeneration += 1
+                    requestedThreadSummaries.remove(sourceThreadId)
+                    _state.value = current.copy(
+                        selectedThreadId = threadId,
+                        activeThreadId = threadId,
+                        activeTurnId = turnId,
+                        isWorking = true,
+                        timeline = listOf(
+                            RemoteTimelineItem(
+                                id = "continuation:$threadId",
+                                kind = "continuation",
+                                text = "历史较长，已懒加载最近上下文并在同一工作目录创建续聊会话。原会话仍保留，可随时返回查看。",
+                            ),
+                        ) + listOfNotNull(pendingItem),
+                        threads = listOf(continuationThread) + sourcePreserved,
+                        approvals = emptyList(),
+                        isTimelineLoading = false,
+                        olderTimelineCursor = null,
+                        isOlderTimelineLoading = false,
+                    )
+                } else {
+                    _state.value = current.copy(
+                        activeThreadId = threadId,
+                        activeTurnId = turnId,
+                        isWorking = threadId != null && threadId == current.selectedThreadId,
+                        timeline = sentTimeline,
+                        threads = current.threads.withExecution(threadId, execution),
+                    )
+                }
             }
         }
     }

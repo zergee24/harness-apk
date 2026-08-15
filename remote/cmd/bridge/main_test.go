@@ -65,6 +65,7 @@ func TestHostStatusAdvertisesAdditiveM2AndM3Capabilities(t *testing.T) {
 		"thread-history-pagination.v1",
 		"thread-latest-user-message.v1",
 		"thread-execution-status.v1",
+		"thread-lazy-continuation.v1",
 	}
 	if !reflect.DeepEqual(payload.Capabilities, want) {
 		t.Fatalf("capabilities=%#v", payload.Capabilities)
@@ -502,13 +503,24 @@ func TestThreadReadUsesPaginatedSummaryHistoryInsteadOfFullRollout(t *testing.T)
 		_ = serverWriter.Close()
 		_ = reader.Close()
 	})
+	initialState := bridgeState{
+		DeviceSecrets:   map[string]string{"device-1": "invalid-on-purpose"},
+		Sequences:       map[string]uint64{},
+		PendingOutbound: map[string]map[string]string{},
+	}
+	diskState := cloneBridgeState(initialState)
+	responsePersisted := make(chan struct{}, 1)
 	b := &bridge{
-		app:  &appProcess{client: client},
-		path: filepath.Join(t.TempDir(), "state.json"),
-		state: bridgeState{
-			DeviceSecrets:   map[string]string{"device-1": "invalid-on-purpose"},
-			Sequences:       map[string]uint64{},
-			PendingOutbound: map[string]map[string]string{},
+		app: &appProcess{client: client}, state: initialState,
+		updateState: func(_ string, update func(*bridgeState) error) error {
+			if err := update(&diskState); err != nil {
+				return err
+			}
+			select {
+			case responsePersisted <- struct{}{}:
+			default:
+			}
+			return nil
 		},
 	}
 
@@ -525,6 +537,11 @@ func TestThreadReadUsesPaginatedSummaryHistoryInsteadOfFullRollout(t *testing.T)
 	second := <-requests
 	if second.Method != "thread/turns/list" || second.Params["itemsView"] != "summary" || second.Params["sortDirection"] != "desc" {
 		t.Fatalf("second request=%s params=%#v; mobile history must use descending summary pages", second.Method, second.Params)
+	}
+	select {
+	case <-responsePersisted:
+	case <-time.After(time.Second):
+		t.Fatal("thread.read did not finish persisting its async response state")
 	}
 }
 
@@ -558,13 +575,24 @@ func TestThreadSummaryReadsOnlyRecentSummaryTurns(t *testing.T) {
 		_ = serverWriter.Close()
 		_ = reader.Close()
 	})
+	initialState := bridgeState{
+		DeviceSecrets:   map[string]string{"device-1": "invalid-on-purpose"},
+		Sequences:       map[string]uint64{},
+		PendingOutbound: map[string]map[string]string{},
+	}
+	diskState := cloneBridgeState(initialState)
+	responsePersisted := make(chan struct{}, 1)
 	b := &bridge{
-		app:  &appProcess{client: client},
-		path: filepath.Join(t.TempDir(), "state.json"),
-		state: bridgeState{
-			DeviceSecrets:   map[string]string{"device-1": "invalid-on-purpose"},
-			Sequences:       map[string]uint64{},
-			PendingOutbound: map[string]map[string]string{},
+		app: &appProcess{client: client}, state: initialState,
+		updateState: func(_ string, update func(*bridgeState) error) error {
+			if err := update(&diskState); err != nil {
+				return err
+			}
+			select {
+			case responsePersisted <- struct{}{}:
+			default:
+			}
+			return nil
 		},
 	}
 
@@ -583,6 +611,11 @@ func TestThreadSummaryReadsOnlyRecentSummaryTurns(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("thread.summary did not request a bounded summary page")
+	}
+	select {
+	case <-responsePersisted:
+	case <-time.After(time.Second):
+		t.Fatal("thread.summary did not finish persisting its async response state")
 	}
 }
 
@@ -881,7 +914,47 @@ func TestLegacyTurnStartResumesPersistedThreadBeforeSafeRetry(t *testing.T) {
 	}
 }
 
-func TestLegacyTurnStartRejectsAnOversizedPersistedThreadBeforeResume(t *testing.T) {
+func TestLegacyTurnStartDoesNotAttemptAnUnboundedResumeWhenMetadataReadFails(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var methods []string
+	app := appProcessScripted(t, func(request appServerTestRequest) (json.RawMessage, json.RawMessage) {
+		methods = append(methods, request.Method)
+		switch len(methods) {
+		case 1:
+			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
+		case 2:
+			return nil, json.RawMessage(`{"code":-32603,"message":"metadata unavailable"}`)
+		default:
+			t.Fatalf("unexpected unbounded resume request: %#v", request)
+			return nil, nil
+		}
+	})
+	b := &bridge{app: app, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{
+		Type: "turn.start", RequestID: "request-metadata-failure", ThreadID: "thread-1", Text: "继续任务",
+	}
+
+	_, outcome, err := b.executeTurnStartOnce(
+		context.Background(), "phone-1", command, legacyTurnStartParams(command),
+	)
+
+	if err == nil || outcome != turnRPCFailed || !strings.Contains(err.Error(), "metadata unavailable") {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if !reflect.DeepEqual(methods, []string{"turn/start", "thread/read"}) {
+		t.Fatalf("methods=%v", methods)
+	}
+}
+
+func TestLegacyTurnStartContinuesAnOversizedPersistedThreadWithoutResume(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
 	if err != nil {
@@ -910,9 +983,16 @@ func TestLegacyTurnStartRejectsAnOversizedPersistedThreadBeforeResume(t *testing
 		case 1:
 			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
 		case 2:
-			return json.RawMessage(fmt.Sprintf(`{"thread":{"id":"thread-1","path":%q}}`, rolloutPath)), nil
+			return json.RawMessage(fmt.Sprintf(`{"thread":{"id":"thread-1","cwd":"/workspace/project","path":%q}}`, rolloutPath)), nil
+		case 3:
+			return json.RawMessage(`{"data":[{"id":"turn-new","items":[{"id":"user-new","type":"userMessage","text":"最新用户要求"},{"id":"agent-new","type":"agentMessage","text":"最新处理结论"},{"id":"tool-new","type":"commandExecution","command":"printenv VERY_SECRET"}]},{"id":"turn-old","items":[{"id":"user-old","type":"userMessage","text":"较早用户背景"},{"id":"agent-old","type":"agentMessage","text":"较早处理结论"}]}]}`), nil
+		case 4:
+			return json.RawMessage(`{"thread":{"id":"thread-continuation"},"cwd":"/workspace/project"}`), nil
+		case 5:
+			return json.RawMessage(`{"turn":{"id":"turn-real"}}`), nil
 		default:
-			return json.RawMessage(`{"turn":{"id":"turn-unexpected"}}`), nil
+			t.Fatalf("unexpected app-server request: %#v", request)
+			return nil, nil
 		}
 	})
 	b := &bridge{
@@ -922,19 +1002,74 @@ func TestLegacyTurnStartRejectsAnOversizedPersistedThreadBeforeResume(t *testing
 		Type: "turn.start", RequestID: "request-oversized", ThreadID: "thread-1", Text: "继续任务",
 	}
 
-	_, outcome, err := b.executeTurnStartOnce(
+	result, outcome, err := b.executeTurnStartOnce(
 		context.Background(), "phone-1", command, legacyTurnStartParams(command),
 	)
 
-	if err == nil || outcome != turnRPCFailed || !strings.Contains(err.Error(), "too large") {
-		t.Fatalf("outcome=%q err=%v", outcome, err)
+	if err != nil || outcome != turnRPCSucceeded {
+		t.Fatalf("result=%s outcome=%q err=%v", result, outcome, err)
 	}
 	methods := make([]string, len(requests))
 	for index := range requests {
 		methods[index] = requests[index].Method
 	}
-	if !reflect.DeepEqual(methods, []string{"turn/start", "thread/read"}) {
+	if !reflect.DeepEqual(methods, []string{"turn/start", "thread/read", "thread/turns/list", "thread/start", "turn/start"}) {
 		t.Fatalf("methods=%v", methods)
+	}
+	if requests[2].Params["threadId"] != "thread-1" || requests[2].Params["limit"] != float64(8) && requests[2].Params["limit"] != 8 || requests[2].Params["itemsView"] != "summary" {
+		t.Fatalf("lazy history params=%#v", requests[2].Params)
+	}
+	if requests[3].Params["cwd"] != "/workspace/project" {
+		t.Fatalf("continuation thread params=%#v", requests[3].Params)
+	}
+	if requests[4].Params["threadId"] != "thread-continuation" || requests[4].Params["clientUserMessageId"] != "request-oversized" {
+		t.Fatalf("continuation turn params=%#v", requests[4].Params)
+	}
+	input := requests[4].Params["input"].([]any)
+	if len(input) != 1 || input[0].(map[string]any)["text"] != "继续任务" {
+		t.Fatalf("continuation input=%#v", input)
+	}
+	additional := requests[4].Params["additionalContext"].(map[string]any)
+	history := additional["harness.lazyContinuation.history"].(map[string]any)
+	if history["kind"] != "untrusted" {
+		t.Fatalf("history context=%#v", history)
+	}
+	handoff, _ := history["value"].(string)
+	for _, expected := range []string{"较早用户背景", "较早处理结论", "最新用户要求", "最新处理结论"} {
+		if !strings.Contains(handoff, expected) {
+			t.Fatalf("handoff missing %q: %q", expected, handoff)
+		}
+	}
+	if strings.Contains(handoff, "printenv VERY_SECRET") || len([]byte(handoff)) > maxMobilePaginatedTextBytes {
+		t.Fatalf("handoff leaked tool output or exceeded bound: %q", handoff)
+	}
+	var response struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+		Continuation struct {
+			ThreadID              string `json:"threadId"`
+			ContinuedFromThreadID string `json:"continuedFromThreadId"`
+			CWD                   string `json:"cwd"`
+		} `json:"continuation"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Turn.ID != "turn-real" || response.Continuation.ThreadID != "thread-continuation" || response.Continuation.ContinuedFromThreadID != "thread-1" || response.Continuation.CWD != "/workspace/project" {
+		t.Fatalf("continuation result=%s", result)
+	}
+	if _, ok := routes.ByThreadTurn("thread-1", "turn-real"); ok {
+		t.Fatal("continuation turn must not be routed under the oversized source thread")
+	}
+	if route, ok := routes.ByThreadTurn("thread-continuation", "turn-real"); !ok || route.DeviceID != "phone-1" {
+		t.Fatalf("continuation route=%#v ok=%v", route, ok)
+	}
+	replayed, replayedOutcome, replayedErr := b.executeTurnStartOnce(
+		context.Background(), "phone-1", command, legacyTurnStartParams(command),
+	)
+	if replayedErr != nil || replayedOutcome != turnRPCSucceeded || string(replayed) != string(result) || len(requests) != 5 {
+		t.Fatalf("replayed=%s outcome=%q err=%v appCalls=%d", replayed, replayedOutcome, replayedErr, len(requests))
 	}
 }
 

@@ -238,3 +238,10 @@ ANDROID_SERIAL=emulator-15672 \
 - 完整入口：`remote/scripts/m3-automated-acceptance.sh`。日志 `/tmp/harness-m3-acceptance-20260809/final-full`；`android-jvm-assemble.log`、`android-connected.log`、`go-race.log`、`go-vet.log`、`go-build.log` 的 SHA-256 已本地记录。
 - 首次完整运行在既有 50k 性能 fixture 暴露 v23 NOT NULL 列缺失，222 项中 1 项失败；按 RED 证据补齐 fixture 后定向 `2/2`，第二次完整运行 `222/222`。两次运行的 trap 均关闭 AVD/ADB，最终 `5041/15672/15673` 均无监听。
 - 自动化已完成；尚未完成的只剩验收台账列出的荣耀真机、真实 Relay/Mac/Codex、TalkBack 和真实 Commit/Push 人工 Gate。
+
+### 2026-08-15 test 集成回归：大会话懒续聊
+
+- 真机问题：未加载的 403 MiB 持久会话在手机发消息时先长期停留“发送中”；直接 `thread/resume` 会触发高 CPU 全量恢复，临时拒绝大会话又错误缩小了产品边界。
+- 最终契约：常规会话保持原 threadId 安全恢复；超过直接恢复边界时，Bridge 只分页读取最近 8 个 Turn 的 summary，提取用户/Codex 文本并限制为 24 KiB，以 `untrusted additionalContext` 交给同 cwd 新 Thread。Android 自动选中新 Thread、保留原 Thread，并显示“大会话续聊”说明；实际用户输入不会混入内部 handoff。
+- TDD：Bridge 大会话用例先因旧的明确拒绝 RED，Android 用例先因仍停留原 Thread RED；实现后直接恢复/懒续聊/稳定 command identity/新 route/自动切换全部 GREEN。异步 summary 测试暴露一次 TempDir 清理竞态，改为等待响应状态后定向 race 连续 10 轮通过。
+- 最终统一自动化：JVM `1142/1142`、connected `261/261`、0 skipped/failed；Go `115` pass test/subtest event、11 package，race/vet/build 通过。专用环境 `HarnessM3Api36`、ADB `5041`、serial `emulator-15672`，结束后 `5041/15672/15673` 均无监听。日志：`/tmp/harness-stuck-sending-20260815/m3-lazy-continuation`。

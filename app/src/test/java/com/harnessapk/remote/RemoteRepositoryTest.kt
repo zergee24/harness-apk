@@ -343,6 +343,65 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun oversizedThreadContinuationKeepsSourceAndAutomaticallySelectsTheNewThread() {
+        val requestId = "turn.start:continuation"
+        val repository = repositoryWithPendingTurnStart(requestId)
+        val stateField = RemoteRepository::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutableState = stateField.get(repository) as MutableStateFlow<RemoteUiState>
+        mutableState.value = mutableState.value.copy(
+            threads = listOf(
+                RemoteThread(
+                    id = "thread-a",
+                    title = "历史大会话",
+                    preview = "旧消息",
+                    cwd = "/workspace",
+                    updatedAt = 1L,
+                    status = "active",
+                    execution = RemoteThreadExecution(RemoteThreadExecutionState.RUNNING),
+                ),
+            ),
+        )
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = requestId,
+                payload = Json.parseToJsonElement(
+                    """{
+                      "result":{
+                        "turn":{"id":"turn-continuation"},
+                        "continuation":{
+                          "schemaVersion":1,
+                          "threadId":"thread-new",
+                          "continuedFromThreadId":"thread-a",
+                          "cwd":"/workspace",
+                          "historyMode":"recent"
+                        }
+                      }
+                    }""",
+                ),
+            ),
+        )
+
+        val state = repository.state.value
+        assertEquals("thread-new", state.selectedThreadId)
+        assertEquals("thread-new", state.activeThreadId)
+        assertEquals("turn-continuation", state.activeTurnId)
+        assertTrue(state.isWorking)
+        assertEquals(listOf("thread-new", "thread-a"), state.threads.map(RemoteThread::id))
+        assertEquals(RemoteThreadExecutionState.RUNNING, state.threads.first().execution.state)
+        assertEquals(RemoteThreadExecutionState.UNKNOWN, state.threads.last().execution.state)
+        assertEquals(2, state.timeline.size)
+        assertEquals("continuation", state.timeline.first().kind)
+        assertTrue(state.timeline.first().text.contains("原会话仍保留"))
+        assertEquals("继续任务", state.timeline.last().text)
+        assertEquals("sent", state.timeline.last().status)
+        assertFalse(state.timeline.any { it.text.contains("harness.lazyContinuation") })
+        assertEquals(null, state.olderTimelineCursor)
+    }
+
+    @Test
     fun failedTurnStartShowsFailureInsteadOfPermanentSending() {
         val repository = repositoryWithPendingTurnStart("turn.start:failed")
 
@@ -399,7 +458,7 @@ class RemoteRepositoryTest {
         assertEquals("sendFailed", repository.state.value.timeline.single().status)
         assertFalse(repository.state.value.isWorking)
         assertEquals(RemoteThreadExecutionState.FAILED, repository.state.value.threads.single().execution.state)
-        assertEquals("历史会话内容过大，请在同一工作目录新建会话继续", repository.state.value.errorMessage)
+        assertEquals("Mac Bridge 版本过旧，请升级后重试大会话", repository.state.value.errorMessage)
     }
 
     @Test

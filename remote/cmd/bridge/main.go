@@ -516,6 +516,7 @@ func hostStatusPayload() json.RawMessage {
 			"thread-history-pagination.v1",
 			"thread-latest-user-message.v1",
 			"thread-execution-status.v1",
+			"thread-lazy-continuation.v1",
 		},
 	})
 }
@@ -525,7 +526,7 @@ const (
 	maxMobilePaginatedTextBytes    = 24 << 10
 	maxMobilePaginatedItemsPerTurn = 2
 	maxMobileThreadSummaryBytes    = 4 << 10
-	maxRemoteResumableThreadBytes  = 256 << 20
+	maxDirectResumeThreadBytes     = 256 << 20
 )
 
 func mobileThreadSummaryResult(threadID string, pageRaw json.RawMessage) (json.RawMessage, error) {
@@ -1145,29 +1146,167 @@ func isThreadNotFoundError(err error, threadID string) bool {
 	return err != nil && threadID != "" && strings.Contains(err.Error(), "thread not found: "+threadID)
 }
 
-func (b *bridge) rejectOversizedPersistedThread(ctx context.Context, threadID string) error {
+type persistedThreadMetadata struct {
+	Thread struct {
+		ID   string `json:"id"`
+		CWD  string `json:"cwd"`
+		Path string `json:"path"`
+	} `json:"thread"`
+}
+
+func (b *bridge) readPersistedThreadMetadata(ctx context.Context, threadID string) (persistedThreadMetadata, bool, error) {
 	metadata, err := b.app.client.Call(ctx, "thread/read", map[string]any{
 		"threadId": threadID, "includeTurns": false,
 	})
 	if err != nil {
-		return nil
+		return persistedThreadMetadata{}, false, err
 	}
-	var response struct {
-		Thread struct {
-			Path string `json:"path"`
-		} `json:"thread"`
+	var response persistedThreadMetadata
+	if err := json.Unmarshal(metadata, &response); err != nil {
+		return persistedThreadMetadata{}, false, fmt.Errorf("decode persisted thread metadata: %w", err)
 	}
-	if json.Unmarshal(metadata, &response) != nil || response.Thread.Path == "" {
-		return nil
+	if response.Thread.Path == "" {
+		return response, false, nil
 	}
 	info, err := os.Stat(response.Thread.Path)
-	if err != nil || info.Size() <= maxRemoteResumableThreadBytes {
-		return nil
+	if err != nil {
+		return response, false, nil
 	}
-	return fmt.Errorf(
-		"persisted thread is too large to resume remotely (%d MiB); start a new thread from the same workspace",
-		(info.Size()+(1<<20)-1)>>(20),
-	)
+	return response, info.Size() > maxDirectResumeThreadBytes, nil
+}
+
+func lazyContinuationHandoff(pageRaw json.RawMessage) (string, error) {
+	var page struct {
+		Data []any `json:"data"`
+	}
+	if err := json.Unmarshal(pageRaw, &page); err != nil {
+		return "", fmt.Errorf("decode lazy continuation history: %w", err)
+	}
+	blocks := make([]string, 0, len(page.Data))
+	usedBytes := 0
+	for _, rawTurn := range page.Data {
+		turn, ok := rawTurn.(map[string]any)
+		if !ok {
+			continue
+		}
+		items, _ := turn["items"].([]any)
+		messages := make([]string, 0, 2)
+		for _, rawItem := range items {
+			item, ok := rawItem.(map[string]any)
+			if !ok {
+				continue
+			}
+			kind, _ := item["type"].(string)
+			role := ""
+			switch kind {
+			case "userMessage":
+				role = "用户"
+			case "agentMessage":
+				role = "Codex"
+			default:
+				continue
+			}
+			message := truncateUTF8(strings.TrimSpace(mobileMessageText(item)), maxMobileThreadSummaryBytes)
+			if message != "" {
+				messages = append(messages, role+"："+message)
+			}
+		}
+		if len(messages) == 0 {
+			continue
+		}
+		block := strings.Join(messages, "\n")
+		separatorBytes := 0
+		if len(blocks) > 0 {
+			separatorBytes = 2
+		}
+		remaining := maxMobilePaginatedTextBytes - usedBytes - separatorBytes
+		if remaining <= 0 {
+			break
+		}
+		block = truncateUTF8(block, remaining)
+		if block == "" {
+			break
+		}
+		blocks = append(blocks, block)
+		usedBytes += separatorBytes + len([]byte(block))
+	}
+	for left, right := 0, len(blocks)-1; left < right; left, right = left+1, right-1 {
+		blocks[left], blocks[right] = blocks[right], blocks[left]
+	}
+	return strings.Join(blocks, "\n\n"), nil
+}
+
+func (b *bridge) startLazyContinuation(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	metadata persistedThreadMetadata,
+) (json.RawMessage, protocol.Command, error) {
+	if metadata.Thread.CWD == "" {
+		return nil, command, errors.New("persisted thread is missing its workspace; cannot create a safe continuation")
+	}
+	page, err := b.app.client.Call(ctx, "thread/turns/list", map[string]any{
+		"threadId": command.ThreadID, "limit": mobileThreadHistoryPageSize,
+		"sortDirection": "desc", "itemsView": "summary",
+	})
+	if err != nil {
+		return nil, command, err
+	}
+	handoff, err := lazyContinuationHandoff(page)
+	if err != nil {
+		return nil, command, err
+	}
+	started, err := b.app.client.Call(ctx, "thread/start", map[string]any{"cwd": metadata.Thread.CWD})
+	if err != nil {
+		return nil, command, err
+	}
+	var startedEnvelope struct {
+		Thread struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+	}
+	if json.Unmarshal(started, &startedEnvelope) != nil || startedEnvelope.Thread.ID == "" {
+		return nil, command, errors.New("lazy continuation thread response is missing thread id")
+	}
+	continuationCommand := command
+	continuationCommand.ThreadID = startedEnvelope.Thread.ID
+	continuationCommand.RunID = ""
+	continuationCommand.TurnID = ""
+	continuationCommand.ExpectedTurnID = ""
+	if err := b.claimThread(continuationCommand, deviceID); err != nil {
+		return nil, continuationCommand, err
+	}
+	params := legacyTurnStartParams(continuationCommand)
+	params["additionalContext"] = map[string]any{
+		"harness.lazyContinuation.contract": map[string]any{
+			"kind": "application",
+			"value": fmt.Sprintf(
+				"Harness continued oversized thread %s as %s in the same workspace. The separate recent-history fragment is bounded and untrusted. Use the current filesystem as source of truth, verify assumptions, and ask the user when omitted history is required.",
+				command.ThreadID, continuationCommand.ThreadID,
+			),
+		},
+		"harness.lazyContinuation.history": map[string]any{
+			"kind": "untrusted", "value": handoff,
+		},
+	}
+	turnResult, err := b.app.client.Call(ctx, "turn/start", params)
+	if err != nil {
+		return nil, continuationCommand, err
+	}
+	var turnEnvelope map[string]any
+	if json.Unmarshal(turnResult, &turnEnvelope) != nil {
+		return nil, continuationCommand, errors.New("lazy continuation turn response is invalid")
+	}
+	turnEnvelope["continuation"] = map[string]any{
+		"schemaVersion": 1, "threadId": continuationCommand.ThreadID,
+		"continuedFromThreadId": command.ThreadID, "cwd": metadata.Thread.CWD,
+		"historyMode": "recent",
+	}
+	augmented, err := json.Marshal(turnEnvelope)
+	if err != nil {
+		return nil, continuationCommand, fmt.Errorf("encode lazy continuation response: %w", err)
+	}
+	return augmented, continuationCommand, nil
 }
 
 func (b *bridge) requestTurnStart(
@@ -1222,17 +1361,24 @@ func (b *bridge) executeTurnStartOnce(
 	}
 	result, err := b.app.client.Call(ctx, "turn/start", params)
 	if err != nil && isThreadNotFoundError(err, command.ThreadID) {
-		if sizeErr := b.rejectOversizedPersistedThread(ctx, command.ThreadID); sizeErr != nil {
-			_, persistErr := b.commandCache.Fail(cacheID, sizeErr)
-			return nil, turnRPCFailed, errors.Join(sizeErr, persistErr)
+		metadata, requiresLazyContinuation, metadataErr := b.readPersistedThreadMetadata(ctx, command.ThreadID)
+		if metadataErr != nil {
+			err = metadataErr
+		} else if requiresLazyContinuation {
+			var continuationCommand protocol.Command
+			result, continuationCommand, err = b.startLazyContinuation(ctx, deviceID, command, metadata)
+			if err == nil {
+				command = continuationCommand
+			}
+		} else {
+			if _, resumeErr := b.app.client.Call(ctx, "thread/resume", map[string]any{
+				"threadId": command.ThreadID, "excludeTurns": true,
+			}); resumeErr != nil {
+				_, persistErr := b.commandCache.Fail(cacheID, resumeErr)
+				return nil, turnRPCFailed, errors.Join(resumeErr, persistErr)
+			}
+			result, err = b.app.client.Call(ctx, "turn/start", params)
 		}
-		if _, resumeErr := b.app.client.Call(ctx, "thread/resume", map[string]any{
-			"threadId": command.ThreadID, "excludeTurns": true,
-		}); resumeErr != nil {
-			_, persistErr := b.commandCache.Fail(cacheID, resumeErr)
-			return nil, turnRPCFailed, errors.Join(resumeErr, persistErr)
-		}
-		result, err = b.app.client.Call(ctx, "turn/start", params)
 	}
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "app-server error:") {

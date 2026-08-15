@@ -91,3 +91,11 @@
 - 自动化签署条件已满足：最终工作树 JVM/assemble、全量 connected、40 Query、两组 10k p95、Go 门禁和脚本清理均有同一候选版本成功日志。
 - 人工签署条件：上列荣耀真机、真实 Relay/Mac/Codex、来源回跳/Diff、Commit/Push 边界全部完成并记录。
 - 自动化 PASS 不授权自动发布、自动合并、自动 Commit/Push 或跳过真实外部系统人工验收。
+
+## 2026-08-15 test 集成补充
+
+- [x] 未加载常规历史会话：同 threadId、同 `clientUserMessageId` 恢复后安全重试。
+- [x] 超过直接恢复边界的大会话：最近 8 Turn / 24 KiB 懒续聊，同 cwd 新 Thread，旧 Thread 保留，工具输出不复制。
+- [x] Android 收到 continuation envelope 后自动切换新 Thread；内部 handoff 不进入时间线，用户消息从“发送中”转为已送达。
+- [x] 最终 JVM `1142/1142`、专用 AVD connected `261/261`、Go `115` pass test/subtest event；race/vet/build 与端口清理通过。
+- 日志：`/tmp/harness-stuck-sending-20260815/m3-lazy-continuation`。

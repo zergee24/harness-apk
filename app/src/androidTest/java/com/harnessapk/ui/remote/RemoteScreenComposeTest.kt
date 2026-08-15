@@ -395,14 +395,21 @@ class RemoteScreenComposeTest {
     }
 
     @Test
-    fun detailErrorBannerExplainsWhyAnOversizedHistoryCannotContinue() {
+    fun lazyContinuationNoticeExplainsThatTheSourceThreadWasPreserved() {
         composeRule.setContent {
             HarnessApkTheme {
-                RemoteThreadErrorBanner("历史会话内容过大，请在同一工作目录新建会话继续")
+                TimelineCard(
+                    RemoteTimelineItem(
+                        id = "continuation:thread-new",
+                        kind = "continuation",
+                        text = "历史较长，已懒加载最近上下文并在同一工作目录创建续聊会话。原会话仍保留，可随时返回查看。",
+                    ),
+                )
             }
         }
 
-        composeRule.onNodeWithText("历史会话内容过大，请在同一工作目录新建会话继续").assertIsDisplayed()
+        composeRule.onNodeWithText("大会话续聊").assertIsDisplayed()
+        composeRule.onNodeWithText("历史较长，已懒加载最近上下文并在同一工作目录创建续聊会话。原会话仍保留，可随时返回查看。").assertIsDisplayed()
     }
 
     @Test
