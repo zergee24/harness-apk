@@ -1,0 +1,115 @@
+package com.harnessapk.remote
+
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class RemoteBackendContractTest {
+
+    @Test
+    fun commandJsonIncludesBackendIdWhenSet() {
+        val raw = RemoteCommand(type = "turn.start", requestId = "r1", backendId = "dsh", threadId = "t1", text = "hi")
+            .toJson().toString()
+        assertTrue(raw.contains("\"backendId\":\"dsh\""))
+    }
+
+    @Test
+    fun commandJsonOmitsBackendIdWhenNull() {
+        val raw = RemoteCommand(type = "thread.list", requestId = "r2").toJson().toString()
+        assertFalse(raw.contains("backendId"))
+    }
+
+    @Test
+    fun parseRemoteEventReadsBackendId() {
+        val event = parseRemoteEvent(
+            """{"type":"codex.event","backendId":"dsh","method":"turn/completed","createdAt":123}""",
+        )
+        assertEquals("dsh", event.backendId)
+        assertEquals("turn/completed", event.method)
+    }
+
+    @Test
+    fun legacyEventWithoutBackendIdParsesNull() {
+        val event = parseRemoteEvent(
+            """{"type":"codex.event","method":"turn/completed","createdAt":123}""",
+        )
+        assertNull(event.backendId)
+    }
+
+    @Test
+    fun parseRemoteBackendsParsesPerBackendCapabilities() {
+        val payload = buildJsonObject {
+            put("schemaVersion", JsonPrimitive(1))
+            put(
+                "backends",
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("id", JsonPrimitive("codex"))
+                            put("name", JsonPrimitive("Codex"))
+                            put(
+                                "capabilities",
+                                buildJsonArray {
+                                    add(JsonPrimitive("run.lifecycle.v1"))
+                                    add(JsonPrimitive("approvals.v1"))
+                                },
+                            )
+                        },
+                    )
+                    add(
+                        buildJsonObject {
+                            put("id", JsonPrimitive("dsh"))
+                            put("name", JsonPrimitive("DeepSeek Harness"))
+                            put(
+                                "capabilities",
+                                buildJsonArray { add(JsonPrimitive("run.lifecycle.v1")) },
+                            )
+                        },
+                    )
+                },
+            )
+        }
+        val event = RemoteEvent(type = "host.status", payload = payload)
+        val backends = parseRemoteBackends(event)
+        assertEquals(2, backends.size)
+        assertEquals("codex", backends[0].id)
+        assertTrue("approvals.v1" in backends[0].capabilities)
+        assertEquals("DeepSeek Harness", backends[1].name)
+        assertFalse("approvals.v1" in backends[1].capabilities)
+    }
+
+    @Test
+    fun legacyHostStatusWithoutBackendsReturnsEmptyList() {
+        val payload = buildJsonObject {
+            put("schemaVersion", JsonPrimitive(1))
+            put("capabilities", buildJsonArray { add(JsonPrimitive("run.lifecycle.v1")) })
+        }
+        val event = RemoteEvent(type = "host.status", payload = payload)
+        assertTrue(parseRemoteBackends(event).isEmpty())
+    }
+
+    @Test
+    fun legacyHostCapabilitiesParsingStillWorks() {
+        val payload = buildJsonObject {
+            put("schemaVersion", JsonPrimitive(1))
+            put(
+                "capabilities",
+                buildJsonArray {
+                    add(JsonPrimitive("run.lifecycle.v1"))
+                    add(JsonPrimitive("logical-replay.v1"))
+                },
+            )
+        }
+        val event = RemoteEvent(type = "host.status", payload = payload)
+        assertEquals(
+            setOf("run.lifecycle.v1", "logical-replay.v1"),
+            parseRemoteHostCapabilities(event),
+        )
+    }
+}
