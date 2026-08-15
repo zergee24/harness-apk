@@ -39,20 +39,21 @@ import (
 type bridgeState = bridgestate.BridgeData
 
 type bridge struct {
-	mu           sync.Mutex
-	writeMu      sync.Mutex
-	state        bridgeState
-	path         string
-	conn         *websocket.Conn
-	backends     map[string]backend.Backend
-	backendOrder []string
-	journal      *journal.Store
-	commandCache *commandcache.Store
-	routes       *runstate.RouteStore
-	terminals    *completion.TerminalRunStore
-	workspaces   *workspace.Registry
-	seen         map[string]time.Time
-	updateState  func(string, func(*bridgeState) error) error
+	mu             sync.Mutex
+	writeMu        sync.Mutex
+	state          bridgeState
+	path           string
+	conn           *websocket.Conn
+	backends       map[string]backend.Backend
+	backendOrder   []string
+	journal        *journal.Store
+	commandCache   *commandcache.Store
+	routes         *runstate.RouteStore
+	terminals      *completion.TerminalRunStore
+	workspaces     *workspace.Registry
+	seen           map[string]time.Time
+	updateState    func(string, func(*bridgeState) error) error
+	backendBackoff time.Duration
 }
 
 func main() {
@@ -309,9 +310,11 @@ func runServe(defaultPath string, args []string) {
 		if err := b.recoverThreadContinuationsFromCommands(); err != nil {
 			log.Printf("recover lazy continuations: %v", err)
 		}
-		if err := b.run(context.Background(), specs); err != nil {
+		serveCtx, cancelServe := context.WithCancel(context.Background())
+		if err := b.run(serveCtx, specs); err != nil {
 			log.Printf("bridge disconnected: %v", err)
 		}
+		cancelServe()
 		b.closeBackends()
 		state, _ = loadBridgeState(*statePath)
 		time.Sleep(3 * time.Second)
@@ -409,10 +412,17 @@ func (b *bridge) run(ctx context.Context, specs []backend.Spec) error {
 		})
 	}
 	// Wait until every backend registered once so the first host.status is
-	// truthful; the relay loop below can serve commands meanwhile.
-	for range specs {
+	// truthful, but never block the relay loop forever on a broken backend
+	// spec: supervisors keep retrying and host.status reports availability.
+	remaining := len(specs)
+	readyDeadline := time.After(60 * time.Second)
+	for remaining > 0 {
 		select {
 		case <-ready:
+			remaining--
+		case <-readyDeadline:
+			log.Printf("timed out waiting for backend readiness (%d pending); continuing", remaining)
+			remaining = 0
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -455,7 +465,10 @@ func (b *bridge) superviseBackend(
 	ready chan<- backend.Backend,
 	start func(backend.Spec) (backend.Backend, error),
 ) {
-	backoff := 3 * time.Second
+	backoff := b.backendBackoff
+	if backoff <= 0 {
+		backoff = 3 * time.Second
+	}
 	announced := false
 	for {
 		bd, err := start(spec)

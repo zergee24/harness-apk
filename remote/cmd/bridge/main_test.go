@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1657,7 +1658,177 @@ func (b *testBackend) Respond(ctx context.Context, ref backend.ServerRequestRef,
 	}, result)
 }
 
-func (b *testBackend) Start(ctx context.Context)                  {}
+func (b *testBackend) Start(ctx context.Context)        {}
 func (b *testBackend) Messages() <-chan backend.Message { return b.messages }
 func (b *testBackend) Done() <-chan error               { return b.client.Done() }
 func (b *testBackend) Close() error                     { return nil }
+
+func TestExecuteCommandRoutesByBackendID(t *testing.T) {
+	codexCalls := make(chan string, 4)
+	dshCalls := make(chan string, 4)
+	codex := backend.NewFake("codex").OnScript("thread/list", func(method string, params any) (json.RawMessage, error) {
+		codexCalls <- method
+		return json.RawMessage(`{"data":[]}`), nil
+	})
+	dsh := backend.NewFake("dsh").OnScript("thread/list", func(method string, params any) (json.RawMessage, error) {
+		dshCalls <- method
+		return json.RawMessage(`{"data":[]}`), nil
+	})
+	b := &bridge{
+		backends:     map[string]backend.Backend{"codex": codex, "dsh": dsh},
+		backendOrder: []string{"codex", "dsh"},
+		state: bridgeState{
+			Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{},
+		},
+	}
+	// A dsh command must reach only the dsh backend.
+	if err := b.executeCommand(context.Background(), "phone-1", protocol.Command{
+		Type: "thread.list", RequestID: "r-dsh", BackendID: "dsh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case method := <-dshCalls:
+		if method != "thread/list" {
+			t.Fatalf("dsh method = %s", method)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dsh backend was not called")
+	}
+	select {
+	case <-codexCalls:
+		t.Fatal("codex backend was called for a dsh command")
+	default:
+	}
+	// An empty backend id defaults to codex.
+	if err := b.executeCommand(context.Background(), "phone-1", protocol.Command{
+		Type: "thread.list", RequestID: "r-codex",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case method := <-codexCalls:
+		if method != "thread/list" {
+			t.Fatalf("codex method = %s", method)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("codex backend was not called")
+	}
+}
+
+func TestExecuteCommandUnknownBackendIsRejectedWithoutCallingOthers(t *testing.T) {
+	called := make(chan struct{}, 1)
+	codex := backend.NewFake("codex").OnScript("thread.list", func(method string, params any) (json.RawMessage, error) {
+		called <- struct{}{}
+		return json.RawMessage(`{"data":[]}`), nil
+	})
+	b := &bridge{
+		backends: map[string]backend.Backend{"codex": codex},
+		state: bridgeState{
+			Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{},
+		},
+	}
+	err := b.executeCommand(context.Background(), "phone-1", protocol.Command{
+		Type: "thread.list", RequestID: "r-aux", BackendID: "aux",
+	})
+	if err == nil {
+		t.Fatal("unknown backend command must fail")
+	}
+	select {
+	case <-called:
+		t.Fatal("a registered backend was called for an unknown backend id")
+	default:
+	}
+}
+
+func TestRouteForParamsScopesEventsToOwningBackend(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-codex", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-codex", BackendID: "codex",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-dsh", HostID: "host-a", DeviceID: "phone-b", ThreadID: "thread-dsh", BackendID: "dsh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes}
+
+	route, ok := b.routeForParams("dsh", json.RawMessage(`{"threadId":"thread-dsh"}`))
+	if !ok || route.RunID != "run-dsh" {
+		t.Fatalf("dsh route = %#v ok=%v", route, ok)
+	}
+	// A dsh event for a codex-owned thread must not route anywhere.
+	if _, ok := b.routeForParams("dsh", json.RawMessage(`{"threadId":"thread-codex"}`)); ok {
+		t.Fatal("dsh event reached a codex-owned thread")
+	}
+	if _, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-dsh"}`)); ok {
+		t.Fatal("codex event reached a dsh-owned thread")
+	}
+}
+
+func TestSuperviseBackendRestartsCrashedBackendAndLeavesOthersAlive(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, backendBackoff: 30 * time.Millisecond}
+	var mu sync.Mutex
+	var codexInstances []*backend.Fake
+	dsh := backend.NewFake("dsh")
+	factory := func(spec backend.Spec) (backend.Backend, error) {
+		f := backend.NewFake(spec.ID)
+		mu.Lock()
+		codexInstances = append(codexInstances, f)
+		mu.Unlock()
+		return f, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan backend.Backend, 2)
+	go b.superviseBackend(ctx, backend.Spec{ID: "codex"}, ready, factory)
+	go b.superviseBackend(ctx, backend.Spec{ID: "dsh"}, ready, func(spec backend.Spec) (backend.Backend, error) {
+		return dsh, nil
+	})
+	firstArrival := <-ready
+	secondArrival := <-ready
+	var codexFirst backend.Backend
+	if firstArrival.ID() == "codex" {
+		codexFirst = firstArrival
+	} else {
+		codexFirst = secondArrival
+	}
+
+	// Crash the codex backend; the dsh backend must keep serving and codex
+	// must be restarted and re-registered.
+	codexFirst.(*backend.Fake).Crash(errors.New("boom"))
+	deadline := time.After(5 * time.Second)
+	for {
+		mu.Lock()
+		count := len(codexInstances)
+		mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("codex backend was not restarted (instances=%d)", count)
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if got := b.backendFor("codex"); got == nil || got == codexFirst {
+		t.Fatal("restarted codex backend is not the active one")
+	}
+	if got := b.backendFor("dsh"); got != dsh {
+		t.Fatal("dsh backend was disturbed by the codex crash")
+	}
+	// The restarted backend can serve a command.
+	if _, err := b.backendFor("codex").Call(context.Background(), "thread/list", map[string]any{}); err != nil {
+		t.Fatalf("restarted backend call failed: %v", err)
+	}
+}
