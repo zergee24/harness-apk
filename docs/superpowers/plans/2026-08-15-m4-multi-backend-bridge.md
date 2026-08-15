@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0/G1 DONE；进入 G2（DSH 后端 v1）
+当前状态：G0/G1/G2 DONE；进入 G3（Android 多后端 UI 与路由）
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -159,11 +159,16 @@ type Backend interface {
 
 **G1 关键决策记录**：Coordinator 层本就依赖 `AppServerCaller` 接口，后端抽象零改动接入；`Backend` 接口的 `Capabilities() []string` 直接采用既有能力名字符串（spec §6.1 的 bool 结构体落为字符串集合，wire 与 Android 门控均以字符串为准）；`sendEvent` 保持无 backendId，新增 `sendBackendEvent` 只在需要归属的事件（后端事件/错误）上打标。
 
-### G2：DSH 后端 v1
+### G2：DSH 后端 v1 — **DONE（2026-08-15）**
 
-- [ ] 按 G0 结论实现 `dshBackend`（A：新增 dsh profile 插件；B：headless 子进程 + resume）。
-- [ ] 事件翻译（agent delta/时间线/完成）对 DSH 生效；无审批能力时正确降级。
-- [ ] Mac 本机端到端验证：Bridge + dsh 后端 + 模拟器（或真机）跑通"发起 → 流式时间线 → 完成"。
+- [x] 正式插件 `remote/dsh/appserver/`（dsh-appserver v0.2.0，取代 G0 spike）：`thread/start`、`turn/start/steer`（多轮）、`thread/read`、`thread/turns/list`（移动端分页摘要视图）、`thread/list`（内存 + `~/.dsh/sessions` 持久化枚举）；事件流对齐 codex 方法名（turn/started、item/agentMessage/delta、turn/completed）；**user/message 形状修正**（dsh 的 user/message data 即消息本体，assistant/message 才是 data.message；空文本条目过滤）。
+- [x] 持久化恢复：通过 dsh 树内 `sessionPersistence` 服务 `loadStored`（多帧 zstd、格式版本、torn 写全由 dsh 处理）；**跨进程验证**：新进程 thread/list 枚举旧线程、thread/read 从磁盘日志恢复出用户文本。
+- [x] 安装脚本 `remote/dsh/install-appserver.sh`（幂等：profile 初始化 + pnpm 依赖（registry 覆盖 + 代理）+ 插件复制 + patch 层）；`remote/README.md` 新增 dsh 后端章节。
+- [x] bridge 接入：`serve --backend dsh`（bare id 注册表：exec `dsh` + `--profile appserver --listen stdio://` + `backend.DSHCapabilities()` = canonical 能力减 approvals.v1/user-input.v1）；`TestParseBackendSpecsKnownDSH` 等单测；**真实 dsh 进程冒烟** `TestDSHBackendSmoke`（initialize + thread/start + 能力断言，无 dsh 自动 skip）。
+- [x] 能力降级生效：dsh 不声明 `approvals.v1`/`user-input.v1`（D4）；`turn/interrupt` v1 返回 unsupported（任务在 Mac 继续跑），记为 G2.5 探索项。
+- [x] 验证证据：`node client.mjs` 12 项断言全过（含持久化探针）；全量 `go vet` + `go test ./...` 12 包全绿。
+
+**G2 关键决策记录**：spike 用轮询 `session.events` 流式；正式版沿用（G2.5 可换 session/event observer 降延迟）。`StartCodex` 的 args 语义改为"spec.Args 非空时完全自持"，否则 dsh 会被拼上 codex 的 `app-server` 参数。
 
 ### G3：Android 多后端 UI 与路由
 
