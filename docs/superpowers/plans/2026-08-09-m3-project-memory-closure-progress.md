@@ -242,6 +242,6 @@ ANDROID_SERIAL=emulator-15672 \
 ### 2026-08-15 test 集成回归：大会话懒续聊
 
 - 真机问题：未加载的 403 MiB 持久会话在手机发消息时先长期停留“发送中”；直接 `thread/resume` 会触发高 CPU 全量恢复，临时拒绝大会话又错误缩小了产品边界。
-- 最终契约：常规会话保持原 threadId 安全恢复；超过直接恢复边界时，Bridge 只分页读取最近 8 个 Turn 的 summary，提取用户/Codex 文本并限制为 24 KiB，以 `untrusted additionalContext` 交给同 cwd 新 Thread。Android 自动选中新 Thread、保留原 Thread，并显示“大会话续聊”说明；实际用户输入不会混入内部 handoff。
+- 最终契约：常规会话保持原 threadId 安全恢复；超过直接恢复边界时，Bridge 只分页读取最近 8 个 Turn 的 summary，提取用户/Codex 文本并限制为 24 KiB，以 `untrusted additionalContext` 交给同 cwd 新 Thread。Bridge 持久记录物理 Thread 链，列表折叠为沿用原标题的单一逻辑会话；Android 自动选中续聊尾部并显示“大会话续聊”说明，上翻到边界时才跨 Thread 懒加载原历史，实际用户输入不会混入内部 handoff。
 - TDD：Bridge 大会话用例先因旧的明确拒绝 RED，Android 用例先因仍停留原 Thread RED；实现后直接恢复/懒续聊/稳定 command identity/新 route/自动切换全部 GREEN。异步 summary 测试暴露一次 TempDir 清理竞态，改为等待响应状态后定向 race 连续 10 轮通过。
-- 最终统一自动化：JVM `1142/1142`、connected `261/261`、0 skipped/failed；Go `115` pass test/subtest event、11 package，race/vet/build 通过。专用环境 `HarnessM3Api36`、ADB `5041`、serial `emulator-15672`，结束后 `5041/15672/15673` 均无监听。日志：`/tmp/harness-stuck-sending-20260815/m3-lazy-continuation`。
+- 最终统一自动化：JVM `1142/1142`、connected `261/261`、0 skipped/failed；Go `118` pass test/subtest event、11 package，race/vet/build 通过。专用环境 `HarnessM3Api36`、ADB `5041`、serial `emulator-15672`，结束后 `5041/15672/15673` 均无监听。日志：`/tmp/harness-stuck-sending-20260815/m3-lazy-continuation` 与 `/tmp/harness-lazy-logical-go.json`。

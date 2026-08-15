@@ -95,7 +95,7 @@
 ## 2026-08-15 test 集成补充
 
 - [x] 未加载常规历史会话：同 threadId、同 `clientUserMessageId` 恢复后安全重试。
-- [x] 超过直接恢复边界的大会话：最近 8 Turn / 24 KiB 懒续聊，同 cwd 新 Thread，旧 Thread 保留，工具输出不复制。
+- [x] 超过直接恢复边界的大会话：最近 8 Turn / 24 KiB 懒续聊，同 cwd 新 Thread，物理链持久化并折叠为原标题的单一逻辑会话，上翻时才跨 Thread 懒加载旧历史，工具输出不复制。
 - [x] Android 收到 continuation envelope 后自动切换新 Thread；内部 handoff 不进入时间线，用户消息从“发送中”转为已送达。
-- [x] 最终 JVM `1142/1142`、专用 AVD connected `261/261`、Go `115` pass test/subtest event；race/vet/build 与端口清理通过。
+- [x] 最终 JVM `1142/1142`、专用 AVD connected `261/261`、Go `118` pass test/subtest event；race/vet/build 与端口清理通过。
 - 日志：`/tmp/harness-stuck-sending-20260815/m3-lazy-continuation`。

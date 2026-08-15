@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -37,6 +38,42 @@ func TestStateV1ToV2PreservesCredentialsAndForcesInitialGapSnapshot(t *testing.T
 	reloaded, err := LoadBridge(path)
 	if err != nil || reloaded.SchemaVersion != 2 || !reloaded.NeedsInitialGapSnapshot {
 		t.Fatalf("reloaded state=%#v err=%v", reloaded, err)
+	}
+}
+
+func TestBridgeStatePersistsLogicalThreadContinuations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	initial := BridgeData{
+		SchemaVersion:   BridgeSchemaVersion,
+		RelayURL:        "https://relay.example",
+		HostID:          "host-1",
+		HostName:        "Mac",
+		HostToken:       "host-token",
+		Pending:         map[string]string{},
+		DeviceSecrets:   map[string]string{},
+		Sequences:       map[string]uint64{},
+		PendingOutbound: map[string]map[string]string{},
+		JournalKey:      base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		ThreadContinuations: map[string]ThreadContinuation{
+			"thread-root": {
+				RootThreadID: "thread-root",
+				ThreadIDs:    []string{"thread-root", "thread-current"},
+				Name:         "review",
+				CWD:          "/workspace/project",
+			},
+		},
+	}
+	if err := SaveBridge(path, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := LoadBridge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := reloaded.ThreadContinuations["thread-root"]
+	if record.RootThreadID != "thread-root" || record.Name != "review" || record.CWD != "/workspace/project" || len(record.ThreadIDs) != 2 || record.ThreadIDs[1] != "thread-current" {
+		t.Fatalf("continuation=%#v", record)
 	}
 }
 

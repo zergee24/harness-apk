@@ -310,6 +310,9 @@ func runServe(defaultPath string, args []string) {
 			commandCache: commandStore, routes: routeStore, terminals: terminalStore, workspaces: workspaceRegistry,
 			seen: map[string]time.Time{},
 		}
+		if err := b.recoverThreadContinuationsFromCommands(); err != nil {
+			log.Printf("recover lazy continuations: %v", err)
+		}
 		if err := b.run(context.Background()); err != nil {
 			log.Printf("bridge disconnected: %v", err)
 		}
@@ -461,10 +464,7 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 			Payload: hostStatusPayload(), CreatedAt: time.Now().UnixMilli(),
 		}, "")
 	case "thread.list":
-		return b.requestAppServer(ctx, deviceID, command, "thread/list", map[string]any{
-			"limit": 20, "sortKey": "updated_at", "sortDirection": "desc",
-			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
-		})
+		return b.requestMobileThreadList(ctx, deviceID, command)
 	case "thread.summary":
 		return b.requestMobileThreadSummary(ctx, deviceID, command)
 	case "workspace.list":
@@ -528,6 +528,127 @@ const (
 	maxMobileThreadSummaryBytes    = 4 << 10
 	maxDirectResumeThreadBytes     = 256 << 20
 )
+
+func (b *bridge) requestMobileThreadList(ctx context.Context, deviceID string, command protocol.Command) error {
+	go func() {
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		result, err := b.app.client.Call(callCtx, "thread/list", map[string]any{
+			"limit": 20, "sortKey": "updated_at", "sortDirection": "desc",
+			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
+		})
+		if err == nil {
+			if rememberErr := b.rememberThreadContinuationNames(result); rememberErr != nil {
+				log.Printf("remember lazy continuation names: %v", rememberErr)
+			}
+			result, err = mobileThreadListResult(result, b.threadContinuationsSnapshot())
+		}
+		payload := map[string]any{"result": json.RawMessage(result)}
+		if err != nil {
+			payload = map[string]any{"error": err.Error()}
+		}
+		_ = b.sendEvent(ctx, deviceID, protocol.Event{
+			Type: "rpc.response", RequestID: command.RequestID,
+			Payload: mustJSON(payload), CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}()
+	return nil
+}
+
+func (b *bridge) rememberThreadContinuationNames(raw json.RawMessage) error {
+	var response struct {
+		Data []map[string]any `json:"data"`
+	}
+	if json.Unmarshal(raw, &response) != nil {
+		return nil
+	}
+	names := map[string]string{}
+	for _, thread := range response.Data {
+		id, _ := thread["id"].(string)
+		name, _ := thread["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			name, _ = thread["preview"].(string)
+		}
+		if id != "" && strings.TrimSpace(name) != "" {
+			names[id] = name
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	previous := cloneBridgeState(b.state)
+	changed := false
+	for rootThreadID, record := range b.state.ThreadContinuations {
+		if strings.TrimSpace(record.Name) == "" && strings.TrimSpace(names[rootThreadID]) != "" {
+			record.Name = names[rootThreadID]
+			b.state.ThreadContinuations[rootThreadID] = record
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := b.persistStateLocked(); err != nil {
+		b.state = previous
+		return err
+	}
+	return nil
+}
+
+func mobileThreadListResult(raw json.RawMessage, continuations map[string]bridgestate.ThreadContinuation) (json.RawMessage, error) {
+	var response map[string]any
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return nil, fmt.Errorf("decode thread list for mobile: %w", err)
+	}
+	rawData, _ := response["data"].([]any)
+	data := make([]map[string]any, 0, len(rawData))
+	for _, rawThread := range rawData {
+		if thread, ok := rawThread.(map[string]any); ok {
+			data = append(data, thread)
+		}
+	}
+	byID := make(map[string]map[string]any, len(data))
+	for _, thread := range data {
+		if id, _ := thread["id"].(string); id != "" {
+			byID[id] = thread
+		}
+	}
+	hidden := map[string]struct{}{}
+	for _, record := range continuations {
+		if len(record.ThreadIDs) < 2 {
+			continue
+		}
+		latestID := record.ThreadIDs[len(record.ThreadIDs)-1]
+		latest := byID[latestID]
+		if latest == nil {
+			continue
+		}
+		name := strings.TrimSpace(record.Name)
+		if name == "" {
+			if root := byID[record.RootThreadID]; root != nil {
+				name, _ = root["name"].(string)
+				if strings.TrimSpace(name) == "" {
+					name, _ = root["preview"].(string)
+				}
+			}
+		}
+		if strings.TrimSpace(name) != "" {
+			latest["name"] = name
+		}
+		latest["continuedFromThreadId"] = record.RootThreadID
+		for _, id := range record.ThreadIDs[:len(record.ThreadIDs)-1] {
+			hidden[id] = struct{}{}
+		}
+	}
+	filtered := data[:0]
+	for _, thread := range data {
+		id, _ := thread["id"].(string)
+		if _, shouldHide := hidden[id]; !shouldHide {
+			filtered = append(filtered, thread)
+		}
+	}
+	response["data"] = filtered
+	return json.Marshal(response)
+}
 
 func mobileThreadSummaryResult(threadID string, pageRaw json.RawMessage) (json.RawMessage, error) {
 	var page struct {
@@ -641,21 +762,33 @@ func (b *bridge) requestMobileThreadHistory(ctx context.Context, deviceID string
 	go func() {
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
+		record := b.continuationForLatestThread(command.ThreadID)
+		historyThreadID, historyCursor, cursorErr := continuationHistoryRequest(
+			command.ThreadID, mobileHistoryCursor(command.Params), record,
+		)
 		metadata, err := b.app.client.Call(callCtx, "thread/read", map[string]any{
 			"threadId": command.ThreadID, "includeTurns": false,
 		})
+		if err == nil && cursorErr != nil {
+			err = cursorErr
+		}
 		if err == nil {
 			params := map[string]any{
-				"threadId": command.ThreadID, "limit": mobileThreadHistoryPageSize,
+				"threadId": historyThreadID, "limit": mobileThreadHistoryPageSize,
 				"sortDirection": "desc", "itemsView": "summary",
 			}
-			if cursor := mobileHistoryCursor(command.Params); cursor != "" {
-				params["cursor"] = cursor
+			if historyCursor != "" {
+				params["cursor"] = historyCursor
 			}
 			var page json.RawMessage
 			page, err = b.app.client.Call(callCtx, "thread/turns/list", params)
 			if err == nil {
 				metadata, err = mobileThreadHistoryResult(metadata, page)
+				if err == nil && record != nil {
+					metadata, err = overrideMobileOlderCursor(
+						metadata, continuationOlderCursor(*record, historyThreadID, threadPageNextCursor(page)),
+					)
+				}
 			}
 		}
 		if err != nil {
@@ -671,6 +804,94 @@ func (b *bridge) requestMobileThreadHistory(ctx context.Context, deviceID string
 		}, "")
 	}()
 	return nil
+}
+
+const mobileContinuationCursorPrefix = "harness-continuation-v1:"
+
+type mobileContinuationCursor struct {
+	ThreadID string `json:"threadId"`
+	Cursor   string `json:"cursor,omitempty"`
+}
+
+func continuationHistoryRequest(
+	requestedThreadID string,
+	rawCursor string,
+	record *bridgestate.ThreadContinuation,
+) (string, string, error) {
+	if !strings.HasPrefix(rawCursor, mobileContinuationCursorPrefix) {
+		return requestedThreadID, rawCursor, nil
+	}
+	if record == nil {
+		return "", "", errors.New("continuation history is unavailable")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(rawCursor, mobileContinuationCursorPrefix))
+	if err != nil {
+		return "", "", errors.New("continuation history cursor is invalid")
+	}
+	var cursor mobileContinuationCursor
+	if json.Unmarshal(raw, &cursor) != nil || cursor.ThreadID == "" {
+		return "", "", errors.New("continuation history cursor is invalid")
+	}
+	for _, threadID := range record.ThreadIDs {
+		if cursor.ThreadID == threadID {
+			return cursor.ThreadID, cursor.Cursor, nil
+		}
+	}
+	return "", "", errors.New("continuation history cursor points outside its conversation")
+}
+
+func continuationOlderCursor(
+	record bridgestate.ThreadContinuation,
+	historyThreadID string,
+	nextCursor *string,
+) *string {
+	cursor := mobileContinuationCursor{ThreadID: historyThreadID}
+	if nextCursor != nil && *nextCursor != "" {
+		cursor.Cursor = *nextCursor
+	} else {
+		index := -1
+		for candidateIndex, threadID := range record.ThreadIDs {
+			if threadID == historyThreadID {
+				index = candidateIndex
+				break
+			}
+		}
+		if index <= 0 {
+			return nil
+		}
+		cursor.ThreadID = record.ThreadIDs[index-1]
+	}
+	raw, err := json.Marshal(cursor)
+	if err != nil {
+		return nil
+	}
+	encoded := mobileContinuationCursorPrefix + base64.RawURLEncoding.EncodeToString(raw)
+	return &encoded
+}
+
+func threadPageNextCursor(raw json.RawMessage) *string {
+	var page struct {
+		NextCursor *string `json:"nextCursor"`
+	}
+	if json.Unmarshal(raw, &page) != nil {
+		return nil
+	}
+	return page.NextCursor
+}
+
+func overrideMobileOlderCursor(raw json.RawMessage, olderCursor *string) (json.RawMessage, error) {
+	var response map[string]any
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return nil, err
+	}
+	history, _ := response["mobileHistory"].(map[string]any)
+	if history == nil {
+		history = map[string]any{}
+		response["mobileHistory"] = history
+	}
+	history["olderCursor"] = olderCursor
+	history["hasOlder"] = olderCursor != nil && *olderCursor != ""
+	return json.Marshal(response)
 }
 
 func mobileHistoryCursor(raw json.RawMessage) string {
@@ -1149,9 +1370,87 @@ func isThreadNotFoundError(err error, threadID string) bool {
 type persistedThreadMetadata struct {
 	Thread struct {
 		ID   string `json:"id"`
+		Name string `json:"name"`
 		CWD  string `json:"cwd"`
 		Path string `json:"path"`
 	} `json:"thread"`
+}
+
+func (b *bridge) recordThreadContinuation(sourceThreadID, continuationThreadID string, metadata persistedThreadMetadata) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	previous := cloneBridgeState(b.state)
+	if b.state.ThreadContinuations == nil {
+		b.state.ThreadContinuations = map[string]bridgestate.ThreadContinuation{}
+	}
+	record := bridgestate.ThreadContinuation{
+		RootThreadID: sourceThreadID,
+		ThreadIDs:    []string{sourceThreadID},
+		Name:         metadata.Thread.Name,
+		CWD:          metadata.Thread.CWD,
+	}
+	foundExisting := false
+	for rootThreadID, candidate := range b.state.ThreadContinuations {
+		for index, threadID := range candidate.ThreadIDs {
+			if threadID != sourceThreadID {
+				continue
+			}
+			record = candidate
+			record.RootThreadID = rootThreadID
+			record.ThreadIDs = append([]string(nil), candidate.ThreadIDs[:index+1]...)
+			foundExisting = true
+			break
+		}
+		if foundExisting {
+			break
+		}
+	}
+	if strings.TrimSpace(record.Name) == "" {
+		record.Name = metadata.Thread.Name
+	}
+	if strings.TrimSpace(record.CWD) == "" {
+		record.CWD = metadata.Thread.CWD
+	}
+	if len(record.ThreadIDs) == 0 || record.ThreadIDs[len(record.ThreadIDs)-1] != continuationThreadID {
+		record.ThreadIDs = append(record.ThreadIDs, continuationThreadID)
+	}
+	record.UpdatedAt = time.Now().UnixMilli()
+	b.state.ThreadContinuations[record.RootThreadID] = record
+	if err := b.persistStateLocked(); err != nil {
+		b.state = previous
+		return err
+	}
+	return nil
+}
+
+func (b *bridge) recoverThreadContinuationsFromCommands() error {
+	if b.commandCache == nil {
+		return nil
+	}
+	records := b.commandCache.RecordsByTypeStatus("turn.start", commandcache.StatusSucceeded)
+	sort.Slice(records, func(left, right int) bool { return records[left].UpdatedAt < records[right].UpdatedAt })
+	for _, commandRecord := range records {
+		var result struct {
+			Continuation struct {
+				ThreadID              string `json:"threadId"`
+				ContinuedFromThreadID string `json:"continuedFromThreadId"`
+				CWD                   string `json:"cwd"`
+			} `json:"continuation"`
+		}
+		if json.Unmarshal(commandRecord.ResultJSON, &result) != nil || result.Continuation.ThreadID == "" || result.Continuation.ContinuedFromThreadID == "" {
+			continue
+		}
+		metadata := persistedThreadMetadata{}
+		metadata.Thread.CWD = result.Continuation.CWD
+		if err := b.recordThreadContinuation(
+			result.Continuation.ContinuedFromThreadID,
+			result.Continuation.ThreadID,
+			metadata,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *bridge) readPersistedThreadMetadata(ctx context.Context, threadID string) (persistedThreadMetadata, bool, error) {
@@ -1296,6 +1595,9 @@ func (b *bridge) startLazyContinuation(
 	var turnEnvelope map[string]any
 	if json.Unmarshal(turnResult, &turnEnvelope) != nil {
 		return nil, continuationCommand, errors.New("lazy continuation turn response is invalid")
+	}
+	if err := b.recordThreadContinuation(command.ThreadID, continuationCommand.ThreadID, metadata); err != nil {
+		log.Printf("persist lazy continuation %s -> %s: %v", command.ThreadID, continuationCommand.ThreadID, err)
 	}
 	turnEnvelope["continuation"] = map[string]any{
 		"schemaVersion": 1, "threadId": continuationCommand.ThreadID,
@@ -2593,6 +2895,26 @@ func (b *bridge) deviceSecrets() map[string]string {
 	return result
 }
 
+func (b *bridge) threadContinuationsSnapshot() map[string]bridgestate.ThreadContinuation {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return cloneThreadContinuations(b.state.ThreadContinuations)
+}
+
+func (b *bridge) continuationForLatestThread(threadID string) *bridgestate.ThreadContinuation {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, record := range b.state.ThreadContinuations {
+		if len(record.ThreadIDs) == 0 || record.ThreadIDs[len(record.ThreadIDs)-1] != threadID {
+			continue
+		}
+		copy := record
+		copy.ThreadIDs = append([]string(nil), record.ThreadIDs...)
+		return &copy
+	}
+	return nil
+}
+
 func (b *bridge) persistStateLocked() error {
 	candidate := cloneBridgeState(b.state)
 	var persisted bridgeState
@@ -2680,6 +3002,16 @@ func cloneBridgeState(source bridgeState) bridgeState {
 		cloned.PendingOutbound[deviceID] = clonedPending
 	}
 	cloned.RegisteredWorkspaces = append([]string(nil), source.RegisteredWorkspaces...)
+	cloned.ThreadContinuations = cloneThreadContinuations(source.ThreadContinuations)
+	return cloned
+}
+
+func cloneThreadContinuations(source map[string]bridgestate.ThreadContinuation) map[string]bridgestate.ThreadContinuation {
+	cloned := make(map[string]bridgestate.ThreadContinuation, len(source))
+	for rootThreadID, record := range source {
+		record.ThreadIDs = append([]string(nil), record.ThreadIDs...)
+		cloned[rootThreadID] = record
+	}
 	return cloned
 }
 

@@ -56,18 +56,27 @@ type Data struct {
 const BridgeSchemaVersion = 2
 
 type BridgeData struct {
-	SchemaVersion           int                          `json:"schemaVersion"`
-	RelayURL                string                       `json:"relayUrl"`
-	HostID                  string                       `json:"hostId"`
-	HostName                string                       `json:"hostName"`
-	HostToken               string                       `json:"hostToken"`
-	Pending                 map[string]string            `json:"pendingPairingSecrets"`
-	DeviceSecrets           map[string]string            `json:"deviceSecrets"`
-	Sequences               map[string]uint64            `json:"sequences"`
-	PendingOutbound         map[string]map[string]string `json:"pendingOutbound,omitempty"`
-	NeedsInitialGapSnapshot bool                         `json:"needsInitialGapSnapshot,omitempty"`
-	JournalKey              string                       `json:"journalKey"`
-	RegisteredWorkspaces    []string                     `json:"registeredWorkspaces,omitempty"`
+	SchemaVersion           int                           `json:"schemaVersion"`
+	RelayURL                string                        `json:"relayUrl"`
+	HostID                  string                        `json:"hostId"`
+	HostName                string                        `json:"hostName"`
+	HostToken               string                        `json:"hostToken"`
+	Pending                 map[string]string             `json:"pendingPairingSecrets"`
+	DeviceSecrets           map[string]string             `json:"deviceSecrets"`
+	Sequences               map[string]uint64             `json:"sequences"`
+	PendingOutbound         map[string]map[string]string  `json:"pendingOutbound,omitempty"`
+	NeedsInitialGapSnapshot bool                          `json:"needsInitialGapSnapshot,omitempty"`
+	JournalKey              string                        `json:"journalKey"`
+	RegisteredWorkspaces    []string                      `json:"registeredWorkspaces,omitempty"`
+	ThreadContinuations     map[string]ThreadContinuation `json:"threadContinuations,omitempty"`
+}
+
+type ThreadContinuation struct {
+	RootThreadID string   `json:"rootThreadId"`
+	ThreadIDs    []string `json:"threadIds"`
+	Name         string   `json:"name,omitempty"`
+	CWD          string   `json:"cwd,omitempty"`
+	UpdatedAt    int64    `json:"updatedAt"`
 }
 
 func LoadBridge(path string) (BridgeData, error) {
@@ -141,6 +150,10 @@ func normalizeBridge(data *BridgeData, loading bool) (bool, error) {
 	}
 	if data.PendingOutbound == nil {
 		data.PendingOutbound = map[string]map[string]string{}
+		dirty = true
+	}
+	if data.ThreadContinuations == nil {
+		data.ThreadContinuations = map[string]ThreadContinuation{}
 		dirty = true
 	}
 	if data.SchemaVersion < BridgeSchemaVersion {

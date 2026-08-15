@@ -20,6 +20,7 @@ import (
 	"github.com/harnessapk/remote/internal/journal"
 	"github.com/harnessapk/remote/internal/protocol"
 	runstate "github.com/harnessapk/remote/internal/run"
+	bridgestate "github.com/harnessapk/remote/internal/state"
 )
 
 func TestDuplicateRunStartReturnsCachedResultWithoutCallingAppServer(t *testing.T) {
@@ -983,7 +984,7 @@ func TestLegacyTurnStartContinuesAnOversizedPersistedThreadWithoutResume(t *test
 		case 1:
 			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
 		case 2:
-			return json.RawMessage(fmt.Sprintf(`{"thread":{"id":"thread-1","cwd":"/workspace/project","path":%q}}`, rolloutPath)), nil
+			return json.RawMessage(fmt.Sprintf(`{"thread":{"id":"thread-1","name":"review","cwd":"/workspace/project","path":%q}}`, rolloutPath)), nil
 		case 3:
 			return json.RawMessage(`{"data":[{"id":"turn-new","items":[{"id":"user-new","type":"userMessage","text":"最新用户要求"},{"id":"agent-new","type":"agentMessage","text":"最新处理结论"},{"id":"tool-new","type":"commandExecution","command":"printenv VERY_SECRET"}]},{"id":"turn-old","items":[{"id":"user-old","type":"userMessage","text":"较早用户背景"},{"id":"agent-old","type":"agentMessage","text":"较早处理结论"}]}]}`), nil
 		case 4:
@@ -997,6 +998,10 @@ func TestLegacyTurnStartContinuesAnOversizedPersistedThreadWithoutResume(t *test
 	})
 	b := &bridge{
 		app: app, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	b.updateState = func(_ string, update func(*bridgeState) error) error {
+		persisted := cloneBridgeState(b.state)
+		return update(&persisted)
 	}
 	command := protocol.Command{
 		Type: "turn.start", RequestID: "request-oversized", ThreadID: "thread-1", Text: "继续任务",
@@ -1065,11 +1070,66 @@ func TestLegacyTurnStartContinuesAnOversizedPersistedThreadWithoutResume(t *test
 	if route, ok := routes.ByThreadTurn("thread-continuation", "turn-real"); !ok || route.DeviceID != "phone-1" {
 		t.Fatalf("continuation route=%#v ok=%v", route, ok)
 	}
+	record := b.state.ThreadContinuations["thread-1"]
+	if record.RootThreadID != "thread-1" || record.Name != "review" || !reflect.DeepEqual(record.ThreadIDs, []string{"thread-1", "thread-continuation"}) {
+		t.Fatalf("persisted continuation=%#v", record)
+	}
 	replayed, replayedOutcome, replayedErr := b.executeTurnStartOnce(
 		context.Background(), "phone-1", command, legacyTurnStartParams(command),
 	)
 	if replayedErr != nil || replayedOutcome != turnRPCSucceeded || string(replayed) != string(result) || len(requests) != 5 {
 		t.Fatalf("replayed=%s outcome=%q err=%v appCalls=%d", replayed, replayedOutcome, replayedErr, len(requests))
+	}
+}
+
+func TestMobileThreadListCollapsesContinuationUnderOriginalTitle(t *testing.T) {
+	result, err := mobileThreadListResult(
+		json.RawMessage(`{"data":[
+			{"id":"thread-current","preview":"Reply exactly OK","cwd":"/workspace/project","updatedAt":20},
+			{"id":"thread-root","name":"review","preview":"hello","cwd":"/workspace/project","updatedAt":10},
+			{"id":"thread-other","name":"other","preview":"keep me","cwd":"/workspace/other","updatedAt":5}
+		]}`),
+		map[string]bridgestate.ThreadContinuation{
+			"thread-root": {
+				RootThreadID: "thread-root",
+				ThreadIDs:    []string{"thread-root", "thread-current"},
+				Name:         "review",
+				CWD:          "/workspace/project",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Data) != 2 || response.Data[0]["id"] != "thread-current" || response.Data[0]["name"] != "review" || response.Data[0]["continuedFromThreadId"] != "thread-root" || response.Data[1]["id"] != "thread-other" {
+		t.Fatalf("collapsed list=%s", result)
+	}
+}
+
+func TestContinuationHistoryCursorLazilyWalksIntoOriginalThread(t *testing.T) {
+	record := bridgestate.ThreadContinuation{
+		RootThreadID: "thread-root",
+		ThreadIDs:    []string{"thread-root", "thread-current"},
+	}
+	older := continuationOlderCursor(record, "thread-current", nil)
+	if older == nil || *older == "" {
+		t.Fatal("continuation did not expose original history")
+	}
+	target, cursor, err := continuationHistoryRequest("thread-current", *older, &record)
+	if err != nil || target != "thread-root" || cursor != "" {
+		t.Fatalf("history request target=%q cursor=%q err=%v", target, cursor, err)
+	}
+	next := "root-page-2"
+	older = continuationOlderCursor(record, "thread-root", &next)
+	target, cursor, err = continuationHistoryRequest("thread-current", *older, &record)
+	if err != nil || target != "thread-root" || cursor != next {
+		t.Fatalf("paged history target=%q cursor=%q err=%v", target, cursor, err)
 	}
 }
 
