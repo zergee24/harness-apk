@@ -56,6 +56,20 @@ func NormalizeID(id string) string {
 	return id
 }
 
+// DSHCapabilities is the capability set advertised by the dsh backend:
+// the canonical app-server methods minus approvals and user input (dsh's
+// permission model is sandbox presets, not interactive server requests).
+func DSHCapabilities() []string {
+	caps := make([]string, 0, len(CodexCapabilities())-2)
+	for _, capability := range CodexCapabilities() {
+		if capability == protocol.CapabilityApprovals || capability == protocol.CapabilityUserInput {
+			continue
+		}
+		caps = append(caps, capability)
+	}
+	return caps
+}
+
 // CodexCapabilities is the capability set advertised by a codex backend
 // (canonical app-server protocol with approvals and user input).
 func CodexCapabilities() []string {

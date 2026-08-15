@@ -43,7 +43,12 @@ func StartCodex(spec Spec) (*Codex, error) {
 	if spec.ID == "" || spec.Exec == "" {
 		return nil, errors.New("backend id and executable are required")
 	}
-	args := append([]string{"app-server", "--listen", "stdio://"}, spec.Args...)
+	// An explicit spec.Args owns the full command line (e.g. the dsh
+	// appserver profile); an empty one defaults to the codex surface.
+	args := spec.Args
+	if len(args) == 0 {
+		args = []string{"app-server", "--listen", "stdio://"}
+	}
 	cmd := exec.Command(spec.Exec, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

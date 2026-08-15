@@ -1832,3 +1832,60 @@ func TestSuperviseBackendRestartsCrashedBackendAndLeavesOthersAlive(t *testing.T
 		t.Fatalf("restarted backend call failed: %v", err)
 	}
 }
+
+func TestParseBackendSpecsKnownDSH(t *testing.T) {
+	specs, err := parseBackendSpecs([]string{"codex", "dsh"}, "codex-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("specs = %#v", specs)
+	}
+	codex := specs[0]
+	if codex.ID != "codex" || codex.Exec != "codex-exec" || codex.Name != "Codex" {
+		t.Fatalf("codex spec = %#v", codex)
+	}
+	dsh := specs[1]
+	if dsh.ID != "dsh" || dsh.Name != "DeepSeek Harness" || dsh.Exec != "dsh" {
+		t.Fatalf("dsh spec = %#v", dsh)
+	}
+	if len(dsh.Args) != 4 || dsh.Args[0] != "--profile" || dsh.Args[1] != "appserver" ||
+		dsh.Args[2] != "--listen" || dsh.Args[3] != "stdio://" {
+		t.Fatalf("dsh args = %#v", dsh.Args)
+	}
+	hasApprovals := false
+	for _, capability := range dsh.Capabilities {
+		if capability == "approvals.v1" || capability == "user-input.v1" {
+			hasApprovals = true
+		}
+	}
+	if hasApprovals {
+		t.Fatalf("dsh must not advertise approval capabilities: %#v", dsh.Capabilities)
+	}
+	if len(codex.Capabilities) != len(dsh.Capabilities)+2 {
+		t.Fatalf("codex caps = %d, dsh caps = %d", len(codex.Capabilities), len(dsh.Capabilities))
+	}
+}
+
+func TestParseBackendSpecsCustomExecutableAndDefaults(t *testing.T) {
+	specs, err := parseBackendSpecs(nil, "codex-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0].ID != "codex" || specs[0].Exec != "codex-exec" {
+		t.Fatalf("default specs = %#v", specs)
+	}
+	specs, err = parseBackendSpecs([]string{"aux=/opt/tools/appserver"}, "codex-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0].ID != "aux" || specs[0].Exec != "/opt/tools/appserver" {
+		t.Fatalf("custom specs = %#v", specs)
+	}
+	if _, err := parseBackendSpecs([]string{"nope"}, "codex-exec"); err == nil {
+		t.Fatal("unknown bare backend id must be rejected")
+	}
+	if _, err := parseBackendSpecs([]string{"codex", "codex"}, "codex-exec"); err == nil {
+		t.Fatal("duplicate backend ids must be rejected")
+	}
+}

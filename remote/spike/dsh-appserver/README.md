@@ -1,5 +1,8 @@
 # dsh-appserver-spike（M4 G0，路线 A）
 
+> **已由正式插件取代**：G2 的正式实现位于 `remote/dsh/appserver/`（安装：
+> `remote/dsh/install-appserver.sh`），本目录保留为 G0 验证历史。
+
 把 dsh 的 agent/session API 包成与 codex app-server 兼容的 stdio JSON-RPC 面（`dsh --profile appserver --listen stdio://`）的最小原型。
 
 ## 验证结果（2026-08-15）

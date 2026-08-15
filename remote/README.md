@@ -72,6 +72,36 @@ The bridge launches `codex app-server --listen stdio://`. The normal Codex login
 
 The launch agent uses a restrictive umask and throttles restart loops. If `codex` is not available on the launchd `PATH`, add `--codex /absolute/path/to/codex` to `ProgramArguments`; do not copy login credentials into the plist.
 
+## 2.5 DeepSeek Harness backend (M4)
+
+The bridge can drive a second backend on the same Mac — DeepSeek Harness —
+through the same canonical app-server JSON-RPC surface, so one phone controls
+Codex and dsh side by side. Install the dsh appserver profile once:
+
+```bash
+cd remote
+bash dsh/install-appserver.sh
+```
+
+Then start the bridge with both backends:
+
+```bash
+harness-bridge serve --backend codex --backend dsh
+```
+
+Behavior notes for the dsh backend (v1):
+
+- It advertises the canonical capabilities minus `approvals.v1` and
+  `user-input.v1`: dsh's permission model is sandbox presets, not interactive
+  server requests, so the phone shows no approval entry for dsh runs.
+- `turn/interrupt` is not mapped yet (the turn keeps running on the Mac);
+  thread history, steering, streaming deltas and completion all work.
+- Sessions persist in `~/.dsh/sessions` and survive bridge restarts; the
+  plugin loads them through dsh's own persistence service.
+- Requires dsh 0.1.0-rc.6 or newer on PATH; the plugin package lives in
+  `remote/dsh/appserver/` (source of truth; the profile copy is installed by
+  the script).
+
 ## 3. Pair Harness
 
 Generate a five-minute, one-use QR code on the Mac:

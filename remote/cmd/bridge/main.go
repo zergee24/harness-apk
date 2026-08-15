@@ -352,18 +352,29 @@ func parseBackendSpecs(raw []string, codexExec string) ([]backend.Spec, error) {
 			return nil, fmt.Errorf("duplicate backend %q", id)
 		}
 		seen[id] = struct{}{}
-		name := id
-		if id == protocol.DefaultBackendID {
-			name = "Codex"
-		}
 		if strings.TrimSpace(exec) == "" {
-			if id != protocol.DefaultBackendID {
+			switch id {
+			case protocol.DefaultBackendID:
+				exec = codexExec
+			case "dsh":
+				exec = "dsh"
+			default:
 				return nil, fmt.Errorf("unknown backend %q: use <id>=<executable>", id)
 			}
-			exec = codexExec
+		}
+		name := id
+		capabilities := backend.CodexCapabilities()
+		args := []string(nil)
+		switch id {
+		case protocol.DefaultBackendID:
+			name = "Codex"
+		case "dsh":
+			name = "DeepSeek Harness"
+			capabilities = backend.DSHCapabilities()
+			args = []string{"--profile", "appserver", "--listen", "stdio://"}
 		}
 		specs = append(specs, backend.Spec{
-			ID: id, Name: name, Capabilities: backend.CodexCapabilities(), Exec: exec,
+			ID: id, Name: name, Capabilities: capabilities, Exec: exec, Args: args,
 		})
 	}
 	return specs, nil
