@@ -167,39 +167,27 @@ Android 端 `remoteFeatureAvailability` 按**选中后端的**能力集合计算
 ### 6.1 `remote/internal/backend` 接口
 
 ```go
-package backend
-
-type Capabilities struct {
-    Threads   bool // threads.v1
-    Runs      bool // runs.v1
-    Approvals bool // approvals.v1
-    UserInput bool // user-input.v1
-    Streaming bool // streaming.v1
-    Workspaces bool // workspaces.v1
-    LogicalReplay bool // logical-replay.v1
-}
-
-type Thread struct { ID, Name, Preview, CWD string; UpdatedAt int64; Status string }
-
-type BackendEvent struct {
-    Method  string          // 归一化方法名（如 "turn/completed"、"item/started"）
-    Params  json.RawMessage // 原样透传，翻译逻辑在 Bridge 侧（沿用 M2 的 timelineLogicalPayload 等）
-    ThreadID string
+// G1 落地签名（2026-08-15 锁定）：能力直接用既有能力名字符串集合，
+// 事件为归一化 Message（BackendID/Method/Params），RPC 面保持 app-server
+// canonical 协议（Call/Notify/Respond），进程面由监督者持有。
+type Message struct {
+    BackendID string          // 事件来源后端
+    ID        json.RawMessage // server request id（审批），可空
+    Method    string          // 归一化方法名（如 "turn/completed"、"item/started"）
+    Params    json.RawMessage // 原样透传，翻译逻辑在 Bridge 侧
 }
 
 type Backend interface {
     ID() string
     Name() string
-    Capabilities() Capabilities
-    ProcessEpoch() string
-    ListThreads(ctx context.Context, limit int) ([]Thread, error)
-    ReadThread(ctx context.Context, threadID string) (json.RawMessage, error)
-    StartThread(ctx context.Context, cwd string) (json.RawMessage, error)
-    StartTurn(ctx context.Context, threadID, text string) (json.RawMessage, error)
-    SteerTurn(ctx context.Context, threadID, expectedTurnID, text string) (json.RawMessage, error)
-    InterruptTurn(ctx context.Context, threadID, turnID string) (json.RawMessage, error)
-    RespondApproval(ctx context.Context, ref ServerRequestRef, decision string) error
-    Notifications() <-chan BackendEvent
+    Capabilities() []string            // 既有能力名（workspace.candidates.v1 等）+ approvals.v1/user-input.v1
+    ProcessEpoch() string              // 进程代际，审批 STALE 判定沿用 M2
+    Start(ctx context.Context)         // 启动读取循环
+    Call(ctx context.Context, method string, params any) (json.RawMessage, error)
+    Notify(ctx context.Context, method string, params any) error
+    Respond(ctx context.Context, ref ServerRequestRef, result any) error
+    Messages() <-chan Message          // 归一化事件流
+    Done() <-chan error                // 进程退出原因（监督者据此重启）
     Close() error
 }
 ```
