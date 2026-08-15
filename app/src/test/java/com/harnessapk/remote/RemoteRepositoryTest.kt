@@ -362,6 +362,47 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun definiteTurnStartFailureOverridesAStaleRunningSummaryAfterTheActiveRouteWasCleared() {
+        val repository = repositoryWithPendingTurnStart("turn.start:failed-after-summary")
+        val stateField = RemoteRepository::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutableState = stateField.get(repository) as MutableStateFlow<RemoteUiState>
+        mutableState.value = mutableState.value.copy(
+            activeThreadId = null,
+            isWorking = true,
+            threads = listOf(
+                RemoteThread(
+                    id = "thread-a",
+                    title = "任务 A",
+                    preview = "继续任务",
+                    cwd = "/workspace",
+                    updatedAt = 1L,
+                    status = "active",
+                    execution = RemoteThreadExecution(
+                        state = RemoteThreadExecutionState.RUNNING,
+                        startedAtMillis = 2_000L,
+                    ),
+                ),
+            ),
+        )
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "turn.start:failed-after-summary",
+                payload = Json.parseToJsonElement(
+                    """{"error":{"message":"persisted thread is too large to resume remotely (404 MiB); start a new thread from the same workspace"},"retrySafe":true}""",
+                ),
+            ),
+        )
+
+        assertEquals("sendFailed", repository.state.value.timeline.single().status)
+        assertFalse(repository.state.value.isWorking)
+        assertEquals(RemoteThreadExecutionState.FAILED, repository.state.value.threads.single().execution.state)
+        assertEquals("历史会话内容过大，请在同一工作目录新建会话继续", repository.state.value.errorMessage)
+    }
+
+    @Test
     fun unknownTurnStartShowsReconciliationInsteadOfPermanentSending() {
         val repository = repositoryWithPendingTurnStart("turn.start:unknown")
 

@@ -525,6 +525,7 @@ const (
 	maxMobilePaginatedTextBytes    = 24 << 10
 	maxMobilePaginatedItemsPerTurn = 2
 	maxMobileThreadSummaryBytes    = 4 << 10
+	maxRemoteResumableThreadBytes  = 256 << 20
 )
 
 func mobileThreadSummaryResult(threadID string, pageRaw json.RawMessage) (json.RawMessage, error) {
@@ -1144,6 +1145,31 @@ func isThreadNotFoundError(err error, threadID string) bool {
 	return err != nil && threadID != "" && strings.Contains(err.Error(), "thread not found: "+threadID)
 }
 
+func (b *bridge) rejectOversizedPersistedThread(ctx context.Context, threadID string) error {
+	metadata, err := b.app.client.Call(ctx, "thread/read", map[string]any{
+		"threadId": threadID, "includeTurns": false,
+	})
+	if err != nil {
+		return nil
+	}
+	var response struct {
+		Thread struct {
+			Path string `json:"path"`
+		} `json:"thread"`
+	}
+	if json.Unmarshal(metadata, &response) != nil || response.Thread.Path == "" {
+		return nil
+	}
+	info, err := os.Stat(response.Thread.Path)
+	if err != nil || info.Size() <= maxRemoteResumableThreadBytes {
+		return nil
+	}
+	return fmt.Errorf(
+		"persisted thread is too large to resume remotely (%d MiB); start a new thread from the same workspace",
+		(info.Size()+(1<<20)-1)>>(20),
+	)
+}
+
 func (b *bridge) requestTurnStart(
 	ctx context.Context,
 	deviceID string,
@@ -1196,6 +1222,10 @@ func (b *bridge) executeTurnStartOnce(
 	}
 	result, err := b.app.client.Call(ctx, "turn/start", params)
 	if err != nil && isThreadNotFoundError(err, command.ThreadID) {
+		if sizeErr := b.rejectOversizedPersistedThread(ctx, command.ThreadID); sizeErr != nil {
+			_, persistErr := b.commandCache.Fail(cacheID, sizeErr)
+			return nil, turnRPCFailed, errors.Join(sizeErr, persistErr)
+		}
 		if _, resumeErr := b.app.client.Call(ctx, "thread/resume", map[string]any{
 			"threadId": command.ThreadID, "excludeTurns": true,
 		}); resumeErr != nil {

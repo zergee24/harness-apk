@@ -842,6 +842,8 @@ func TestLegacyTurnStartResumesPersistedThreadBeforeSafeRetry(t *testing.T) {
 			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
 		case 2:
 			return json.RawMessage(`{"thread":{"id":"thread-1"}}`), nil
+		case 3:
+			return json.RawMessage(`{"thread":{"id":"thread-1"}}`), nil
 		default:
 			return json.RawMessage(`{"turn":{"id":"turn-real"}}`), nil
 		}
@@ -860,19 +862,79 @@ func TestLegacyTurnStartResumesPersistedThreadBeforeSafeRetry(t *testing.T) {
 	if err != nil || outcome != turnRPCSucceeded || string(result) != `{"turn":{"id":"turn-real"}}` {
 		t.Fatalf("result=%s outcome=%q err=%v", result, outcome, err)
 	}
-	if got := []string{requests[0].Method, requests[1].Method, requests[2].Method}; !reflect.DeepEqual(got, []string{"turn/start", "thread/resume", "turn/start"}) {
+	if got := []string{requests[0].Method, requests[1].Method, requests[2].Method, requests[3].Method}; !reflect.DeepEqual(got, []string{"turn/start", "thread/read", "thread/resume", "turn/start"}) {
 		t.Fatalf("methods=%v", got)
 	}
-	if requests[1].Params["threadId"] != "thread-1" || requests[1].Params["excludeTurns"] != true {
-		t.Fatalf("resume params=%#v", requests[1].Params)
+	if requests[1].Params["threadId"] != "thread-1" || requests[1].Params["includeTurns"] != false {
+		t.Fatalf("metadata params=%#v", requests[1].Params)
 	}
-	for _, index := range []int{0, 2} {
+	if requests[2].Params["threadId"] != "thread-1" || requests[2].Params["excludeTurns"] != true {
+		t.Fatalf("resume params=%#v", requests[2].Params)
+	}
+	for _, index := range []int{0, 3} {
 		if requests[index].Params["clientUserMessageId"] != "request-1" {
 			t.Fatalf("turn params[%d]=%#v", index, requests[index].Params)
 		}
 	}
 	if route, ok := routes.ByThreadTurn("thread-1", "turn-real"); !ok || route.DeviceID != "phone-1" {
 		t.Fatalf("route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestLegacyTurnStartRejectsAnOversizedPersistedThreadBeforeResume(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolloutPath := filepath.Join(dir, "oversized-thread.jsonl")
+	file, err := os.Create(rolloutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(300 << 20); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var requests []appServerTestRequest
+	app := appProcessScripted(t, func(request appServerTestRequest) (json.RawMessage, json.RawMessage) {
+		requests = append(requests, request)
+		switch len(requests) {
+		case 1:
+			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
+		case 2:
+			return json.RawMessage(fmt.Sprintf(`{"thread":{"id":"thread-1","path":%q}}`, rolloutPath)), nil
+		default:
+			return json.RawMessage(`{"turn":{"id":"turn-unexpected"}}`), nil
+		}
+	})
+	b := &bridge{
+		app: app, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	command := protocol.Command{
+		Type: "turn.start", RequestID: "request-oversized", ThreadID: "thread-1", Text: "继续任务",
+	}
+
+	_, outcome, err := b.executeTurnStartOnce(
+		context.Background(), "phone-1", command, legacyTurnStartParams(command),
+	)
+
+	if err == nil || outcome != turnRPCFailed || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	methods := make([]string, len(requests))
+	for index := range requests {
+		methods[index] = requests[index].Method
+	}
+	if !reflect.DeepEqual(methods, []string{"turn/start", "thread/read"}) {
+		t.Fatalf("methods=%v", methods)
 	}
 }
 

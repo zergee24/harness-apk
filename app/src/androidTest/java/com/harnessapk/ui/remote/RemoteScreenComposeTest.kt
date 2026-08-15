@@ -395,6 +395,17 @@ class RemoteScreenComposeTest {
     }
 
     @Test
+    fun detailErrorBannerExplainsWhyAnOversizedHistoryCannotContinue() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteThreadErrorBanner("历史会话内容过大，请在同一工作目录新建会话继续")
+            }
+        }
+
+        composeRule.onNodeWithText("历史会话内容过大，请在同一工作目录新建会话继续").assertIsDisplayed()
+    }
+
+    @Test
     fun activeDetailPollsUntilBridgeReportsTerminalState() {
         composeRule.mainClock.autoAdvance = false
         val requests = mutableListOf<String>()

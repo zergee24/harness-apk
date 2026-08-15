@@ -36,6 +36,9 @@ internal fun remoteRpcErrorMessage(payload: JsonElement?): String {
     return when {
         raw.contains("not materialized", ignoreCase = true) -> "会话正在初始化，请先发送第一条消息"
         raw.contains("token too long", ignoreCase = true) -> "会话内容过大，Mac Bridge 需要升级后重试"
+        raw.contains("too large to resume remotely", ignoreCase = true) ->
+            "历史会话内容过大，请在同一工作目录新建会话继续"
+        raw.contains("deadline exceeded", ignoreCase = true) -> "Mac 恢复会话超时，请稍后重试或新建会话"
         else -> "Mac 返回错误，请稍后重试"
     }
 }
@@ -473,18 +476,21 @@ class RemoteRepository(
                 return
             }
             val completed = completedCommandState(kind)
-            val failedActiveTurnStart = kind == "turn.start" &&
-                pendingThreadId != null &&
-                completed.activeThreadId == pendingThreadId
+            val failedTurnStart = kind == "turn.start" && pendingThreadId != null
+            val failedSelectedTurnStart = failedTurnStart && completed.selectedThreadId == pendingThreadId
             _state.value = completed.copy(
-                activeThreadId = completed.activeThreadId.takeUnless { failedActiveTurnStart },
-                activeTurnId = completed.activeTurnId.takeUnless { failedActiveTurnStart },
-                isWorking = completed.isWorking && !failedActiveTurnStart,
+                activeThreadId = completed.activeThreadId.takeUnless {
+                    failedTurnStart && it == pendingThreadId
+                },
+                activeTurnId = completed.activeTurnId.takeUnless {
+                    failedTurnStart && completed.activeThreadId == pendingThreadId
+                },
+                isWorking = completed.isWorking && !failedSelectedTurnStart,
                 timeline = completed.timeline.withPendingTurnStatus(
                     event.requestId,
                     if (kind == "turn.start") "sendFailed" else null,
                 ),
-                threads = if (failedActiveTurnStart) {
+                threads = if (failedTurnStart) {
                     completed.threads.withExecution(
                         pendingThreadId,
                         RemoteThreadExecution(RemoteThreadExecutionState.FAILED),

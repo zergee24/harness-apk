@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -425,6 +426,7 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             executionStatusLoadingEnabled = executionStatusLoadingEnabled,
             onLoadThreadSummary = container.remoteRepository::loadThreadSummary,
         )
+        state.errorMessage?.let { RemoteThreadErrorBanner(it) }
         RemoteTimelineList(
             threadId = state.selectedThreadId.orEmpty(),
             items = state.timeline,
@@ -452,6 +454,27 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             com.harnessapk.remote.RemoteConnectionService.start(context)
             if (state.isWorking) container.remoteRepository.steer(text) else container.remoteRepository.startTurn(text)
         })
+    }
+}
+
+@Composable
+internal fun RemoteThreadErrorBanner(message: String) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer,
+            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        ),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text("消息发送未完成", style = MaterialTheme.typography.labelLarge)
+            Text(message, style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 
