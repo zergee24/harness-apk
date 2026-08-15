@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0/G1/G2 DONE；进入 G3（Android 多后端 UI 与路由）
+当前状态：G0-G3 DONE；G4/G5 待办；G3 完成后按用户确认合入 test 并推送
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -170,12 +170,17 @@ type Backend interface {
 
 **G2 关键决策记录**：spike 用轮询 `session.events` 流式；正式版沿用（G2.5 可换 session/event observer 降延迟）。`StartCodex` 的 args 语义改为"spec.Args 非空时完全自持"，否则 dsh 会被拼上 codex 的 `app-server` 参数。
 
-### G3：Android 多后端 UI 与路由
+### G3：Android 多后端 UI 与路由 — **DONE（2026-08-15）**
 
-- [ ] backend.list 解析与缓存；后端切换 UI；每后端线程列表。
-- [ ] Room Run/Binding 表 `backendId` 列 + 迁移；Outbox 重放带 backendId。
-- [ ] 通知与活动页按后端分组；能力降级 UI。
-- [ ] Instrumented 测试：双后端并行发起、切换、恢复。
+- [x] `host.status` 的 backends 解析与缓存（`RemoteUiState.backends`）；旧 Bridge 无 backends → 单 codex 回退（`fallbackRemoteBackends`）；选中后端失效自动回退 codex。
+- [x] 命令统一注入 `backendId`（`injectBackendId`，outbox 重放 payload 已带 backendId 则保留）；事件按 backendId 过滤（codex.event/approval.request/error）；逻辑事件解析 backendId。
+- [x] Room：`remote_runs`/`project_remote_bindings` 加 `backendId` 列（MIGRATION_23_24，默认 codex），binding 唯一索引改 `(projectId, backendId)`（D5：同一项目可分别绑定 codex/dsh 工作区）；`RemoteRunLauncher` 落库带 backendId；删除项目清全部后端绑定。
+- [x] 后端切换 UI：RemoteScreen 线程列表顶部 `BackendSwitcher`（多后端时显示 chips）；切换后清空视图并重拉该后端线程列表；能力集合按选中后端计算（`canStartM2Run` 等门控随之降级）。
+- [x] 活动页按后端标注：`RemoteActivityRun.backendId` 透传，非 codex 的 run 标题带后端名（如"项目 · DeepSeek Harness"）。
+- [x] JVM 单测：`RemoteBackendSelectionTest` 6 项（injectBackendId/回退/选中校准/逻辑事件 backendId 解析）+ G0 契约测试；全量 `:app:testDebugUnitTest` 全绿，`:app:compileDebugKotlin` 通过。
+- [ ] **Instrumented 双后端并行测试延期至 G6**：需要模拟器/真机 + 真实 relay + 双后端 Bridge 环境，与 G6 故障矩阵一并验收（真机人工项已有）。
+
+**G3 关键决策记录**：绑定/运行按 `(projectId, backendId)` 隔离（D5 落地）；snapshot 恢复的旧 run（无 backendId）按 codex 展示；通知标题带后端名但点击目标不变（按 runId 精确定位）。
 
 ### G4：并行与恢复语义
 
