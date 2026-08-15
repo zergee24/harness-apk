@@ -38,6 +38,9 @@ type Backend interface {
 	Call(ctx context.Context, method string, params any) (json.RawMessage, error)
 	Notify(ctx context.Context, method string, params any) error
 	Respond(ctx context.Context, ref ServerRequestRef, result any) error
+	// Start launches the backend's read loop; must be called before Done can
+	// resolve. Implementations must be safe to call once.
+	Start(ctx context.Context)
 	// Messages delivers normalized app-server events until the backend stops.
 	Messages() <-chan Message
 	// Done resolves once with the client/process exit cause.

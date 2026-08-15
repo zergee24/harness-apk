@@ -15,6 +15,7 @@ import (
 	"time"
 
 	appserverrpc "github.com/harnessapk/remote/internal/appserver"
+	"github.com/harnessapk/remote/internal/backend"
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/completion"
 	"github.com/harnessapk/remote/internal/journal"
@@ -46,30 +47,49 @@ func TestDuplicateRunStartReturnsCachedResultWithoutCallingAppServer(t *testing.
 	}
 }
 
-func TestHostStatusAdvertisesAdditiveM2AndM3Capabilities(t *testing.T) {
-	var payload struct {
-		SchemaVersion int      `json:"schemaVersion"`
-		Capabilities  []string `json:"capabilities"`
+func TestHostStatusAdvertisesLegacyCapsAndPerBackendList(t *testing.T) {
+	codex := backend.NewFake("codex").SetCapabilities(backend.CodexCapabilities())
+	dsh := backend.NewFake("dsh").SetCapabilities([]string{"run.lifecycle.v1", "workspace.candidates.v1"})
+	b := &bridge{
+		backends:     map[string]backend.Backend{"codex": codex, "dsh": dsh},
+		backendOrder: []string{"codex", "dsh"},
 	}
-	if err := json.Unmarshal(hostStatusPayload(), &payload); err != nil {
+	var payload struct {
+		SchemaVersion int                    `json:"schemaVersion"`
+		Capabilities  []string               `json:"capabilities"`
+		Backends      []protocol.BackendInfo `json:"backends"`
+	}
+	if err := json.Unmarshal(b.hostStatusPayload(), &payload); err != nil {
 		t.Fatal(err)
 	}
 	if payload.SchemaVersion != 1 {
 		t.Fatalf("schemaVersion=%d", payload.SchemaVersion)
 	}
-	want := []string{
-		"workspace.candidates.v1",
-		"run.lifecycle.v1",
-		"logical-replay.v1",
-		"completion-evidence.v2",
-		"turn-command-idempotency.v1",
-		"thread-history-pagination.v1",
-		"thread-latest-user-message.v1",
-		"thread-execution-status.v1",
-		"thread-lazy-continuation.v1",
-	}
-	if !reflect.DeepEqual(payload.Capabilities, want) {
+	// Legacy host-level capabilities stay the default backend's, so old
+	// clients keep their M2/M3 behavior.
+	if !reflect.DeepEqual(payload.Capabilities, backend.CodexCapabilities()) {
 		t.Fatalf("capabilities=%#v", payload.Capabilities)
+	}
+	if len(payload.Backends) != 2 || payload.Backends[0].ID != "codex" || payload.Backends[1].ID != "dsh" {
+		t.Fatalf("backends=%#v", payload.Backends)
+	}
+	if !reflect.DeepEqual(payload.Backends[1].Capabilities, []string{"run.lifecycle.v1", "workspace.candidates.v1"}) {
+		t.Fatalf("dsh caps=%#v", payload.Backends[1].Capabilities)
+	}
+}
+
+func TestHostStatusOmitsUnavailableBackends(t *testing.T) {
+	codex := backend.NewFake("codex").SetCapabilities(backend.CodexCapabilities())
+	b := &bridge{
+		backends:     map[string]backend.Backend{"codex": codex},
+		backendOrder: []string{"codex", "dsh"}, // dsh crashed
+	}
+	var payload protocol.HostStatusPayload
+	if err := json.Unmarshal(b.hostStatusPayload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Backends) != 1 || payload.Backends[0].ID != "codex" {
+		t.Fatalf("backends=%#v", payload.Backends)
 	}
 }
 
@@ -236,7 +256,7 @@ func TestDuplicateApprovalResponseCallsAppServerAndEmitsResultOnce(t *testing.T)
 }
 
 func TestApprovalLogicalPayloadRedactsSecretsAndClassifiesHighRisk(t *testing.T) {
-	payload := approvalLogicalPayload(appserverrpc.Message{
+	payload := approvalLogicalPayload(backend.Message{BackendID: "codex",
 		ID: json.RawMessage(`7`), Method: "item/commandExecution/requestApproval",
 		Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","command":"sudo curl https://api.example.com?access_token=top-secret"}`),
 	}, "approval-1", "epoch-1")
@@ -261,7 +281,7 @@ func TestEventTargetsOnlyThreadOwner(t *testing.T) {
 	bridge := &bridge{routes: routes}
 	params := json.RawMessage(`{"threadId":"thread-a","turn":{"id":"turn-a"}}`)
 
-	if got := bridge.eventTargets(params); !reflect.DeepEqual(got, []string{"phone-a"}) {
+	if got := bridge.eventTargets("codex", params); !reflect.DeepEqual(got, []string{"phone-a"}) {
 		t.Fatalf("targets = %#v", got)
 	}
 }
@@ -276,7 +296,7 @@ func TestUnownedEventIsNotBroadcast(t *testing.T) {
 	}
 	bridge := &bridge{routes: routes}
 
-	if got := bridge.eventTargets(json.RawMessage(`{"threadId":"thread-b"}`)); len(got) != 0 {
+	if got := bridge.eventTargets("codex", json.RawMessage(`{"threadId":"thread-b"}`)); len(got) != 0 {
 		t.Fatalf("targets = %#v", got)
 	}
 }
@@ -512,7 +532,7 @@ func TestThreadReadUsesPaginatedSummaryHistoryInsteadOfFullRollout(t *testing.T)
 	diskState := cloneBridgeState(initialState)
 	responsePersisted := make(chan struct{}, 1)
 	b := &bridge{
-		app: &appProcess{client: client}, state: initialState,
+		backends: map[string]backend.Backend{"codex": newTestBackend(client)}, backendOrder: []string{"codex"}, state: initialState,
 		updateState: func(_ string, update func(*bridgeState) error) error {
 			if err := update(&diskState); err != nil {
 				return err
@@ -584,7 +604,7 @@ func TestThreadSummaryReadsOnlyRecentSummaryTurns(t *testing.T) {
 	diskState := cloneBridgeState(initialState)
 	responsePersisted := make(chan struct{}, 1)
 	b := &bridge{
-		app: &appProcess{client: client}, state: initialState,
+		backends: map[string]backend.Backend{"codex": newTestBackend(client)}, backendOrder: []string{"codex"}, state: initialState,
 		updateState: func(_ string, update func(*bridgeState) error) error {
 			if err := update(&diskState); err != nil {
 				return err
@@ -740,7 +760,7 @@ func TestMobileCodexEventEnvelopeWhitelistsTimelineAndBoundsItemPayload(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope, ok := mobileCodexEventEnvelope(appserverrpc.Message{
+	envelope, ok := mobileCodexEventEnvelope(backend.Message{BackendID: "codex",
 		Method: "item/completed", Params: params,
 	}, "epoch-1")
 	if !ok {
@@ -752,7 +772,7 @@ func TestMobileCodexEventEnvelopeWhitelistsTimelineAndBoundsItemPayload(t *testi
 	if !bytes.Contains(envelope, []byte("git status")) || !bytes.Contains(envelope, []byte(`"exitCode":0`)) {
 		t.Fatalf("command summary was lost: %s", envelope)
 	}
-	if _, ok := mobileCodexEventEnvelope(appserverrpc.Message{
+	if _, ok := mobileCodexEventEnvelope(backend.Message{BackendID: "codex",
 		Method: "account/updated", Params: json.RawMessage(`{"profile":"large internal payload"}`),
 	}, "epoch-1"); ok {
 		t.Fatal("unrelated app-server event was forwarded to the phone")
@@ -780,11 +800,11 @@ func TestRouteForParamsUsesThreadAndTurnAcrossMultipleProjectBindings(t *testing
 	}
 	b := &bridge{routes: routes}
 
-	completionRoute, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared","turn":{"id":"turn-b"}}`))
+	completionRoute, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared","turn":{"id":"turn-b"}}`))
 	if !ok || completionRoute.RunID != "run-b" || completionRoute.BindingID != "project-b" {
 		t.Fatalf("completion route = %#v ok=%v", completionRoute, ok)
 	}
-	approvalRoute, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared","turnId":"turn-a","itemId":"approval-a"}`))
+	approvalRoute, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared","turnId":"turn-a","itemId":"approval-a"}`))
 	if !ok || approvalRoute.RunID != "run-a" || approvalRoute.BindingID != "project-a" {
 		t.Fatalf("approval route = %#v ok=%v", approvalRoute, ok)
 	}
@@ -809,7 +829,7 @@ func TestRouteForParamsWithoutTurnRequiresOneActiveRoute(t *testing.T) {
 		}
 	}
 	b := &bridge{routes: routes, terminals: terminals}
-	if route, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared"}`)); ok {
+	if route, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared"}`)); ok {
 		t.Fatalf("ambiguous thread event routed to %#v", route)
 	}
 	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{
@@ -817,7 +837,7 @@ func TestRouteForParamsWithoutTurnRequiresOneActiveRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	route, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared"}`))
+	route, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared"}`))
 	if !ok || route.RunID != "run-b" {
 		t.Fatalf("unique active route = %#v ok=%v", route, ok)
 	}
@@ -834,7 +854,7 @@ func TestRouteForParamsWithUnknownTurnDoesNotFallBackToLegacyEmptyTurnRoute(t *t
 		t.Fatal(err)
 	}
 	b := &bridge{routes: routes}
-	if route, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-shared","turnId":"unknown-turn"}`)); ok {
+	if route, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared","turnId":"unknown-turn"}`)); ok {
 		t.Fatalf("unknown exact turn fell back to legacy route: %#v", route)
 	}
 }
@@ -852,7 +872,7 @@ func TestLegacyTurnStartBackfillsRealTurnIDBeforeRouting(t *testing.T) {
 	if err := b.backfillTurnRoute(command, json.RawMessage(`{"turn":{"id":"turn-real"}}`)); err != nil {
 		t.Fatal(err)
 	}
-	route, ok := b.routeForParams(json.RawMessage(`{"threadId":"thread-1","turnId":"turn-real"}`))
+	route, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-1","turnId":"turn-real"}`))
 	if !ok || route.RunID != "legacy:thread-1" || route.DeviceID != "phone-1" {
 		t.Fatalf("backfilled route=%#v ok=%v", route, ok)
 	}
@@ -883,14 +903,14 @@ func TestLegacyTurnStartResumesPersistedThreadBeforeSafeRetry(t *testing.T) {
 		}
 	})
 	b := &bridge{
-		app: app, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+		backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"}, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
 	}
 	command := protocol.Command{
 		Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "继续任务",
 	}
 
 	result, outcome, err := b.executeTurnStartOnce(
-		context.Background(), "phone-1", command, legacyTurnStartParams(command),
+		context.Background(), "phone-1", command, b.backendFor("codex"), legacyTurnStartParams(command),
 	)
 
 	if err != nil || outcome != turnRPCSucceeded || string(result) != `{"turn":{"id":"turn-real"}}` {
@@ -938,13 +958,13 @@ func TestLegacyTurnStartDoesNotAttemptAnUnboundedResumeWhenMetadataReadFails(t *
 			return nil, nil
 		}
 	})
-	b := &bridge{app: app, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"}}
+	b := &bridge{backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"}, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"}}
 	command := protocol.Command{
 		Type: "turn.start", RequestID: "request-metadata-failure", ThreadID: "thread-1", Text: "继续任务",
 	}
 
 	_, outcome, err := b.executeTurnStartOnce(
-		context.Background(), "phone-1", command, legacyTurnStartParams(command),
+		context.Background(), "phone-1", command, b.backendFor("codex"), legacyTurnStartParams(command),
 	)
 
 	if err == nil || outcome != turnRPCFailed || !strings.Contains(err.Error(), "metadata unavailable") {
@@ -997,7 +1017,7 @@ func TestLegacyTurnStartContinuesAnOversizedPersistedThreadWithoutResume(t *test
 		}
 	})
 	b := &bridge{
-		app: app, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+		backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"}, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
 	}
 	b.updateState = func(_ string, update func(*bridgeState) error) error {
 		persisted := cloneBridgeState(b.state)
@@ -1008,7 +1028,7 @@ func TestLegacyTurnStartContinuesAnOversizedPersistedThreadWithoutResume(t *test
 	}
 
 	result, outcome, err := b.executeTurnStartOnce(
-		context.Background(), "phone-1", command, legacyTurnStartParams(command),
+		context.Background(), "phone-1", command, b.backendFor("codex"), legacyTurnStartParams(command),
 	)
 
 	if err != nil || outcome != turnRPCSucceeded {
@@ -1075,7 +1095,7 @@ func TestLegacyTurnStartContinuesAnOversizedPersistedThreadWithoutResume(t *test
 		t.Fatalf("persisted continuation=%#v", record)
 	}
 	replayed, replayedOutcome, replayedErr := b.executeTurnStartOnce(
-		context.Background(), "phone-1", command, legacyTurnStartParams(command),
+		context.Background(), "phone-1", command, b.backendFor("codex"), legacyTurnStartParams(command),
 	)
 	if replayedErr != nil || replayedOutcome != turnRPCSucceeded || string(replayed) != string(result) || len(requests) != 5 {
 		t.Fatalf("replayed=%s outcome=%q err=%v appCalls=%d", replayed, replayedOutcome, replayedErr, len(requests))
@@ -1161,12 +1181,12 @@ func TestLegacyTurnStartBackfillFailureIsPersistentUnknownAndNotReexecuted(t *te
 	}
 	appCalls := 0
 	b := &bridge{
-		app:          appProcessReturningCounted(t, json.RawMessage(`{"turn":{}}`), &appCalls),
+		backends: map[string]backend.Backend{"codex": appProcessReturningCounted(t, json.RawMessage(`{"turn":{}}`), &appCalls)}, backendOrder: []string{"codex"},
 		commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
 	}
 	command := protocol.Command{Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
 	params := map[string]any{"threadId": command.ThreadID}
-	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, params); err == nil || outcome != turnRPCUnknown {
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, b.backendFor("codex"), params); err == nil || outcome != turnRPCUnknown {
 		t.Fatalf("first outcome=%q err=%v", outcome, err)
 	}
 
@@ -1175,7 +1195,7 @@ func TestLegacyTurnStartBackfillFailureIsPersistentUnknownAndNotReexecuted(t *te
 		t.Fatal(err)
 	}
 	b.commandCache = reopened
-	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, params); err == nil || outcome != turnRPCUnknown {
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, b.backendFor("codex"), params); err == nil || outcome != turnRPCUnknown {
 		t.Fatalf("retry outcome=%q err=%v", outcome, err)
 	}
 	if appCalls != 1 {
@@ -1209,18 +1229,18 @@ func TestLegacyTurnStartRouteSaveFailureDoesNotReexecuteAppServer(t *testing.T) 
 		}
 	}
 	b := &bridge{
-		app:          appProcessReturningHooked(t, json.RawMessage(`{"turn":{"id":"turn-real"}}`), &appCalls, injectRouteSaveFailure),
+		backends: map[string]backend.Backend{"codex": appProcessReturningHooked(t, json.RawMessage(`{"turn":{"id":"turn-real"}}`), &appCalls, injectRouteSaveFailure)}, backendOrder: []string{"codex"},
 		commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
 	}
 	command := protocol.Command{Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
 	params := map[string]any{"threadId": command.ThreadID}
-	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, params); err == nil || outcome != turnRPCUnknown {
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, b.backendFor("codex"), params); err == nil || outcome != turnRPCUnknown {
 		t.Fatalf("first outcome=%q err=%v", outcome, err)
 	}
 	if route, ok := routes.ByRun("legacy:thread-1"); !ok || route.TurnID != "" {
 		t.Fatalf("failed route save leaked TurnID in memory: %#v ok=%v", route, ok)
 	}
-	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, params); err == nil || outcome != turnRPCUnknown {
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, b.backendFor("codex"), params); err == nil || outcome != turnRPCUnknown {
 		t.Fatalf("retry outcome=%q err=%v", outcome, err)
 	}
 	if appCalls != 1 {
@@ -1295,7 +1315,7 @@ func TestSnapshotLedgerMissDoesNotExposeLiveTerminalState(t *testing.T) {
 			app := appProcessReturning(t, json.RawMessage(fmt.Sprintf(
 				`{"thread":{"turns":[{"id":"turn-1","status":{"type":%q}}]}}`, status,
 			)))
-			b := &bridge{app: app, terminals: terminals}
+			b := &bridge{backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"}, terminals: terminals}
 			snapshot, err := b.snapshotForRoute(context.Background(), runstate.Route{
 				RunID: "run-1", ThreadID: "thread-1", TurnID: "turn-1",
 			})
@@ -1320,7 +1340,7 @@ func TestCompleteRunTemporaryThreadReadFailureDoesNotFreezeFailedTerminal(t *tes
 	client := appserverrpc.NewClient(strings.NewReader(""), writerFunc(func([]byte) (int, error) {
 		return 0, errors.New("temporary app-server disconnect")
 	}), "epoch-1")
-	b := bridgeForTerminalTest(t, &appProcess{client: client}, terminals)
+	b := bridgeForTerminalTest(t, newTestBackend(client), terminals)
 	b.completeRun(context.Background(), runstate.Route{
 		RunID: "run-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1",
 	}, json.RawMessage(`{"status":{"type":"completed"}}`))
@@ -1515,7 +1535,7 @@ type appServerTestRequest struct {
 func appProcessScripted(
 	t *testing.T,
 	respond func(appServerTestRequest) (json.RawMessage, json.RawMessage),
-) *appProcess {
+) *testBackend {
 	t.Helper()
 	reader, serverWriter := io.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1542,18 +1562,18 @@ func appProcessScripted(
 		_ = serverWriter.Close()
 		_ = reader.Close()
 	})
-	return &appProcess{client: client}
+	return newTestBackend(client)
 }
 
-func appProcessReturning(t *testing.T, result json.RawMessage) *appProcess {
+func appProcessReturning(t *testing.T, result json.RawMessage) *testBackend {
 	return appProcessReturningCounted(t, result, nil)
 }
 
-func appProcessReturningCounted(t *testing.T, result json.RawMessage, calls *int) *appProcess {
+func appProcessReturningCounted(t *testing.T, result json.RawMessage, calls *int) *testBackend {
 	return appProcessReturningHooked(t, result, calls, nil)
 }
 
-func appProcessReturningHooked(t *testing.T, result json.RawMessage, calls *int, beforeResponse func()) *appProcess {
+func appProcessReturningHooked(t *testing.T, result json.RawMessage, calls *int, beforeResponse func()) *testBackend {
 	t.Helper()
 	reader, serverWriter := io.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1582,10 +1602,10 @@ func appProcessReturningHooked(t *testing.T, result json.RawMessage, calls *int,
 		_ = serverWriter.Close()
 		_ = reader.Close()
 	})
-	return &appProcess{client: client}
+	return newTestBackend(client)
 }
 
-func bridgeForTerminalTest(t *testing.T, app *appProcess, terminals *completion.TerminalRunStore) *bridge {
+func bridgeForTerminalTest(t *testing.T, app *testBackend, terminals *completion.TerminalRunStore) *bridge {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := journal.Open(filepath.Join(dir, "logical-events.log"), bytes.Repeat([]byte{0x41}, 32), 100)
@@ -1593,10 +1613,51 @@ func bridgeForTerminalTest(t *testing.T, app *appProcess, terminals *completion.
 		t.Fatal(err)
 	}
 	return &bridge{
-		app: app, terminals: terminals, journal: store, path: filepath.Join(dir, "state.json"),
+		backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"},
+		terminals: terminals, journal: store, path: filepath.Join(dir, "state.json"),
 		state: bridgeState{
 			HostID: "host-1", DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{},
 			PendingOutbound: map[string]map[string]string{},
 		},
 	}
 }
+
+// testBackend adapts a scripted appserverrpc.Client to the backend.Backend
+// interface used by the bridge, keeping existing scripted-response tests
+// intact after the M4 backend abstraction.
+type testBackend struct {
+	client   *appserverrpc.Client
+	messages chan backend.Message
+}
+
+func newTestBackend(client *appserverrpc.Client) *testBackend {
+	b := &testBackend{client: client, messages: make(chan backend.Message, 64)}
+	client.SetNotificationHandler(func(message appserverrpc.Message) {
+		b.messages <- backend.Message{BackendID: "codex", ID: message.ID, Method: message.Method, Params: message.Params}
+	})
+	return b
+}
+
+func (b *testBackend) ID() string             { return "codex" }
+func (b *testBackend) Name() string           { return "Codex" }
+func (b *testBackend) Capabilities() []string { return backend.CodexCapabilities() }
+func (b *testBackend) ProcessEpoch() string   { return b.client.ProcessEpoch() }
+
+func (b *testBackend) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return b.client.Call(ctx, method, params)
+}
+
+func (b *testBackend) Notify(ctx context.Context, method string, params any) error {
+	return b.client.Notify(method, params)
+}
+
+func (b *testBackend) Respond(ctx context.Context, ref backend.ServerRequestRef, result any) error {
+	return b.client.Respond(appserverrpc.ServerRequestRef{
+		ID: ref.ID, Method: ref.Method, Params: ref.Params, ProcessEpoch: ref.ProcessEpoch,
+	}, result)
+}
+
+func (b *testBackend) Start(ctx context.Context)                  {}
+func (b *testBackend) Messages() <-chan backend.Message { return b.messages }
+func (b *testBackend) Done() <-chan error               { return b.client.Done() }
+func (b *testBackend) Close() error                     { return nil }

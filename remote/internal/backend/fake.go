@@ -105,6 +105,9 @@ func (f *Fake) Notify(ctx context.Context, method string, params any) error { re
 
 func (f *Fake) Respond(ctx context.Context, ref ServerRequestRef, result any) error { return nil }
 
+// Start is a no-op for the in-process fake.
+func (f *Fake) Start(ctx context.Context) {}
+
 func (f *Fake) Messages() <-chan Message { return f.messages }
 func (f *Fake) Done() <-chan error       { return f.done }
 

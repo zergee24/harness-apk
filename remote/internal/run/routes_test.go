@@ -20,7 +20,7 @@ func TestServerRequestResolvedMarksPendingApprovalStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	approval, changed, err := store.MarkServerRequestResolved("epoch-1", requestID)
+	approval, changed, err := store.MarkServerRequestResolved("", "epoch-1", requestID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +48,7 @@ func TestRouteSurvivesWebSocketReconnectAndBridgeStateReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, ok := reconnected.ByThread("thread-1")
+	route.BackendID = "codex" // legacy empty backend id normalizes to codex
 	if !ok || loaded != route {
 		t.Fatalf("loaded route=%#v ok=%v", loaded, ok)
 	}
@@ -59,7 +60,7 @@ func TestNewProcessEpochInvalidatesOldServerRequestIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	requestID := json.RawMessage(`7`)
-	if err := store.BeginProcessEpoch("epoch-1"); err != nil {
+	if err := store.BeginProcessEpoch("codex", "epoch-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutApproval(Approval{
@@ -68,7 +69,7 @@ func TestNewProcessEpochInvalidatesOldServerRequestIDs(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.BeginProcessEpoch("epoch-2"); err != nil {
+	if err := store.BeginProcessEpoch("codex", "epoch-2"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -131,5 +132,119 @@ func TestUpdateTurnSaveFailureDoesNotMutateInMemoryRoute(t *testing.T) {
 	loaded, ok := store.ByRun("run-1")
 	if !ok || loaded.TurnID != "" {
 		t.Fatalf("failed save mutated in-memory route: %#v ok=%v", loaded, ok)
+	}
+}
+
+func TestLegacySchemaV1RoutesMigrateToBackendScopedKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "routes.json")
+	legacy := `{
+  "schemaVersion": 1,
+  "processEpoch": "epoch-legacy",
+  "routes": {
+    "run-legacy": {"runId": "run-legacy", "bindingId": "b", "workspaceId": "w", "hostId": "h", "deviceId": "d", "threadId": "thread-legacy", "turnId": "turn-1", "baselineJson": "{\"cwd\":\"/x\"}"}
+  },
+  "approvals": {
+    "approval-legacy": {"approvalId": "approval-legacy", "runId": "run-legacy", "processEpoch": "epoch-legacy", "serverRequestId": 7, "status": "PENDING"}
+  }
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, ok := store.ByThread("thread-legacy")
+	if !ok || route.BackendID != "codex" || route.BaselineJSON != `{"cwd":"/x"}` {
+		t.Fatalf("migrated route=%#v ok=%v", route, ok)
+	}
+	approval, ok := store.Approval("approval-legacy")
+	if !ok || approval.BackendID != "codex" {
+		t.Fatalf("migrated approval=%#v ok=%v", approval, ok)
+	}
+	if err := store.ValidateResponse("approval-legacy", "epoch-legacy", json.RawMessage(`7`)); err != nil {
+		t.Fatalf("legacy approval epoch not adopted into per-backend epochs: %v", err)
+	}
+	// Reopen persists schema v2 with composite keys.
+	reopened, err := OpenRoutes(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.data.SchemaVersion != 2 {
+		t.Fatalf("schema version = %d", reopened.data.SchemaVersion)
+	}
+	if _, ok := reopened.ByRun("run-legacy"); !ok {
+		t.Fatal("ByRun lost the migrated route")
+	}
+}
+
+func TestBeginProcessEpochScopedPerBackend(t *testing.T) {
+	store, err := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := json.RawMessage(`1`)
+	if err := store.BeginProcessEpoch("codex", "codex-epoch-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BeginProcessEpoch("dsh", "dsh-epoch-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutApproval(Approval{
+		ApprovalID: "a-codex", RunID: "run-c", BackendID: "codex", ProcessEpoch: "codex-epoch-1",
+		ServerRequestID: request, Status: ApprovalPending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutApproval(Approval{
+		ApprovalID: "a-dsh", RunID: "run-d", BackendID: "dsh", ProcessEpoch: "dsh-epoch-1",
+		ServerRequestID: request, Status: ApprovalPending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// codex restarts; only codex approvals must go stale.
+	if err := store.BeginProcessEpoch("codex", "codex-epoch-2"); err != nil {
+		t.Fatal(err)
+	}
+	codexApproval, _ := store.Approval("a-codex")
+	if codexApproval.Status != ApprovalStale {
+		t.Fatalf("codex approval status = %s", codexApproval.Status)
+	}
+	dshApproval, _ := store.Approval("a-dsh")
+	if dshApproval.Status != ApprovalPending {
+		t.Fatalf("dsh approval must stay pending, got %s", dshApproval.Status)
+	}
+	if err := store.ValidateResponse("a-dsh", "dsh-epoch-1", request); err != nil {
+		t.Fatalf("dsh approval should still validate: %v", err)
+	}
+	if err := store.ValidateResponse("a-codex", "codex-epoch-1", request); err == nil {
+		t.Fatal("codex approval with old epoch was accepted")
+	}
+}
+
+func TestByThreadBackendScopesRoutes(t *testing.T) {
+	store, err := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []Route{
+		{RunID: "run-c", HostID: "h", DeviceID: "d", ThreadID: "same-thread", BackendID: "codex"},
+		{RunID: "run-d", HostID: "h", DeviceID: "d", ThreadID: "same-thread", BackendID: "dsh"},
+	} {
+		if err := store.Put(route); err != nil {
+			t.Fatal(err)
+		}
+	}
+	codexRoute, ok := store.ByThreadBackend("same-thread", "codex")
+	if !ok || codexRoute.RunID != "run-c" {
+		t.Fatalf("codex route=%#v ok=%v", codexRoute, ok)
+	}
+	dshRoute, ok := store.ByThreadBackend("same-thread", "dsh")
+	if !ok || dshRoute.RunID != "run-d" {
+		t.Fatalf("dsh route=%#v ok=%v", dshRoute, ok)
+	}
+	if _, ok := store.ByThreadBackend("same-thread", "aux"); ok {
+		t.Fatal("aux backend must not see the thread")
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/harnessapk/remote/internal/protocol"
 )
 
 type ApprovalStatus string
@@ -26,6 +28,7 @@ type Route struct {
 	DeviceID     string `json:"deviceId"`
 	ThreadID     string `json:"threadId"`
 	TurnID       string `json:"turnId"`
+	BackendID    string `json:"backendId,omitempty"`
 	BaselineJSON string `json:"baselineJson,omitempty"`
 }
 
@@ -42,6 +45,7 @@ type WorkspaceBaseline struct {
 type Approval struct {
 	ApprovalID      string          `json:"approvalId"`
 	RunID           string          `json:"runId"`
+	BackendID       string          `json:"backendId,omitempty"`
 	ProcessEpoch    string          `json:"processEpoch"`
 	ServerRequestID json.RawMessage `json:"serverRequestId"`
 	Method          string          `json:"method,omitempty"`
@@ -57,7 +61,8 @@ type Approval struct {
 
 type routesData struct {
 	SchemaVersion int                  `json:"schemaVersion"`
-	ProcessEpoch  string               `json:"processEpoch"`
+	ProcessEpoch  string               `json:"processEpoch,omitempty"`
+	ProcessEpochs map[string]string    `json:"processEpochs,omitempty"`
 	Routes        map[string]*Route    `json:"routes"`
 	Approvals     map[string]*Approval `json:"approvals"`
 }
@@ -70,7 +75,8 @@ type RouteStore struct {
 
 func OpenRoutes(path string) (*RouteStore, error) {
 	store := &RouteStore{path: path, data: routesData{
-		SchemaVersion: 1, Routes: map[string]*Route{}, Approvals: map[string]*Approval{},
+		SchemaVersion: 2, ProcessEpochs: map[string]string{},
+		Routes: map[string]*Route{}, Approvals: map[string]*Approval{},
 	}}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -82,9 +88,20 @@ func OpenRoutes(path string) (*RouteStore, error) {
 	if err := json.Unmarshal(raw, &store.data); err != nil {
 		return nil, err
 	}
-	if store.data.SchemaVersion != 1 {
+	if store.data.SchemaVersion != 1 && store.data.SchemaVersion != 2 {
 		return nil, errors.New("unsupported route store schema")
 	}
+	if store.data.ProcessEpochs == nil {
+		store.data.ProcessEpochs = map[string]string{}
+	}
+	if store.data.SchemaVersion == 1 {
+		// Legacy: single host-level epoch and routes keyed by runID.
+		if store.data.ProcessEpoch != "" {
+			store.data.ProcessEpochs[protocol.DefaultBackendID] = store.data.ProcessEpoch
+		}
+	}
+	store.data.SchemaVersion = 2
+	normalizeRouteStoreData(&store.data)
 	if store.data.Routes == nil {
 		store.data.Routes = map[string]*Route{}
 	}
@@ -94,21 +111,63 @@ func OpenRoutes(path string) (*RouteStore, error) {
 	return store, nil
 }
 
-func (s *RouteStore) BeginProcessEpoch(epoch string) error {
+// normalizeRouteStoreData rekeys legacy routes (keyed by runID with an empty
+// BackendID) onto composite (backendID, runID) keys and canonicalizes empty
+// backend ids to the default backend.
+func normalizeRouteStoreData(data *routesData) {
+	normalized := make(map[string]*Route, len(data.Routes))
+	for _, route := range data.Routes {
+		route.BackendID = normalizeBackend(route.BackendID)
+		normalized[routeKey(route.BackendID, route.RunID)] = route
+	}
+	data.Routes = normalized
+	for _, approval := range data.Approvals {
+		approval.BackendID = normalizeBackend(approval.BackendID)
+	}
+}
+
+// routeKey is the storage key for one run's route: (backendID, runID).
+func routeKey(backendID, runID string) string {
+	return backendID + "\x00" + runID
+}
+
+// normalizeBackend maps the legacy empty backend id to the default backend.
+func normalizeBackend(id string) string {
+	if id == "" {
+		return protocol.DefaultBackendID
+	}
+	return id
+}
+
+// findRouteByRun scans the route map for the route whose RunID matches.
+func findRouteByRun(routes map[string]*Route, runID string) (*Route, bool) {
+	for _, route := range routes {
+		if route.RunID == runID {
+			return route, true
+		}
+	}
+	return nil, false
+}
+
+// BeginProcessEpoch records the process epoch of one backend and marks that
+// backend's pending approvals stale when the epoch changes. Other backends'
+// approvals are untouched, so one backend restart cannot invalidate the other.
+func (s *RouteStore) BeginProcessEpoch(backendID, epoch string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if epoch == "" {
 		return errors.New("process epoch is required")
 	}
-	if s.data.ProcessEpoch == epoch {
+	backendID = normalizeBackend(backendID)
+	if s.data.ProcessEpochs[backendID] == epoch {
 		return nil
 	}
 	for _, approval := range s.data.Approvals {
-		if approval.Status == ApprovalPending && approval.ProcessEpoch != epoch {
+		if approval.Status == ApprovalPending && approval.BackendID == backendID && approval.ProcessEpoch != epoch {
 			approval.Status = ApprovalStale
 		}
 	}
-	s.data.ProcessEpoch = epoch
+	s.data.ProcessEpochs[backendID] = epoch
 	return s.saveLocked()
 }
 
@@ -118,8 +177,9 @@ func (s *RouteStore) Put(route Route) error {
 	if route.RunID == "" || route.HostID == "" || route.DeviceID == "" {
 		return errors.New("route stable identity is required")
 	}
+	route.BackendID = normalizeBackend(route.BackendID)
 	copy := route
-	s.data.Routes[route.RunID] = &copy
+	s.data.Routes[routeKey(route.BackendID, route.RunID)] = &copy
 	return s.saveLocked()
 }
 
@@ -129,8 +189,8 @@ func (s *RouteStore) UpdateTurn(runID, threadID, turnID string) error {
 	if runID == "" || threadID == "" || turnID == "" {
 		return errors.New("run, thread, and turn identity are required")
 	}
-	route := s.data.Routes[runID]
-	if route == nil {
+	route, ok := findRouteByRun(s.data.Routes, runID)
+	if !ok {
 		return errors.New("route not found")
 	}
 	if route.ThreadID != threadID {
@@ -144,9 +204,9 @@ func (s *RouteStore) UpdateTurn(runID, threadID, turnID string) error {
 	}
 	updated := *route
 	updated.TurnID = turnID
-	s.data.Routes[runID] = &updated
+	s.data.Routes[routeKey(updated.BackendID, runID)] = &updated
 	if err := s.saveLocked(); err != nil {
-		s.data.Routes[runID] = route
+		s.data.Routes[routeKey(route.BackendID, runID)] = route
 		return err
 	}
 	return nil
@@ -155,8 +215,8 @@ func (s *RouteStore) UpdateTurn(runID, threadID, turnID string) error {
 func (s *RouteStore) ByRun(runID string) (Route, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	route := s.data.Routes[runID]
-	if route == nil {
+	route, ok := findRouteByRun(s.data.Routes, runID)
+	if !ok {
 		return Route{}, false
 	}
 	return *route, true
@@ -173,21 +233,46 @@ func (s *RouteStore) ByThread(threadID string) (Route, bool) {
 	return Route{}, false
 }
 
+// ByThreadBackend resolves the route for one thread scoped to one backend.
+// Events arriving from a backend are only routed to a run that backend owns.
+func (s *RouteStore) ByThreadBackend(threadID, backendID string) (Route, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	backendID = normalizeBackend(backendID)
+	for _, route := range s.data.Routes {
+		if route.ThreadID == threadID && route.BackendID == backendID {
+			return *route, true
+		}
+	}
+	return Route{}, false
+}
+
 func (s *RouteStore) ByThreadTurn(threadID, turnID string) (Route, bool) {
+	return s.ByThreadTurnBackend(threadID, turnID, "")
+}
+
+// ByThreadTurnBackend resolves the route for one (thread, turn) scoped to one
+// backend; an empty backendID accepts any backend (legacy callers).
+func (s *RouteStore) ByThreadTurnBackend(threadID, turnID, backendID string) (Route, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if threadID == "" || turnID == "" {
 		return Route{}, false
 	}
+	backendID = normalizeBackend(backendID)
 	var matched *Route
 	for _, route := range s.data.Routes {
-		if route.ThreadID == threadID && route.TurnID == turnID {
-			if matched != nil {
-				return Route{}, false
-			}
-			copy := *route
-			matched = &copy
+		if route.ThreadID != threadID || route.TurnID != turnID {
+			continue
 		}
+		if backendID != "" && route.BackendID != backendID {
+			continue
+		}
+		if matched != nil {
+			return Route{}, false
+		}
+		copy := *route
+		matched = &copy
 	}
 	if matched != nil {
 		return *matched, true
@@ -195,17 +280,28 @@ func (s *RouteStore) ByThreadTurn(threadID, turnID string) (Route, bool) {
 	return Route{}, false
 }
 
-func (s *RouteStore) ByThreadAll(threadID string) []Route {
+// ByThreadAllBackend returns all non-terminal-candidate routes for one thread
+// on one backend (an empty backendID accepts any backend).
+func (s *RouteStore) ByThreadAllBackend(threadID, backendID string) []Route {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	backendID = normalizeBackend(backendID)
 	result := make([]Route, 0)
 	for _, route := range s.data.Routes {
-		if route.ThreadID == threadID {
-			result = append(result, *route)
+		if route.ThreadID != threadID {
+			continue
 		}
+		if backendID != "" && route.BackendID != backendID {
+			continue
+		}
+		result = append(result, *route)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].RunID < result[j].RunID })
 	return result
+}
+
+func (s *RouteStore) ByThreadAll(threadID string) []Route {
+	return s.ByThreadAllBackend(threadID, "")
 }
 
 func (s *RouteStore) ByRuns(runIDs []string) []Route {
@@ -213,7 +309,7 @@ func (s *RouteStore) ByRuns(runIDs []string) []Route {
 	defer s.mu.Unlock()
 	result := make([]Route, 0, len(runIDs))
 	for _, runID := range runIDs {
-		if route := s.data.Routes[runID]; route != nil {
+		if route, ok := findRouteByRun(s.data.Routes, runID); ok {
 			result = append(result, *route)
 		}
 	}
@@ -242,6 +338,7 @@ func (s *RouteStore) PutApproval(approval Approval) error {
 	if approval.ApprovalID == "" || approval.RunID == "" || approval.ProcessEpoch == "" || len(approval.ServerRequestID) == 0 {
 		return errors.New("approval stable identity is required")
 	}
+	approval.BackendID = normalizeBackend(approval.BackendID)
 	copy := cloneApproval(approval)
 	s.data.Approvals[approval.ApprovalID] = &copy
 	return s.saveLocked()
@@ -257,11 +354,15 @@ func (s *RouteStore) Approval(approvalID string) (Approval, bool) {
 	return cloneApproval(*approval), true
 }
 
-func (s *RouteStore) MarkServerRequestResolved(epoch string, requestID json.RawMessage) (Approval, bool, error) {
+// MarkServerRequestResolved marks the pending approval matching one backend's
+// epoch and server request id stale (resolved elsewhere).
+func (s *RouteStore) MarkServerRequestResolved(backendID, epoch string, requestID json.RawMessage) (Approval, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	backendID = normalizeBackend(backendID)
 	for _, approval := range s.data.Approvals {
-		if approval.Status == ApprovalPending && approval.ProcessEpoch == epoch && sameJSON(approval.ServerRequestID, requestID) {
+		if approval.Status == ApprovalPending && approval.BackendID == backendID &&
+			approval.ProcessEpoch == epoch && sameJSON(approval.ServerRequestID, requestID) {
 			approval.Status = ApprovalStale
 			if err := s.saveLocked(); err != nil {
 				return Approval{}, false, err
@@ -279,7 +380,8 @@ func (s *RouteStore) ValidateResponse(approvalID, epoch string, requestID json.R
 	if approval == nil {
 		return errors.New("approval not found")
 	}
-	if s.data.ProcessEpoch != epoch || approval.ProcessEpoch != epoch {
+	current := s.data.ProcessEpochs[approval.BackendID]
+	if current != epoch || approval.ProcessEpoch != epoch {
 		return errors.New("approval belongs to an expired process epoch")
 	}
 	if approval.Status != ApprovalPending {
