@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0 DONE；D1/D2 已确认（路线 A、免熔断替换），进入 G1
+当前状态：G0/G1 DONE；进入 G2（DSH 后端 v1）
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -150,12 +150,14 @@ type Backend interface {
 
 **G0 关键决策记录**：host.status 能力上报必须加性（保留顶层 `capabilities` = 默认后端 codex 的能力），否则旧版 Android（依赖 `parseRemoteHostCapabilities`）会因 schemaVersion/字段变化退化——旧 APK ↔ 新 Bridge 兼容由此保证。
 
-### G1：Bridge 后端抽象与多进程生命周期
+### G1：Bridge 后端抽象与多进程生命周期 — **DONE（2026-08-15）**
 
-- [ ] `internal/backend` 接口 + `BackendEvent` 归一化；`codexBackend` 迁移（行为不变，测试全绿）。
-- [ ] `serve` 多后端启动/监督/重启隔离/每后端 epoch；`host.status` 上报后端列表与能力。
-- [ ] Route/Approval/LogicalEvent 增加 `backendId`；`routes.json` 键升级；向后兼容读取。
-- [ ] 单测：后端崩溃隔离、epoch 变化、双后端路由不串扰。
+- [x] `internal/backend` 接口 + `Message`（BackendEvent）归一化；`codexBackend`（`backend.StartCodex`）迁移，原 appserver client 行为不变；`Fake` 测试后端（脚本化响应/事件/崩溃）。
+- [x] `serve --backend <id>|<id>=<executable>`（可重复）多后端启动/监督/重启隔离（每后端独立 goroutine + 退避 + 独立 epoch）；就绪等待 60s 上限不卡死 relay 循环；`host.status` 上报 backends 列表，顶层 `capabilities` 保持 = 默认后端（codex）能力。
+- [x] Route/Approval/LogicalEvent 增加 `backendId`；`routes.json` schema v2（复合键 `(backendID, runID)` + 每后端 epoch 表），v1 旧文件加载时自动迁移；旧审批只在所属后端 epoch 变化时置 STALE。
+- [x] 单测：`TestSuperviseBackendRestartsCrashedBackendAndLeavesOthersAlive`（崩溃重启 + 他端不受扰）、`TestBeginProcessEpochScopedPerBackend`（epoch 隔离）、`TestExecuteCommandRoutesByBackendID` / `TestRouteForParamsScopesEventsToOwningBackend`（双后端路由不串扰）、`TestLegacySchemaV1RoutesMigrateToBackendScopedKeys`（迁移兼容）；全量 `go vet` + `go test ./...` 12 包全绿。
+
+**G1 关键决策记录**：Coordinator 层本就依赖 `AppServerCaller` 接口，后端抽象零改动接入；`Backend` 接口的 `Capabilities() []string` 直接采用既有能力名字符串（spec §6.1 的 bool 结构体落为字符串集合，wire 与 Android 门控均以字符串为准）；`sendEvent` 保持无 backendId，新增 `sendBackendEvent` 只在需要归属的事件（后端事件/错误）上打标。
 
 ### G2：DSH 后端 v1
 
