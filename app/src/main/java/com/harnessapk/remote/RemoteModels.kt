@@ -50,6 +50,7 @@ data class RemoteWireMessage(
 data class RemoteCommand(
     val type: String,
     val requestId: String,
+    val backendId: String? = null,
     val threadId: String? = null,
     val turnId: String? = null,
     val text: String? = null,
@@ -207,6 +208,7 @@ data class RemoteLogicalEvent(
     val hostId: String,
     val deviceId: String,
     val runId: String,
+    val backendId: String? = null,
     val sequence: Long,
     val type: String,
     val payload: JsonElement?,
@@ -226,6 +228,7 @@ internal fun parseRemoteLogicalEvent(raw: String): RemoteLogicalEvent {
         hostId = root.requiredString("hostId"),
         deviceId = root.requiredString("deviceId"),
         runId = root.requiredString("runId"),
+        backendId = root.string("backendId"),
         sequence = sequence,
         type = root.requiredString("type"),
         payload = root["payload"]?.takeUnless { it is JsonNull },
@@ -235,6 +238,7 @@ internal fun parseRemoteLogicalEvent(raw: String): RemoteLogicalEvent {
 
 data class RemoteEvent(
     val type: String,
+    val backendId: String? = null,
     val requestId: String? = null,
     val method: String? = null,
     val threadId: String? = null,
@@ -243,6 +247,34 @@ data class RemoteEvent(
     val payload: JsonElement? = null,
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+/** One backend exposed by the Mac host (M4 multi-backend). */
+data class RemoteBackend(
+    val id: String,
+    val name: String,
+    val capabilities: Set<String>,
+)
+
+/**
+ * Parses the M4 `backends` list from a host.status payload. Returns an empty
+ * list when the payload predates M4 (legacy host-level capabilities only);
+ * callers then fall back to the single default backend view.
+ */
+internal fun parseRemoteBackends(event: RemoteEvent): List<RemoteBackend> {
+    val payload = event.payload as? JsonObject ?: return emptyList()
+    val backends = payload["backends"] as? JsonArray ?: return emptyList()
+    return backends.mapNotNull { element ->
+        val item = element as? JsonObject ?: return@mapNotNull null
+        val id = item.string("id")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        RemoteBackend(
+            id = id,
+            name = item.string("name").orEmpty().ifBlank { id },
+            capabilities = item.array("capabilities")
+                .mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotBlank) }
+                .toSet(),
+        )
+    }
+}
 
 data class RemoteThread(
     val id: String,
@@ -306,6 +338,8 @@ data class RemoteNotification(
 data class RemoteUiState(
     val connectionStatus: RemoteConnectionStatus = RemoteConnectionStatus.DISCONNECTED,
     val errorMessage: String? = null,
+    val backends: List<RemoteBackend> = emptyList(),
+    val selectedBackendId: String = DEFAULT_BACKEND_ID,
     val threads: List<RemoteThread> = emptyList(),
     val selectedThreadId: String? = null,
     val activeThreadId: String? = null,
@@ -322,6 +356,39 @@ data class RemoteUiState(
     val workspaceCandidatesLoaded: Boolean = false,
     val capabilities: Set<String> = emptySet(),
 )
+
+const val DEFAULT_BACKEND_ID = "codex"
+
+/**
+ * The legacy single-backend view used when a host.status payload predates M4
+ * (no `backends` array): one codex backend carrying the host-level
+ * capabilities.
+ */
+internal fun fallbackRemoteBackends(hostCapabilities: Set<String>): List<RemoteBackend> = listOf(
+    RemoteBackend(
+        id = DEFAULT_BACKEND_ID,
+        name = "Codex",
+        capabilities = hostCapabilities,
+    ),
+)
+
+/** Keeps the selected backend valid after a host.status refresh. */
+internal fun reconcileSelectedBackend(
+    selected: String,
+    backends: List<RemoteBackend>,
+): String = if (backends.any { it.id == selected }) selected else DEFAULT_BACKEND_ID
+
+/**
+ * Attaches the selected backend id to a command payload unless it already
+ * carries one (outbox replays keep their original backend).
+ */
+internal fun injectBackendId(payload: JsonObject, backendId: String): JsonObject {
+    if (payload.containsKey("backendId")) return payload
+    return buildJsonObject {
+        payload.forEach { (key, value) -> put(key, value) }
+        put("backendId", JsonPrimitive(backendId))
+    }
+}
 
 internal fun parsePairingPayload(raw: String, now: Long = System.currentTimeMillis()): RemotePairingPayload {
     val root = Json.parseToJsonElement(raw.trim()).jsonObject
@@ -343,6 +410,7 @@ internal fun parsePairingPayload(raw: String, now: Long = System.currentTimeMill
 
 internal fun RemoteCommand.toJson(): JsonObject = buildJsonObject {
     put("type", JsonPrimitive(type)); put("requestId", JsonPrimitive(requestId))
+    backendId?.takeIf(String::isNotBlank)?.let { put("backendId", JsonPrimitive(it)) }
     threadId?.let { put("threadId", JsonPrimitive(it)) }; turnId?.let { put("turnId", JsonPrimitive(it)) }
     text?.let { put("text", JsonPrimitive(it)) }; cwd?.let { put("cwd", JsonPrimitive(it)) }
     expectedTurnId?.let { put("expectedTurnId", JsonPrimitive(it)) }
@@ -353,7 +421,8 @@ internal fun RemoteCommand.toJson(): JsonObject = buildJsonObject {
 internal fun parseRemoteEvent(raw: String): RemoteEvent {
     val root = Json.parseToJsonElement(raw).jsonObject
     return RemoteEvent(
-        type = root.string("type").orEmpty(), requestId = root.string("requestId"), method = root.string("method"),
+        type = root.string("type").orEmpty(), backendId = root.string("backendId"),
+        requestId = root.string("requestId"), method = root.string("method"),
         threadId = root.string("threadId"), turnId = root.string("turnId"), message = root.string("message"),
         payload = root["payload"]?.takeUnless { it is JsonNull }, createdAt = root.long("createdAt") ?: System.currentTimeMillis(),
     )

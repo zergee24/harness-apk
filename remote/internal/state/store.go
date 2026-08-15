@@ -69,6 +69,16 @@ type BridgeData struct {
 	JournalKey              string                        `json:"journalKey"`
 	RegisteredWorkspaces    []string                      `json:"registeredWorkspaces,omitempty"`
 	ThreadContinuations     map[string]ThreadContinuation `json:"threadContinuations,omitempty"`
+	Backends                []BackendConfig               `json:"backends,omitempty"`
+}
+
+// BackendConfig is the persisted serve-time backend list, reported by
+// host.status and kept across restarts so a bridge that loses its flags still
+// describes the same host truthfully.
+type BackendConfig struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Capabilities []string `json:"capabilities"`
 }
 
 type ThreadContinuation struct {

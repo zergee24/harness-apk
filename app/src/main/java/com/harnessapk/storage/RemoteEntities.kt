@@ -8,7 +8,7 @@ import androidx.room.Index
     tableName = "project_remote_bindings",
     primaryKeys = ["id"],
     indices = [
-        Index(value = ["projectId"], unique = true),
+        Index(value = ["projectId", "backendId"], unique = true),
         Index("hostId"),
         Index("workspaceId"),
     ],
@@ -16,6 +16,7 @@ import androidx.room.Index
 data class ProjectRemoteBindingEntity(
     val id: String,
     val projectId: String,
+    val backendId: String,
     val hostId: String,
     val workspaceId: String,
     val cwd: String,
@@ -40,6 +41,7 @@ data class RemoteRunEntity(
     val bindingId: String,
     val bindingSnapshotJson: String,
     val hostId: String,
+    val backendId: String,
     val threadId: String?,
     val turnId: String?,
     val objective: String,

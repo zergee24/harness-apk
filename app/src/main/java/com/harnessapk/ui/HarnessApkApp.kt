@@ -874,7 +874,12 @@ fun HarnessApkApp(
                     remoteRunStartError = null
                     runCatching {
                         val binding = withContext(container.dispatchers.io) {
-                            requireNotNull(container.remoteBindingRepository.bindingForProject(project.id)) {
+                            requireNotNull(
+                                container.remoteBindingRepository.bindingForProject(
+                                    project.id,
+                                    remoteUiState.selectedBackendId,
+                                ),
+                            ) {
                                 "项目尚未绑定 Mac 工作区"
                             }
                         }

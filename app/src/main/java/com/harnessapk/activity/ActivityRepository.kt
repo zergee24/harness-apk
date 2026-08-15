@@ -1,5 +1,6 @@
 package com.harnessapk.activity
 
+import com.harnessapk.remote.DEFAULT_BACKEND_ID
 import com.harnessapk.storage.AppDatabase
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -44,6 +45,7 @@ data class RemoteActivityRun(
     val status: String,
     val latestLine: String,
     val updatedAt: Long,
+    val backendId: String = DEFAULT_BACKEND_ID,
 )
 
 data class RemoteActivityApproval(
@@ -127,12 +129,22 @@ class RoomActivityFeedSource(database: AppDatabase) : ActivityFeedSource {
     }
 
     override val remoteOpen: Flow<List<RemoteActivityRun>> = remoteDao.observeOpenRuns().map { rows ->
-        rows.map { RemoteActivityRun(it.id, it.projectNameSnapshot, it.objective, it.status, it.latestLine, it.updatedAt) }
+        rows.map {
+            RemoteActivityRun(
+                it.id, it.projectNameSnapshot, it.objective, it.status,
+                it.latestLine, it.updatedAt, it.backendId,
+            )
+        }
     }
 
     override fun remoteRecent(since: Long, limit: Int): Flow<List<RemoteActivityRun>> =
         remoteDao.observeRecentTerminalRuns(since, limit).map { rows ->
-            rows.map { RemoteActivityRun(it.id, it.projectNameSnapshot, it.objective, it.status, it.latestLine, it.updatedAt) }
+            rows.map {
+                RemoteActivityRun(
+                    it.id, it.projectNameSnapshot, it.objective, it.status,
+                    it.latestLine, it.updatedAt, it.backendId,
+                )
+            }
         }
 
     override val pendingApprovals: Flow<List<RemoteActivityApproval>> = remoteDao.observePendingApprovals().map { rows ->
@@ -162,7 +174,7 @@ private fun RemoteActivityRun.toActivityItem() = ActivityItem(
     id = "run:$id",
     target = ActivityTarget.REMOTE_RUN,
     targetId = id,
-    title = projectName,
+    title = if (backendId == DEFAULT_BACKEND_ID) projectName else "$projectName · ${backendDisplayLabel(backendId)}",
     summary = objective,
     statusLabel = when (status) {
         "QUEUED" -> "等待 Mac 接收"
@@ -178,6 +190,12 @@ private fun RemoteActivityRun.toActivityItem() = ActivityItem(
     risk = null,
     updatedAt = updatedAt,
 )
+
+private fun backendDisplayLabel(backendId: String): String = when (backendId) {
+    DEFAULT_BACKEND_ID -> "Codex"
+    "dsh" -> "DeepSeek Harness"
+    else -> backendId
+}
 
 private fun RemoteActivityApproval.toActivityItem(run: RemoteActivityRun?) = ActivityItem(
     id = "approval:$id",

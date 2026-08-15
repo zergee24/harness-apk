@@ -65,18 +65,20 @@ class RemoteBindingRepository(
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
-    suspend fun bindingForProject(projectId: String): ProjectRemoteBindingEntity? =
-        dao.bindingForProject(projectId)
+    suspend fun bindingForProject(projectId: String, backendId: String): ProjectRemoteBindingEntity? =
+        dao.bindingForProject(projectId, backendId)
 
     suspend fun bind(
         projectId: String,
+        backendId: String,
         hostId: String,
         candidate: WorkspaceCandidate,
         confirmFingerprintChange: Boolean = false,
     ): ProjectRemoteBindingEntity {
         require(projectId.isNotBlank()) { "projectId is required" }
+        require(backendId.isNotBlank()) { "backendId is required" }
         require(hostId.isNotBlank()) { "hostId is required" }
-        val existing = dao.bindingForProject(projectId)
+        val existing = dao.bindingForProject(projectId, backendId)
         val evaluation = evaluateBindingChange(
             existingFingerprint = existing?.repositoryFingerprint,
             candidate = candidate,
@@ -87,6 +89,7 @@ class RemoteBindingRepository(
         val binding = ProjectRemoteBindingEntity(
             id = existing?.id ?: newId(),
             projectId = projectId,
+            backendId = backendId,
             hostId = hostId,
             workspaceId = candidate.workspaceId,
             cwd = candidate.cwd,
@@ -102,7 +105,7 @@ class RemoteBindingRepository(
         return binding
     }
 
-    suspend fun unbind(projectId: String) {
-        dao.deleteBindingByProject(projectId)
+    suspend fun unbind(projectId: String, backendId: String) {
+        dao.deleteBindingByProject(projectId, backendId)
     }
 }

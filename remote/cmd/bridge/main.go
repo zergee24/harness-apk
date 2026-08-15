@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/coder/websocket"
 	appserverrpc "github.com/harnessapk/remote/internal/appserver"
+	"github.com/harnessapk/remote/internal/backend"
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/completion"
 	"github.com/harnessapk/remote/internal/journal"
@@ -39,25 +39,21 @@ import (
 type bridgeState = bridgestate.BridgeData
 
 type bridge struct {
-	mu           sync.Mutex
-	writeMu      sync.Mutex
-	state        bridgeState
-	path         string
-	conn         *websocket.Conn
-	app          *appProcess
-	journal      *journal.Store
-	commandCache *commandcache.Store
-	routes       *runstate.RouteStore
-	terminals    *completion.TerminalRunStore
-	workspaces   *workspace.Registry
-	seen         map[string]time.Time
-	updateState  func(string, func(*bridgeState) error) error
-}
-
-type appProcess struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	client *appserverrpc.Client
+	mu             sync.Mutex
+	writeMu        sync.Mutex
+	state          bridgeState
+	path           string
+	conn           *websocket.Conn
+	backends       map[string]backend.Backend
+	backendOrder   []string
+	journal        *journal.Store
+	commandCache   *commandcache.Store
+	routes         *runstate.RouteStore
+	terminals      *completion.TerminalRunStore
+	workspaces     *workspace.Registry
+	seen           map[string]time.Time
+	updateState    func(string, func(*bridgeState) error) error
+	backendBackoff time.Duration
 }
 
 func main() {
@@ -245,81 +241,143 @@ func runServe(defaultPath string, args []string) {
 	flags := flag.NewFlagSet("serve", flag.ExitOnError)
 	statePath := flags.String("state", defaultPath, "bridge state file")
 	codex := flags.String("codex", "codex", "Codex executable")
+	var backendSpecs stringList
+	flags.Var(&backendSpecs, "backend", "backend <id> or <id>=<executable>; repeatable (default: codex)")
 	_ = flags.Parse(args)
+	specs, err := parseBackendSpecs(backendSpecs, *codex)
+	if err != nil {
+		log.Fatal(err)
+	}
 	state, err := loadBridgeState(*statePath)
 	if err != nil {
 		log.Fatal(err)
 	}
+	persistedBackends := make([]bridgestate.BackendConfig, 0, len(specs))
+	for _, spec := range specs {
+		persistedBackends = append(persistedBackends, bridgestate.BackendConfig{
+			ID: spec.ID, Name: spec.Name, Capabilities: spec.Capabilities,
+		})
+	}
+	if err := bridgestate.UpdateBridge(*statePath, func(current *bridgeState) error {
+		current.Backends = persistedBackends
+		state = *current
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+	}
 	for {
-		app, err := startAppServer(*codex)
-		if err != nil {
-			log.Printf("start app-server: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
 		journalKey, err := base64.RawURLEncoding.DecodeString(state.JournalKey)
 		if err != nil {
 			log.Printf("decode journal key: %v", err)
-			app.close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		journalStore, err := journal.Open(filepath.Join(filepath.Dir(*statePath), "logical-events.log"), journalKey, 10_000)
 		if err != nil {
 			log.Printf("open logical journal: %v", err)
-			app.close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		commandStore, err := commandcache.Open(filepath.Join(filepath.Dir(*statePath), "commands.json"))
 		if err != nil {
 			log.Printf("open command cache: %v", err)
-			app.close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		routeStore, err := runstate.OpenRoutes(filepath.Join(filepath.Dir(*statePath), "routes.json"))
 		if err != nil {
 			log.Printf("open run routes: %v", err)
-			app.close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		terminalStore, err := completion.OpenTerminalRunStore(filepath.Join(filepath.Dir(*statePath), "terminal-runs.json"))
 		if err != nil {
 			log.Printf("open terminal run ledger: %v", err)
-			app.close()
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		if err := routeStore.BeginProcessEpoch(app.client.ProcessEpoch()); err != nil {
-			log.Printf("start app-server process epoch: %v", err)
-			app.close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		workspaceRegistry, err := workspace.OpenRegistry(filepath.Join(filepath.Dir(*statePath), "workspaces.json"))
 		if err != nil {
 			log.Printf("open workspace registry: %v", err)
-			app.close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		b := &bridge{
-			state: state, path: *statePath, app: app, journal: journalStore,
+			state: state, path: *statePath, journal: journalStore,
 			commandCache: commandStore, routes: routeStore, terminals: terminalStore, workspaces: workspaceRegistry,
 			seen: map[string]time.Time{},
 		}
 		if err := b.recoverThreadContinuationsFromCommands(); err != nil {
 			log.Printf("recover lazy continuations: %v", err)
 		}
-		if err := b.run(context.Background()); err != nil {
+		serveCtx, cancelServe := context.WithCancel(context.Background())
+		if err := b.run(serveCtx, specs); err != nil {
 			log.Printf("bridge disconnected: %v", err)
 		}
-		app.close()
+		cancelServe()
+		b.closeBackends()
 		state, _ = loadBridgeState(*statePath)
 		time.Sleep(3 * time.Second)
 	}
+}
+
+// stringList collects one repeatable string flag.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+// parseBackendSpecs turns --backend values into ordered backend specs. A bare
+// id resolves a known backend (codex); <id>=<executable> registers any
+// executable speaking the canonical app-server protocol under that id.
+func parseBackendSpecs(raw []string, codexExec string) ([]backend.Spec, error) {
+	if len(raw) == 0 {
+		raw = []string{"codex"}
+	}
+	specs := make([]backend.Spec, 0, len(raw))
+	seen := map[string]struct{}{}
+	for _, item := range raw {
+		id, exec := item, ""
+		if eq := strings.IndexByte(item, '='); eq >= 0 {
+			id, exec = item[:eq], item[eq+1:]
+		}
+		id = backend.NormalizeID(strings.TrimSpace(id))
+		if id == "" {
+			return nil, fmt.Errorf("backend id is required in %q", item)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return nil, fmt.Errorf("duplicate backend %q", id)
+		}
+		seen[id] = struct{}{}
+		if strings.TrimSpace(exec) == "" {
+			switch id {
+			case protocol.DefaultBackendID:
+				exec = codexExec
+			case "dsh":
+				exec = "dsh"
+			default:
+				return nil, fmt.Errorf("unknown backend %q: use <id>=<executable>", id)
+			}
+		}
+		name := id
+		capabilities := backend.CodexCapabilities()
+		args := []string(nil)
+		switch id {
+		case protocol.DefaultBackendID:
+			name = "Codex"
+		case "dsh":
+			name = "DeepSeek Harness"
+			capabilities = backend.DSHCapabilities()
+			args = []string{"--profile", "appserver", "--listen", "stdio://"}
+		}
+		specs = append(specs, backend.Spec{
+			ID: id, Name: name, Capabilities: capabilities, Exec: exec, Args: args,
+		})
+	}
+	return specs, nil
 }
 
 func executeCachedCommand(
@@ -342,7 +400,7 @@ func executeCachedCommand(
 	return cache.Complete(commandID, eventID, result)
 }
 
-func (b *bridge) run(ctx context.Context) error {
+func (b *bridge) run(ctx context.Context, specs []backend.Spec) error {
 	wsURL, err := relayWebSocketURL(b.state.RelayURL, "host", b.state.HostID)
 	if err != nil {
 		return err
@@ -358,11 +416,29 @@ func (b *bridge) run(ctx context.Context) error {
 		return err
 	}
 	errorsCh := make(chan error, 2)
-	b.app.client.SetNotificationHandler(func(message appserverrpc.Message) {
-		b.handleAppServer(ctx, message)
-	})
-	b.app.client.Start(ctx)
-	go func() { errorsCh <- <-b.app.client.Done() }()
+	ready := make(chan backend.Backend, len(specs))
+	for _, spec := range specs {
+		go b.superviseBackend(ctx, spec, ready, func(spec backend.Spec) (backend.Backend, error) {
+			return backend.StartCodex(spec)
+		})
+	}
+	// Wait until every backend registered once so the first host.status is
+	// truthful, but never block the relay loop forever on a broken backend
+	// spec: supervisors keep retrying and host.status reports availability.
+	remaining := len(specs)
+	readyDeadline := time.After(60 * time.Second)
+	for remaining > 0 {
+		select {
+		case <-ready:
+			remaining--
+		case <-readyDeadline:
+			log.Printf("timed out waiting for backend readiness (%d pending); continuing", remaining)
+			remaining = 0
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	close(ready)
 	go func() {
 		for {
 			_, raw, err := conn.Read(ctx)
@@ -375,19 +451,6 @@ func (b *bridge) run(ctx context.Context) error {
 			}
 		}
 	}()
-	initializeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if _, err := b.app.client.Call(initializeCtx, "initialize", map[string]any{
-		"clientInfo": map[string]string{
-			"name": "harness_remote_bridge", "title": "Harness Remote Bridge", "version": "0.2.0",
-		},
-		"capabilities": map[string]bool{"experimentalApi": true},
-	}); err != nil {
-		return err
-	}
-	if err := b.app.client.Notify("initialized", map[string]any{}); err != nil {
-		return err
-	}
 	if err := b.recoverTurnStartRoutes(); err != nil {
 		log.Printf("recover turn/start routes after bridge connection: %v", err)
 	}
@@ -401,6 +464,126 @@ func (b *bridge) run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+}
+
+// superviseBackend starts, initializes, and restarts one backend process
+// independently: a crash only affects its own routes/approvals (via its own
+// process epoch) and never tears down the relay connection or other backends.
+func (b *bridge) superviseBackend(
+	ctx context.Context,
+	spec backend.Spec,
+	ready chan<- backend.Backend,
+	start func(backend.Spec) (backend.Backend, error),
+) {
+	backoff := b.backendBackoff
+	if backoff <= 0 {
+		backoff = 3 * time.Second
+	}
+	announced := false
+	for {
+		bd, err := start(spec)
+		if err != nil {
+			log.Printf("start backend %s: %v", spec.ID, err)
+			if !sleepCtx(ctx, backoff) {
+				return
+			}
+			continue
+		}
+		initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		_, initErr := bd.Call(initCtx, "initialize", map[string]any{
+			"clientInfo": map[string]string{
+				"name": "harness_remote_bridge", "title": "Harness Remote Bridge", "version": "0.2.0",
+			},
+			"capabilities": map[string]bool{"experimentalApi": true},
+		})
+		if initErr == nil {
+			initErr = bd.Notify(initCtx, "initialized", map[string]any{})
+		}
+		cancel()
+		if initErr != nil {
+			log.Printf("initialize backend %s: %v", spec.ID, initErr)
+			_ = bd.Close()
+			if !sleepCtx(ctx, backoff) {
+				return
+			}
+			continue
+		}
+		bd.Start(ctx)
+		if err := b.routes.BeginProcessEpoch(bd.ID(), bd.ProcessEpoch()); err != nil {
+			log.Printf("begin process epoch for backend %s: %v", spec.ID, err)
+		}
+		b.registerBackend(bd)
+		if !announced {
+			announced = true
+			select {
+			case ready <- bd:
+			case <-ctx.Done():
+				return
+			}
+		}
+		go func(bd backend.Backend) {
+			for message := range bd.Messages() {
+				b.handleAppServer(ctx, message)
+			}
+		}(bd)
+		exitErr := <-bd.Done()
+		b.unregisterBackend(bd.ID())
+		_ = bd.Close()
+		log.Printf("backend %s exited (%v); restarting in %s", spec.ID, exitErr, backoff)
+		if !sleepCtx(ctx, backoff) {
+			return
+		}
+	}
+}
+
+func sleepCtx(ctx context.Context, duration time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(duration):
+		return true
+	}
+}
+
+func (b *bridge) registerBackend(bd backend.Backend) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.backends == nil {
+		b.backends = map[string]backend.Backend{}
+	}
+	if _, exists := b.backends[bd.ID()]; !exists {
+		b.backendOrder = append(b.backendOrder, bd.ID())
+	}
+	b.backends[bd.ID()] = bd
+}
+
+func (b *bridge) unregisterBackend(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.backends, id)
+}
+
+// backendFor resolves the backend for a command/event; empty id means the
+// default backend.
+func (b *bridge) backendFor(id string) backend.Backend {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.backends[backend.NormalizeID(id)]
+}
+
+// closeBackends stops every supervised backend (used on bridge teardown).
+func (b *bridge) closeBackends() {
+	b.mu.Lock()
+	backends := make([]backend.Backend, 0, len(b.backends))
+	for _, bd := range b.backends {
+		backends = append(backends, bd)
+	}
+	b.backends = map[string]backend.Backend{}
+	b.backendOrder = nil
+	b.mu.Unlock()
+	for _, bd := range backends {
+		_ = bd.Close()
 	}
 }
 
@@ -457,67 +640,87 @@ func (b *bridge) acknowledge(deviceID, messageID string) {
 }
 
 func (b *bridge) executeCommand(ctx context.Context, deviceID string, command protocol.Command) error {
+	backendID := backend.NormalizeID(command.BackendID)
 	switch command.Type {
 	case "host.status":
 		return b.sendEvent(ctx, deviceID, protocol.Event{
 			Type: "host.status", RequestID: command.RequestID, Message: "online",
-			Payload: hostStatusPayload(), CreatedAt: time.Now().UnixMilli(),
+			Payload: b.hostStatusPayload(), CreatedAt: time.Now().UnixMilli(),
 		}, "")
-	case "thread.list":
-		return b.requestMobileThreadList(ctx, deviceID, command)
-	case "thread.summary":
-		return b.requestMobileThreadSummary(ctx, deviceID, command)
-	case "workspace.list":
-		return b.requestWorkspaceCandidates(ctx, deviceID, command)
-	case "run.start":
-		return b.startRun(ctx, deviceID, command)
-	case "run.steer", "run.interrupt":
-		return b.controlRun(ctx, deviceID, command)
-	case "sync.resume":
-		return b.resumeLogicalEvents(ctx, deviceID, command)
-	case "run.snapshot":
-		return b.sendRunSnapshot(ctx, deviceID, command.OpenRunIDs, command.RequestID)
-	case "thread.read":
-		return b.requestMobileThreadHistory(ctx, deviceID, command)
-	case "thread.start":
-		return b.requestAppServer(ctx, deviceID, command, "thread/start", map[string]any{"cwd": command.CWD})
-	case "turn.start":
-		return b.requestTurnStart(ctx, deviceID, command, legacyTurnStartParams(command))
-	case "turn.steer":
-		if err := b.claimThread(command, deviceID); err != nil {
-			return err
-		}
-		return b.requestTurnAppServer(ctx, deviceID, command, "turn/steer", map[string]any{"threadId": command.ThreadID, "expectedTurnId": command.ExpectedTurnID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
-	case "turn.interrupt":
-		return b.requestAppServer(ctx, deviceID, command, "turn/interrupt", map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID})
-	case "approval.respond":
-		return b.respondApproval(ctx, deviceID, command)
 	case "event.ack":
 		if b.journal == nil {
 			return errors.New("logical journal is unavailable")
 		}
 		return b.journal.Ack(b.state.HostID, deviceID, command.HighestContiguousSequence)
+	}
+	bd := b.backendFor(backendID)
+	if bd == nil {
+		return b.sendBackendEvent(ctx, backendID, deviceID, protocol.Event{
+			Type: "error", RequestID: command.RequestID,
+			Message: "后端不可用：" + backendID, CreatedAt: time.Now().UnixMilli(),
+		}, "")
+	}
+	switch command.Type {
+	case "thread.list":
+		return b.requestMobileThreadList(ctx, deviceID, command, bd)
+	case "thread.summary":
+		return b.requestMobileThreadSummary(ctx, deviceID, command, bd)
+	case "workspace.list":
+		return b.requestWorkspaceCandidates(ctx, deviceID, command, bd)
+	case "run.start":
+		return b.startRun(ctx, deviceID, command, bd)
+	case "run.steer", "run.interrupt":
+		return b.controlRun(ctx, deviceID, command, bd)
+	case "sync.resume":
+		return b.resumeLogicalEvents(ctx, deviceID, command)
+	case "run.snapshot":
+		return b.sendRunSnapshot(ctx, deviceID, command.OpenRunIDs, command.RequestID)
+	case "thread.read":
+		return b.requestMobileThreadHistory(ctx, deviceID, command, bd)
+	case "thread.start":
+		return b.requestAppServer(ctx, deviceID, command, bd, "thread/start", map[string]any{"cwd": command.CWD})
+	case "turn.start":
+		return b.requestTurnStart(ctx, deviceID, command, bd, legacyTurnStartParams(command))
+	case "turn.steer":
+		if err := b.claimThread(command, deviceID); err != nil {
+			return err
+		}
+		return b.requestTurnAppServer(ctx, deviceID, command, bd, "turn/steer", map[string]any{"threadId": command.ThreadID, "expectedTurnId": command.ExpectedTurnID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
+	case "turn.interrupt":
+		return b.requestAppServer(ctx, deviceID, command, bd, "turn/interrupt", map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID})
+	case "approval.respond":
+		return b.respondApproval(ctx, deviceID, command, bd)
 	case "rpc":
-		return b.requestAppServer(ctx, deviceID, command, command.Method, decodeRaw(command.Params))
+		return b.requestAppServer(ctx, deviceID, command, bd, command.Method, decodeRaw(command.Params))
 	default:
-		return b.sendEvent(ctx, deviceID, protocol.Event{Type: "error", RequestID: command.RequestID, Message: "unsupported command: " + command.Type, CreatedAt: time.Now().UnixMilli()}, "")
+		return b.sendBackendEvent(ctx, backendID, deviceID, protocol.Event{
+			Type: "error", RequestID: command.RequestID,
+			Message: "unsupported command: " + command.Type, CreatedAt: time.Now().UnixMilli(),
+		}, "")
 	}
 }
 
-func hostStatusPayload() json.RawMessage {
-	return mustJSON(map[string]any{
-		"schemaVersion": 1,
-		"capabilities": []string{
-			"workspace.candidates.v1",
-			"run.lifecycle.v1",
-			"logical-replay.v1",
-			"completion-evidence.v2",
-			"turn-command-idempotency.v1",
-			"thread-history-pagination.v1",
-			"thread-latest-user-message.v1",
-			"thread-execution-status.v1",
-			"thread-lazy-continuation.v1",
-		},
+// hostStatusPayload reports the legacy host-level capabilities (the default
+// backend's, keeping old clients' behavior) plus the per-backend list.
+func (b *bridge) hostStatusPayload() json.RawMessage {
+	b.mu.Lock()
+	order := append([]string(nil), b.backendOrder...)
+	b.mu.Unlock()
+	backends := make([]protocol.BackendInfo, 0, len(order))
+	var hostCapabilities []string
+	for _, id := range order {
+		bd := b.backendFor(id)
+		if bd == nil {
+			continue
+		}
+		caps := bd.Capabilities()
+		backends = append(backends, protocol.BackendInfo{ID: bd.ID(), Name: bd.Name(), Capabilities: caps})
+		if id == protocol.DefaultBackendID {
+			hostCapabilities = caps
+		}
+	}
+	return mustJSON(protocol.HostStatusPayload{
+		SchemaVersion: 1, Capabilities: hostCapabilities, Backends: backends,
 	})
 }
 
@@ -529,11 +732,11 @@ const (
 	maxDirectResumeThreadBytes     = 256 << 20
 )
 
-func (b *bridge) requestMobileThreadList(ctx context.Context, deviceID string, command protocol.Command) error {
+func (b *bridge) requestMobileThreadList(ctx context.Context, deviceID string, command protocol.Command, bd backend.Backend) error {
 	go func() {
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		result, err := b.app.client.Call(callCtx, "thread/list", map[string]any{
+		result, err := bd.Call(callCtx, "thread/list", map[string]any{
 			"limit": 20, "sortKey": "updated_at", "sortDirection": "desc",
 			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
 		})
@@ -726,7 +929,7 @@ func jsonNumberInt64(value any) (int64, bool) {
 	}
 }
 
-func (b *bridge) requestMobileThreadSummary(ctx context.Context, deviceID string, command protocol.Command) error {
+func (b *bridge) requestMobileThreadSummary(ctx context.Context, deviceID string, command protocol.Command, bd backend.Backend) error {
 	go func() {
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
@@ -737,7 +940,7 @@ func (b *bridge) requestMobileThreadSummary(ctx context.Context, deviceID string
 			}, "")
 			return
 		}
-		page, err := b.app.client.Call(callCtx, "thread/turns/list", map[string]any{
+		page, err := bd.Call(callCtx, "thread/turns/list", map[string]any{
 			"threadId": command.ThreadID, "limit": 3, "sortDirection": "desc", "itemsView": "summary",
 		})
 		if err == nil {
@@ -758,7 +961,7 @@ func (b *bridge) requestMobileThreadSummary(ctx context.Context, deviceID string
 	return nil
 }
 
-func (b *bridge) requestMobileThreadHistory(ctx context.Context, deviceID string, command protocol.Command) error {
+func (b *bridge) requestMobileThreadHistory(ctx context.Context, deviceID string, command protocol.Command, bd backend.Backend) error {
 	go func() {
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
@@ -766,7 +969,7 @@ func (b *bridge) requestMobileThreadHistory(ctx context.Context, deviceID string
 		historyThreadID, historyCursor, cursorErr := continuationHistoryRequest(
 			command.ThreadID, mobileHistoryCursor(command.Params), record,
 		)
-		metadata, err := b.app.client.Call(callCtx, "thread/read", map[string]any{
+		metadata, err := bd.Call(callCtx, "thread/read", map[string]any{
 			"threadId": command.ThreadID, "includeTurns": false,
 		})
 		if err == nil && cursorErr != nil {
@@ -781,7 +984,7 @@ func (b *bridge) requestMobileThreadHistory(ctx context.Context, deviceID string
 				params["cursor"] = historyCursor
 			}
 			var page json.RawMessage
-			page, err = b.app.client.Call(callCtx, "thread/turns/list", params)
+			page, err = bd.Call(callCtx, "thread/turns/list", params)
 			if err == nil {
 				metadata, err = mobileThreadHistoryResult(metadata, page)
 				if err == nil && record != nil {
@@ -957,11 +1160,11 @@ func projectMobilePaginatedTurns(turns []any) []map[string]any {
 	return projectedTurns
 }
 
-func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string, command protocol.Command) error {
+func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string, command protocol.Command, bd backend.Backend) error {
 	go func() {
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		result, err := b.app.client.Call(callCtx, "thread/list", map[string]any{
+		result, err := bd.Call(callCtx, "thread/list", map[string]any{
 			"limit": 50, "sortKey": "updated_at", "sortDirection": "desc",
 			"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
 		})
@@ -1022,7 +1225,7 @@ func (b *bridge) requestWorkspaceCandidates(ctx context.Context, deviceID string
 	return nil
 }
 
-func (b *bridge) startRun(ctx context.Context, deviceID string, command protocol.Command) error {
+func (b *bridge) startRun(ctx context.Context, deviceID string, command protocol.Command, bd backend.Backend) error {
 	if command.CommandID == "" || command.RequestID == "" || command.RunID == "" {
 		return errors.New("run.start command identity is required")
 	}
@@ -1037,7 +1240,7 @@ func (b *bridge) startRun(ctx context.Context, deviceID string, command protocol
 			return
 		}
 		coordinator := runstate.Coordinator{
-			Cache: b.commandCache, Routes: b.routes, App: b.app.client, HostID: b.state.HostID,
+			Cache: b.commandCache, Routes: b.routes, App: bd, HostID: b.state.HostID,
 			ResolveWorkspace: b.workspaces.Resolve,
 			InspectWorkspace: func(cwd string) (workspace.Candidate, error) {
 				return workspace.Inspect(secret, cwd, time.Now().UnixMilli())
@@ -1076,7 +1279,7 @@ func (b *bridge) startRun(ctx context.Context, deviceID string, command protocol
 	return nil
 }
 
-func (b *bridge) controlRun(ctx context.Context, deviceID string, command protocol.Command) error {
+func (b *bridge) controlRun(ctx context.Context, deviceID string, command protocol.Command, bd backend.Backend) error {
 	if command.CommandID == "" || command.RequestID == "" || command.RunID == "" {
 		return errors.New("run control command identity is required")
 	}
@@ -1084,7 +1287,7 @@ func (b *bridge) controlRun(ctx context.Context, deviceID string, command protoc
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		coordinator := runstate.ControlCoordinator{
-			Cache: b.commandCache, Routes: b.routes, App: b.app.client, Emit: b.emitLogicalEvent,
+			Cache: b.commandCache, Routes: b.routes, App: bd, Emit: b.emitLogicalEvent,
 		}
 		err := coordinator.Execute(callCtx, runstate.ControlCommand{
 			Type: command.Type, CommandID: command.CommandID, RunID: command.RunID,
@@ -1116,9 +1319,15 @@ func (b *bridge) emitLogicalEvent(
 	if err != nil {
 		return "", err
 	}
+	backendID := ""
+	if b.routes != nil {
+		if route, ok := b.routes.ByRun(runID); ok {
+			backendID = route.BackendID
+		}
+	}
 	event := protocol.LogicalEvent{
 		SchemaVersion: 1, EventID: eventID, HostID: b.state.HostID, DeviceID: deviceID,
-		RunID: runID, Type: eventType, Payload: payload, CreatedAt: time.Now().UnixMilli(),
+		RunID: runID, BackendID: backendID, Type: eventType, Payload: payload, CreatedAt: time.Now().UnixMilli(),
 	}
 	err = b.sendLogicalEvent(ctx, event)
 	if err != nil && b.journal.Has(eventID) {
@@ -1172,6 +1381,7 @@ func (b *bridge) resumeLogicalEvents(ctx context.Context, deviceID string, comma
 
 type runSnapshot struct {
 	RunID          string          `json:"runId"`
+	BackendID      string          `json:"backendId,omitempty"`
 	Status         string          `json:"status"`
 	ThreadID       string          `json:"threadId,omitempty"`
 	TurnID         string          `json:"turnId,omitempty"`
@@ -1195,8 +1405,9 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 	for _, approval := range b.routes.ApprovalsForRuns(runIDs) {
 		approvals = append(approvals, map[string]any{
 			"approvalId": approval.ApprovalID, "runId": approval.RunID,
-			"processEpoch": approval.ProcessEpoch, "serverRequestId": approval.ServerRequestID,
-			"method": approval.Method, "itemId": approval.ItemID,
+			"backendId": approval.BackendID, "processEpoch": approval.ProcessEpoch,
+			"serverRequestId": approval.ServerRequestID,
+			"method":          approval.Method, "itemId": approval.ItemID,
 			"actionType": approval.ActionType, "target": approval.Target,
 			"commandPreview":     approval.CommandPreview,
 			"details":            decodeRaw(json.RawMessage(approval.DetailsJSON)),
@@ -1205,10 +1416,15 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 			"status": approval.Status,
 		})
 	}
+	defaultBackend := b.backendFor(protocol.DefaultBackendID)
+	processEpoch := ""
+	if defaultBackend != nil {
+		processEpoch = defaultBackend.ProcessEpoch()
+	}
 	payload := mustJSON(map[string]any{
 		"hostId": b.state.HostID, "deviceId": deviceID,
 		"journalHead":  b.journal.Head(b.state.HostID, deviceID),
-		"processEpoch": b.app.client.ProcessEpoch(),
+		"processEpoch": processEpoch,
 		"runs":         runs, "approvals": approvals,
 	})
 	if err := b.sendEvent(ctx, deviceID, protocol.Event{
@@ -1314,20 +1530,22 @@ func (b *bridge) requestAppServer(
 	ctx context.Context,
 	deviceID string,
 	command protocol.Command,
+	bd backend.Backend,
 	method string,
 	params any,
 ) error {
-	return b.requestAppServerAfter(ctx, deviceID, command, method, params, nil)
+	return b.requestAppServerAfter(ctx, deviceID, command, bd, method, params, nil)
 }
 
 func (b *bridge) requestTurnAppServer(
 	ctx context.Context,
 	deviceID string,
 	command protocol.Command,
+	bd backend.Backend,
 	method string,
 	params any,
 ) error {
-	return b.requestAppServerAfter(ctx, deviceID, command, method, params, func(result json.RawMessage) error {
+	return b.requestAppServerAfter(ctx, deviceID, command, bd, method, params, func(result json.RawMessage) error {
 		return b.backfillTurnRoute(command, result)
 	})
 }
@@ -1453,8 +1671,8 @@ func (b *bridge) recoverThreadContinuationsFromCommands() error {
 	return nil
 }
 
-func (b *bridge) readPersistedThreadMetadata(ctx context.Context, threadID string) (persistedThreadMetadata, bool, error) {
-	metadata, err := b.app.client.Call(ctx, "thread/read", map[string]any{
+func (b *bridge) readPersistedThreadMetadata(ctx context.Context, bd backend.Backend, threadID string) (persistedThreadMetadata, bool, error) {
+	metadata, err := bd.Call(ctx, "thread/read", map[string]any{
 		"threadId": threadID, "includeTurns": false,
 	})
 	if err != nil {
@@ -1539,12 +1757,13 @@ func (b *bridge) startLazyContinuation(
 	ctx context.Context,
 	deviceID string,
 	command protocol.Command,
+	bd backend.Backend,
 	metadata persistedThreadMetadata,
 ) (json.RawMessage, protocol.Command, error) {
 	if metadata.Thread.CWD == "" {
 		return nil, command, errors.New("persisted thread is missing its workspace; cannot create a safe continuation")
 	}
-	page, err := b.app.client.Call(ctx, "thread/turns/list", map[string]any{
+	page, err := bd.Call(ctx, "thread/turns/list", map[string]any{
 		"threadId": command.ThreadID, "limit": mobileThreadHistoryPageSize,
 		"sortDirection": "desc", "itemsView": "summary",
 	})
@@ -1555,7 +1774,7 @@ func (b *bridge) startLazyContinuation(
 	if err != nil {
 		return nil, command, err
 	}
-	started, err := b.app.client.Call(ctx, "thread/start", map[string]any{"cwd": metadata.Thread.CWD})
+	started, err := bd.Call(ctx, "thread/start", map[string]any{"cwd": metadata.Thread.CWD})
 	if err != nil {
 		return nil, command, err
 	}
@@ -1588,7 +1807,7 @@ func (b *bridge) startLazyContinuation(
 			"kind": "untrusted", "value": handoff,
 		},
 	}
-	turnResult, err := b.app.client.Call(ctx, "turn/start", params)
+	turnResult, err := bd.Call(ctx, "turn/start", params)
 	if err != nil {
 		return nil, continuationCommand, err
 	}
@@ -1615,6 +1834,7 @@ func (b *bridge) requestTurnStart(
 	ctx context.Context,
 	deviceID string,
 	command protocol.Command,
+	bd backend.Backend,
 	params any,
 ) error {
 	if command.ThreadID == "" || firstNonEmpty(command.CommandID, command.RequestID) == "" {
@@ -1623,7 +1843,7 @@ func (b *bridge) requestTurnStart(
 	go func() {
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
-		result, outcome, err := b.executeTurnStartOnce(callCtx, deviceID, command, params)
+		result, outcome, err := b.executeTurnStartOnce(callCtx, deviceID, command, bd, params)
 		_ = b.sendEvent(ctx, deviceID, protocol.Event{
 			Type: "rpc.response", RequestID: command.RequestID,
 			Payload: turnRPCResponsePayload(result, outcome, err), CreatedAt: time.Now().UnixMilli(),
@@ -1636,6 +1856,7 @@ func (b *bridge) executeTurnStartOnce(
 	ctx context.Context,
 	deviceID string,
 	command protocol.Command,
+	bd backend.Backend,
 	params any,
 ) (json.RawMessage, turnRPCOutcome, error) {
 	if b.commandCache == nil || b.routes == nil {
@@ -1656,30 +1877,25 @@ func (b *bridge) executeTurnStartOnce(
 		_, persistErr := b.commandCache.Fail(cacheID, err)
 		return nil, turnRPCFailed, errors.Join(err, persistErr)
 	}
-	if b.app == nil || b.app.client == nil {
-		err := errors.New("app-server is unavailable")
-		_, persistErr := b.commandCache.Fail(cacheID, err)
-		return nil, turnRPCFailed, errors.Join(err, persistErr)
-	}
-	result, err := b.app.client.Call(ctx, "turn/start", params)
+	result, err := bd.Call(ctx, "turn/start", params)
 	if err != nil && isThreadNotFoundError(err, command.ThreadID) {
-		metadata, requiresLazyContinuation, metadataErr := b.readPersistedThreadMetadata(ctx, command.ThreadID)
+		metadata, requiresLazyContinuation, metadataErr := b.readPersistedThreadMetadata(ctx, bd, command.ThreadID)
 		if metadataErr != nil {
 			err = metadataErr
 		} else if requiresLazyContinuation {
 			var continuationCommand protocol.Command
-			result, continuationCommand, err = b.startLazyContinuation(ctx, deviceID, command, metadata)
+			result, continuationCommand, err = b.startLazyContinuation(ctx, deviceID, command, bd, metadata)
 			if err == nil {
 				command = continuationCommand
 			}
 		} else {
-			if _, resumeErr := b.app.client.Call(ctx, "thread/resume", map[string]any{
+			if _, resumeErr := bd.Call(ctx, "thread/resume", map[string]any{
 				"threadId": command.ThreadID, "excludeTurns": true,
 			}); resumeErr != nil {
 				_, persistErr := b.commandCache.Fail(cacheID, resumeErr)
 				return nil, turnRPCFailed, errors.Join(resumeErr, persistErr)
 			}
-			result, err = b.app.client.Call(ctx, "turn/start", params)
+			result, err = bd.Call(ctx, "turn/start", params)
 		}
 	}
 	if err != nil {
@@ -1786,6 +2002,7 @@ func (b *bridge) requestAppServerAfter(
 	ctx context.Context,
 	deviceID string,
 	command protocol.Command,
+	bd backend.Backend,
 	method string,
 	params any,
 	after func(json.RawMessage) error,
@@ -1796,7 +2013,7 @@ func (b *bridge) requestAppServerAfter(
 	go func() {
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
-		result, err := b.app.client.Call(callCtx, method, params)
+		result, err := bd.Call(callCtx, method, params)
 		if err == nil && method == "thread/read" {
 			result, err = mobileThreadReadResult(result)
 		}
@@ -1930,7 +2147,7 @@ func mobileMessageText(item map[string]any) string {
 	return strings.Join(parts, "\n")
 }
 
-func mobileCodexEventEnvelope(message appserverrpc.Message, processEpoch string) (json.RawMessage, bool) {
+func mobileCodexEventEnvelope(message backend.Message, processEpoch string) (json.RawMessage, bool) {
 	var params map[string]any
 	if json.Unmarshal(message.Params, &params) != nil {
 		return nil, false
@@ -2003,14 +2220,15 @@ func (b *bridge) snapshotForRoute(ctx context.Context, route runstate.Route) (ru
 		}
 	}
 	snapshot := runSnapshot{
-		RunID: route.RunID, ThreadID: route.ThreadID, TurnID: route.TurnID,
+		RunID: route.RunID, BackendID: route.BackendID, ThreadID: route.ThreadID, TurnID: route.TurnID,
 		Status: "RECONCILING", LatestLine: "正在与 Mac 对账",
 	}
-	if route.ThreadID == "" || b.app == nil || b.app.client == nil {
+	bd := b.backendFor(route.BackendID)
+	if route.ThreadID == "" || bd == nil {
 		return snapshot, nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	result, err := b.app.client.Call(readCtx, "thread/read", map[string]any{
+	result, err := bd.Call(readCtx, "thread/read", map[string]any{
 		"threadId": route.ThreadID, "includeTurns": true,
 	})
 	cancel()
@@ -2035,19 +2253,19 @@ func terminalSnapshot(route runstate.Route, record completion.TerminalRunRecord)
 		latestLine = "任务已停止"
 	}
 	return runSnapshot{
-		RunID: route.RunID, ThreadID: route.ThreadID, TurnID: route.TurnID,
+		RunID: route.RunID, BackendID: route.BackendID, ThreadID: route.ThreadID, TurnID: route.TurnID,
 		Status: record.Status, LatestLine: latestLine,
 		CompletionJSON: append(json.RawMessage(nil), record.CompletionJSON...), CompletedAt: record.CompletedAt,
 	}
 }
 
-func (b *bridge) respondApproval(ctx context.Context, deviceID string, command protocol.Command) error {
+func (b *bridge) respondApproval(ctx context.Context, deviceID string, command protocol.Command, bd backend.Backend) error {
 	if command.CommandID == "" || command.RunID == "" || command.ApprovalID == "" {
 		return errors.New("approval response stable identity is required")
 	}
 	epoch := command.ProcessEpoch
 	if epoch == "" {
-		epoch = b.app.client.ProcessEpoch()
+		epoch = bd.ProcessEpoch()
 	}
 	return executeApprovalCommand(
 		ctx, b.commandCache, command,
@@ -2059,8 +2277,8 @@ func (b *bridge) respondApproval(ctx context.Context, deviceID string, command p
 			return b.routes.ValidateResponse(command.ApprovalID, epoch, command.ServerRequestID)
 		},
 		func() error {
-			return b.app.client.Respond(appserverrpc.ServerRequestRef{
-				ID: command.ServerRequestID, ProcessEpoch: epoch,
+			return bd.Respond(ctx, backend.ServerRequestRef{
+				ID: command.ServerRequestID, Method: "", Params: nil, ProcessEpoch: epoch,
 			}, map[string]string{"decision": command.Decision})
 		},
 		func(ctx context.Context, ignoredDeviceID, runID, eventType string, payload json.RawMessage) (string, error) {
@@ -2125,16 +2343,22 @@ func executeApprovalCommand(
 	return err
 }
 
-func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Message) {
+func (b *bridge) handleAppServer(ctx context.Context, message backend.Message) {
 	if message.Method == "" {
 		return
 	}
+	bd := b.backendFor(message.BackendID)
+	if bd == nil {
+		log.Printf("discard app-server event from unavailable backend %s: %s", message.BackendID, message.Method)
+		return
+	}
+	processEpoch := bd.ProcessEpoch()
 	if message.Method == "serverRequest/resolved" {
 		var params struct {
 			RequestID json.RawMessage `json:"requestId"`
 		}
 		if json.Unmarshal(message.Params, &params) == nil && len(params.RequestID) > 0 {
-			if approval, found, _ := b.routes.MarkServerRequestResolved(b.app.client.ProcessEpoch(), params.RequestID); found {
+			if approval, found, _ := b.routes.MarkServerRequestResolved(message.BackendID, processEpoch, params.RequestID); found {
 				if route, ok := b.routes.ByRun(approval.RunID); ok {
 					payload := mustJSON(map[string]string{
 						"approvalId": approval.ApprovalID, "status": "STALE",
@@ -2151,9 +2375,9 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 		message.Method == "item/fileChange/requestApproval" ||
 		message.Method == "item/permissions/requestApproval" {
 		eventType, pushKind = "approval.request", "approval"
-		approvalID = stableApprovalID(b.app.client.ProcessEpoch(), message.ID)
-		if route, ok := b.routeForParams(message.Params); ok {
-			payload := approvalLogicalPayload(message, approvalID, b.app.client.ProcessEpoch())
+		approvalID = stableApprovalID(processEpoch, message.ID)
+		if route, ok := b.routeForParams(message.BackendID, message.Params); ok {
+			payload := approvalLogicalPayload(message, approvalID, processEpoch)
 			var ledger struct {
 				Method         string `json:"method"`
 				ItemID         string `json:"itemId"`
@@ -2164,8 +2388,8 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 			}
 			_ = json.Unmarshal(payload, &ledger)
 			_ = b.routes.PutApproval(runstate.Approval{
-				ApprovalID: approvalID, RunID: route.RunID,
-				ProcessEpoch: b.app.client.ProcessEpoch(), ServerRequestID: message.ID,
+				ApprovalID: approvalID, RunID: route.RunID, BackendID: message.BackendID,
+				ProcessEpoch: processEpoch, ServerRequestID: message.ID,
 				Method: ledger.Method, ItemID: ledger.ItemID, ActionType: ledger.ActionType,
 				Target: ledger.Target, CommandPreview: ledger.CommandPreview,
 				DetailsJSON: "{}", Risk: ledger.Risk, RequestedAt: time.Now().UnixMilli(),
@@ -2178,7 +2402,7 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 	}
 	if message.Method == "item/tool/requestUserInput" {
 		eventType, pushKind = "user_input.request", "approval"
-		if route, ok := b.routeForParams(message.Params); ok {
+		if route, ok := b.routeForParams(message.BackendID, message.Params); ok {
 			_, _ = b.emitLogicalEvent(
 				ctx, route.DeviceID, route.RunID, "run.user_input.requested", userInputLogicalPayload(message.Params),
 			)
@@ -2186,7 +2410,7 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 	}
 	if message.Method == "turn/completed" {
 		pushKind = "completion"
-		if route, ok := b.routeForParams(message.Params); ok {
+		if route, ok := b.routeForParams(message.BackendID, message.Params); ok {
 			if b.terminals != nil {
 				if err := b.terminals.Observe(completion.TerminalObservation{
 					RunID: route.RunID, Params: message.Params, ObservedAt: time.Now().UnixMilli(),
@@ -2197,17 +2421,17 @@ func (b *bridge) handleAppServer(ctx context.Context, message appserverrpc.Messa
 			go b.completeRun(ctx, route, message.Params)
 		}
 	}
-	if route, ok := b.routeForParams(message.Params); ok {
+	if route, ok := b.routeForParams(message.BackendID, message.Params); ok {
 		if logicalType, payload, translated := timelineLogicalPayload(message.Method, message.Params); translated {
 			_, _ = b.emitLogicalEvent(ctx, route.DeviceID, route.RunID, logicalType, payload)
 		}
 	}
-	raw, mobileEvent := mobileCodexEventEnvelope(message, b.app.client.ProcessEpoch())
+	raw, mobileEvent := mobileCodexEventEnvelope(message, processEpoch)
 	if !mobileEvent {
 		return
 	}
-	for _, deviceID := range b.eventTargets(message.Params) {
-		_ = b.sendEvent(ctx, deviceID, protocol.Event{Type: eventType, Method: message.Method, Payload: raw, CreatedAt: time.Now().UnixMilli()}, pushKind)
+	for _, deviceID := range b.eventTargets(message.BackendID, message.Params) {
+		_ = b.sendBackendEvent(ctx, message.BackendID, deviceID, protocol.Event{Type: eventType, Method: message.Method, Payload: raw, CreatedAt: time.Now().UnixMilli()}, pushKind)
 	}
 }
 
@@ -2309,12 +2533,13 @@ func (b *bridge) reconcileTerminalRun(ctx context.Context, route runstate.Route,
 			return b.publishFrozenTerminal(ctx, route, frozen)
 		}
 	}
-	if b.app == nil || b.app.client == nil || route.ThreadID == "" || route.TurnID == "" {
-		return errors.New("terminal route or app-server is unavailable")
+	bd := b.backendFor(route.BackendID)
+	if bd == nil || route.ThreadID == "" || route.TurnID == "" {
+		return errors.New("terminal route or backend is unavailable")
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	result, err := b.app.client.Call(callCtx, "thread/read", map[string]any{
+	result, err := bd.Call(callCtx, "thread/read", map[string]any{
 		"threadId": route.ThreadID, "includeTurns": true,
 	})
 	if err != nil {
@@ -2390,7 +2615,7 @@ func (b *bridge) publishFrozenTerminal(ctx context.Context, route runstate.Route
 	if !b.journal.Has(eventID) {
 		event := protocol.LogicalEvent{
 			SchemaVersion: 1, EventID: eventID, HostID: b.state.HostID, DeviceID: route.DeviceID,
-			RunID: route.RunID, Type: eventType, Payload: payload, CreatedAt: record.CompletedAt,
+			RunID: route.RunID, BackendID: route.BackendID, Type: eventType, Payload: payload, CreatedAt: record.CompletedAt,
 		}
 		if err := b.sendLogicalEvent(ctx, event); err != nil && !b.journal.Has(eventID) {
 			return err
@@ -2584,7 +2809,7 @@ func normalizeCompletionStatus(status string) string {
 	}
 }
 
-func approvalLogicalPayload(message appserverrpc.Message, approvalID, processEpoch string) json.RawMessage {
+func approvalLogicalPayload(message backend.Message, approvalID, processEpoch string) json.RawMessage {
 	var params map[string]any
 	if json.Unmarshal(message.Params, &params) != nil {
 		params = map[string]any{}
@@ -2691,16 +2916,16 @@ func approvalTarget(params map[string]any) string {
 	return "Codex 请求执行受保护操作"
 }
 
-func (b *bridge) routeForParams(params json.RawMessage) (runstate.Route, bool) {
+func (b *bridge) routeForParams(backendID string, params json.RawMessage) (runstate.Route, bool) {
 	threadID, turnID := routeIdentityFromParams(params)
 	if threadID == "" || b.routes == nil {
 		return runstate.Route{}, false
 	}
 	if turnID != "" {
-		return b.routes.ByThreadTurn(threadID, turnID)
+		return b.routes.ByThreadTurnBackend(threadID, turnID, backendID)
 	}
 	active := make([]runstate.Route, 0, 1)
-	for _, route := range b.routes.ByThreadAll(threadID) {
+	for _, route := range b.routes.ByThreadAllBackend(threadID, backendID) {
 		if b.terminals != nil {
 			if _, terminal := b.terminals.Lookup(route.RunID); terminal {
 				continue
@@ -2733,6 +2958,7 @@ func (b *bridge) claimThread(command protocol.Command, deviceID string) error {
 	route.HostID = b.state.HostID
 	route.DeviceID = deviceID
 	route.ThreadID = command.ThreadID
+	route.BackendID = command.BackendID
 	if command.BindingID != "" {
 		route.BindingID = command.BindingID
 	}
@@ -2768,8 +2994,8 @@ func (b *bridge) backfillTurnRoute(command protocol.Command, result json.RawMess
 	return b.routes.UpdateTurn(runID, command.ThreadID, turnID)
 }
 
-func (b *bridge) eventTargets(params json.RawMessage) []string {
-	route, ok := b.routeForParams(params)
+func (b *bridge) eventTargets(backendID string, params json.RawMessage) []string {
+	route, ok := b.routeForParams(backendID, params)
 	if !ok || route.DeviceID == "" {
 		return nil
 	}
@@ -2813,6 +3039,13 @@ func firstNonEmpty(values ...string) string {
 func stableApprovalID(epoch string, serverRequestID json.RawMessage) string {
 	digest := sha256.Sum256(append(append([]byte(epoch), 0), serverRequestID...))
 	return "approval-" + hex.EncodeToString(digest[:16])
+}
+
+// sendBackendEvent attributes an event to one backend before transmission, so
+// the phone can group and filter events by backend.
+func (b *bridge) sendBackendEvent(ctx context.Context, backendID, deviceID string, event protocol.Event, pushKind string) error {
+	event.BackendID = backendID
+	return b.sendEvent(ctx, deviceID, event, pushKind)
 }
 
 func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.Event, pushKind string) error {
@@ -3013,38 +3246,6 @@ func cloneThreadContinuations(source map[string]bridgestate.ThreadContinuation) 
 		cloned[rootThreadID] = record
 	}
 	return cloned
-}
-
-func startAppServer(codex string) (*appProcess, error) {
-	cmd := exec.Command(codex, "app-server", "--listen", "stdio://")
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	epoch, err := protocol.NewID()
-	if err != nil {
-		_ = stdin.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return nil, err
-	}
-	return &appProcess{cmd: cmd, stdin: stdin, client: appserverrpc.NewClient(stdout, stdin, epoch)}, nil
-}
-
-func (a *appProcess) close() {
-	_ = a.stdin.Close()
-	if a.cmd.Process != nil {
-		_ = a.cmd.Process.Kill()
-	}
-	_ = a.cmd.Wait()
 }
 
 func loadBridgeState(path string) (bridgeState, error) { return bridgestate.LoadBridge(path) }
