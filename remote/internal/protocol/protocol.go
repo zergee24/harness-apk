@@ -13,6 +13,36 @@ import (
 
 const Version = 1
 
+// DefaultBackendID is the backend used when a command or event carries no
+// backendId. Legacy clients never set BackendID and keep talking to it.
+const DefaultBackendID = "codex"
+
+// M4 backend capability names. Existing host-level capability names
+// (workspace.candidates.v1, run.lifecycle.v1, logical-replay.v1,
+// completion-evidence.v2, ...) remain valid per backend.
+const (
+	CapabilityApprovals = "approvals.v1"
+	CapabilityUserInput = "user-input.v1"
+)
+
+// BackendInfo describes one backend exposed by a host.
+type BackendInfo struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Capabilities []string `json:"capabilities"`
+}
+
+// HostStatusPayload is the payload of the host.status event.
+// SchemaVersion 1 keeps the legacy host-level Capabilities field for old
+// clients; Backends carries the per-backend list added by M4. New clients
+// prefer Backends and fall back to the legacy single-backend view when it is
+// absent.
+type HostStatusPayload struct {
+	SchemaVersion int           `json:"schemaVersion"`
+	Capabilities  []string      `json:"capabilities,omitempty"`
+	Backends      []BackendInfo `json:"backends,omitempty"`
+}
+
 type PairingPayload struct {
 	Version       int    `json:"version"`
 	RelayURL      string `json:"relayUrl"`
@@ -39,6 +69,7 @@ type WireMessage struct {
 
 type Command struct {
 	Type                      string          `json:"type"`
+	BackendID                 string          `json:"backendId,omitempty"`
 	CommandID                 string          `json:"commandId,omitempty"`
 	RequestID                 string          `json:"requestId"`
 	RunID                     string          `json:"runId,omitempty"`
@@ -76,6 +107,7 @@ type LogicalEvent struct {
 
 type Event struct {
 	Type      string          `json:"type"`
+	BackendID string          `json:"backendId,omitempty"`
 	RequestID string          `json:"requestId,omitempty"`
 	Method    string          `json:"method,omitempty"`
 	ThreadID  string          `json:"threadId,omitempty"`
