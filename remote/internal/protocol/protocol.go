@@ -99,6 +99,7 @@ type LogicalEvent struct {
 	HostID        string          `json:"hostId"`
 	DeviceID      string          `json:"deviceId"`
 	RunID         string          `json:"runId"`
+	BackendID     string          `json:"backendId,omitempty"`
 	Sequence      uint64          `json:"sequence"`
 	Type          string          `json:"type"`
 	Payload       json.RawMessage `json:"payload,omitempty"`
