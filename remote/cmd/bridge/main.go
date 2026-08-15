@@ -1421,12 +1421,9 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 	if defaultBackend != nil {
 		processEpoch = defaultBackend.ProcessEpoch()
 	}
-	payload := mustJSON(map[string]any{
-		"hostId": b.state.HostID, "deviceId": deviceID,
-		"journalHead":  b.journal.Head(b.state.HostID, deviceID),
-		"processEpoch": processEpoch,
-		"runs":         runs, "approvals": approvals,
-	})
+	payload := runSnapshotPayload(
+		b.state.HostID, deviceID, b.journal.Head(b.state.HostID, deviceID), processEpoch, runs, approvals,
+	)
 	if err := b.sendEvent(ctx, deviceID, protocol.Event{
 		Type: "sync.snapshot", RequestID: requestID, Payload: payload, CreatedAt: time.Now().UnixMilli(),
 	}, ""); err != nil {
@@ -1437,6 +1434,23 @@ func (b *bridge) sendRunSnapshot(ctx context.Context, deviceID string, runIDs []
 	err := b.persistStateLocked()
 	b.mu.Unlock()
 	return err
+}
+
+// runSnapshotPayload builds the sync.snapshot event payload; extracted for
+// contract tests (per-run and per-approval backendId).
+func runSnapshotPayload(
+	hostID, deviceID string,
+	journalHead uint64,
+	processEpoch string,
+	runs []runSnapshot,
+	approvals []map[string]any,
+) json.RawMessage {
+	return mustJSON(map[string]any{
+		"hostId": hostID, "deviceId": deviceID,
+		"journalHead":  journalHead,
+		"processEpoch": processEpoch,
+		"runs":         runs, "approvals": approvals,
+	})
 }
 
 func snapshotStatus(raw json.RawMessage, turnID string) (string, string) {

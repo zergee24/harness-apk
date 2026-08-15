@@ -29,6 +29,7 @@ data class RemoteRunSnapshot(
     val latestLine: String,
     val completionJson: String?,
     val errorMessage: String?,
+    val backendId: String = DEFAULT_BACKEND_ID,
 )
 
 data class RemoteApprovalSnapshot(
@@ -47,6 +48,7 @@ data class RemoteApprovalSnapshot(
     val availableDecisionsJson: String = "[]",
     val risk: String = "UNKNOWN",
     val requestedAt: Long = 0L,
+    val backendId: String = DEFAULT_BACKEND_ID,
 )
 
 data class RemoteRunSnapshotEnvelope(
@@ -291,6 +293,7 @@ internal fun parseRemoteRunSnapshot(payload: JsonObject): RemoteRunSnapshotEnvel
             status = run.required("status"),
             threadId = run.string("threadId"),
             turnId = run.string("turnId"),
+            backendId = run.string("backendId") ?: DEFAULT_BACKEND_ID,
             latestLine = redactRemoteSensitiveText(run.string("latestLine").orEmpty()),
             completionJson = run["completion"]?.takeUnless { it is JsonNull }
                 ?.let(::sanitizeRemoteApprovalJson)?.toString(),
@@ -321,6 +324,7 @@ internal fun parseRemoteRunSnapshot(payload: JsonObject): RemoteRunSnapshotEnvel
             availableDecisionsJson = approval["availableDecisions"]?.toString() ?: "[]",
             risk = risk.name,
             requestedAt = approval.long("requestedAt") ?: 0L,
+            backendId = approval.string("backendId") ?: DEFAULT_BACKEND_ID,
         )
     }
     return RemoteRunSnapshotEnvelope(

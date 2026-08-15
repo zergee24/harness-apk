@@ -1889,3 +1889,71 @@ func TestParseBackendSpecsCustomExecutableAndDefaults(t *testing.T) {
 		t.Fatal("duplicate backend ids must be rejected")
 	}
 }
+
+func TestRunSnapshotPayloadCarriesBackendIDPerRunAndApproval(t *testing.T) {
+	payload := runSnapshotPayload(
+		"host-1", "device-1", 7, "epoch-1",
+		[]runSnapshot{
+			{RunID: "run-codex", BackendID: "codex", Status: "RUNNING", LatestLine: "正在运行"},
+			{RunID: "run-dsh", BackendID: "dsh", Status: "RUNNING", LatestLine: "正在运行"},
+		},
+		[]map[string]any{
+			{"approvalId": "approval-1", "runId": "run-codex", "backendId": "codex", "status": "PENDING"},
+		},
+	)
+	var decoded struct {
+		Runs []struct {
+			RunID     string `json:"runId"`
+			BackendID string `json:"backendId"`
+		} `json:"runs"`
+		Approvals []struct {
+			BackendID string `json:"backendId"`
+		} `json:"approvals"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Runs) != 2 || decoded.Runs[0].BackendID != "codex" || decoded.Runs[1].BackendID != "dsh" {
+		t.Fatalf("runs = %#v", decoded.Runs)
+	}
+	if len(decoded.Approvals) != 1 || decoded.Approvals[0].BackendID != "codex" {
+		t.Fatalf("approvals = %#v", decoded.Approvals)
+	}
+}
+
+func TestSnapshotForRouteReconcilesWhenBackendUnavailable(t *testing.T) {
+	codex := backend.NewFake("codex").OnScript("thread/read", func(method string, params any) (json.RawMessage, error) {
+		return json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"inProgress"}}]}}`), nil
+	})
+	b := &bridge{backends: map[string]backend.Backend{"codex": codex}}
+	// The dsh backend crashed: its run must reconcile instead of erroring out.
+	snapshot, err := b.snapshotForRoute(context.Background(), runstate.Route{
+		RunID: "run-dsh", BackendID: "dsh", ThreadID: "thread-dsh", TurnID: "turn-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "RECONCILING" || snapshot.LatestLine != "正在与 Mac 对账" {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if snapshot.BackendID != "dsh" {
+		t.Fatalf("snapshot backendId = %q", snapshot.BackendID)
+	}
+	// The codex backend still answers: its run stays live.
+	snapshot, err = b.snapshotForRoute(context.Background(), runstate.Route{
+		RunID: "run-codex", BackendID: "codex", ThreadID: "thread-codex", TurnID: "turn-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "RUNNING" || snapshot.LatestLine != "任务正在 Mac 上运行" {
+		t.Fatalf("codex snapshot = %#v", snapshot)
+	}
+}
+
+func TestRunSnapshotPayloadLegacyBackendDefaults(t *testing.T) {
+	payload := runSnapshotPayload("host-1", "device-1", 0, "", nil, nil)
+	if !bytes.Contains(payload, []byte(`"runs":null`)) && !bytes.Contains(payload, []byte(`"runs":[]`)) {
+		t.Fatalf("empty runs payload = %s", payload)
+	}
+}

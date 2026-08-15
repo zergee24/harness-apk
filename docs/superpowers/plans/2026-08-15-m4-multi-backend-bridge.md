@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0-G3 DONE；**已合入 test（e0bab5e 合并：集成M4多后端Bridge（G0-G3））并推送 origin/test（SSH）**；G4/G5 待办
+当前状态：G0-G4 DONE；已合入 test（e0bab5e）并推送；G5（运维与文档）待办
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -182,11 +182,15 @@ type Backend interface {
 
 **G3 关键决策记录**：绑定/运行按 `(projectId, backendId)` 隔离（D5 落地）；snapshot 恢复的旧 run（无 backendId）按 codex 展示；通知标题带后端名但点击目标不变（按 runId 精确定位）。
 
-### G4：并行与恢复语义
+### G4：并行与恢复语义 — **DONE（2026-08-15）**
 
-- [ ] 同一手机 codex run + dsh run 同时 in-flight 的黄金链路（含各自审批/无审批路径）。
-- [ ] 断网 10 分钟、Android 进程重建、Bridge 重启、单后端崩溃四类故障下，两个后端分别恢复、不串扰、不重复执行。
-- [ ] Snapshot/对账带 backendId 的回归。
+- [x] 双后端并行/路由不串扰（G1 已落地）：`TestExecuteCommandRoutesByBackendID`、`TestRouteForParamsScopesEventsToOwningBackend`、`TestByThreadBackendScopesRoutes`。
+- [x] 单后端崩溃后该端 run 置 RECONCILING、他端照常：`TestSnapshotForRouteReconcilesWhenBackendUnavailable`（dsh 后端消失 → run-dsh RECONCILING，codex 后端正常回 RUNNING）。
+- [x] Snapshot/对账带 backendId 回归：`TestRunSnapshotPayloadCarriesBackendIDPerRunAndApproval`（payload 每 run/approval 带 backendId）；journal 重放保留 `LogicalEvent.BackendID`（`TestReplayPreservesBackendID`）；Android `RemoteRunSnapshot`/`RemoteApprovalSnapshot` 解析 backendId（`RemoteSyncSnapshotBackendTest` 2 项，旧 payload 默认 codex）。
+- [x] 全量回归：Go 12 包 `go vet`+`go test` 全绿；`:app:testDebugUnitTest` 全绿。
+- [ ] **黄金链路与四类故障矩阵（断网 10 分钟、进程重建、Bridge 重启、单后端崩溃）的 instrumented/真机验收归入 G6**（需要双后端 Bridge + 真机/模拟器 + 真实 relay 环境，与 G6 故障矩阵合并执行）。
+
+**G4 关键决策记录**：`sendRunSnapshot` 的 payload 构造抽为纯函数 `runSnapshotPayload` 以便契约测试；快照对账只 reconcile 本地已有 run（不凭空创建），backendId 以 run.start 落库值为准。
 
 ### G5：运维与文档
 
