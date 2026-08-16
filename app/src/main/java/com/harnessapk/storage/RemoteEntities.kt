@@ -1,5 +1,6 @@
 package com.harnessapk.storage
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -16,6 +17,7 @@ import androidx.room.Index
 data class ProjectRemoteBindingEntity(
     val id: String,
     val projectId: String,
+    @ColumnInfo(defaultValue = "'codex'")
     val backendId: String,
     val hostId: String,
     val workspaceId: String,
@@ -41,6 +43,7 @@ data class RemoteRunEntity(
     val bindingId: String,
     val bindingSnapshotJson: String,
     val hostId: String,
+    @ColumnInfo(defaultValue = "'codex'")
     val backendId: String,
     val threadId: String?,
     val turnId: String?,
