@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0-G5 DONE；已合入 test（e0bab5e，G0-G3）并推送；G4/G5 待合入；G6（验收与回归）待办
+当前状态：G0-G5 DONE；已合入 test（e0bab5e + f223d1f）并推送 origin/test；G6（验收与回归）待办
 
 ## 1. Source Of Truth 与范围纪律
 
