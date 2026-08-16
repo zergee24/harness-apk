@@ -7,6 +7,13 @@
   <array>
     <string>/usr/local/bin/harness-bridge</string>
     <string>serve</string>
+    <!-- M4 multi-backend: keep codex and add the dsh backend (installed by
+         remote/dsh/install-appserver.sh). Remove the last two lines to run
+         codex only. -->
+    <string>--backend</string>
+    <string>codex</string>
+    <string>--backend</string>
+    <string>dsh</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

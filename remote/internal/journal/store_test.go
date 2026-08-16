@@ -2,6 +2,7 @@ package journal
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -140,4 +141,33 @@ func TestGapRequiresSnapshotOnlyWhenCursorIsBehindDroppedRange(t *testing.T) {
 
 func protocolID(sequence uint64) string {
 	return "event-" + time.Unix(int64(sequence), 0).UTC().Format("150405")
+}
+
+func TestReplayPreservesBackendID(t *testing.T) {
+	key := bytes.Repeat([]byte{0x43}, 32)
+	secret := bytes.Repeat([]byte{0x24}, 32)
+	store, err := Open(filepath.Join(t.TempDir(), "journal.log"), key, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := protocol.LogicalEvent{
+		SchemaVersion: 1, EventID: "event-dsh", HostID: "host-1", DeviceID: "device-1",
+		RunID: "run-dsh", BackendID: "dsh", Sequence: 1, Type: "run.timeline",
+		Payload: json.RawMessage(`{"latestLine":"正在整理结果"}`), CreatedAt: time.Now().UnixMilli(),
+	}
+	appended, err := store.AppendNext(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := store.Replay(appended.EventID, secret, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded protocol.LogicalEvent
+	if err := protocol.Decrypt(secret, wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.BackendID != "dsh" || decoded.RunID != "run-dsh" {
+		t.Fatalf("replayed event lost backend identity: %#v", decoded)
+	}
 }

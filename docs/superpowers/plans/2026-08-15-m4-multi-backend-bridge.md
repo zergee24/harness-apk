@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0-G3 DONE；G4/G5 待办；G3 完成后按用户确认合入 test 并推送
+当前状态：G0-G5 DONE；已合入 test（e0bab5e，G0-G3）并推送；G4/G5 待合入；G6（验收与回归）待办
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -182,16 +182,23 @@ type Backend interface {
 
 **G3 关键决策记录**：绑定/运行按 `(projectId, backendId)` 隔离（D5 落地）；snapshot 恢复的旧 run（无 backendId）按 codex 展示；通知标题带后端名但点击目标不变（按 runId 精确定位）。
 
-### G4：并行与恢复语义
+### G4：并行与恢复语义 — **DONE（2026-08-15）**
 
-- [ ] 同一手机 codex run + dsh run 同时 in-flight 的黄金链路（含各自审批/无审批路径）。
-- [ ] 断网 10 分钟、Android 进程重建、Bridge 重启、单后端崩溃四类故障下，两个后端分别恢复、不串扰、不重复执行。
-- [ ] Snapshot/对账带 backendId 的回归。
+- [x] 双后端并行/路由不串扰（G1 已落地）：`TestExecuteCommandRoutesByBackendID`、`TestRouteForParamsScopesEventsToOwningBackend`、`TestByThreadBackendScopesRoutes`。
+- [x] 单后端崩溃后该端 run 置 RECONCILING、他端照常：`TestSnapshotForRouteReconcilesWhenBackendUnavailable`（dsh 后端消失 → run-dsh RECONCILING，codex 后端正常回 RUNNING）。
+- [x] Snapshot/对账带 backendId 回归：`TestRunSnapshotPayloadCarriesBackendIDPerRunAndApproval`（payload 每 run/approval 带 backendId）；journal 重放保留 `LogicalEvent.BackendID`（`TestReplayPreservesBackendID`）；Android `RemoteRunSnapshot`/`RemoteApprovalSnapshot` 解析 backendId（`RemoteSyncSnapshotBackendTest` 2 项，旧 payload 默认 codex）。
+- [x] 全量回归：Go 12 包 `go vet`+`go test` 全绿；`:app:testDebugUnitTest` 全绿。
+- [ ] **黄金链路与四类故障矩阵（断网 10 分钟、进程重建、Bridge 重启、单后端崩溃）的 instrumented/真机验收归入 G6**（需要双后端 Bridge + 真机/模拟器 + 真实 relay 环境，与 G6 故障矩阵合并执行）。
 
-### G5：运维与文档
+**G4 关键决策记录**：`sendRunSnapshot` 的 payload 构造抽为纯函数 `runSnapshotPayload` 以便契约测试；快照对账只 reconcile 本地已有 run（不凭空创建），backendId 以 run.start 落库值为准。
 
-- [ ] LaunchAgent 示例（多后端参数）、`remote/README.md` 多后端章节、升级/回滚说明。
-- [ ] 日志按后端标识；状态目录迁移说明（v2 → v3）。
+### G5：运维与文档 — **DONE（2026-08-15）**
+
+- [x] LaunchAgent 示例：`remote/deploy/com.harnessapk.remote-bridge.plist` 带 `--backend codex --backend dsh`（XML 注释说明如何回退 codex-only），`plutil -lint` 通过。
+- [x] `remote/README.md`：新增 "Bridge state and upgrades (M4)"（bridge.json 保持 v2 + backends 加性段；routes.json v1→v2 自动迁移；logical-events 事件带可选 backendId；升级备份/回滚纪律）与 "Multi-backend serve flags"（--backend 可重复、裸 id 与 `<id>=<executable>`）。
+- [x] 日志按后端标识：supervise 日志已带 backend id；新增 serve 启动日志 `serve backends: codex=codex, dsh=dsh`。
+- [x] 状态目录迁移说明：**实现与计划措辞偏差已记录**——计划写"v2 → v3"，实际 bridge.json 保持 schema v2（Backends 是加性字段），升级发生在 routes.json v1→v2 与 journal 事件可选字段；README 按实际描述。
+- [x] 回归：`go vet` + bridge/backend 测试通过；plist lint 通过。
 
 ### G6：验收与回归
 

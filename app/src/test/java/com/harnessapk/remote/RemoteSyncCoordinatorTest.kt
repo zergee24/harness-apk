@@ -3,6 +3,10 @@ package com.harnessapk.remote
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -178,5 +182,87 @@ private class FakeRemoteSyncState(
     }
     override suspend fun applySnapshot(snapshot: RemoteRunSnapshotEnvelope) {
         appliedSnapshot = snapshot
+    }
+}
+
+class RemoteSyncSnapshotBackendTest {
+    @Test
+    fun parseSnapshotCarriesBackendIdPerRunAndApproval() {
+        val payload = buildJsonObject {
+            put("hostId", "host-1")
+            put("deviceId", "device-1")
+            put("journalHead", 7L)
+            put("processEpoch", "epoch-1")
+            put(
+                "runs",
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("runId", "run-codex")
+                            put("status", "RUNNING")
+                            put("threadId", "t-codex")
+                            put("turnId", "turn-1")
+                            put("latestLine", "正在运行")
+                            put("backendId", "codex")
+                        },
+                    )
+                    add(
+                        buildJsonObject {
+                            put("runId", "run-dsh")
+                            put("status", "RUNNING")
+                            put("threadId", "s-dsh")
+                            put("turnId", "turn-2")
+                            put("latestLine", "正在运行")
+                            put("backendId", "dsh")
+                        },
+                    )
+                },
+            )
+            put(
+                "approvals",
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("approvalId", "approval-1")
+                            put("runId", "run-codex")
+                            put("backendId", "codex")
+                            put("processEpoch", "epoch-1")
+                            put("status", "PENDING")
+                        },
+                    )
+                },
+            )
+        }
+        val snapshot = parseRemoteRunSnapshot(payload)
+        assertEquals("codex", snapshot.runs[0].backendId)
+        assertEquals("dsh", snapshot.runs[1].backendId)
+        assertEquals("codex", snapshot.approvals.single().backendId)
+    }
+
+    @Test
+    fun parseSnapshotDefaultsMissingBackendToCodex() {
+        val payload = buildJsonObject {
+            put("hostId", "host-1")
+            put("deviceId", "device-1")
+            put("journalHead", 1L)
+            put("processEpoch", "epoch-1")
+            put(
+                "runs",
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("runId", "run-legacy")
+                            put("status", "RUNNING")
+                            put("threadId", "t-1")
+                            put("turnId", "turn-1")
+                            put("latestLine", "正在运行")
+                        },
+                    )
+                },
+            )
+            put("approvals", buildJsonArray {})
+        }
+        val snapshot = parseRemoteRunSnapshot(payload)
+        assertEquals("codex", snapshot.runs.single().backendId)
     }
 }

@@ -128,10 +128,54 @@ Never commit these values. Build and install the APK, then grant notification pe
 
 - Relay health: `GET /healthz`
 - Relay state backup: back up the Docker `relay-data` volume with server-side encryption.
-- Bridge logs: `/tmp/harness-remote-bridge.log` and `/tmp/harness-remote-bridge.error.log`
+- Bridge logs: `/tmp/harness-remote-bridge.log` and `/tmp/harness-remote-bridge.error.log`. Multi-backend logs are tagged per backend (`start backend dsh`, `backend codex exited (...)`, `serve backends: codex=codex, dsh=dsh`).
 - Pairing expires after five minutes and cannot be reused.
 - Wire messages expire after five minutes and are authenticated against routing metadata to prevent tampering.
 - The relay accepts encrypted Wire messages up to 8 MiB and JSON HTTP bodies up to 64 KiB. Bridge projections keep mobile thread history and live events substantially below that transport ceiling.
+
+### Bridge state and upgrades (M4)
+
+`~/.harness-remote` holds `bridge.json`, `routes.json`, `logical-events.log`,
+`commands.json`, `terminal-runs.json` and `workspaces.json`. M4 upgrades are
+additive:
+
+- `bridge.json` stays schema v2; the new `backends` section is optional and
+  older bridges ignore it.
+- `routes.json` migrates schema v1 → v2 automatically on first load: routes
+  and approvals gain `backendId` (legacy rows become `codex`) and route keys
+  become `(backendID, runID)`. Process epochs are per backend, so one backend
+  restart only stales that backend's pending approvals.
+- `logical-events.log` events gain an optional `backendId` field; journal
+  replay preserves it and old entries replay with an empty backend id
+  (treated as `codex`).
+
+Upgrade and rollback discipline (unchanged from M2): stop the launch agent and
+back up the whole state directory before upgrading:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.harnessapk.remote-bridge.plist
+BACKUP_DIR="${HOME}/.harness-remote-backup-$(date +%Y%m%d-%H%M%S)"
+cp -a "${HOME}/.harness-remote" "$BACKUP_DIR"
+chmod -R go-rwx "$BACKUP_DIR"
+```
+
+Rollback must use a Bridge build that understands the current state schema
+(v2 routes are readable by a v2 bridge; a legacy v1-only binary is not a
+valid rollback target after migration). Never delete only one ledger file —
+the ledgers form one recovery set.
+
+### Multi-backend serve flags
+
+```text
+harness-bridge serve --backend codex --backend dsh
+harness-bridge serve --backend codex                    # codex only (default)
+harness-bridge serve --backend aux=/path/to/appserver   # any canonical app-server executable
+```
+
+`--backend` is repeatable. A bare `codex` or `dsh` resolves a known backend
+(codex uses `--codex`; dsh uses `dsh --profile appserver --listen stdio://`);
+`<id>=<executable>` registers any executable speaking the canonical
+app-server JSON-RPC protocol under that id.
 
 ### Bridge state v1 -> v2
 
