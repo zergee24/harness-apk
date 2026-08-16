@@ -110,7 +110,7 @@ class RemoteRunRecoveryInstrumentedTest {
         projectNameSnapshot = "Harness APK",
         bindingId = "binding-1",
         bindingSnapshotJson = "{}",
-        hostId = "host-1",
+        hostId = "host-1", backendId = "codex",
         threadId = null,
         turnId = null,
         objective = "实现 M2",

@@ -156,7 +156,7 @@ class RunDetailScreenTest {
 
     private fun run() = RemoteRunEntity(
         id = "run-1", projectId = "project-1", projectNameSnapshot = "Harness APK",
-        bindingId = "binding-1", bindingSnapshotJson = "{}", hostId = "host-1",
+        bindingId = "binding-1", bindingSnapshotJson = "{}", hostId = "host-1", backendId = "codex",
         threadId = "thread-1", turnId = "turn-1", objective = "实现 M2", status = "RUNNING",
         latestLine = "正在运行", lastLogicalSequence = 0L, startedAt = 1L, updatedAt = 1L,
         completedAt = null, completionJson = null, errorMessage = null,

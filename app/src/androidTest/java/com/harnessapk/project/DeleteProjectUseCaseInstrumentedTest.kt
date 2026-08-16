@@ -361,7 +361,7 @@ class DeleteProjectUseCaseInstrumentedTest {
         projectNameSnapshot = "索引清理项目",
         bindingId = "binding-1",
         bindingSnapshotJson = "{}",
-        hostId = "host-1",
+        hostId = "host-1", backendId = "codex",
         threadId = "thread-1",
         turnId = "turn-1",
         objective = "历史任务",

@@ -62,7 +62,7 @@ class RemoteApprovalActionInstrumentedTest {
 
     private fun run() = RemoteRunEntity(
         id = "run-1", projectId = "project-1", projectNameSnapshot = "Harness APK",
-        bindingId = "binding-1", bindingSnapshotJson = "{}", hostId = "host-1",
+        bindingId = "binding-1", bindingSnapshotJson = "{}", hostId = "host-1", backendId = "codex",
         threadId = "thread-1", turnId = "turn-1", objective = "实现 M2", status = "WAITING_APPROVAL",
         latestLine = "等待审批", lastLogicalSequence = 1L, startedAt = 1L, updatedAt = 1L,
         completedAt = null, completionJson = null, errorMessage = null,

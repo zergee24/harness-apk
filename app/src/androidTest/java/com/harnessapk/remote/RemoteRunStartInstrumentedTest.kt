@@ -92,7 +92,7 @@ class RemoteRunStartInstrumentedTest {
 
     private fun binding() = ProjectRemoteBindingEntity(
         id = "binding-1",
-        projectId = "project-1",
+        projectId = "project-1", backendId = "codex",
         hostId = "host-1",
         workspaceId = "workspace-1",
         cwd = "/Users/test/harness-apk",
