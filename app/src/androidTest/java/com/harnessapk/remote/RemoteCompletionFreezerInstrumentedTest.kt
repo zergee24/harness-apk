@@ -132,7 +132,7 @@ class RemoteCompletionFreezerInstrumentedTest {
         projectNameSnapshot = "Project",
         bindingId = "binding-1",
         bindingSnapshotJson = "{}",
-        hostId = "host-1",
+        hostId = "host-1", backendId = "codex",
         threadId = "thread-1",
         turnId = "turn-1",
         objective = "objective",

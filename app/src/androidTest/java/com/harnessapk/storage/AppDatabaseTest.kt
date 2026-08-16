@@ -2520,7 +2520,7 @@ class AppDatabaseTest {
 
     private fun remoteBinding() = ProjectRemoteBindingEntity(
         id = "binding-1",
-        projectId = "project-1",
+        projectId = "project-1", backendId = "codex",
         hostId = "host-1",
         workspaceId = "workspace-1",
         cwd = "/workspace/project-1",
@@ -2539,7 +2539,7 @@ class AppDatabaseTest {
         projectNameSnapshot = "Project One",
         bindingId = "binding-1",
         bindingSnapshotJson = "{}",
-        hostId = "host-1",
+        hostId = "host-1", backendId = "codex",
         threadId = "thread-1",
         turnId = "turn-1",
         objective = "Implement M2",

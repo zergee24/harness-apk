@@ -183,7 +183,7 @@ class RoomProjectMarkdownIndexerInstrumentedTest {
         projectNameSnapshot = "Project A",
         bindingId = "binding-1",
         bindingSnapshotJson = "{}",
-        hostId = "host-1",
+        hostId = "host-1", backendId = "codex",
         threadId = "thread-1",
         turnId = "turn-1",
         objective = "完成 $marker",

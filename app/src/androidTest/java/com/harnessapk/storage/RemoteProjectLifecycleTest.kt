@@ -36,12 +36,12 @@ class RemoteProjectLifecycleTest {
     @Test
     fun unbindKeepsHistoricalRunReadableFromBindingSnapshot() = runBlocking {
         val project = projects.createProject("Harness")
-        bindings.bind(project.id, "host-1", candidate())
+        bindings.bind(project.id, "codex", "host-1", candidate())
         database.remoteDao().insertRun(run(project.id))
 
-        bindings.unbind(project.id)
+        bindings.unbind(project.id, "codex")
 
-        assertNull(database.remoteDao().bindingForProject(project.id))
+        assertNull(database.remoteDao().bindingForProject(project.id, "codex"))
         val historical = database.remoteDao().run("run-1")
         assertNotNull(historical)
         assertEquals("Harness", historical?.projectNameSnapshot)
@@ -51,12 +51,12 @@ class RemoteProjectLifecycleTest {
     @Test
     fun deletingProjectRemovesActiveBindingButKeepsHistoricalRun() = runBlocking {
         val project = projects.createProject("Harness")
-        bindings.bind(project.id, "host-1", candidate())
+        bindings.bind(project.id, "codex", "host-1", candidate())
         database.remoteDao().insertRun(run(project.id))
 
         DeleteProjectUseCase(projects, database).delete(project.id)
 
-        assertNull(database.remoteDao().bindingForProject(project.id))
+        assertNull(database.remoteDao().bindingForProject(project.id, "codex"))
         assertNotNull(database.remoteDao().run("run-1"))
     }
 
@@ -76,7 +76,7 @@ class RemoteProjectLifecycleTest {
         projectNameSnapshot = "Harness",
         bindingId = "binding-1",
         bindingSnapshotJson = "{\"repositoryLabel\":\"github.com/acme/harness\"}",
-        hostId = "host-1",
+        hostId = "host-1", backendId = "codex",
         threadId = "thread-1",
         turnId = "turn-1",
         objective = "继续实现 M2",

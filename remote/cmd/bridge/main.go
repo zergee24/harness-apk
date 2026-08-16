@@ -495,6 +495,9 @@ func (b *bridge) superviseBackend(
 			}
 			continue
 		}
+		// Start the read loop BEFORE the initialize call, otherwise the
+		// response is never read and every backend times out (G6 caught this).
+		bd.Start(ctx)
 		initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		_, initErr := bd.Call(initCtx, "initialize", map[string]any{
 			"clientInfo": map[string]string{
@@ -514,7 +517,6 @@ func (b *bridge) superviseBackend(
 			}
 			continue
 		}
-		bd.Start(ctx)
 		if err := b.routes.BeginProcessEpoch(bd.ID(), bd.ProcessEpoch()); err != nil {
 			log.Printf("begin process epoch for backend %s: %v", spec.ID, err)
 		}

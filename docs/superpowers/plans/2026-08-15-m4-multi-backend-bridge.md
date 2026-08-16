@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0-G5 DONE；已合入 test（e0bab5e + f223d1f）并推送 origin/test；G6（验收与回归）待办
+当前状态：G0-G6 DONE（模拟器验收完成，真机项 blocked）；G7（发布候选）待办
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -200,10 +200,13 @@ type Backend interface {
 - [x] 状态目录迁移说明：**实现与计划措辞偏差已记录**——计划写"v2 → v3"，实际 bridge.json 保持 schema v2（Backends 是加性字段），升级发生在 routes.json v1→v2 与 journal 事件可选字段；README 按实际描述。
 - [x] 回归：`go vet` + bridge/backend 测试通过；plist lint 通过。
 
-### G6：验收与回归
+### G6：验收与回归 — **DONE（2026-08-16，模拟器）**
 
-- [ ] 自动化：Go（`go test ./...`、`go vet ./...`）+ Android JVM/Instrumented；故障矩阵沿用 M2 的 fault-matrix 模式扩展 backend 维度。
-- [ ] 真机人工项（荣耀真机）：双后端真机验收、Push 通知区分后端、锁屏审批（仅 codex）。
+- [x] 自动化回归：Go 12 包 `go vet`+`go test` 全绿；`:app:testDebugUnitTest` 全绿；androidTest 编译通过（G3 的 backendId 字段修复 8+3 处既有 instrumented 测试实体构造）。
+- [x] **模拟器端到端验收（隔离环境）**：本地 relay（127.0.0.1:8080，独立 bootstrap）+ 独立 bridge state + 独立 AVD HarnessM4Api36 + 真实双后端（codex 槽 = `remote/cmd/appserver-stub` 验收 stub；dsh = 真实 dsh appserver profile）。`RemoteMultiBackendAcceptanceTest`（androidTest）全过：配对 enroll（真实本地 relay，配对 JSON 经 run-as 注入 app 私有目录）→ WS 连接 → host.status 双后端 `[codex, dsh]` → codex 能力含 `approvals.v1` → 切 dsh 后能力降级（无 approvals.v1）→ 切回 codex(stub) 发任务端到端（thread.start → turn.start → 流式 agentMessage"固定回复"）→ 再切 dsh 线程列表与 stub 线程隔离。
+- [x] **G6 抓出 G1 生产 bug**：`superviseBackend` 在 `bd.Start(ctx)` 之前调用 initialize——readLoop 未启动导致所有后端 initialize 必超时（G1 单测用 Fake 未覆盖真实进程路径）；已修复（先 Start 后 initialize），回归通过。
+- [x] 配套基础设施：`remote/cmd/appserver-stub`（canonical app-server 验收 stub）；debug 变体 network security config（localhost/10.0.2.2 明文，本地 relay 验收用）；模拟器环境搭建与配对注入流程记录在台账。
+- [ ] **真机人工项（荣耀真机）保持 blocked**：双后端真机验收、Push 通知区分后端、锁屏审批（仅 codex）需要真实手机 + 真实 relay + 真实 codex（本机 Codex.app 已移除，codex 槽位以 stub 顶替）；故障矩阵（断网 10 分钟/进程重建/Bridge 重启/单后端崩溃）的模拟器 instrumented 版已由验收 + G4 单测覆盖核心语义，真机全量矩阵仍待设备环境。
 
 ### G7：发布候选
 
