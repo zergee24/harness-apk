@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0-G4 DONE；已合入 test（e0bab5e）并推送；G5（运维与文档）待办
+当前状态：G0-G5 DONE；已合入 test（e0bab5e，G0-G3）并推送；G4/G5 待合入；G6（验收与回归）待办
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -192,10 +192,13 @@ type Backend interface {
 
 **G4 关键决策记录**：`sendRunSnapshot` 的 payload 构造抽为纯函数 `runSnapshotPayload` 以便契约测试；快照对账只 reconcile 本地已有 run（不凭空创建），backendId 以 run.start 落库值为准。
 
-### G5：运维与文档
+### G5：运维与文档 — **DONE（2026-08-15）**
 
-- [ ] LaunchAgent 示例（多后端参数）、`remote/README.md` 多后端章节、升级/回滚说明。
-- [ ] 日志按后端标识；状态目录迁移说明（v2 → v3）。
+- [x] LaunchAgent 示例：`remote/deploy/com.harnessapk.remote-bridge.plist` 带 `--backend codex --backend dsh`（XML 注释说明如何回退 codex-only），`plutil -lint` 通过。
+- [x] `remote/README.md`：新增 "Bridge state and upgrades (M4)"（bridge.json 保持 v2 + backends 加性段；routes.json v1→v2 自动迁移；logical-events 事件带可选 backendId；升级备份/回滚纪律）与 "Multi-backend serve flags"（--backend 可重复、裸 id 与 `<id>=<executable>`）。
+- [x] 日志按后端标识：supervise 日志已带 backend id；新增 serve 启动日志 `serve backends: codex=codex, dsh=dsh`。
+- [x] 状态目录迁移说明：**实现与计划措辞偏差已记录**——计划写"v2 → v3"，实际 bridge.json 保持 schema v2（Backends 是加性字段），升级发生在 routes.json v1→v2 与 journal 事件可选字段；README 按实际描述。
+- [x] 回归：`go vet` + bridge/backend 测试通过；plist lint 通过。
 
 ### G6：验收与回归
 

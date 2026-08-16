@@ -265,6 +265,11 @@ func runServe(defaultPath string, args []string) {
 	}); err != nil {
 		log.Fatal(err)
 	}
+	names := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		names = append(names, fmt.Sprintf("%s=%s", spec.ID, spec.Exec))
+	}
+	log.Printf("serve backends: %s", strings.Join(names, ", "))
 	for {
 		journalKey, err := base64.RawURLEncoding.DecodeString(state.JournalKey)
 		if err != nil {
