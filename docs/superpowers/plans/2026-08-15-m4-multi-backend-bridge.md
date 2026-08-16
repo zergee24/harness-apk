@@ -33,7 +33,7 @@ Harness APK <-- HTTPS/WSS --> Aliyun Relay <-- WSS --> Mac Bridge
 
 实施分支：`codex/m4-multi-backend-bridge`（从 `test` 切出；合入目标 `test`，不自动合并、不推送）
 
-当前状态：G0-G6 DONE（模拟器验收完成，真机项 blocked）；已合入 test（e0bab5e/f223d1f/01625f4）并推送 origin/test；G7（发布候选）待办
+当前状态：G0-G7 主体 DONE——test 通道已发布 2000105（含多后端 UI + 迁移修复），Mac bridge 已升级双后端；**待办：联想真机插入后的真机验收（完成后锁屏）**
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -205,6 +205,8 @@ type Backend interface {
 - [x] 自动化回归：Go 12 包 `go vet`+`go test` 全绿；`:app:testDebugUnitTest` 全绿；androidTest 编译通过（G3 的 backendId 字段修复 8+3 处既有 instrumented 测试实体构造）。
 - [x] **模拟器端到端验收（隔离环境）**：本地 relay（127.0.0.1:8080，独立 bootstrap）+ 独立 bridge state + 独立 AVD HarnessM4Api36 + 真实双后端（codex 槽 = `remote/cmd/appserver-stub` 验收 stub；dsh = 真实 dsh appserver profile）。`RemoteMultiBackendAcceptanceTest`（androidTest）全过：配对 enroll（真实本地 relay，配对 JSON 经 run-as 注入 app 私有目录）→ WS 连接 → host.status 双后端 `[codex, dsh]` → codex 能力含 `approvals.v1` → 切 dsh 后能力降级（无 approvals.v1）→ 切回 codex(stub) 发任务端到端（thread.start → turn.start → 流式 agentMessage"固定回复"）→ 再切 dsh 线程列表与 stub 线程隔离。
 - [x] **G6 抓出 G1 生产 bug**：`superviseBackend` 在 `bd.Start(ctx)` 之前调用 initialize——readLoop 未启动导致所有后端 initialize 必超时（G1 单测用 Fake 未覆盖真实进程路径）；已修复（先 Start 后 initialize），回归通过。
+- [x] **发布候选期间抓出并修复 Room 迁移崩溃（2000105）**：test 通道 2000104 在升级路径（schema 23→24）闪退——`backendId` 列的 `@ColumnInfo(defaultValue)` 需 SQL 字面量 `"'codex'"` 且实体不能带 Kotlin 默认值（Room schema 期望 undefined），迁移里多余的 `index_remote_runs_backendId`（实体未声明）也导致 TableInfo 不匹配；修复后模拟器旧包→发布包升级路径验证通过（app 存活无崩溃），2000105 已发布。
+- [x] **Mac 生产 bridge 升级为双后端**：`~/.local/bin/harness-bridge` 换 M4 版（旧版备份 `.bak-m2`），launchagent 参数 `--backend codex=/Applications/ChatGPT.app/Contents/Resources/codex --backend dsh=<nvm bin>`，launchd PATH 补 nvm（dsh shebang 需要 node）；state 备份 `~/.harness-remote-backup-20260816-090945`。
 - [x] 配套基础设施：`remote/cmd/appserver-stub`（canonical app-server 验收 stub）；debug 变体 network security config（localhost/10.0.2.2 明文，本地 relay 验收用）；模拟器环境搭建与配对注入流程记录在台账。
 - [ ] **真机人工项（荣耀真机）保持 blocked**：双后端真机验收、Push 通知区分后端、锁屏审批（仅 codex）需要真实手机 + 真实 relay + 真实 codex（本机 Codex.app 已移除，codex 槽位以 stub 顶替）；故障矩阵（断网 10 分钟/进程重建/Bridge 重启/单后端崩溃）的模拟器 instrumented 版已由验收 + G4 单测覆盖核心语义，真机全量矩阵仍待设备环境。
 
