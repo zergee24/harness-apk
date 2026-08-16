@@ -1203,7 +1203,6 @@ abstract class AppDatabase : RoomDatabase() {
                     ON project_remote_bindings(projectId, backendId)
                     """.trimIndent(),
                 )
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_remote_runs_backendId ON remote_runs(backendId)")
             }
         }
 
