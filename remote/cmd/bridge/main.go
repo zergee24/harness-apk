@@ -38,22 +38,29 @@ import (
 
 type bridgeState = bridgestate.BridgeData
 
+type turnTransition struct {
+	generation            uint64
+	runID, expectedTurnID string
+}
+
 type bridge struct {
-	mu             sync.Mutex
-	writeMu        sync.Mutex
-	state          bridgeState
-	path           string
-	conn           *websocket.Conn
-	backends       map[string]backend.Backend
-	backendOrder   []string
-	journal        *journal.Store
-	commandCache   *commandcache.Store
-	routes         *runstate.RouteStore
-	terminals      *completion.TerminalRunStore
-	workspaces     *workspace.Registry
-	seen           map[string]time.Time
-	updateState    func(string, func(*bridgeState) error) error
-	backendBackoff time.Duration
+	mu                    sync.Mutex
+	writeMu               sync.Mutex
+	state                 bridgeState
+	path                  string
+	conn                  *websocket.Conn
+	backends              map[string]backend.Backend
+	backendOrder          []string
+	journal               *journal.Store
+	commandCache          *commandcache.Store
+	routes                *runstate.RouteStore
+	terminals             *completion.TerminalRunStore
+	workspaces            *workspace.Registry
+	seen                  map[string]time.Time
+	updateState           func(string, func(*bridgeState) error) error
+	backendBackoff        time.Duration
+	turnTransitions       map[string][]turnTransition
+	turnTransitionCounter uint64
 }
 
 func main() {
@@ -559,16 +566,24 @@ func (b *bridge) registerBackend(bd backend.Backend) {
 	if b.backends == nil {
 		b.backends = map[string]backend.Backend{}
 	}
-	if _, exists := b.backends[bd.ID()]; !exists {
-		b.backendOrder = append(b.backendOrder, bd.ID())
+	id := backend.NormalizeID(bd.ID())
+	ordered := false
+	for _, backendID := range b.backendOrder {
+		if backendID == id {
+			ordered = true
+			break
+		}
 	}
-	b.backends[bd.ID()] = bd
+	if !ordered {
+		b.backendOrder = append(b.backendOrder, id)
+	}
+	b.backends[id] = bd
 }
 
 func (b *bridge) unregisterBackend(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.backends, id)
+	delete(b.backends, backend.NormalizeID(id))
 }
 
 // backendFor resolves the backend for a command/event; empty id means the
@@ -1555,7 +1570,32 @@ func (b *bridge) requestAppServer(
 	method string,
 	params any,
 ) error {
-	return b.requestAppServerAfter(ctx, deviceID, command, bd, method, params, nil)
+	return b.requestAppServerAfter(ctx, deviceID, command, bd, method, params, nil, nil)
+}
+
+func (b *bridge) prepareTurnSteer(command protocol.Command, params any) (protocol.Command, any) {
+	if command.Type != "turn.steer" || b.routes == nil {
+		return command, params
+	}
+	runID := command.RunID
+	if runID == "" {
+		runID = "legacy:" + command.ThreadID
+	}
+	route, ok := b.routes.ByRun(runID)
+	if !ok || route.ThreadID != command.ThreadID || backend.NormalizeID(route.BackendID) != backend.NormalizeID(command.BackendID) || route.TurnID == "" {
+		return command, params
+	}
+	command.TurnID = ""
+	command.ExpectedTurnID = route.TurnID
+	if values, ok := params.(map[string]any); ok {
+		copied := make(map[string]any, len(values))
+		for key, value := range values {
+			copied[key] = value
+		}
+		copied["expectedTurnId"] = route.TurnID
+		params = copied
+	}
+	return command, params
 }
 
 func (b *bridge) requestTurnAppServer(
@@ -1566,9 +1606,23 @@ func (b *bridge) requestTurnAppServer(
 	method string,
 	params any,
 ) error {
+	command, params = b.prepareTurnSteer(command, params)
+	var finish func()
+	var generation uint64
+	if command.Type == "turn.steer" {
+		generation = b.beginTurnTransition(command)
+		finish = func() { b.endTurnTransition(command, generation) }
+	}
 	return b.requestAppServerAfter(ctx, deviceID, command, bd, method, params, func(result json.RawMessage) error {
+		if command.Type == "turn.steer" {
+			transition, ok := b.turnTransitionGeneration(command.BackendID, command.ThreadID, generation)
+			if !ok {
+				return errors.New("turn steer transition is no longer active")
+			}
+			return b.backfillTurnRouteExpected(command, result, transition.expectedTurnID)
+		}
 		return b.backfillTurnRoute(command, result)
-	})
+	}, finish)
 }
 
 type turnRPCOutcome string
@@ -2027,11 +2081,15 @@ func (b *bridge) requestAppServerAfter(
 	method string,
 	params any,
 	after func(json.RawMessage) error,
+	finish func(),
 ) error {
 	if method == "" {
 		return errors.New("app-server method is required")
 	}
 	go func() {
+		if finish != nil {
+			defer finish()
+		}
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		result, err := bd.Call(callCtx, method, params)
@@ -2374,6 +2432,9 @@ func (b *bridge) handleAppServer(ctx context.Context, message backend.Message) {
 		return
 	}
 	processEpoch := bd.ProcessEpoch()
+	if message.Method == "turn/started" {
+		_ = b.bindStartedTurnRoute(message.BackendID, message.Params)
+	}
 	if message.Method == "serverRequest/resolved" {
 		var params struct {
 			RequestID json.RawMessage `json:"requestId"`
@@ -2937,6 +2998,105 @@ func approvalTarget(params map[string]any) string {
 	return "Codex 请求执行受保护操作"
 }
 
+func turnTransitionKey(backendID, threadID string) string {
+	return backend.NormalizeID(backendID) + "\x00" + threadID
+}
+
+func (b *bridge) beginTurnTransition(command protocol.Command) uint64 {
+	expectedTurnID := firstNonEmpty(command.TurnID, command.ExpectedTurnID)
+	if command.ThreadID == "" || expectedTurnID == "" {
+		return 0
+	}
+	runID := command.RunID
+	if runID == "" {
+		runID = "legacy:" + command.ThreadID
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.turnTransitions == nil {
+		b.turnTransitions = map[string][]turnTransition{}
+	}
+	b.turnTransitionCounter++
+	generation := b.turnTransitionCounter
+	key := turnTransitionKey(command.BackendID, command.ThreadID)
+	b.turnTransitions[key] = append(b.turnTransitions[key], turnTransition{
+		generation: generation, runID: runID, expectedTurnID: expectedTurnID,
+	})
+	return generation
+}
+
+func (b *bridge) endTurnTransition(command protocol.Command, generation uint64) {
+	runID := command.RunID
+	if runID == "" {
+		runID = "legacy:" + command.ThreadID
+	}
+	currentTurnID := ""
+	if b.routes != nil {
+		if route, ok := b.routes.ByRun(runID); ok && route.ThreadID == command.ThreadID {
+			currentTurnID = route.TurnID
+		}
+	}
+	key := turnTransitionKey(command.BackendID, command.ThreadID)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	queue := b.turnTransitions[key]
+	for index, transition := range queue {
+		if transition.generation != generation || transition.runID != runID {
+			continue
+		}
+		wasFirst := index == 0
+		queue = append(queue[:index], queue[index+1:]...)
+		if len(queue) == 0 {
+			delete(b.turnTransitions, key)
+		} else {
+			if wasFirst && currentTurnID != "" {
+				queue[0].expectedTurnID = currentTurnID
+			}
+			b.turnTransitions[key] = queue
+		}
+		return
+	}
+}
+
+func (b *bridge) turnTransitionFor(backendID, threadID string) (turnTransition, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	queue := b.turnTransitions[turnTransitionKey(backendID, threadID)]
+	if len(queue) == 0 {
+		return turnTransition{}, false
+	}
+	return queue[0], true
+}
+
+func (b *bridge) turnTransitionGeneration(backendID, threadID string, generation uint64) (turnTransition, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, transition := range b.turnTransitions[turnTransitionKey(backendID, threadID)] {
+		if transition.generation == generation {
+			return transition, true
+		}
+	}
+	return turnTransition{}, false
+}
+
+func (b *bridge) bindStartedTurnRoute(backendID string, params json.RawMessage) error {
+	threadID, turnID := routeIdentityFromParams(params)
+	if threadID == "" || turnID == "" || b.routes == nil {
+		return errors.New("turn/started is missing route identity")
+	}
+	if _, exact := b.routes.ByThreadTurnBackend(threadID, turnID, backendID); exact {
+		return nil
+	}
+	if transition, ok := b.turnTransitionFor(backendID, threadID); ok {
+		return b.routes.AdvanceTurn(transition.runID, threadID, transition.expectedTurnID, turnID)
+	}
+	active := b.routes.ByThreadAllBackend(threadID, backendID)
+	if len(active) != 1 || active[0].TurnID != "" {
+		return errors.New("turn/started does not match one claimed route")
+	}
+	return b.routes.UpdateTurn(active[0].RunID, threadID, turnID)
+}
+
 func (b *bridge) routeForParams(backendID string, params json.RawMessage) (runstate.Route, bool) {
 	threadID, turnID := routeIdentityFromParams(params)
 	if threadID == "" || b.routes == nil {
@@ -2974,7 +3134,10 @@ func (b *bridge) claimThread(command protocol.Command, deviceID string) error {
 	if runID == "" {
 		runID = "legacy:" + command.ThreadID
 	}
-	route, _ := b.routes.ByRun(runID)
+	route, exists := b.routes.ByRun(runID)
+	if exists && command.Type == "turn.steer" && (route.ThreadID != command.ThreadID || backend.NormalizeID(route.BackendID) != backend.NormalizeID(command.BackendID) || route.DeviceID != deviceID) {
+		return errors.New("route steer identity changed")
+	}
 	route.RunID = runID
 	route.HostID = b.state.HostID
 	route.DeviceID = deviceID
@@ -2987,7 +3150,10 @@ func (b *bridge) claimThread(command protocol.Command, deviceID string) error {
 		route.WorkspaceID = command.WorkspaceID
 	}
 	if command.Type == "turn.steer" {
-		route.TurnID = firstNonEmpty(command.TurnID, command.ExpectedTurnID)
+		expectedTurnID := firstNonEmpty(command.TurnID, command.ExpectedTurnID)
+		if route.TurnID == "" || route.TurnID == expectedTurnID {
+			route.TurnID = expectedTurnID
+		}
 	} else {
 		route.TurnID = command.TurnID
 	}
@@ -2995,6 +3161,10 @@ func (b *bridge) claimThread(command protocol.Command, deviceID string) error {
 }
 
 func (b *bridge) backfillTurnRoute(command protocol.Command, result json.RawMessage) error {
+	return b.backfillTurnRouteExpected(command, result, firstNonEmpty(command.TurnID, command.ExpectedTurnID))
+}
+
+func (b *bridge) backfillTurnRouteExpected(command protocol.Command, result json.RawMessage, expectedTurnID string) error {
 	var envelope struct {
 		TurnID string `json:"turnId"`
 		Turn   struct {
@@ -3011,6 +3181,9 @@ func (b *bridge) backfillTurnRoute(command protocol.Command, result json.RawMess
 	runID := command.RunID
 	if runID == "" {
 		runID = "legacy:" + command.ThreadID
+	}
+	if command.Type == "turn.steer" {
+		return b.routes.AdvanceTurn(runID, command.ThreadID, expectedTurnID, turnID)
 	}
 	return b.routes.UpdateTurn(runID, command.ThreadID, turnID)
 }

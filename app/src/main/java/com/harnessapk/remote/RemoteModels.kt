@@ -376,7 +376,7 @@ internal fun fallbackRemoteBackends(hostCapabilities: Set<String>): List<RemoteB
 internal fun reconcileSelectedBackend(
     selected: String,
     backends: List<RemoteBackend>,
-): String = if (backends.any { it.id == selected }) selected else DEFAULT_BACKEND_ID
+): String = if (backends.any { it.id == selected }) selected else backends.firstOrNull()?.id ?: DEFAULT_BACKEND_ID
 
 /**
  * Attaches the selected backend id to a command payload unless it already

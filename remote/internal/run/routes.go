@@ -183,6 +183,35 @@ func (s *RouteStore) Put(route Route) error {
 	return s.saveLocked()
 }
 
+func (s *RouteStore) AdvanceTurn(runID, threadID, expectedTurnID, turnID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runID == "" || threadID == "" || expectedTurnID == "" || turnID == "" {
+		return errors.New("run, thread, expected turn, and next turn identity are required")
+	}
+	route, ok := findRouteByRun(s.data.Routes, runID)
+	if !ok {
+		return errors.New("route not found")
+	}
+	if route.ThreadID != threadID {
+		return errors.New("route thread identity changed")
+	}
+	if route.TurnID == turnID {
+		return nil
+	}
+	if route.TurnID != expectedTurnID {
+		return errors.New("route expected turn identity changed")
+	}
+	updated := *route
+	updated.TurnID = turnID
+	s.data.Routes[routeKey(updated.BackendID, runID)] = &updated
+	if err := s.saveLocked(); err != nil {
+		s.data.Routes[routeKey(route.BackendID, runID)] = route
+		return err
+	}
+	return nil
+}
+
 func (s *RouteStore) UpdateTurn(runID, threadID, turnID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

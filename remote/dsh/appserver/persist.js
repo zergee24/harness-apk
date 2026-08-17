@@ -17,14 +17,6 @@ export function sessionsRoot() {
 	return join(home, "sessions");
 }
 
-/**
- * The human-navigable project key is lossy (separators collapse into `-`),
- * so it is used for display only; exact cwd comes from the session header.
- */
-export function displayCwd(projectKey) {
-	return projectKey.replace(/^--/, "").replace(/--$/, "").replace(/-/g, "/");
-}
-
 function findLogPath(root, projectDir, sessionDir) {
 	for (const name of LOG_NAMES) {
 		const candidate = join(root, projectDir, sessionDir, name);
@@ -39,7 +31,8 @@ function findLogPath(root, projectDir, sessionDir) {
 
 /**
  * Enumerate persisted sessions across every project directory.
- * @returns [{id, cwd, updatedAt}] with `cwd` best-effort display value.
+ * @returns [{id, updatedAt}]. Exact cwd is read from the session header;
+ * the encoded project directory is intentionally never exposed. `updatedAt` is Unix seconds.
  */
 export function listPersistedSessions() {
 	const root = sessionsRoot();
@@ -59,18 +52,17 @@ export function listPersistedSessions() {
 			continue;
 		}
 		for (const entry of entries) {
-			if (!entry.isDirectory() || !entry.name.startsWith("session-")) continue;
+			if (!entry.isDirectory()) continue;
 			const logPath = findLogPath(root, projectDir.name, entry.name);
 			if (logPath === null) continue;
 			let updatedAt = 0;
 			try {
-				updatedAt = statSync(logPath).mtimeMs;
+				updatedAt = Math.floor(statSync(logPath).mtimeMs / 1000);
 			} catch {
 				continue;
 			}
 			sessions.push({
 				id: entry.name,
-				cwd: displayCwd(projectDir.name),
 				updatedAt,
 			});
 		}
@@ -79,24 +71,23 @@ export function listPersistedSessions() {
 }
 
 /**
- * Load a persisted session's events through the tree's sessionPersistence
- * service. Returns `{events, cwd}` or null when unknown/unreadable. The
+ * Inspect a persisted session through the public sessionPersistence contract.
+ * Returns `{events, header}` or null when unknown/unreadable. The
  * fallback path (no service) returns null so callers treat the thread as
  * unknown rather than reading half a torn log.
  */
 export async function loadPersistedSession(ctx, id) {
 	const persistence = ctx.get("sessionPersistence");
-	if (persistence === void 0 || typeof persistence.loadStored !== "function") {
+	if (persistence === void 0 || typeof persistence.inspect !== "function") {
 		return null;
 	}
 	try {
-		const stored = await persistence.loadStored(String(id));
-		if (stored === void 0) return null;
-		const events = Array.isArray(stored.events) ? stored.events : [];
+		const inspection = await persistence.inspect(String(id));
+		if (inspection === void 0) return null;
+		const events = Array.isArray(inspection.events) ? inspection.events : [];
 		return {
 			events,
-			cwd: stored.meta?.cwd ?? null,
-			updatedAt: stored.meta?.updatedAt ?? null,
+			header: inspection.meta ?? {},
 		};
 	} catch (error) {
 		return { events: [], cwd: null, error: String(error?.message ?? error) };

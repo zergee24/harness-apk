@@ -94,6 +94,41 @@ func TestHostStatusOmitsUnavailableBackends(t *testing.T) {
 	}
 }
 
+func TestBackendRestartDoesNotDuplicateHostStatusEntry(t *testing.T) {
+	b := &bridge{}
+	b.registerBackend(backend.NewFake("dsh"))
+	b.unregisterBackend("dsh")
+	b.registerBackend(backend.NewFake("dsh"))
+
+	var payload protocol.HostStatusPayload
+	if err := json.Unmarshal(b.hostStatusPayload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Backends) != 1 || payload.Backends[0].ID != "dsh" {
+		t.Fatalf("backends after restart=%#v", payload.Backends)
+	}
+}
+
+func TestBackendRestartPreservesEstablishedHostStatusOrder(t *testing.T) {
+	b := &bridge{}
+	b.registerBackend(backend.NewFake("codex"))
+	b.registerBackend(backend.NewFake("dsh"))
+	b.unregisterBackend("codex")
+	b.registerBackend(backend.NewFake("codex"))
+
+	var payload protocol.HostStatusPayload
+	if err := json.Unmarshal(b.hostStatusPayload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(payload.Backends))
+	for _, item := range payload.Backends {
+		ids = append(ids, item.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"codex", "dsh"}) {
+		t.Fatalf("backend order after restart=%#v", ids)
+	}
+}
+
 func TestRuntimeStateSavePreservesPairingCreatedAfterBridgeStartup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bridge.json")
 	initial := bridgeState{
@@ -844,6 +879,26 @@ func TestRouteForParamsWithoutTurnRequiresOneActiveRoute(t *testing.T) {
 	}
 }
 
+func TestTurnStartedBindsClaimedRouteBeforeRealtimeEvents(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.start", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	params := json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress"}}`)
+	if err := b.bindStartedTurnRoute("dsh", params); err != nil {
+		t.Fatal(err)
+	}
+	route, ok := b.routeForParams("dsh", params)
+	if !ok || route.RunID != "run-1" || route.TurnID != "turn-1" {
+		t.Fatalf("started route=%#v ok=%v", route, ok)
+	}
+}
+
 func TestRouteForParamsWithUnknownTurnDoesNotFallBackToLegacyEmptyTurnRoute(t *testing.T) {
 	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
 	if err != nil {
@@ -1151,6 +1206,117 @@ func TestContinuationHistoryCursorLazilyWalksIntoOriginalThread(t *testing.T) {
 	target, cursor, err = continuationHistoryRequest("thread-current", *older, &record)
 	if err != nil || target != "thread-root" || cursor != next {
 		t.Fatalf("paged history target=%q cursor=%q err=%v", target, cursor, err)
+	}
+}
+
+func TestTurnSteerStartedNotificationCanRaceAheadOfRPCBackfill(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{
+		Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-existing",
+	}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	b.beginTurnTransition(command)
+	params := json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-next","status":"inProgress"}}`)
+	if err := b.bindStartedTurnRoute("dsh", params); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.backfillTurnRoute(command, json.RawMessage(`{"turn":{"id":"turn-next"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	route, ok := routes.ByThreadTurnBackend("thread-1", "turn-next", "dsh")
+	if !ok || route.RunID != "run-1" {
+		t.Fatalf("raced steer route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestOverlappingTurnSteersAdvanceInRequestOrder(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	first := protocol.Command{
+		Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-existing",
+	}
+	second := first
+	second.RequestID = "second"
+	if err := b.claimThread(first, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	firstGeneration := b.beginTurnTransition(first)
+	b.beginTurnTransition(second)
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-next"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	b.endTurnTransition(first, firstGeneration)
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-third"}}`)); err != nil {
+		t.Fatalf("second steer did not inherit the preceding turn: %v", err)
+	}
+	route, ok := routes.ByThreadTurnBackend("thread-1", "turn-third", "dsh")
+	if !ok || route.RunID != "run-1" {
+		t.Fatalf("overlapping steer route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestOverlappingTurnSteerClaimDoesNotRegressAdvancedRoute(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	first := protocol.Command{
+		Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-existing",
+	}
+	if err := b.claimThread(first, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	generation := b.beginTurnTransition(first)
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-next"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	b.endTurnTransition(first, generation)
+	second := first
+	second.RequestID = "second"
+	if err := b.claimThread(second, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	route, _ := routes.ByRun("run-1")
+	if route.TurnID != "turn-next" {
+		t.Fatalf("stale overlapping claim regressed route to %q", route.TurnID)
+	}
+	prepared, params := b.prepareTurnSteer(second, map[string]any{"expectedTurnId": second.ExpectedTurnID})
+	if prepared.ExpectedTurnID != "turn-next" || params.(map[string]any)["expectedTurnId"] != "turn-next" {
+		t.Fatalf("stale steer was not refreshed: command=%#v params=%#v", prepared, params)
+	}
+}
+
+func TestLegacyTurnSteerBackfillsNewTurnIDAfterExpectedTurn(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{
+		Type: "turn.steer", BackendID: "dsh", ThreadID: "thread-1", ExpectedTurnID: "turn-existing",
+	}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.backfillTurnRoute(command, json.RawMessage(`{"turn":{"id":"turn-next"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, old := routes.ByThreadTurnBackend("thread-1", "turn-existing", "dsh"); old {
+		t.Fatal("steer kept the completed turn route")
+	}
+	route, ok := routes.ByThreadTurnBackend("thread-1", "turn-next", "dsh")
+	if !ok || route.RunID != "legacy:thread-1" {
+		t.Fatalf("steer next route=%#v ok=%v", route, ok)
 	}
 }
 

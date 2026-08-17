@@ -374,8 +374,12 @@ class RemoteRepository(
         }
     }
 
-    private fun backendDisplayName(backendId: String?): String =
-        _state.value.backends.firstOrNull { it.id == backendId }?.name ?: "Codex"
+    private fun backendDisplayName(backendId: String?): String {
+        val state = _state.value
+        val resolvedId = backendId ?: state.selectedBackendId
+        return state.backends.firstOrNull { it.id == resolvedId }?.name
+            ?: if (resolvedId == "dsh") "DeepSeek Harness" else "Codex"
+    }
 
     private fun notifyLogicalEvent(event: RemoteLogicalEvent) {
         val payload = event.payload as? JsonObject ?: JsonObject(emptyMap())
@@ -423,7 +427,8 @@ class RemoteRepository(
                 )
             }
             "error" -> {
-                val message = event.message ?: "Codex 远程任务失败"
+                val agentName = backendDisplayName(event.backendId)
+                val message = event.message ?: "$agentName 远程任务失败"
                 _state.value = _state.value.copy(
                     errorMessage = redactRemoteSensitiveText(message).take(240),
                     activeThreadId = null,
@@ -433,7 +438,7 @@ class RemoteRepository(
                     isTimelineLoading = false,
                     isCreatingThread = false,
                 )
-                _notifications.tryEmit(RemoteNotification("Codex 任务失败", message))
+                _notifications.tryEmit(RemoteNotification("$agentName 任务失败", message))
             }
             "rpc.response" -> handleRpcResponse(event)
             "workspace.candidates" -> _state.value = _state.value.copy(
@@ -551,7 +556,7 @@ class RemoteRepository(
                 },
                 errorMessage = remoteRpcErrorMessage(event.payload),
             )
-            _notifications.tryEmit(RemoteNotification("Codex 任务失败", "Mac 返回了错误，请打开 Harness 查看详情"))
+            _notifications.tryEmit(RemoteNotification("${backendDisplayName(event.backendId)} 任务失败", "Mac 返回了错误，请打开 Harness 查看详情"))
             return
         }
         if (kind == "thread.read" || kind == "thread.read.older") {
@@ -658,7 +663,10 @@ class RemoteRepository(
                     ?.execution
                     ?.startedAtMillis
                     ?: System.currentTimeMillis()
-                val execution = RemoteThreadExecution(
+                val existingExecution = current.threads.firstOrNull { it.id == threadId }?.execution
+                val execution = existingExecution?.takeIf {
+                    !it.state.isActive && it.state != RemoteThreadExecutionState.UNKNOWN && it.turnId == turnId
+                } ?: RemoteThreadExecution(
                     state = RemoteThreadExecutionState.RUNNING,
                     turnId = turnId,
                     startedAtMillis = startedAtMillis,
@@ -694,9 +702,9 @@ class RemoteRepository(
                     requestedThreadSummaries.remove(sourceThreadId)
                     _state.value = current.copy(
                         selectedThreadId = threadId,
-                        activeThreadId = threadId,
-                        activeTurnId = turnId,
-                        isWorking = true,
+                        activeThreadId = threadId.takeIf { execution.state.isActive },
+                        activeTurnId = turnId.takeIf { execution.state.isActive },
+                        isWorking = execution.state.isActive,
                         timeline = listOf(
                             RemoteTimelineItem(
                                 id = "continuation:$threadId",
@@ -712,9 +720,9 @@ class RemoteRepository(
                     )
                 } else {
                     _state.value = current.copy(
-                        activeThreadId = threadId,
-                        activeTurnId = turnId,
-                        isWorking = threadId != null && threadId == current.selectedThreadId,
+                        activeThreadId = threadId.takeIf { execution.state.isActive },
+                        activeTurnId = turnId.takeIf { execution.state.isActive },
+                        isWorking = execution.state.isActive && threadId != null && threadId == current.selectedThreadId,
                         timeline = sentTimeline,
                         threads = current.threads.withExecution(threadId, execution),
                     )
@@ -813,10 +821,11 @@ class RemoteRepository(
                     isWorking = current.isWorking && !completesActiveTurn,
                     threads = current.threads.withExecution(completedThreadId, execution),
                 )
+                val agentName = backendDisplayName(event.backendId)
                 val notification = when (execution.state) {
-                    RemoteThreadExecutionState.FAILED -> RemoteNotification("Codex 任务失败", "打开 Harness 查看失败详情")
-                    RemoteThreadExecutionState.INTERRUPTED -> RemoteNotification("Codex 已停止", "远程任务已中断")
-                    else -> RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果")
+                    RemoteThreadExecutionState.FAILED -> RemoteNotification("$agentName 任务失败", "打开 Harness 查看失败详情")
+                    RemoteThreadExecutionState.INTERRUPTED -> RemoteNotification("$agentName 已停止", "远程任务已中断")
+                    else -> RemoteNotification("$agentName 已完成", "远程任务已结束，点击查看结果")
                 }
                 _notifications.tryEmit(notification)
                 refreshThreads()
@@ -850,6 +859,7 @@ class RemoteRepository(
             if (value is JsonPrimitive) value.contentOrNull else value.toString()
         }
         val current = _state.value
+        val agentName = backendDisplayName(event.backendId)
         val threadId = params.string("threadId")
         val turnId = params.string("turnId")
         _state.value = current.copy(
@@ -858,7 +868,7 @@ class RemoteRepository(
                 method = raw.string("method").orEmpty(),
                 threadId = threadId,
                 turnId = turnId,
-                reason = params.string("reason") ?: "Codex 请求执行受保护操作",
+                reason = params.string("reason") ?: "$agentName 请求执行受保护操作",
                 command = command,
             ),
             threads = current.threads.withExecution(
@@ -869,7 +879,7 @@ class RemoteRepository(
             activeTurnId = turnId ?: current.activeTurnId,
             isWorking = threadId == null || threadId == current.selectedThreadId,
         )
-        _notifications.tryEmit(RemoteNotification("Codex 等待审批", "Mac 上的任务需要你的确认"))
+        _notifications.tryEmit(RemoteNotification("$agentName 等待审批", "Mac 上的任务需要你的确认"))
     }
 
     private fun matchesSelectedThread(eventThreadId: String?): Boolean {
@@ -879,6 +889,7 @@ class RemoteRepository(
 
     private fun timelineItem(element: JsonElement): RemoteTimelineItem? {
         val item = element.jsonObject
+        val agentName = backendDisplayName(null)
         val id = item.string("id") ?: return null
         val kind = item.string("type").orEmpty()
         val status = item.string("status")
@@ -888,8 +899,8 @@ class RemoteRepository(
             "fileChange" -> remoteFileChangeText(item["changes"])
             "reasoning" -> item.string("summary")?.takeIf(String::isNotBlank)
                 ?: item.string("text")?.takeIf(String::isNotBlank)
-                ?: if (status in setOf("streaming", "inProgress", "running")) "Codex 正在分析" else return null
-            "webSearch" -> item.string("query") ?: item.string("text") ?: "Codex 正在查找资料"
+                ?: if (status in setOf("streaming", "inProgress", "running")) "$agentName 正在分析" else return null
+            "webSearch" -> item.string("query") ?: item.string("text") ?: "$agentName 正在查找资料"
             else -> item.string("text") ?: item.string("status") ?: "远程事件更新"
         }
         return RemoteTimelineItem(id, kind, text, status)

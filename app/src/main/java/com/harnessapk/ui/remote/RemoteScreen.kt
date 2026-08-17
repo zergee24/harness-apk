@@ -422,9 +422,25 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             turnId = state.activeTurnId,
         )
     val executionStatusLoadingEnabled = remoteFeatureAvailability(state.capabilities).canLoadThreadExecutionStatus
+    val agentName = state.backends.firstOrNull { it.id == state.selectedBackendId }?.name ?: "Codex"
     Column(Modifier.fillMaxSize().padding(padding)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Box(Modifier)
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            selectedThread?.let { thread ->
+                Column(Modifier.weight(1f)) {
+                    Text(thread.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${remoteWorkspaceLabel(thread.cwd)} · ${formatRemoteUpdatedAt(thread.updatedAt, System.currentTimeMillis())}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            } ?: Box(Modifier.weight(1f))
             if (selectedExecution.state.isActive) {
                 IconButton(onClick = container.remoteRepository::interrupt) { Icon(Icons.Outlined.Cancel, "停止") }
             }
@@ -434,6 +450,7 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             execution = selectedExecution,
             executionStatusLoadingEnabled = executionStatusLoadingEnabled,
             onLoadThreadSummary = container.remoteRepository::loadThreadSummary,
+            agentName = agentName,
         )
         state.errorMessage?.let { RemoteThreadErrorBanner(it) }
         RemoteTimelineList(
@@ -444,6 +461,7 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
             loadingOlder = state.isOlderTimelineLoading,
             onLoadOlder = container.remoteRepository::loadOlderHistory,
             modifier = Modifier.weight(1f).fillMaxWidth(),
+            agentName = agentName,
         )
         state.approvals.forEach { approval ->
             Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
@@ -459,7 +477,7 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
                 }
             }
         }
-        RemoteComposer(isWorking = state.isWorking, onSubmit = { text ->
+        RemoteComposer(isWorking = state.isWorking, agentName = agentName, onSubmit = { text ->
             com.harnessapk.remote.RemoteConnectionService.start(context)
             if (state.isWorking) container.remoteRepository.steer(text) else container.remoteRepository.startTurn(text)
         })
@@ -493,6 +511,7 @@ internal fun RemoteThreadDetailStatus(
     execution: RemoteThreadExecution,
     executionStatusLoadingEnabled: Boolean,
     onLoadThreadSummary: (String) -> Unit,
+    agentName: String = "Codex",
 ) {
     RemoteThreadSummaryLoader(
         thread = thread,
@@ -512,6 +531,7 @@ internal fun RemoteThreadDetailStatus(
     RemoteExecutionStatusBanner(
         execution = execution,
         startedAtMillis = workingStartedAtMillis,
+        agentName = agentName,
     )
 }
 
@@ -519,17 +539,18 @@ internal fun RemoteThreadDetailStatus(
 internal fun RemoteExecutionStatusBanner(
     execution: RemoteThreadExecution,
     startedAtMillis: Long? = execution.startedAtMillis,
+    agentName: String = "Codex",
 ) {
     val label = remoteExecutionStatusLabel(execution.state)
     if (execution.state == RemoteThreadExecutionState.RUNNING) {
         Box(Modifier.semantics { contentDescription = "当前会话状态：$label" }) {
-            RemoteWorkingBanner(startedAtMillis = startedAtMillis ?: System.currentTimeMillis())
+            RemoteWorkingBanner(startedAtMillis = startedAtMillis ?: System.currentTimeMillis(), agentName = agentName)
         }
         return
     }
     val (title, description) = when (execution.state) {
-        RemoteThreadExecutionState.WAITING_APPROVAL -> "等待审批" to "需要你处理后，Codex 才会继续"
-        RemoteThreadExecutionState.WAITING_USER -> "等待你的回复" to "补充信息后，Codex 会继续当前任务"
+        RemoteThreadExecutionState.WAITING_APPROVAL -> "等待审批" to "需要你处理后，$agentName 才会继续"
+        RemoteThreadExecutionState.WAITING_USER -> "等待你的回复" to "补充信息后，$agentName 会继续当前任务"
         RemoteThreadExecutionState.COMPLETED -> "任务已完成" to "可以继续发送消息开始下一轮"
         RemoteThreadExecutionState.FAILED -> "执行失败" to "查看最后一条消息后可继续重试"
         RemoteThreadExecutionState.INTERRUPTED -> "任务已中断" to "可以继续发送消息重新开始"
@@ -564,6 +585,7 @@ internal fun RemoteExecutionStatusBanner(
 internal fun RemoteWorkingBanner(
     startedAtMillis: Long,
     nowMillis: Long? = null,
+    agentName: String = "Codex",
 ) {
     var clockMillis by remember(startedAtMillis, nowMillis) {
         mutableLongStateOf(nowMillis ?: System.currentTimeMillis())
@@ -587,7 +609,7 @@ internal fun RemoteWorkingBanner(
         ) {
             CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
             Column {
-                Text("Codex 正在处理 · 已等待 $elapsedSeconds 秒", style = MaterialTheme.typography.labelLarge)
+                Text("$agentName 正在处理 · 已等待 $elapsedSeconds 秒", style = MaterialTheme.typography.labelLarge)
                 Text(
                     "收到新内容后会继续实时显示",
                     style = MaterialTheme.typography.bodySmall,
@@ -603,6 +625,7 @@ internal fun RemoteComposer(
     isWorking: Boolean,
     onSubmit: (String) -> Unit,
     modifier: Modifier = Modifier,
+    agentName: String = "Codex",
 ) {
     var input by remember { mutableStateOf("") }
     fun submit() {
@@ -619,7 +642,7 @@ internal fun RemoteComposer(
             value = input,
             onValueChange = { input = it },
             modifier = Modifier.weight(1f).testTag("remote-composer-input"),
-            label = { Text(if (isWorking) "引导当前任务" else "发送给 Codex") },
+            label = { Text(if (isWorking) "引导当前任务" else "发送给 $agentName") },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { submit() }),
             maxLines = 5,
@@ -638,6 +661,7 @@ internal fun RemoteTimelineList(
     onLoadOlder: () -> Unit = {},
     listState: LazyListState = rememberLazyListState(),
     modifier: Modifier = Modifier,
+    agentName: String = "Codex",
 ) {
     if (loading && items.isEmpty()) {
         Box(modifier, contentAlignment = androidx.compose.ui.Alignment.Center) {
@@ -720,7 +744,7 @@ internal fun RemoteTimelineList(
                 }
             }
         }
-        items(items, key = { it.id }) { TimelineCard(it) }
+        items(items, key = { it.id }) { TimelineCard(it, agentName = agentName) }
     }
 }
 
@@ -730,10 +754,10 @@ private fun LazyListState.latestViewportOffset(): Int =
     (layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset).coerceAtLeast(0)
 
 @Composable
-internal fun TimelineCard(item: RemoteTimelineItem) {
+internal fun TimelineCard(item: RemoteTimelineItem, agentName: String = "Codex") {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(remoteTimelineKindLabel(item.kind), style = MaterialTheme.typography.labelMedium)
+            Text(remoteTimelineKindLabel(item.kind, agentName), style = MaterialTheme.typography.labelMedium)
             when (item.kind) {
                 "agentMessage", "userMessage" -> MarkdownMessage(item.text)
                 "commandExecution" -> RemoteCommandText(item)
@@ -764,9 +788,9 @@ private fun RemoteCommandText(item: RemoteTimelineItem) {
     }
 }
 
-internal fun remoteTimelineKindLabel(kind: String): String = when (kind) {
+internal fun remoteTimelineKindLabel(kind: String, agentName: String = "Codex"): String = when (kind) {
     "userMessage" -> "你"
-    "agentMessage" -> "Codex"
+    "agentMessage" -> agentName
     "commandExecution" -> "命令"
     "fileChange" -> "文件变更"
     "reasoning" -> "思考"

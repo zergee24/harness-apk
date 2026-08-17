@@ -156,6 +156,13 @@ class RemoteBackendSelectionTest {
     }
 
     @Test
+    fun reconcileSelectedBackendFallsBackToOnlyAdvertisedBackend() {
+        val dshOnly = listOf(RemoteBackend("dsh", "DeepSeek Harness", emptySet()))
+        assertEquals("dsh", reconcileSelectedBackend("codex", dshOnly))
+        assertEquals("codex", reconcileSelectedBackend("codex", emptyList()))
+    }
+
+    @Test
     fun parseRemoteLogicalEventReadsBackendId() {
         val event = parseRemoteLogicalEvent(
             """{"schemaVersion":1,"eventId":"e1","hostId":"h","deviceId":"d","runId":"r","backendId":"dsh","sequence":3,"type":"run.timeline","payload":{"latestLine":"正在整理结果"},"createdAt":123}""",

@@ -6,7 +6,20 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { APPSERVER_STARTUP_SERVICE } from "./startup.js";
 import { listPersistedSessions, loadPersistedSession } from "./persist.js";
-import { messageOf, projectTurns, textBlocks, turnID, turnStatusFromReason, turnStatusString } from "./translate.js";
+import { serializeTurnStart } from "./turn-queue.js";
+import {
+	eventsFromSeq,
+	eventsThroughTurn,
+	isVisibleSession,
+	messageOf,
+	projectTurns,
+	sessionSummary,
+	textBlocks,
+	toProtocolSeconds,
+	turnID,
+	turnStatusString,
+	turnTimestamps,
+} from "./translate.js";
 
 /**
  * @module dsh-appserver — a codex app-server compatible stdio JSON-RPC
@@ -28,7 +41,7 @@ const Config = z.object({ listen: z.string().required() });
 
 const POLL_INTERVAL_MS = 200;
 
-/** live registry: threadId -> { agent, cwd, name, updatedAt } */
+/** live registry: threadId -> { agent, cwd } */
 const threads = new Map();
 
 function writeLine(value) {
@@ -58,11 +71,10 @@ function registryEntry(threadId) {
 	return entry;
 }
 
-/** Emit codex-style notifications for dsh session events after lastSeq. */
+/** Emit codex-style notifications from a DSH next-event cursor. */
 function emitNewEvents(session, threadId, state) {
-	for (const event of session.events) {
-		if (event.seq <= state.lastSeq) continue;
-		state.lastSeq = event.seq;
+	for (const event of eventsThroughTurn(session.events, state.nextSeq, state.targetTurnId)) {
+		state.nextSeq = event.seq + 1;
 		switch (event.type) {
 			case "turn/start":
 				state.turnId = turnID(event);
@@ -79,13 +91,15 @@ function emitNewEvents(session, threadId, state) {
 				}
 			}
 				break;
-			case "turn/end":
+			case "turn/end": {
+				const status = turnStatusString(event.data?.reason);
 				state.emit("turn/completed", {
 					threadId,
-					turn: { id: state.turnId, status: "completed" },
-					status: turnStatusString(event.data?.reason),
+					turn: { id: state.turnId, status },
+					status,
 					reason: event.data?.reason?.kind ?? "completed",
 				});
+			}
 				break;
 			default:
 				break;
@@ -93,17 +107,67 @@ function emitNewEvents(session, threadId, state) {
 	}
 }
 
-/** Wait for quiescence while streaming session events as notifications. */
-async function runTurn(agent, threadId, firstSeq) {
-	const state = { lastSeq: firstSeq, turnId: null, emit: notify };
-	const timer = setInterval(() => emitNewEvents(agent.session, threadId, state), POLL_INTERVAL_MS);
-	try {
-		await agent.whenIdle();
-	} finally {
-		clearInterval(timer);
-		emitNewEvents(agent.session, threadId, state);
-	}
-	return state.turnId;
+function waitForTurnStart(agent, firstSeq) {
+	return new Promise((resolve, reject) => {
+		const findStart = () => eventsFromSeq(agent.session.events, firstSeq)
+			.find((event) => event.type === "turn/start");
+		const existing = findStart();
+		if (existing !== void 0) {
+			resolve(turnID(existing));
+			return;
+		}
+		const timer = setInterval(() => {
+			const started = findStart();
+			if (started === void 0) return;
+			clearInterval(timer);
+			resolve(turnID(started));
+		}, POLL_INTERVAL_MS);
+		agent.whenIdle().then(() => {
+			const started = findStart();
+			clearInterval(timer);
+			if (started !== void 0) {
+				resolve(turnID(started));
+				return;
+			}
+			reject(new Error("turn ended before a start event was recorded"));
+		}, (error) => {
+			clearInterval(timer);
+			reject(error);
+		});
+	});
+}
+
+/** Stream one accepted turn after the RPC response establishes its route. */
+async function streamTurn(ctx, agent, threadId, firstSeq, targetTurnId) {
+	const state = { nextSeq: firstSeq, turnId: null, targetTurnId, emit: notify };
+	const isComplete = () => eventsFromSeq(agent.session.events, firstSeq).some((event) =>
+		event.type === "turn/end" && turnID(event) === targetTurnId);
+	await new Promise((resolve, reject) => {
+		let settled = false;
+		const pump = () => {
+			if (settled) return;
+			emitNewEvents(agent.session, threadId, state);
+			if (!isComplete()) return;
+			settled = true;
+			clearInterval(timer);
+			resolve();
+		};
+		const timer = setInterval(pump, POLL_INTERVAL_MS);
+		pump();
+		agent.whenIdle().then(() => {
+			pump();
+			if (settled) return;
+			settled = true;
+			clearInterval(timer);
+			reject(new Error(`turn ${targetTurnId} became idle without a turn/end event`));
+		}, (error) => {
+			if (settled) return;
+			settled = true;
+			clearInterval(timer);
+			reject(error);
+		});
+	});
+	await ctx.get("sessions").flush(agent.session);
 }
 
 async function ensureReady(ctx) {
@@ -125,7 +189,7 @@ async function createThread(ctx, cwd) {
 		},
 	});
 	await agent.whenIdle();
-	threads.set(String(sessionId), { agent, cwd, name: "", updatedAt: Date.now() });
+	threads.set(String(sessionId), { agent, cwd });
 	return String(sessionId);
 }
 
@@ -133,38 +197,50 @@ async function createThread(ctx, cwd) {
 async function threadEvents(ctx, threadId) {
 	const entry = registryEntry(threadId);
 	if (entry !== null) {
-		return { events: entry.agent.session.events, cwd: entry.cwd, name: entry.name, live: true };
+		return {
+			events: entry.agent.session.events,
+			header: entry.agent.session.header ?? { cwd: entry.cwd },
+			live: true,
+		};
 	}
 	const persisted = await loadPersistedSession(ctx, threadId);
 	if (persisted === null || persisted.error !== void 0) {
 		return null;
 	}
-	return {
-		events: persisted.events, cwd: persisted.cwd ?? null, name: null, live: false,
-	};
+	return { events: persisted.events, header: persisted.header, live: false };
 }
 
-function threadListResult(limit) {
-	const now = Date.now();
+async function threadListResult(ctx, limit) {
 	const merged = new Map();
 	for (const [threadId, entry] of threads) {
+		if (!isVisibleSession(entry.agent.session.header)) continue;
 		merged.set(threadId, {
-			id: threadId, name: entry.name || threadId, preview: "",
-			cwd: entry.cwd ?? "", updatedAt: entry.updatedAt, status: { type: "idle" },
+			id: threadId,
+			...sessionSummary(entry.agent.session.events, entry.agent.session.header ?? { cwd: entry.cwd }),
 		});
 	}
-	for (const persisted of listPersistedSessions()) {
-		if (merged.has(persisted.id)) continue;
+	const candidates = listPersistedSessions()
+		.filter((persisted) => !merged.has(persisted.id))
+		.sort((left, right) => right.updatedAt - left.updatedAt);
+	for (const persisted of candidates) {
+		if (limit > 0 && merged.size >= limit) {
+			const cutoff = [...merged.values()]
+				.sort((left, right) => right.updatedAt - left.updatedAt)[limit - 1]?.updatedAt ?? 0;
+			if (persisted.updatedAt <= cutoff) break;
+		}
+		const loaded = await loadPersistedSession(ctx, persisted.id);
+		if (loaded === null || loaded.error !== void 0) continue;
+		if (!isVisibleSession(loaded.header)) continue;
+		const summary = sessionSummary(loaded.events, loaded.header);
 		merged.set(persisted.id, {
-			id: persisted.id, name: persisted.cwd || persisted.id, preview: "",
-			cwd: persisted.cwd ?? "", updatedAt: persisted.updatedAt, status: { type: "idle" },
+			id: persisted.id,
+			...summary,
+			updatedAt: summary.updatedAt || persisted.updatedAt,
 		});
 	}
 	const data = [...merged.values()].sort((left, right) => right.updatedAt - left.updatedAt);
-	if (limit > 0 && data.length > limit) {
-		data.length = limit;
-	}
-	return { data, now };
+	if (limit > 0 && data.length > limit) data.length = limit;
+	return { data, now: toProtocolSeconds(Date.now()) };
 }
 
 async function readThreadResult(ctx, threadId, includeTurns) {
@@ -172,11 +248,7 @@ async function readThreadResult(ctx, threadId, includeTurns) {
 	if (resolved === null) return null;
 	const thread = {
 		id: threadId,
-		cwd: resolved.cwd ?? "",
-		name: resolved.name ?? threadId,
-		preview: "",
-		updatedAt: Date.now(),
-		status: { type: "idle" },
+		...sessionSummary(resolved.events, resolved.header),
 	};
 	if (includeTurns) {
 		thread.turns = projectTurns(resolved.events);
@@ -189,14 +261,7 @@ async function turnsListResult(ctx, threadId, limit, sortDirection) {
 	if (resolved === null) return null;
 	const turns = projectTurns(resolved.events);
 	const data = turns.map((turn) => {
-		const timestamps = { startedAt: null, completedAt: null };
-		for (const event of resolved.events) {
-			if (turnID(event) !== turn.id) continue;
-			if (event.type === "turn/start" && timestamps.startedAt === null) {
-				timestamps.startedAt = event.timestamp ?? null;
-			}
-			if (event.type === "turn/end") timestamps.completedAt = event.timestamp ?? null;
-		}
+		const timestamps = turnTimestamps(resolved.events, turn.id);
 		return {
 			id: turn.id,
 			status: turnStatusString(turn.status),
@@ -213,21 +278,21 @@ async function turnsListResult(ctx, threadId, limit, sortDirection) {
 	return { data, nextCursor: null };
 }
 
-async function startTurn(ctx, threadId, input) {
+async function startTurn(threadId, input) {
 	const entry = registryEntry(threadId);
 	if (entry === null) return { error: `unknown thread ${threadId}` };
 	const text = firstText(input);
 	if (text === "") return { error: "turn input text is required" };
-	if (entry.name === "") entry.name = text.slice(0, 60);
-	entry.updatedAt = Date.now();
 	const firstSeq = entry.agent.session.seq;
 	entry.agent.followup(createUserMessage({
 		content: [{ type: "text", text }],
 		source: { kind: "user" },
 	}));
-	const turnId = await runTurn(entry.agent, threadId, firstSeq);
-	await ctx.get("sessions").flush(entry.agent.session);
-	return { turn: { id: turnId, threadId, status: "completed" } };
+	const turnId = await waitForTurnStart(entry.agent, firstSeq);
+	return {
+		result: { turn: { id: turnId, threadId, status: "inProgress" } },
+		stream: { agent: entry.agent, threadId, firstSeq, turnId },
+	};
 }
 
 async function dispatch(ctx, msg) {
@@ -247,26 +312,33 @@ async function dispatch(ctx, msg) {
 				return;
 			case "thread/list": {
 				const limit = Number(params?.limit ?? 0) || 0;
-				respond(id, threadListResult(limit));
+				respond(id, await threadListResult(ctx, limit));
 				return;
 			}
 			case "thread/start": {
 				await ensureReady(ctx);
 				const cwd = params?.cwd ?? process.cwd();
 				const threadId = await createThread(ctx, cwd);
-				const now = Date.now();
+				const now = toProtocolSeconds(Date.now());
 				respond(id, { thread: { id: threadId, cwd, createdAt: now, updatedAt: now } });
 				return;
 			}
 			case "turn/start":
 			case "turn/steer": {
 				await ensureReady(ctx);
-				const result = await startTurn(ctx, params?.threadId, params?.input);
-				if (result.error !== void 0) {
-					respondError(id, "invalid_params", result.error);
+				const started = await serializeTurnStart(
+					params?.threadId,
+					() => startTurn(params?.threadId, params?.input),
+				);
+				if (started.error !== void 0) {
+					respondError(id, "invalid_params", started.error);
 					return;
 				}
-				respond(id, result);
+				respond(id, started.result);
+				Promise.resolve().then(() => streamTurn(
+					ctx, started.stream.agent, started.stream.threadId, started.stream.firstSeq, started.stream.turnId,
+				))
+					.catch((error) => notify("error", { message: String(error?.message ?? error) }));
 				return;
 			}
 			case "thread/read": {

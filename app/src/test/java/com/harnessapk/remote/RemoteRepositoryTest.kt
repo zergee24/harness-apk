@@ -343,6 +343,38 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun lateTurnStartResponseDoesNotOverwriteAnAlreadyCompletedTurn() {
+        val repository = repositoryWithPendingTurnStart("turn.start:late")
+        val stateField = RemoteRepository::class.java.getDeclaredField("_state").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutableState = stateField.get(repository) as MutableStateFlow<RemoteUiState>
+        mutableState.value = mutableState.value.copy(
+            threads = listOf(
+                RemoteThread("thread-a", "会话", "", "/workspace", 1L, "active"),
+            ),
+        )
+        repository.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = Json.parseToJsonElement(
+                    """{"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-real","status":"completed"}}}""",
+                ),
+            ),
+        )
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "turn.start:late",
+                payload = Json.parseToJsonElement("""{"result":{"turn":{"id":"turn-real","status":"inProgress"}}}"""),
+            ),
+        )
+
+        val state = repository.state.value
+        assertFalse(state.isWorking)
+        assertEquals(RemoteThreadExecutionState.COMPLETED, state.threads.single().execution.state)
+    }
+
+    @Test
     fun oversizedThreadContinuationKeepsSourceAndAutomaticallySelectsTheNewThread() {
         val requestId = "turn.start:continuation"
         val repository = repositoryWithPendingTurnStart(requestId)

@@ -108,6 +108,23 @@ func TestUpdateTurnAtomicallyBackfillsLegacyRoute(t *testing.T) {
 	}
 }
 
+func TestAdvanceTurnIsIdempotentAfterConcurrentWinner(t *testing.T) {
+	store, err := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := Route{RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-old"}
+	if err := store.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvanceTurn(route.RunID, route.ThreadID, "turn-old", "turn-new"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvanceTurn(route.RunID, route.ThreadID, "turn-old", "turn-new"); err != nil {
+		t.Fatalf("same transition replay should succeed: %v", err)
+	}
+}
+
 func TestUpdateTurnSaveFailureDoesNotMutateInMemoryRoute(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

@@ -1,6 +1,7 @@
 package com.harnessapk.ui.remote
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
@@ -325,6 +326,41 @@ class RemoteScreenComposeTest {
         composeRule.onNodeWithText("已完成").assertIsDisplayed()
         composeRule.onAllNodesWithText("agentMessage").assertCountEquals(0)
         composeRule.onAllNodesWithText("completed").assertCountEquals(0)
+    }
+
+    @Test
+    fun deepSeekDetailUsesSelectedBackendNameInsteadOfCodex() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                Column {
+                    TimelineCard(
+                        item = RemoteTimelineItem(
+                            id = "dsh-agent-1",
+                            kind = "agentMessage",
+                            text = "字段已经同步",
+                            status = "completed",
+                        ),
+                        agentName = "DeepSeek Harness",
+                    )
+                    RemoteComposer(
+                        isWorking = false,
+                        agentName = "DeepSeek Harness",
+                        onSubmit = {},
+                    )
+                    RemoteWorkingBanner(
+                        startedAtMillis = 1_000L,
+                        nowMillis = 48_000L,
+                        agentName = "DeepSeek Harness",
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("DeepSeek Harness").assertIsDisplayed()
+        composeRule.onNodeWithText("发送给 DeepSeek Harness").assertIsDisplayed()
+        composeRule.onNodeWithText("DeepSeek Harness 正在处理 · 已等待 47 秒").assertIsDisplayed()
+        composeRule.onAllNodesWithText("发送给 Codex").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Codex 正在处理", substring = true).assertCountEquals(0)
     }
 
     @Test

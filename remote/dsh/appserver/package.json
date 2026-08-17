@@ -8,6 +8,9 @@
     ".": "./index.js",
     "./startup": "./startup.js"
   },
+  "scripts": {
+    "test": "node --test index.test.js persist.test.js translate.test.js"
+  },
   "dependencies": {
     "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
     "@deepseek-ai/dsh-cmdline": "0.1.0-rc.6",
