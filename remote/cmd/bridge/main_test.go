@@ -113,6 +113,7 @@ func TestControlRunReplaysSucceededCommandAfterRouteAdvanced(t *testing.T) {
 	if err := b.controlRun(context.Background(), "phone-1", command, bd); err != nil {
 		t.Fatalf("cached replay after route advance: %v", err)
 	}
+	waitForRecoveryWorker(t, b)
 	if calls := bd.Calls(); len(calls) != 0 {
 		t.Fatalf("cached replay called backend: %#v", calls)
 	}
@@ -210,24 +211,251 @@ func TestNewRunSteerDoesNotOvertakeDurableUnknownPredecessor(t *testing.T) {
 	if _, err := cache.MarkUnknown("command-old", errors.New("lost")); err != nil {
 		t.Fatal(err)
 	}
+	readCalled := make(chan struct{}, 1)
+	releaseRead := make(chan struct{})
 	app := backend.NewFake("dsh").OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+		readCalled <- struct{}{}
+		<-releaseRead
 		return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"}]}}`), nil
 	})
-	b := &bridge{commandCache: cache, routes: routes, backends: map[string]backend.Backend{"dsh": app}}
+	unknown := make(chan string, 1)
+	b := &bridge{
+		commandCache: cache, routes: routes, backends: map[string]backend.Backend{"dsh": app},
+		controlEventEmitter: func(_ context.Context, _, _, _, eventType string, payload json.RawMessage) (string, error) {
+			if eventType == "run.control.unknown" {
+				var value struct {
+					CommandID string `json:"commandId"`
+				}
+				_ = json.Unmarshal(payload, &value)
+				unknown <- value.CommandID
+			}
+			return "event-unknown", nil
+		},
+	}
 	command := protocol.Command{
 		Type: "run.steer", CommandID: "command-new", RequestID: "request-new", BackendID: "dsh",
 		RunID: "run-1", ExpectedTurnID: "turn-1", Text: "must wait",
 	}
 
-	if err := b.controlRun(context.Background(), "phone-1", command, app); !errors.Is(err, runstate.ErrControlOutcomeUnknown) {
+	if err := b.controlRun(context.Background(), "phone-1", command, app); err != nil {
 		t.Fatalf("controlRun error=%v", err)
+	}
+	select {
+	case <-readCalled:
+	case <-time.After(time.Second):
+		t.Fatal("unknown predecessor reconciliation did not start")
+	}
+	close(releaseRead)
+	deadline := time.Now().Add(time.Second)
+	for {
+		b.recoveryWorkMu.Lock()
+		running := b.recoveryWorkerRunning
+		b.recoveryWorkMu.Unlock()
+		if !running || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if calls := app.Calls(); len(calls) != 1 || calls[0].Method != "thread/read" {
 		t.Fatalf("new steer overtook unknown predecessor: %#v", calls)
 	}
+	select {
+	case commandID := <-unknown:
+		if commandID != "command-new" {
+			t.Fatalf("unknown command=%q", commandID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unresolved successor did not receive a terminal unknown event")
+	}
 	if _, ok := cache.Lookup("command-new"); ok {
 		t.Fatal("blocked successor was persisted as if dispatched")
 	}
+}
+
+func TestNewRunSteerUsesReconciledTurnAfterDurablePredecessorResolves(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contextJSON := json.RawMessage(`{"type":"run.steer","runId":"run-1","deviceId":"phone-1","backendId":"dsh","threadId":"thread-1","expectedTurnId":"turn-1","text":"old"}`)
+	if _, execute, err := cache.BeginWithContext("command-old", "run.steer", "hash-old", contextJSON); err != nil || !execute {
+		t.Fatalf("begin old execute=%v err=%v", execute, err)
+	}
+	if _, err := cache.MarkUnknown("command-old", errors.New("lost")); err != nil {
+		t.Fatal(err)
+	}
+	steered := make(chan string, 1)
+	app := backend.NewFake("dsh").
+		OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+			return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"},{"id":"turn-2"}]}}`), nil
+		}).
+		OnScript("turn/steer", func(_ string, params any) (json.RawMessage, error) {
+			raw, _ := json.Marshal(params)
+			var input struct {
+				ExpectedTurnID string `json:"expectedTurnId"`
+			}
+			_ = json.Unmarshal(raw, &input)
+			steered <- input.ExpectedTurnID
+			return json.RawMessage(`{"turnId":"turn-3"}`), nil
+		})
+	b := &bridge{
+		commandCache: cache, routes: routes, backends: map[string]backend.Backend{"dsh": app},
+		controlEventEmitter: func(context.Context, string, string, string, string, json.RawMessage) (string, error) {
+			return "event-1", nil
+		},
+	}
+	command := protocol.Command{
+		Type: "run.steer", CommandID: "command-new", RequestID: "request-new", BackendID: "dsh",
+		RunID: "run-1", ExpectedTurnID: "turn-1", Text: "next",
+	}
+
+	if err := b.controlRun(context.Background(), "phone-1", command, app); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case turnID := <-steered:
+		if turnID != "turn-2" {
+			t.Fatalf("successor dispatched against %q, want reconciled turn-2", turnID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successor was not dispatched after predecessor reconciliation")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		record, ok := cache.Lookup("command-new")
+		route, routeOK := routes.ByRunBackend("dsh", "run-1")
+		if ok && record.Status == commandcache.StatusSucceeded && routeOK && route.TurnID == "turn-3" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("successor did not finish durably: record=%#v route=%#v", record, route)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestReconciledSuccessorAcceptsRouteAdvancedAgainBeforeAdmission(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	steered := make(chan string, 1)
+	app := backend.NewFake("dsh").OnScript("turn/steer", func(_ string, params any) (json.RawMessage, error) {
+		raw, _ := json.Marshal(params)
+		var input struct {
+			ExpectedTurnID string `json:"expectedTurnId"`
+		}
+		_ = json.Unmarshal(raw, &input)
+		steered <- input.ExpectedTurnID
+		return json.RawMessage(`{"turnId":"turn-4"}`), nil
+	})
+	b := &bridge{
+		commandCache: cache, routes: routes,
+		controlEventEmitter: func(context.Context, string, string, string, string, json.RawMessage) (string, error) {
+			return "event-1", nil
+		},
+	}
+	command := protocol.Command{
+		Type: "run.steer", CommandID: "command-new", RequestID: "request-new", BackendID: "dsh",
+		RunID: "run-1", ExpectedTurnID: "turn-1", Text: "next",
+	}
+
+	if err := b.controlRunWithReconciledTurn(context.Background(), "phone-1", command, app, "turn-2"); err != nil {
+		t.Fatalf("admission rejected route that advanced after reconciliation: %v", err)
+	}
+	select {
+	case turnID := <-steered:
+		if turnID != "turn-3" {
+			t.Fatalf("successor dispatched against %q, want latest turn-3", turnID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successor was not dispatched against latest route")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		record, ok := cache.Lookup("command-new")
+		route, routeOK := routes.ByRunBackend("dsh", "run-1")
+		if ok && record.Status == commandcache.StatusSucceeded && routeOK && route.TurnID == "turn-4" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("successor did not finish durably: record=%#v route=%#v", record, route)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestControlRunReservesThreadFIFOBeforeIngressReturns(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contextJSON := json.RawMessage(`{"type":"run.steer","runId":"run-1","deviceId":"phone-1","backendId":"dsh","threadId":"thread-1","expectedTurnId":"turn-1","text":"old"}`)
+	if _, execute, err := cache.BeginWithContext("command-old", "run.steer", "hash-old", contextJSON); err != nil || !execute {
+		t.Fatalf("begin old execute=%v err=%v", execute, err)
+	}
+	if _, err := cache.MarkUnknown("command-old", errors.New("lost")); err != nil {
+		t.Fatal(err)
+	}
+	releaseRead := make(chan struct{})
+	app := backend.NewFake("dsh").OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+		<-releaseRead
+		return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"},{"id":"turn-2"}]}}`), nil
+	})
+	b := &bridge{
+		commandCache: cache, routes: routes, backends: map[string]backend.Backend{"dsh": app},
+		controlEventEmitter: func(context.Context, string, string, string, string, json.RawMessage) (string, error) {
+			return "event-1", nil
+		},
+	}
+	command := protocol.Command{
+		Type: "run.steer", CommandID: "command-new", RequestID: "request-new", BackendID: "dsh",
+		RunID: "run-1", ExpectedTurnID: "turn-1", Text: "next",
+	}
+
+	if err := b.controlRun(context.Background(), "phone-1", command, app); err != nil {
+		t.Fatal(err)
+	}
+	// The reconciliation is blocked inside the worker, so the FIFO gate must
+	// already be reserved when ingress returns.
+	if !b.hasQueuedTurnCall("dsh", "thread-1") {
+		t.Fatal("later turn commands can overtake the run control before ingress returns")
+	}
+	close(releaseRead)
+	waitForRecoveryWorker(t, b)
 }
 
 func TestRestartedBridgeReconcilesPersistedUnknownControlWithoutTransition(t *testing.T) {
@@ -280,6 +508,108 @@ func TestRestartedBridgeReconcilesPersistedUnknownControlWithoutTransition(t *te
 	}
 	if route, _ := routes.ByRunBackend("dsh", "run-1"); route.TurnID != "turn-2" {
 		t.Fatalf("route=%#v", route)
+	}
+}
+
+func TestRunControlCannotBeOvertakenByLaterLegacyTurnSteer(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "legacy:thread-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contextJSON := json.RawMessage(`{"type":"run.steer","runId":"run-1","deviceId":"phone-1","backendId":"dsh","threadId":"thread-1","expectedTurnId":"turn-1","text":"old"}`)
+	if _, execute, err := cache.BeginWithContext("command-old", "run.steer", "hash-old", contextJSON); err != nil || !execute {
+		t.Fatalf("begin old execute=%v err=%v", execute, err)
+	}
+	if _, err := cache.MarkUnknown("command-old", errors.New("lost")); err != nil {
+		t.Fatal(err)
+	}
+	releaseRead := make(chan struct{})
+	var callsMu sync.Mutex
+	var calls []string
+	app := backend.NewFake("dsh").
+		OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+			<-releaseRead
+			return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"},{"id":"turn-2"}]}}`), nil
+		}).
+		OnScript("turn/steer", func(method string, params any) (json.RawMessage, error) {
+			raw, _ := json.Marshal(params)
+			var input struct {
+				ThreadID string `json:"threadId"`
+				Input    []struct {
+					Text string `json:"text"`
+				} `json:"input"`
+			}
+			_ = json.Unmarshal(raw, &input)
+			text := ""
+			if len(input.Input) > 0 {
+				text = input.Input[0].Text
+			}
+			callsMu.Lock()
+			calls = append(calls, text)
+			callsMu.Unlock()
+			return json.RawMessage(`{"turnId":"turn-3"}`), nil
+		})
+	b := &bridge{
+		commandCache: cache, routes: routes, backends: map[string]backend.Backend{"dsh": app},
+		state: bridgeState{
+			HostID: "host-1", Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{},
+		},
+		controlEventEmitter: func(context.Context, string, string, string, string, json.RawMessage) (string, error) {
+			return "event-1", nil
+		},
+	}
+	runCommand := protocol.Command{
+		Type: "run.steer", CommandID: "command-new", RequestID: "request-new", BackendID: "dsh",
+		RunID: "run-1", ExpectedTurnID: "turn-1", Text: "run-control",
+	}
+	if err := b.controlRun(context.Background(), "phone-1", runCommand, app); err != nil {
+		t.Fatal(err)
+	}
+	legacyCommand := protocol.Command{
+		Type: "turn.steer", BackendID: "dsh", ThreadID: "thread-1", ExpectedTurnID: "turn-1", Text: "legacy-turn",
+	}
+	if err := b.claimThread(legacyCommand, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.requestTurnAppServer(context.Background(), "phone-1", legacyCommand, app, "turn/steer", map[string]any{
+		"threadId": "thread-1", "expectedTurnId": "turn-1",
+		"input": []map[string]string{{"type": "text", "text": "legacy-turn"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseRead)
+	waitForRecoveryWorker(t, b)
+	deadline := time.Now().Add(time.Second)
+	for {
+		callsMu.Lock()
+		done := len(calls)
+		callsMu.Unlock()
+		if done >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if len(calls) != 2 || calls[0] != "run-control" || calls[1] != "legacy-turn" {
+		t.Fatalf("execution order=%#v", calls)
 	}
 }
 
@@ -2691,6 +3021,40 @@ func TestRouteForParamsScopesEventsToOwningBackend(t *testing.T) {
 	}
 }
 
+func TestPendingReplayDropsStaleHostStatusAndSortsOrdinaryEvents(t *testing.T) {
+	secret := bytes.Repeat([]byte{7}, 32)
+	deviceID := "phone-1"
+	pending := map[string]string{}
+	add := func(sequence uint64, eventType string) {
+		wire, err := protocol.Encrypt(secret, protocol.WireMessage{
+			HostID: "host-1", DeviceID: deviceID, Sequence: sequence,
+		}, protocol.Event{Type: eventType})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(wire)
+		pending[wire.MessageID] = string(raw)
+	}
+	add(3, "rpc.response")
+	add(1, "host.status")
+	add(2, "run.started")
+	b := &bridge{state: bridgeState{
+		DeviceSecrets:   map[string]string{deviceID: protocol.EncodeSecret(secret)},
+		PendingOutbound: map[string]map[string]string{deviceID: pending},
+	}}
+
+	b.mu.Lock()
+	wires := b.pendingReplayWiresLocked(time.Now().UnixMilli())
+	b.mu.Unlock()
+
+	if len(wires) != 2 || wires[0].Sequence != 2 || wires[1].Sequence != 3 {
+		t.Fatalf("replayed wires=%#v", wires)
+	}
+	if len(b.state.PendingOutbound[deviceID]) != 2 {
+		t.Fatalf("stale status was not coalesced: %#v", b.state.PendingOutbound[deviceID])
+	}
+}
+
 func TestInitialBackendRosterWaitsForAllBackendsBeforeFirstBroadcast(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2889,6 +3253,23 @@ func TestSnapshotForRouteReconcilesWhenBackendUnavailable(t *testing.T) {
 	}
 	if snapshot.Status != "RUNNING" || snapshot.LatestLine != "任务正在 Mac 上运行" {
 		t.Fatalf("codex snapshot = %#v", snapshot)
+	}
+}
+
+func waitForRecoveryWorker(t *testing.T, b *bridge) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		b.recoveryWorkMu.Lock()
+		running := b.recoveryWorkerRunning
+		b.recoveryWorkMu.Unlock()
+		if !running {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovery worker did not become idle")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

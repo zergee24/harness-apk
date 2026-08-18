@@ -94,9 +94,9 @@ func TestUnknownRecordsUseDurableDispatchOrderInsteadOfCommandID(t *testing.T) {
 func TestOpenDurablyBackfillsLegacyDispatchOrderBeforeNewerOrderedRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "commands.json")
 	raw := `{"schemaVersion":1,"records":{` +
-		`"z-first":{"commandId":"z-first","type":"run.steer","payloadSha256":"h1","status":"UNKNOWN","createdAt":10,"updatedAt":10},` +
-		`"a-second":{"commandId":"a-second","type":"run.steer","payloadSha256":"h2","status":"UNKNOWN","createdAt":20,"updatedAt":20},` +
-		`"new-third":{"commandId":"new-third","type":"run.steer","payloadSha256":"h3","status":"UNKNOWN","dispatchOrder":1,"createdAt":30,"updatedAt":30}` +
+		`"legacy":{"commandId":"legacy","type":"run.steer","payloadSha256":"h0","status":"UNKNOWN","createdAt":20,"updatedAt":20},` +
+		`"z-modern-first":{"commandId":"z-modern-first","type":"run.steer","payloadSha256":"h1","status":"UNKNOWN","dispatchOrder":1,"createdAt":30,"updatedAt":30},` +
+		`"a-modern-second":{"commandId":"a-modern-second","type":"run.steer","payloadSha256":"h2","status":"UNKNOWN","dispatchOrder":2,"createdAt":10,"updatedAt":10}` +
 		`}}`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
@@ -107,16 +107,16 @@ func TestOpenDurablyBackfillsLegacyDispatchOrderBeforeNewerOrderedRecords(t *tes
 		t.Fatal(err)
 	}
 	records := store.RecordsByTypeStatus("run.steer", StatusUnknown)
-	if len(records) != 3 || records[0].CommandID != "z-first" || records[0].DispatchOrder != 1 ||
-		records[1].CommandID != "a-second" || records[1].DispatchOrder != 2 ||
-		records[2].CommandID != "new-third" || records[2].DispatchOrder != 3 {
+	if len(records) != 3 || records[0].CommandID != "legacy" || records[0].DispatchOrder != 1 ||
+		records[1].CommandID != "z-modern-first" || records[1].DispatchOrder != 2 ||
+		records[2].CommandID != "a-modern-second" || records[2].DispatchOrder != 3 {
 		t.Fatalf("records=%#v", records)
 	}
 	reopened, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record, _ := reopened.Lookup("new-third"); record.DispatchOrder != 3 {
+	if record, _ := reopened.Lookup("a-modern-second"); record.DispatchOrder != 3 {
 		t.Fatalf("backfill was not durable: %#v", record)
 	}
 }

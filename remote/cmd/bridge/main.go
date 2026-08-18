@@ -38,6 +38,16 @@ import (
 
 type bridgeState = bridgestate.BridgeData
 
+type recoveryWork struct {
+	key string
+	run func()
+}
+
+type threadGate struct {
+	wait    func(context.Context) error
+	release func()
+}
+
 type turnTransition struct {
 	generation, dispatchOrder     uint64
 	commandType, commandID, runID string
@@ -52,6 +62,7 @@ type bridge struct {
 	turnRouteMu           sync.Mutex
 	controlReconcileMu    sync.Mutex
 	rosterPublishMu       sync.Mutex
+	recoveryWorkMu        sync.Mutex
 	state                 bridgeState
 	path                  string
 	conn                  *websocket.Conn
@@ -71,6 +82,9 @@ type bridge struct {
 	startedTurns          map[string][]string
 	controlEventEmitter   func(context.Context, string, string, string, string, json.RawMessage) (string, error)
 	initialRosterReady    chan struct{}
+	recoveryWorkQueue     []recoveryWork
+	recoveryWorkKeys      map[string]struct{}
+	recoveryWorkerRunning bool
 }
 
 func main() {
@@ -768,6 +782,46 @@ func (b *bridge) acknowledge(deviceID, messageID string) {
 	}
 }
 
+func (b *bridge) enqueueRecoveryWork(key string, run func()) {
+	b.recoveryWorkMu.Lock()
+	if b.recoveryWorkKeys == nil {
+		b.recoveryWorkKeys = map[string]struct{}{}
+	}
+	if key != "" {
+		if _, exists := b.recoveryWorkKeys[key]; exists {
+			b.recoveryWorkMu.Unlock()
+			return
+		}
+		b.recoveryWorkKeys[key] = struct{}{}
+	}
+	b.recoveryWorkQueue = append(b.recoveryWorkQueue, recoveryWork{key: key, run: run})
+	if b.recoveryWorkerRunning {
+		b.recoveryWorkMu.Unlock()
+		return
+	}
+	b.recoveryWorkerRunning = true
+	b.recoveryWorkMu.Unlock()
+	go func() {
+		for {
+			b.recoveryWorkMu.Lock()
+			if len(b.recoveryWorkQueue) == 0 {
+				b.recoveryWorkerRunning = false
+				b.recoveryWorkMu.Unlock()
+				return
+			}
+			work := b.recoveryWorkQueue[0]
+			b.recoveryWorkQueue = b.recoveryWorkQueue[1:]
+			b.recoveryWorkMu.Unlock()
+			work.run()
+			b.recoveryWorkMu.Lock()
+			if work.key != "" {
+				delete(b.recoveryWorkKeys, work.key)
+			}
+			b.recoveryWorkMu.Unlock()
+		}
+	}()
+}
+
 func (b *bridge) executeCommand(ctx context.Context, deviceID string, command protocol.Command) error {
 	backendID := backend.NormalizeID(command.BackendID)
 	if command.Type == "approval.respond" && b.routes != nil {
@@ -805,9 +859,19 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		}
 		return b.journal.Ack(b.state.HostID, deviceID, command.HighestContiguousSequence)
 	case "sync.resume":
-		return b.resumeLogicalEvents(ctx, deviceID, command)
+		b.enqueueRecoveryWork("", func() {
+			if err := b.resumeLogicalEvents(ctx, deviceID, command); err != nil && ctx.Err() == nil {
+				log.Printf("resume logical events for device %s: %v", deviceID, err)
+			}
+		})
+		return nil
 	case "run.snapshot":
-		return b.sendRunSnapshot(ctx, deviceID, command.OpenRunIDs, command.RequestID)
+		b.enqueueRecoveryWork("", func() {
+			if err := b.sendRunSnapshot(ctx, deviceID, command.OpenRunIDs, command.RequestID); err != nil && ctx.Err() == nil {
+				log.Printf("send run snapshot for device %s: %v", deviceID, err)
+			}
+		})
+		return nil
 	}
 	cachedControlUnknown := false
 	if command.Type == "run.steer" || command.Type == "run.interrupt" {
@@ -833,6 +897,10 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 			Message: "后端不可用：" + backendID, CreatedAt: time.Now().UnixMilli(),
 		}, "")
 	}
+	if command.Type == "run.steer" || command.Type == "run.interrupt" {
+		command.BackendID = backendID
+		return b.controlRun(ctx, deviceID, command, bd)
+	}
 	switch command.Type {
 	case "thread.list":
 		return b.requestMobileThreadList(ctx, deviceID, command, bd)
@@ -842,8 +910,6 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		return b.requestWorkspaceCandidates(ctx, deviceID, command, bd)
 	case "run.start":
 		return b.startRun(ctx, deviceID, command, bd)
-	case "run.steer", "run.interrupt":
-		return b.controlRun(ctx, deviceID, command, bd)
 	case "thread.read":
 		return b.requestMobileThreadHistory(ctx, deviceID, command, bd)
 	case "thread.start":
@@ -1467,15 +1533,53 @@ func (b *bridge) controlRun(ctx context.Context, deviceID string, command protoc
 	if command.CommandID == "" || command.RequestID == "" || command.RunID == "" {
 		return errors.New("run control command identity is required")
 	}
+	route, ok := b.routes.ByRunBackend(command.BackendID, command.RunID)
+	if !ok || route.DeviceID != deviceID {
+		return errors.New("run route does not belong to device")
+	}
+	wait, release := b.enqueueTurnCall(route.BackendID, route.ThreadID)
+	b.enqueueRecoveryWork("run.control.command\x00"+command.CommandID, func() {
+		currentBackend := b.backendFor(command.BackendID)
+		if currentBackend == nil {
+			currentBackend = bd
+		}
+		if err := b.controlRunWithReconciledTurn(ctx, deviceID, command, currentBackend, "", &threadGate{wait: wait, release: release}); err != nil && ctx.Err() == nil {
+			log.Printf("run control %s: %v", command.CommandID, err)
+		}
+	})
+	return nil
+}
+
+func (b *bridge) controlRunWithReconciledTurn(
+	ctx context.Context,
+	deviceID string,
+	command protocol.Command,
+	bd backend.Backend,
+	reconciledTurnID string,
+	reservedGate ...*threadGate,
+) error {
+	var gate *threadGate
+	if len(reservedGate) > 0 {
+		gate = reservedGate[0]
+	}
+	if command.CommandID == "" || command.RequestID == "" || command.RunID == "" {
+		return errors.New("run control command identity is required")
+	}
 	command.BackendID = backend.NormalizeID(command.BackendID)
+	emit := b.controlEventEmitter
+	if emit == nil {
+		emit = b.emitLogicalEventBackend
+	}
 	coordinator := runstate.ControlCoordinator{
 		Cache: b.commandCache, Routes: b.routes, App: bd,
 		Emit: func(emitCtx context.Context, targetDeviceID, runID, eventType string, payload json.RawMessage) (string, error) {
-			return b.emitLogicalEventBackend(emitCtx, targetDeviceID, runID, command.BackendID, eventType, payload)
+			return emit(emitCtx, targetDeviceID, runID, command.BackendID, eventType, payload)
 		},
-		EmitStable: func(emitCtx context.Context, eventID, targetDeviceID, runID, eventType string, payload json.RawMessage) (string, error) {
+	}
+	if b.controlEventEmitter == nil {
+		coordinator.EmitStable = func(emitCtx context.Context, eventID, targetDeviceID, runID, eventType string, payload json.RawMessage) (string, error) {
 			return b.emitLogicalEventStableBackend(emitCtx, eventID, targetDeviceID, runID, command.BackendID, eventType, payload)
-		},
+		}
 	}
 	controlCommand := runstate.ControlCommand{
 		Type: command.Type, CommandID: command.CommandID, RunID: command.RunID,
@@ -1483,17 +1587,29 @@ func (b *bridge) controlRun(ctx context.Context, deviceID string, command protoc
 	}
 	if replayed, err := coordinator.Replay(controlCommand); replayed {
 		if !errors.Is(err, runstate.ErrControlOutcomeUnknown) {
+			if gate != nil {
+				gate.release()
+			}
 			return err
 		}
-		if reconcileErr := b.reconcileUnknownTurnTransitions(ctx); reconcileErr != nil {
+		if reconcileErr := b.reconcileUnknownTurnTransitions(ctx); reconcileErr != nil && ctx.Err() == nil {
 			log.Printf("reconcile replayed unknown control %s: %v", command.CommandID, reconcileErr)
 		}
 		if _, replayErr := coordinator.Replay(controlCommand); replayErr == nil {
+			if gate != nil {
+				gate.release()
+			}
 			return nil
 		} else if !errors.Is(replayErr, runstate.ErrControlOutcomeUnknown) {
+			if gate != nil {
+				gate.release()
+			}
 			return replayErr
 		}
-		return runstate.ErrControlOutcomeUnknown
+		if gate != nil {
+			gate.release()
+		}
+		return nil
 	}
 	if b.routes == nil {
 		return errors.New("run route store is unavailable")
@@ -1505,22 +1621,58 @@ func (b *bridge) controlRun(ctx context.Context, deviceID string, command protoc
 	if route.BackendID != backend.NormalizeID(command.BackendID) {
 		return errors.New("run route does not belong to backend")
 	}
-	arrivalTurnID := route.TurnID
-	if arrivalTurnID == "" || arrivalTurnID != command.ExpectedTurnID {
-		return errors.New("run turn changed; snapshot required")
-	}
 	command.BackendID = route.BackendID
 	command.ThreadID = route.ThreadID
-	if command.Type == "run.steer" && b.hasDurableUnknownSteer(command.BackendID, command.ThreadID) {
-		if err := b.reconcileUnknownTurnTransitions(ctx); err != nil {
+	if command.Type == "run.steer" && reconciledTurnID == "" && b.hasDurableUnknownSteer(command.BackendID, command.ThreadID) {
+		if err := b.reconcileUnknownTurnTransitions(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("reconcile predecessor before steer %s: %v", command.CommandID, err)
 		}
 		if b.hasDurableUnknownSteer(command.BackendID, command.ThreadID) {
-			return runstate.ErrControlOutcomeUnknown
+			payload := mustJSON(map[string]string{
+				"commandId": command.CommandID, "latestLine": "前一条补充仍在核对，请稍后重试",
+			})
+			_, _ = emit(ctx, deviceID, command.RunID, command.BackendID, "run.control.unknown", payload)
+			if gate != nil {
+				gate.release()
+			}
+			return nil
+		}
+		currentRoute, currentOK := b.routes.ByRunBackend(command.BackendID, command.RunID)
+		currentBackend := b.backendFor(command.BackendID)
+		if !currentOK || currentRoute.ThreadID != command.ThreadID || currentRoute.TurnID == "" || currentBackend == nil {
+			if gate != nil {
+				gate.release()
+			}
+			return errors.New("reconciled run route or backend is unavailable")
+		}
+		reconciledTurnID = currentRoute.TurnID
+		bd = currentBackend
+		coordinator = runstate.ControlCoordinator{
+			Cache: b.commandCache, Routes: b.routes, App: bd,
+			Emit: coordinator.Emit,
+		}
+		if b.controlEventEmitter == nil {
+			coordinator.EmitStable = func(emitCtx context.Context, eventID, targetDeviceID, runID, eventType string, payload json.RawMessage) (string, error) {
+				return b.emitLogicalEventStableBackend(emitCtx, eventID, targetDeviceID, runID, command.BackendID, eventType, payload)
+			}
 		}
 	}
-	queued := b.hasQueuedTurnCall(command.BackendID, command.ThreadID)
-	wait, release := b.enqueueTurnCall(command.BackendID, command.ThreadID)
+	arrivalTurnID := route.TurnID
+	if arrivalTurnID == "" || (reconciledTurnID == "" && arrivalTurnID != command.ExpectedTurnID) {
+		if gate != nil {
+			gate.release()
+		}
+		return errors.New("run turn changed; snapshot required")
+	}
+	queued := true
+	var wait func(context.Context) error
+	var release func()
+	if gate != nil {
+		wait, release = gate.wait, gate.release
+	} else {
+		queued = b.hasQueuedTurnCall(command.BackendID, command.ThreadID)
+		wait, release = b.enqueueTurnCall(command.BackendID, command.ThreadID)
+	}
 	go func() {
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
@@ -1534,7 +1686,11 @@ func (b *bridge) controlRun(ctx context.Context, deviceID string, command protoc
 		}
 		dispatchTurnID := command.ExpectedTurnID
 		if currentRoute, ok := b.routes.ByRun(command.RunID); ok && currentRoute.BackendID == command.BackendID && currentRoute.ThreadID == command.ThreadID {
-			dispatchTurnID = controlDispatchTurnID(arrivalTurnID, command.ExpectedTurnID, currentRoute.TurnID, queued)
+			if reconciledTurnID != "" {
+				dispatchTurnID = currentRoute.TurnID
+			} else {
+				dispatchTurnID = controlDispatchTurnID(arrivalTurnID, command.ExpectedTurnID, currentRoute.TurnID, queued)
+			}
 		}
 		transitionCommand := command
 		transitionCommand.ExpectedTurnID = dispatchTurnID
@@ -1562,7 +1718,7 @@ func (b *bridge) controlRun(ctx context.Context, deviceID string, command protoc
 			payload := mustJSON(map[string]string{
 				"commandId": command.CommandID, "latestLine": "正在核对手机指令结果",
 			})
-			_, _ = b.emitLogicalEventBackend(ctx, deviceID, command.RunID, command.BackendID, "run.control.unknown", payload)
+			_, _ = emit(ctx, deviceID, command.RunID, command.BackendID, "run.control.unknown", payload)
 			if reconcileErr := b.reconcileUnknownTurnTransitions(ctx); reconcileErr != nil {
 				log.Printf("reconcile unknown control %s after RPC uncertainty: %v", command.CommandID, reconcileErr)
 			}
@@ -1573,7 +1729,7 @@ func (b *bridge) controlRun(ctx context.Context, deviceID string, command protoc
 			payload := mustJSON(map[string]string{
 				"commandId": command.CommandID, "latestLine": "Mac 未能处理手机指令", "errorMessage": err.Error(),
 			})
-			_, _ = b.emitLogicalEventBackend(ctx, deviceID, command.RunID, command.BackendID, "run.control.failed", payload)
+			_, _ = emit(ctx, deviceID, command.RunID, command.BackendID, "run.control.failed", payload)
 		}
 	}()
 	return nil
@@ -4075,23 +4231,42 @@ func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.
 	return b.conn.Write(ctx, websocket.MessageText, raw)
 }
 
-func (b *bridge) resendPending(ctx context.Context) error {
-	now := time.Now().UnixMilli()
-	b.mu.Lock()
+func (b *bridge) pendingReplayWiresLocked(now int64) []protocol.WireMessage {
 	var wires []protocol.WireMessage
 	for deviceID, pending := range b.state.PendingOutbound {
+		secret, _ := protocol.DecodeSecret(b.state.DeviceSecrets[deviceID])
 		for id, raw := range pending {
 			var wire protocol.WireMessage
 			if json.Unmarshal([]byte(raw), &wire) != nil || wire.ExpiresAt <= now {
 				delete(pending, id)
-			} else {
-				wires = append(wires, wire)
+				continue
 			}
+			var event protocol.Event
+			if len(secret) != 0 && protocol.Decrypt(secret, wire, &event) == nil && event.Type == "host.status" {
+				// A roster is a replaceable snapshot. Never replay one from a prior
+				// connection; the current startup barrier publishes a fresh snapshot.
+				delete(pending, id)
+				continue
+			}
+			wires = append(wires, wire)
 		}
 		if len(pending) == 0 {
 			delete(b.state.PendingOutbound, deviceID)
 		}
 	}
+	sort.Slice(wires, func(i, j int) bool {
+		if wires[i].DeviceID != wires[j].DeviceID {
+			return wires[i].DeviceID < wires[j].DeviceID
+		}
+		return wires[i].Sequence < wires[j].Sequence
+	})
+	return wires
+}
+
+func (b *bridge) resendPending(ctx context.Context) error {
+	now := time.Now().UnixMilli()
+	b.mu.Lock()
+	wires := b.pendingReplayWiresLocked(now)
 	if len(wires) == 0 && len(b.state.PendingOutbound) == 0 {
 		b.mu.Unlock()
 		return nil

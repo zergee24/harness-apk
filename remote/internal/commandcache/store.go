@@ -74,17 +74,28 @@ func Open(path string) (*Store, error) {
 		}
 	}
 	if needsDispatchOrderBackfill {
-		records := make([]*Record, 0, len(s.data.Records))
+		legacy := make([]*Record, 0, len(s.data.Records))
+		ordered := make([]*Record, 0, len(s.data.Records))
 		for _, record := range s.data.Records {
-			records = append(records, record)
-		}
-		sort.Slice(records, func(i, j int) bool {
-			if records[i].CreatedAt != records[j].CreatedAt {
-				return records[i].CreatedAt < records[j].CreatedAt
+			if record.DispatchOrder == 0 {
+				legacy = append(legacy, record)
+			} else {
+				ordered = append(ordered, record)
 			}
-			return records[i].CommandID < records[j].CommandID
+		}
+		sort.Slice(legacy, func(i, j int) bool {
+			if legacy[i].CreatedAt != legacy[j].CreatedAt {
+				return legacy[i].CreatedAt < legacy[j].CreatedAt
+			}
+			return legacy[i].CommandID < legacy[j].CommandID
 		})
-		for index, record := range records {
+		sort.SliceStable(ordered, func(i, j int) bool {
+			if ordered[i].DispatchOrder != ordered[j].DispatchOrder {
+				return ordered[i].DispatchOrder < ordered[j].DispatchOrder
+			}
+			return ordered[i].CommandID < ordered[j].CommandID
+		})
+		for index, record := range append(legacy, ordered...) {
 			record.DispatchOrder = uint64(index + 1)
 		}
 		dirty = true

@@ -1866,6 +1866,26 @@ class RemoteRepositoryTest {
         val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
         pending["thread.list:old"] = PendingRemoteCommand("thread.list", listGeneration = 1)
         pending["thread.list:new"] = PendingRemoteCommand("thread.list", listGeneration = 2)
+        RemoteRepository::class.java.getDeclaredField("nextThreadListGeneration").apply {
+            isAccessible = true
+            setLong(repository, 2L)
+        }
+        setRepositoryState(
+            repository,
+            repository.state.value.copy(
+                threads = listOf(RemoteThread("baseline", "当前列表", "", "/work", 1L, "idle")),
+                isThreadListLoading = true,
+            ),
+        )
+
+        repository.handlePendingRpcResponse(
+            RemoteEvent(
+                type = "rpc.response", requestId = "thread.list:old",
+                payload = Json.parseToJsonElement("""{"result":{"data":[{"id":"old-thread","preview":"旧列表","updatedAt":1}]}}"""),
+            ),
+        )
+        assertEquals(listOf("baseline"), repository.state.value.threads.map(RemoteThread::id))
+        assertTrue(repository.state.value.isThreadListLoading)
 
         repository.handlePendingRpcResponse(
             RemoteEvent(
@@ -1873,14 +1893,8 @@ class RemoteRepositoryTest {
                 payload = Json.parseToJsonElement("""{"result":{"data":[{"id":"new-thread","preview":"新列表","updatedAt":2}]}}"""),
             ),
         )
-        repository.handlePendingRpcResponse(
-            RemoteEvent(
-                type = "rpc.response", requestId = "thread.list:old",
-                payload = Json.parseToJsonElement("""{"result":{"data":[{"id":"old-thread","preview":"旧列表","updatedAt":1}]}}"""),
-            ),
-        )
-
         assertEquals(listOf("new-thread"), repository.state.value.threads.map(RemoteThread::id))
+        assertFalse(repository.state.value.isThreadListLoading)
     }
 
     @Test

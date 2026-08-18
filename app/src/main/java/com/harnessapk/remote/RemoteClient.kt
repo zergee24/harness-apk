@@ -693,7 +693,11 @@ class RemoteRepository(
         val kind = pending.kind
         val pendingThreadId = pending.threadId
         val pendingSelectionGeneration = pending.selectionGeneration
-        if (kind == "thread.list" && (pending.listGeneration ?: 0L) < appliedThreadListGeneration) return
+        if (kind == "thread.list") {
+            val responseGeneration = pending.listGeneration
+            if (responseGeneration != null && responseGeneration != nextThreadListGeneration) return
+            if ((responseGeneration ?: 0L) < appliedThreadListGeneration) return
+        }
         if (kind == "thread.summary" && pendingThreadId != null && pending.threadRevision != null) {
             val currentRevision = _state.value.threads.firstOrNull { it.id == pendingThreadId }?.updatedAt
             if (currentRevision != null && currentRevision != pending.threadRevision) {
