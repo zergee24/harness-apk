@@ -48,6 +48,39 @@ internal data class PendingRemoteCommand(
     val threadId: String? = null,
     val olderCursor: String? = null,
     val selectionGeneration: Long? = null,
+    val backendId: String = DEFAULT_BACKEND_ID,
+)
+
+internal data class PreparedRemoteCommand(
+    val requestId: String,
+    val payload: JsonObject,
+    val pending: PendingRemoteCommand?,
+)
+
+internal fun prepareRemotePayload(
+    requestId: String,
+    payload: JsonObject,
+    pending: PendingRemoteCommand?,
+    selectedBackendId: String,
+): PreparedRemoteCommand {
+    val effectivePayload = injectBackendId(payload, selectedBackendId)
+    val embeddedBackendId = effectivePayload["backendId"]?.jsonPrimitive?.contentOrNull ?: selectedBackendId
+    return PreparedRemoteCommand(
+        requestId = requestId,
+        payload = effectivePayload,
+        pending = pending?.copy(backendId = embeddedBackendId),
+    )
+}
+
+internal fun prepareRemoteCommand(
+    command: RemoteCommand,
+    pending: PendingRemoteCommand?,
+    selectedBackendId: String,
+): PreparedRemoteCommand = prepareRemotePayload(
+    requestId = command.requestId,
+    payload = command.toJson(),
+    pending = pending,
+    selectedBackendId = selectedBackendId,
 )
 
 class RemoteRepository(
@@ -67,7 +100,12 @@ class RemoteRepository(
     private var reconnectAttempt = 0
     private val pendingCommands = mutableMapOf<String, PendingRemoteCommand>()
     private val requestedThreadSummaries = mutableSetOf<String>()
+    private val terminalTurnExecutions = LinkedHashMap<String, RemoteThreadExecution>()
+    private val explicitlyInactiveThreads = mutableSetOf<String>()
+    private val commandOwnershipLock = Any()
     private var selectionGeneration = 0L
+    private var preferredBackendId = DEFAULT_BACKEND_ID
+    private var backendSelectionIsFallback = false
     @Volatile
     private var syncCoordinator: RemoteSyncCoordinator? = null
     @Volatile
@@ -100,6 +138,8 @@ class RemoteRepository(
         socket = null
         pendingCommands.clear()
         requestedThreadSummaries.clear()
+        terminalTurnExecutions.clear()
+        explicitlyInactiveThreads.clear()
         selectionGeneration += 1
         _state.value = _state.value.copy(
             connectionStatus = RemoteConnectionStatus.DISCONNECTED,
@@ -116,23 +156,25 @@ class RemoteRepository(
         )
     }
 
-    fun refreshThreads() {
+    fun refreshThreads() = synchronized(commandOwnershipLock) {
         _state.value = _state.value.copy(isThreadListLoading = true, errorMessage = null)
         if (!send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))) {
             _state.value = _state.value.copy(isThreadListLoading = false)
         }
     }
     fun loadThreadSummary(threadId: String) {
-        val current = _state.value
-        val availability = remoteFeatureAvailability(current.capabilities)
-        val thread = current.threads.firstOrNull { it.id == threadId } ?: return
-        val needsLatestUserMessage = availability.canLoadLatestUserMessage && thread.latestUserMessage == null
-        val needsExecution = availability.canLoadThreadExecutionStatus &&
-            (thread.execution.state == RemoteThreadExecutionState.UNKNOWN || thread.execution.state.isActive)
-        if (!needsLatestUserMessage && !needsExecution) return
-        if (!requestedThreadSummaries.add(threadId)) return
-        if (!send(RemoteCommand(type = "thread.summary", requestId = requestId("thread.summary", threadId), threadId = threadId))) {
-            requestedThreadSummaries.remove(threadId)
+        synchronized(commandOwnershipLock) {
+            val current = _state.value
+            val availability = remoteFeatureAvailability(current.capabilities)
+            val thread = current.threads.firstOrNull { it.id == threadId } ?: return
+            val needsLatestUserMessage = availability.canLoadLatestUserMessage && thread.latestUserMessage == null
+            val needsExecution = availability.canLoadThreadExecutionStatus &&
+                (thread.execution.state == RemoteThreadExecutionState.UNKNOWN || thread.execution.state.isActive)
+            if (!needsLatestUserMessage && !needsExecution) return
+            if (!requestedThreadSummaries.add(threadId)) return
+            if (!send(RemoteCommand(type = "thread.summary", requestId = requestId("thread.summary", threadId), threadId = threadId))) {
+                requestedThreadSummaries.remove(threadId)
+            }
         }
     }
     fun requestWorkspaceCandidates() {
@@ -142,7 +184,7 @@ class RemoteRepository(
             _state.value = _state.value.copy(workspaceCandidatesLoaded = true)
         }
     }
-    fun selectThread(threadId: String) {
+    fun selectThread(threadId: String) = synchronized(commandOwnershipLock) {
         selectionGeneration += 1
         val generation = selectionGeneration
         _state.value = _state.value.copy(
@@ -194,29 +236,53 @@ class RemoteRepository(
             _state.value = _state.value.copy(isCreatingThread = false)
         }
     }
-    fun startTurn(text: String) {
-        val threadId = _state.value.selectedThreadId ?: return
+    fun startTurn(text: String): Boolean = synchronized(commandOwnershipLock) {
+        val threadId = _state.value.selectedThreadId ?: return@synchronized false
         val requestId = requestId("turn.start", threadId)
-        if (send(RemoteCommand(type = "turn.start", requestId = requestId, threadId = threadId, text = text))) {
-            _state.value = _state.value.copy(
-                activeThreadId = threadId,
-                activeTurnId = null,
-                isWorking = true,
-                timeline = _state.value.timeline + RemoteTimelineItem("pending-user:$requestId", "userMessage", text, "sending"),
-                threads = _state.value.threads.withExecution(
-                    threadId,
-                    RemoteThreadExecution(
-                        state = RemoteThreadExecutionState.RUNNING,
-                        startedAtMillis = System.currentTimeMillis(),
+        val generation = selectionGeneration
+        return send(
+            RemoteCommand(type = "turn.start", requestId = requestId, threadId = threadId, text = text),
+            pending = PendingRemoteCommand(
+                kind = "turn.start",
+                threadId = threadId,
+                selectionGeneration = generation,
+            ),
+        ).also { sent ->
+            if (sent) {
+                explicitlyInactiveThreads.remove(threadId)
+                _state.value = _state.value.copy(
+                    activeThreadId = threadId,
+                    activeTurnId = null,
+                    isWorking = true,
+                    timeline = _state.value.timeline + RemoteTimelineItem("pending-user:$requestId", "userMessage", text, "sending"),
+                    threads = _state.value.threads.withExecution(
+                        threadId,
+                        RemoteThreadExecution(
+                            state = RemoteThreadExecutionState.RUNNING,
+                            startedAtMillis = System.currentTimeMillis(),
+                        ),
                     ),
-                ),
-            )
+                )
+            }
         }
     }
-    fun steer(text: String) {
+    fun steer(text: String): Boolean {
         val current = _state.value
-        val threadId = current.selectedThreadId ?: return
-        send(RemoteCommand(type = "turn.steer", requestId = requestId("turn.steer"), threadId = threadId, text = text, expectedTurnId = current.activeTurnId))
+        val threadId = current.selectedThreadId ?: return false
+        val activeTurnId = current.activeTurnId
+        if (activeTurnId == null || current.activeThreadId != threadId) {
+            _state.value = current.copy(errorMessage = "正在等待 Mac 建立当前任务，请稍后再发送")
+            return false
+        }
+        return send(
+            RemoteCommand(
+                type = "turn.steer",
+                requestId = requestId("turn.steer"),
+                threadId = threadId,
+                text = text,
+                expectedTurnId = activeTurnId,
+            ),
+        )
     }
     fun interrupt() {
         val current = _state.value
@@ -233,31 +299,59 @@ class RemoteRepository(
         threadId: String? = null,
         olderCursor: String? = null,
         selectionGeneration: Long? = null,
-    ): String =
-        "$kind:${UUID.randomUUID()}".also {
-            pendingCommands[it] = PendingRemoteCommand(kind, threadId, olderCursor, selectionGeneration)
-        }
+    ): String = "$kind:${UUID.randomUUID()}"
 
-    private fun send(command: RemoteCommand): Boolean {
-        return sendPayload(command.requestId, command.toJson())
+    private fun send(
+        command: RemoteCommand,
+        pending: PendingRemoteCommand? = null,
+    ): Boolean = synchronized(commandOwnershipLock) {
+        val effectivePending = pending ?: PendingRemoteCommand(
+            kind = command.requestId.substringBefore(':'),
+            threadId = command.threadId,
+            olderCursor = (command.params as? JsonObject)?.string("cursor"),
+            selectionGeneration = selectionGeneration.takeIf { command.type == "thread.read" },
+        )
+        val prepared = prepareRemoteCommand(
+            command = command,
+            pending = effectivePending,
+            selectedBackendId = _state.value.selectedBackendId,
+        )
+        prepared.pending?.let { pendingCommands[prepared.requestId] = it }
+        sendPreparedPayload(prepared)
     }
 
-    override fun send(command: RebuiltRemoteCommand): Boolean =
-        sendPayload(command.commandId, command.payload)
+    override fun send(command: RebuiltRemoteCommand): Boolean = synchronized(commandOwnershipLock) {
+        sendPreparedPayload(
+            prepareRemotePayload(
+                requestId = command.commandId,
+                payload = command.payload,
+                pending = null,
+                selectedBackendId = _state.value.selectedBackendId,
+            ),
+        )
+    }
 
-    override fun send(command: JsonObject): Boolean =
-        sendPayload(command.string("requestId") ?: "sync:${UUID.randomUUID()}", command)
+    override fun send(command: JsonObject): Boolean = synchronized(commandOwnershipLock) {
+        val requestId = command.string("requestId") ?: "sync:${UUID.randomUUID()}"
+        sendPreparedPayload(
+            prepareRemotePayload(
+                requestId = requestId,
+                payload = command,
+                pending = null,
+                selectedBackendId = _state.value.selectedBackendId,
+            ),
+        )
+    }
 
-    private fun sendPayload(requestId: String, payload: JsonObject): Boolean {
+    private fun sendPreparedPayload(prepared: PreparedRemoteCommand): Boolean {
         val profile = profileStore.profile.value
         if (profile == null) {
-            pendingCommands.remove(requestId)
+            pendingCommands.remove(prepared.requestId)
             return false
         }
-        val effectivePayload = injectBackendId(payload, _state.value.selectedBackendId)
         val activeSocket = socket
         if (activeSocket == null) {
-            pendingCommands.remove(requestId)
+            pendingCommands.remove(prepared.requestId)
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
             return false
         }
@@ -267,9 +361,9 @@ class RemoteRepository(
             pairingTicket = profile.pairingTicket.takeIf(String::isNotBlank), sequence = outgoingSequence.incrementAndGet(),
             expiresAt = now + 5 * 60_000L, nonce = "", ciphertext = "",
         )
-        val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, effectivePayload)
+        val encrypted = RemoteCrypto.encrypt(profile.pairingSecret, wire, prepared.payload)
         if (!activeSocket.send(encrypted.toJson().toString())) {
-            pendingCommands.remove(requestId)
+            pendingCommands.remove(prepared.requestId)
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
             return false
         }
@@ -321,16 +415,33 @@ class RemoteRepository(
 
     private fun scheduleReconnect(reason: String) {
         socket = null
-        _state.value = _state.value.copy(
-            connectionStatus = if (explicitDisconnect) RemoteConnectionStatus.DISCONNECTED else RemoteConnectionStatus.ERROR,
-            errorMessage = reason,
-            isThreadListLoading = false,
-            isTimelineLoading = false,
-            isOlderTimelineLoading = false,
-            isCreatingThread = false,
-            capabilities = emptySet(),
-            backends = emptyList(),
-        )
+        synchronized(commandOwnershipLock) {
+            pendingCommands.clear()
+            requestedThreadSummaries.clear()
+            terminalTurnExecutions.clear()
+            explicitlyInactiveThreads.clear()
+            selectionGeneration += 1
+            _state.value = _state.value.copy(
+                connectionStatus = if (explicitDisconnect) RemoteConnectionStatus.DISCONNECTED else RemoteConnectionStatus.ERROR,
+                errorMessage = reason,
+                threads = emptyList(),
+                selectedThreadId = null,
+                activeThreadId = null,
+                activeTurnId = null,
+                timeline = emptyList(),
+                approvals = emptyList(),
+                isWorking = false,
+                isThreadListLoading = false,
+                isTimelineLoading = false,
+                olderTimelineCursor = null,
+                isOlderTimelineLoading = false,
+                isCreatingThread = false,
+                workspaceCandidates = emptyList(),
+                workspaceCandidatesLoaded = false,
+                capabilities = emptySet(),
+                backends = emptyList(),
+            )
+        }
         if (explicitDisconnect) return
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
@@ -410,23 +521,10 @@ class RemoteRepository(
 
     internal fun handleEvent(event: RemoteEvent) {
         when (event.type) {
-            "host.status" -> {
-                val parsed = parseRemoteBackends(event)
-                val hostCapabilities = parseRemoteHostCapabilities(event)
-                val backends = parsed.ifEmpty { fallbackRemoteBackends(hostCapabilities) }
-                val current = _state.value
-                val selected = reconcileSelectedBackend(current.selectedBackendId, backends)
-                val capabilities = backends.firstOrNull { it.id == selected }?.capabilities
-                    ?: hostCapabilities
-                _state.value = current.copy(
-                    connectionStatus = RemoteConnectionStatus.CONNECTED,
-                    backends = backends,
-                    selectedBackendId = selected,
-                    capabilities = capabilities,
-                    errorMessage = null,
-                )
-            }
-            "error" -> {
+            "host.status" -> handleHostStatus(event)
+            "error" -> synchronized(commandOwnershipLock) {
+                if (!matchesSelectedPendingRequest(event)) return
+                event.requestId?.let(pendingCommands::remove)
                 val agentName = backendDisplayName(event.backendId)
                 val message = event.message ?: "$agentName 远程任务失败"
                 _state.value = _state.value.copy(
@@ -441,10 +539,14 @@ class RemoteRepository(
                 _notifications.tryEmit(RemoteNotification("$agentName 任务失败", message))
             }
             "rpc.response" -> handleRpcResponse(event)
-            "workspace.candidates" -> _state.value = _state.value.copy(
-                workspaceCandidates = parseWorkspaceCandidates(event),
-                workspaceCandidatesLoaded = true,
-            )
+            "workspace.candidates" -> synchronized(commandOwnershipLock) {
+                if (!matchesSelectedPendingRequest(event)) return
+                event.requestId?.let(pendingCommands::remove)
+                _state.value = _state.value.copy(
+                    workspaceCandidates = parseWorkspaceCandidates(event),
+                    workspaceCandidatesLoaded = true,
+                )
+            }
             "sync.gap" -> {
                 val hostId = profileStore.profile.value?.hostId ?: return
                 syncCoordinator?.let { coordinator -> scope.launch { coordinator.onGap(hostId) } }
@@ -464,19 +566,85 @@ class RemoteRepository(
         }
     }
 
+    private fun handleHostStatus(event: RemoteEvent) = synchronized(commandOwnershipLock) {
+        val parsed = parseRemoteBackends(event)
+        val hostCapabilities = parseRemoteHostCapabilities(event)
+        val backends = parsed ?: fallbackRemoteBackends(hostCapabilities)
+        val current = _state.value
+        val restorePreferred = backendSelectionIsFallback && backends.any { it.id == preferredBackendId }
+        val selected = if (restorePreferred) {
+            preferredBackendId
+        } else {
+            reconcileSelectedBackend(current.selectedBackendId, backends)
+        }
+        backendSelectionIsFallback = when {
+            restorePreferred -> false
+            backends.isEmpty() -> selected != preferredBackendId
+            backends.none { it.id == current.selectedBackendId } -> selected != preferredBackendId
+            else -> backendSelectionIsFallback
+        }
+        val backendRosterChanged = parsed != null && current.backends != backends
+        val backendChanged = selected != current.selectedBackendId || backends.isEmpty() || backendRosterChanged
+        val capabilities = backends.firstOrNull { it.id == selected }?.capabilities
+            ?: if (parsed == null) hostCapabilities else emptySet()
+        if (backendChanged) {
+            selectionGeneration += 1
+            pendingCommands.clear()
+            requestedThreadSummaries.clear()
+            terminalTurnExecutions.clear()
+            explicitlyInactiveThreads.clear()
+        }
+        _state.value = current.copy(
+            connectionStatus = RemoteConnectionStatus.CONNECTED,
+            backends = backends,
+            selectedBackendId = selected,
+            capabilities = capabilities,
+            threads = if (backendChanged) emptyList() else current.threads,
+            selectedThreadId = if (backendChanged) null else current.selectedThreadId,
+            activeThreadId = if (backendChanged) null else current.activeThreadId,
+            activeTurnId = if (backendChanged) null else current.activeTurnId,
+            timeline = if (backendChanged) emptyList() else current.timeline,
+            approvals = if (backendChanged) emptyList() else current.approvals,
+            isWorking = if (backendChanged) false else current.isWorking,
+            isThreadListLoading = if (backendChanged) false else current.isThreadListLoading,
+            isTimelineLoading = if (backendChanged) false else current.isTimelineLoading,
+            olderTimelineCursor = if (backendChanged) null else current.olderTimelineCursor,
+            isOlderTimelineLoading = if (backendChanged) false else current.isOlderTimelineLoading,
+            isCreatingThread = if (backendChanged) false else current.isCreatingThread,
+            workspaceCandidates = if (backendChanged) emptyList() else current.workspaceCandidates,
+            workspaceCandidatesLoaded = if (backendChanged) false else current.workspaceCandidatesLoaded,
+            errorMessage = null,
+        )
+        if (backendChanged && backends.isNotEmpty()) refreshThreads()
+    }
+
     /** Events from another backend are ignored; legacy events carry no id. */
     private fun matchesSelectedBackend(event: RemoteEvent): Boolean {
         val backendId = event.backendId ?: return true
         return backendId == _state.value.selectedBackendId
     }
 
+    /** Tagged command results must still own a pending request; untagged legacy events remain unsolicited. */
+    private fun matchesSelectedPendingRequest(event: RemoteEvent): Boolean {
+        if (!matchesSelectedBackend(event)) return false
+        val requestId = event.requestId ?: return true
+        val pending = pendingCommands[requestId] ?: return false
+        return pending.backendId == _state.value.selectedBackendId &&
+            (event.backendId == null || event.backendId == pending.backendId)
+    }
+
     /** Switches the active backend and reloads its thread list. */
-    fun selectBackend(backendId: String) {
+    fun selectBackend(backendId: String) = synchronized(commandOwnershipLock) {
         val current = _state.value
-        if (current.backends.none { it.id == backendId } || current.selectedBackendId == backendId) return
+        if (current.backends.none { it.id == backendId }) return@synchronized
+        preferredBackendId = backendId
+        backendSelectionIsFallback = false
+        if (current.selectedBackendId == backendId) return@synchronized
         selectionGeneration += 1
         requestedThreadSummaries.clear()
         pendingCommands.clear()
+        terminalTurnExecutions.clear()
+        explicitlyInactiveThreads.clear()
         val capabilities = current.backends.firstOrNull { it.id == backendId }?.capabilities.orEmpty()
         _state.value = current.copy(
             selectedBackendId = backendId,
@@ -488,26 +656,40 @@ class RemoteRepository(
             timeline = emptyList(),
             approvals = emptyList(),
             isWorking = false,
+            isThreadListLoading = false,
+            isTimelineLoading = false,
             olderTimelineCursor = null,
             isOlderTimelineLoading = false,
+            isCreatingThread = false,
+            workspaceCandidates = emptyList(),
+            workspaceCandidatesLoaded = false,
         )
         refreshThreads()
     }
 
-    private fun handleRpcResponse(event: RemoteEvent) {
-        val pending = pendingCommands.remove(event.requestId)
-            ?: event.requestId?.substringBefore(':')?.takeIf {
-                it in setOf("thread.list", "thread.summary", "thread.start", "thread.read", "thread.read.older", "turn.start")
-            }?.let(::PendingRemoteCommand)
-        val kind = pending?.kind
-        val pendingThreadId = pending?.threadId
-        val pendingSelectionGeneration = pending?.selectionGeneration
+    private fun handleRpcResponse(event: RemoteEvent) = synchronized(commandOwnershipLock) {
+        handleRpcResponseLocked(event)
+    }
+
+    private fun handleRpcResponseLocked(event: RemoteEvent) {
+        val requestId = event.requestId ?: return
+        val pending = pendingCommands[requestId] ?: return
+        val currentBackendId = _state.value.selectedBackendId
+        if (pending.backendId != currentBackendId) {
+            pendingCommands.remove(requestId)
+            return
+        }
+        if (event.backendId != null && event.backendId != pending.backendId) return
+        pendingCommands.remove(requestId)
+        val kind = pending.kind
+        val pendingThreadId = pending.threadId
+        val pendingSelectionGeneration = pending.selectionGeneration
         if (kind == "thread.read" || kind == "thread.read.older") {
             val staleThread = pendingThreadId != null && pendingThreadId != _state.value.selectedThreadId
             val staleSelection = pendingSelectionGeneration != null && pendingSelectionGeneration != selectionGeneration
             if (staleThread || staleSelection) return
         }
-        val requestedOlderCursor = pending?.olderCursor ?: _state.value.olderTimelineCursor
+        val requestedOlderCursor = pending.olderCursor ?: _state.value.olderTimelineCursor
         val response = event.payload as? JsonObject
         if (kind == "turn.start" && response?.string("outcome") == "UNKNOWN") {
             val threadId = pendingThreadId ?: _state.value.selectedThreadId
@@ -603,8 +785,14 @@ class RemoteRepository(
                     _state.value = current.copy(
                         threads = current.threads.map { thread ->
                             if (thread.id == threadId) {
+                                val summaryText = latestUserMessage?.trim()?.takeIf(String::isNotBlank)
                                 thread.copy(
-                                    latestUserMessage = latestUserMessage?.take(240) ?: thread.latestUserMessage,
+                                    title = if (thread.title == "未命名会话" || thread.title == "未命名线程") {
+                                        summaryText?.lineSequence()?.firstOrNull()?.take(60) ?: thread.title
+                                    } else {
+                                        thread.title
+                                    },
+                                    latestUserMessage = summaryText?.take(240) ?: thread.latestUserMessage,
                                     execution = reconcileRemoteThreadExecution(thread.execution, execution),
                                 )
                             } else {
@@ -651,7 +839,12 @@ class RemoteRepository(
                 ?: run { _state.value = _state.value.copy(isOlderTimelineLoading = false) }
             "turn.start" -> {
                 val result = event.payload?.jsonObject?.get("result") as? JsonObject
-                val turnId = result?.get("turn")?.jsonObject?.string("id")
+                val responseTurn = result?.get("turn") as? JsonObject
+                val turnId = responseTurn?.string("id")
+                val responseExecution = parseRemoteTurnExecution(
+                    responseTurn,
+                    fallback = RemoteThreadExecutionState.RUNNING,
+                )
                 val continuation = (result?.get("continuation") as? JsonObject)?.takeIf {
                     val sourceThreadId = it.string("continuedFromThreadId")
                     val continuationThreadId = it.string("threadId")
@@ -664,17 +857,37 @@ class RemoteRepository(
                     ?.startedAtMillis
                     ?: System.currentTimeMillis()
                 val existingExecution = current.threads.firstOrNull { it.id == threadId }?.execution
-                val execution = existingExecution?.takeIf {
-                    !it.state.isActive && it.state != RemoteThreadExecutionState.UNKNOWN && it.turnId == turnId
-                } ?: RemoteThreadExecution(
-                    state = RemoteThreadExecutionState.RUNNING,
-                    turnId = turnId,
-                    startedAtMillis = startedAtMillis,
-                )
+                val terminalExecution = terminalTurnExecution(threadId, turnId)
+                val terminalResponse = responseExecution.takeUnless { it.state.isActive }
+                val anotherThreadIsActive = current.activeThreadId != null &&
+                    current.activeThreadId != threadId &&
+                    current.activeThreadId != pendingThreadId
+                val continuationMayAutoSelect = continuation != null &&
+                    pendingThreadId != null &&
+                    current.selectedThreadId == pendingThreadId &&
+                    (pendingSelectionGeneration == null || pendingSelectionGeneration == selectionGeneration)
+                val terminalBeforeResponse = terminalExecution != null || terminalResponse != null ||
+                    (threadId != null && threadId in explicitlyInactiveThreads)
+                val execution = when {
+                    terminalExecution != null -> terminalExecution
+                    terminalResponse != null -> terminalResponse
+                    terminalBeforeResponse -> existingExecution?.takeUnless { it.state.isActive }
+                        ?: RemoteThreadExecution(RemoteThreadExecutionState.UNKNOWN, turnId = turnId)
+                    existingExecution != null &&
+                        !existingExecution.state.isActive &&
+                        existingExecution.state != RemoteThreadExecutionState.UNKNOWN &&
+                        existingExecution.turnId == turnId -> existingExecution
+                    else -> RemoteThreadExecution(
+                        state = RemoteThreadExecutionState.RUNNING,
+                        turnId = turnId,
+                        startedAtMillis = startedAtMillis,
+                    )
+                }
+                rememberTerminalTurnExecution(threadId, execution)
                 val sentTimeline = current.timeline.withPendingTurnStatus(event.requestId, "sent")
                 if (continuation != null && threadId != null) {
                     val sourceThreadId = continuation.string("continuedFromThreadId").orEmpty()
-                    val pendingItemId = event.requestId?.let { "pending-user:$it" }
+                    val pendingItemId = "pending-user:$requestId"
                     val pendingItem = sentTimeline.firstOrNull { it.id == pendingItemId }
                     val sourceThread = current.threads.firstOrNull { it.id == sourceThreadId }
                     val continuationThread = current.threads.firstOrNull { it.id == threadId }?.copy(
@@ -698,31 +911,42 @@ class RemoteRepository(
                                 thread
                             }
                         }
-                    selectionGeneration += 1
                     requestedThreadSummaries.remove(sourceThreadId)
-                    _state.value = current.copy(
-                        selectedThreadId = threadId,
-                        activeThreadId = threadId.takeIf { execution.state.isActive },
-                        activeTurnId = turnId.takeIf { execution.state.isActive },
-                        isWorking = execution.state.isActive,
-                        timeline = listOf(
-                            RemoteTimelineItem(
-                                id = "continuation:$threadId",
-                                kind = "continuation",
-                                text = "历史较长，已懒加载最近上下文并在同一工作目录创建续聊会话。原会话仍保留，可随时返回查看。",
-                            ),
-                        ) + listOfNotNull(pendingItem),
-                        threads = listOf(continuationThread) + sourcePreserved,
-                        approvals = emptyList(),
-                        isTimelineLoading = false,
-                        olderTimelineCursor = null,
-                        isOlderTimelineLoading = false,
-                    )
+                    val continuedThreads = listOf(continuationThread) + sourcePreserved
+                    if (!continuationMayAutoSelect || anotherThreadIsActive) {
+                        _state.value = current.copy(threads = continuedThreads)
+                    } else {
+                        selectionGeneration += 1
+                        _state.value = current.copy(
+                            selectedThreadId = threadId,
+                            activeThreadId = threadId.takeIf { execution.state.isActive },
+                            activeTurnId = turnId.takeIf { execution.state.isActive },
+                            isWorking = execution.state.isActive,
+                            timeline = listOf(
+                                RemoteTimelineItem(
+                                    id = "continuation:$threadId",
+                                    kind = "continuation",
+                                    text = "历史较长，已懒加载最近上下文并在同一工作目录创建续聊会话。原会话仍保留，可随时返回查看。",
+                                ),
+                            ) + listOfNotNull(pendingItem),
+                            threads = continuedThreads,
+                            approvals = emptyList(),
+                            isTimelineLoading = false,
+                            olderTimelineCursor = null,
+                            isOlderTimelineLoading = false,
+                        )
+                    }
                 } else {
                     _state.value = current.copy(
-                        activeThreadId = threadId.takeIf { execution.state.isActive },
-                        activeTurnId = turnId.takeIf { execution.state.isActive },
-                        isWorking = execution.state.isActive && threadId != null && threadId == current.selectedThreadId,
+                        activeThreadId = if (anotherThreadIsActive) current.activeThreadId else {
+                            threadId.takeIf { execution.state.isActive && !terminalBeforeResponse }
+                        },
+                        activeTurnId = if (anotherThreadIsActive) current.activeTurnId else {
+                            turnId.takeIf { execution.state.isActive && !terminalBeforeResponse }
+                        },
+                        isWorking = if (anotherThreadIsActive) current.isWorking else {
+                            execution.state.isActive && !terminalBeforeResponse && threadId != null && threadId == current.selectedThreadId
+                        },
                         timeline = sentTimeline,
                         threads = current.threads.withExecution(threadId, execution),
                     )
@@ -779,6 +1003,10 @@ class RemoteRepository(
                 val current = _state.value
                 val execution = parseRemoteThreadStatus(params["status"] as? JsonObject)
                 val selected = eventThreadId != null && eventThreadId == current.selectedThreadId
+                eventThreadId?.let { threadId ->
+                    if (execution.state.isActive) explicitlyInactiveThreads.remove(threadId)
+                    else explicitlyInactiveThreads.add(threadId)
+                }
                 _state.value = current.copy(
                     threads = current.threads.withExecution(eventThreadId, execution),
                     activeThreadId = when {
@@ -794,6 +1022,8 @@ class RemoteRepository(
             "turn/started" -> {
                 val activeThreadId = eventThreadId ?: _state.value.selectedThreadId
                 val turnId = params["turn"]?.jsonObject?.string("id")
+                if (terminalTurnExecution(activeThreadId, turnId) != null) return
+                activeThreadId?.let(explicitlyInactiveThreads::remove)
                 _state.value = _state.value.copy(
                     activeThreadId = activeThreadId,
                     activeTurnId = turnId,
@@ -812,14 +1042,22 @@ class RemoteRepository(
                     params["turn"] as? JsonObject,
                     fallback = RemoteThreadExecutionState.COMPLETED,
                 )
-                val completesActiveTurn = eventThreadId == null ||
-                    current.activeThreadId == null ||
-                    eventThreadId == current.activeThreadId
+                rememberTerminalTurnExecution(completedThreadId, execution)
+                val matchesActiveThread = eventThreadId == null || eventThreadId == current.activeThreadId
+                val matchesActiveTurn = execution.turnId == null ||
+                    (current.activeTurnId != null && execution.turnId == current.activeTurnId)
+                val completesActiveTurn = matchesActiveThread && matchesActiveTurn
+                val staleCompletionForActiveThread = completedThreadId != null &&
+                    completedThreadId == current.activeThreadId && !matchesActiveTurn
                 _state.value = current.copy(
                     activeThreadId = current.activeThreadId.takeUnless { completesActiveTurn },
                     activeTurnId = current.activeTurnId.takeUnless { completesActiveTurn },
                     isWorking = current.isWorking && !completesActiveTurn,
-                    threads = current.threads.withExecution(completedThreadId, execution),
+                    threads = if (staleCompletionForActiveThread) {
+                        current.threads
+                    } else {
+                        current.threads.withExecution(completedThreadId, execution)
+                    },
                 )
                 val agentName = backendDisplayName(event.backendId)
                 val notification = when (execution.state) {
@@ -838,6 +1076,22 @@ class RemoteRepository(
                 timelineItem(item)?.let { addOrReplaceTimeline(it) }
             }
             "item/agentMessage/delta" -> appendAgentDelta(params.string("itemId"), params.string("delta").orEmpty())
+        }
+    }
+
+    private fun terminalTurnKey(threadId: String, turnId: String): String = "$threadId\u0000$turnId"
+
+    private fun terminalTurnExecution(threadId: String?, turnId: String?): RemoteThreadExecution? {
+        if (threadId == null || turnId == null) return null
+        return terminalTurnExecutions[terminalTurnKey(threadId, turnId)]
+    }
+
+    private fun rememberTerminalTurnExecution(threadId: String?, execution: RemoteThreadExecution) {
+        val turnId = execution.turnId ?: return
+        if (threadId == null || execution.state.isActive) return
+        terminalTurnExecutions[terminalTurnKey(threadId, turnId)] = execution
+        while (terminalTurnExecutions.size > 64) {
+            terminalTurnExecutions.remove(terminalTurnExecutions.keys.first())
         }
     }
 

@@ -39,7 +39,7 @@ class ProviderTemplatesTest {
     fun openAiTemplateUsesConfiguredDefaultBaseUrl() {
         val template = ProviderTemplates.defaults.first { it.name == "OpenAI" }
 
-        assertEquals("https://happycode.vip/v1", template.baseUrl)
+        assertEquals("https://happycodeai.com", template.baseUrl)
         assertEquals("gpt-5.6-terra", template.defaultModel)
         assertEquals("gpt-5.6-terra", template.defaultVisionModel)
         assertEquals(listOf("gpt-5.6-terra", "gpt-5.6-sol"), template.availableModels)

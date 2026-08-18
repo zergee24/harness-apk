@@ -27,7 +27,9 @@ type Record struct {
 	Status        Status          `json:"status"`
 	ResultEventID string          `json:"resultEventId,omitempty"`
 	ResultJSON    json.RawMessage `json:"resultJson,omitempty"`
+	ContextJSON   json.RawMessage `json:"contextJson,omitempty"`
 	LastError     string          `json:"lastError,omitempty"`
+	DispatchOrder uint64          `json:"dispatchOrder,omitempty"`
 	CreatedAt     int64           `json:"createdAt"`
 	UpdatedAt     int64           `json:"updatedAt"`
 }
@@ -76,6 +78,10 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) Begin(commandID, commandType, payloadSHA256 string) (Record, bool, error) {
+	return s.BeginWithContext(commandID, commandType, payloadSHA256, nil)
+}
+
+func (s *Store) BeginWithContext(commandID, commandType, payloadSHA256 string, contextJSON json.RawMessage) (Record, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if commandID == "" || commandType == "" || payloadSHA256 == "" {
@@ -88,9 +94,16 @@ func (s *Store) Begin(commandID, commandType, payloadSHA256 string) (Record, boo
 		return clone(*existing), false, nil
 	}
 	now := time.Now().UnixMilli()
+	var dispatchOrder uint64 = 1
+	for _, existing := range s.data.Records {
+		if existing.DispatchOrder >= dispatchOrder {
+			dispatchOrder = existing.DispatchOrder + 1
+		}
+	}
 	record := &Record{
 		CommandID: commandID, Type: commandType, PayloadSHA256: payloadSHA256,
-		Status: StatusInFlight, CreatedAt: now, UpdatedAt: now,
+		Status: StatusInFlight, ContextJSON: append(json.RawMessage(nil), contextJSON...), DispatchOrder: dispatchOrder,
+		CreatedAt: now, UpdatedAt: now,
 	}
 	s.data.Records[commandID] = record
 	if err := s.saveLocked(); err != nil {
@@ -98,6 +111,57 @@ func (s *Store) Begin(commandID, commandType, payloadSHA256 string) (Record, boo
 		return Record{}, false, err
 	}
 	return clone(*record), true, nil
+}
+
+func (s *Store) AttachContext(commandID string, contextJSON json.RawMessage) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if commandID == "" || len(contextJSON) == 0 {
+		return Record{}, errors.New("command id and reconciliation context are required")
+	}
+	record := s.data.Records[commandID]
+	if record == nil {
+		return Record{}, errors.New("command not found")
+	}
+	if len(record.ContextJSON) != 0 {
+		return clone(*record), nil
+	}
+	previous := clone(*record)
+	record.ContextJSON = append(json.RawMessage(nil), contextJSON...)
+	record.UpdatedAt = time.Now().UnixMilli()
+	if err := s.saveLocked(); err != nil {
+		*record = previous
+		return Record{}, err
+	}
+	return clone(*record), nil
+}
+
+func (s *Store) MovePayloadHash(commandID, expectedHash, payloadHash string) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if commandID == "" || expectedHash == "" || payloadHash == "" {
+		return Record{}, errors.New("command id and payload hashes are required")
+	}
+	record := s.data.Records[commandID]
+	if record == nil {
+		return Record{}, errors.New("command not found")
+	}
+	if record.PayloadSHA256 == payloadHash {
+		return clone(*record), nil
+	}
+	if record.PayloadSHA256 != expectedHash {
+		return Record{}, errors.New("command payload changed before migration")
+	}
+	previousHash := record.PayloadSHA256
+	previousUpdatedAt := record.UpdatedAt
+	record.PayloadSHA256 = payloadHash
+	record.UpdatedAt = time.Now().UnixMilli()
+	if err := s.saveLocked(); err != nil {
+		record.PayloadSHA256 = previousHash
+		record.UpdatedAt = previousUpdatedAt
+		return Record{}, err
+	}
+	return clone(*record), nil
 }
 
 func (s *Store) Complete(commandID, resultEventID string, result json.RawMessage) (Record, error) {
@@ -110,11 +174,39 @@ func (s *Store) Complete(commandID, resultEventID string, result json.RawMessage
 	if record.Status != StatusInFlight {
 		return clone(*record), nil
 	}
+	previous := clone(*record)
 	record.Status = StatusSucceeded
 	record.ResultEventID = resultEventID
 	record.ResultJSON = append(json.RawMessage(nil), result...)
 	record.UpdatedAt = time.Now().UnixMilli()
 	if err := s.saveLocked(); err != nil {
+		*record = previous
+		return Record{}, err
+	}
+	return clone(*record), nil
+}
+
+func (s *Store) Succeed(commandID, resultEventID string, result json.RawMessage) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.data.Records[commandID]
+	if record == nil {
+		return Record{}, errors.New("command not found")
+	}
+	if record.Status == StatusSucceeded {
+		return clone(*record), nil
+	}
+	if record.Status != StatusInFlight && record.Status != StatusUnknown {
+		return clone(*record), errors.New("command cannot be marked succeeded")
+	}
+	previous := clone(*record)
+	record.Status = StatusSucceeded
+	record.ResultEventID = resultEventID
+	record.ResultJSON = append(json.RawMessage(nil), result...)
+	record.LastError = ""
+	record.UpdatedAt = time.Now().UnixMilli()
+	if err := s.saveLocked(); err != nil {
+		*record = previous
 		return Record{}, err
 	}
 	return clone(*record), nil
@@ -127,10 +219,12 @@ func (s *Store) Fail(commandID string, cause error) (Record, error) {
 	if record == nil {
 		return Record{}, errors.New("command not found")
 	}
+	previous := clone(*record)
 	record.Status = StatusFailed
 	record.LastError = cause.Error()
 	record.UpdatedAt = time.Now().UnixMilli()
 	if err := s.saveLocked(); err != nil {
+		*record = previous
 		return Record{}, err
 	}
 	return clone(*record), nil
@@ -147,7 +241,9 @@ func (s *Store) MarkUnknown(commandID string, cause error) (Record, error) {
 	record.LastError = cause.Error()
 	record.UpdatedAt = time.Now().UnixMilli()
 	if err := s.saveLocked(); err != nil {
-		return Record{}, err
+		// Keep the process-local record UNKNOWN: the remote side effect may have
+		// happened, so replay must not treat a failed durability write as success.
+		return clone(*record), err
 	}
 	return clone(*record), nil
 }
@@ -164,7 +260,7 @@ func (s *Store) MarkUnknownWithResult(commandID string, cause error, result json
 	record.LastError = cause.Error()
 	record.UpdatedAt = time.Now().UnixMilli()
 	if err := s.saveLocked(); err != nil {
-		return Record{}, err
+		return clone(*record), err
 	}
 	return clone(*record), nil
 }
@@ -182,11 +278,13 @@ func (s *Store) ResolveUnknown(commandID string, result json.RawMessage) (Record
 	if record.Status != StatusUnknown {
 		return clone(*record), errors.New("command is not awaiting reconciliation")
 	}
+	previous := clone(*record)
 	record.Status = StatusSucceeded
 	record.ResultJSON = append(json.RawMessage(nil), result...)
 	record.LastError = ""
 	record.UpdatedAt = time.Now().UnixMilli()
 	if err := s.saveLocked(); err != nil {
+		*record = previous
 		return Record{}, err
 	}
 	return clone(*record), nil
@@ -201,7 +299,15 @@ func (s *Store) RecordsByTypeStatus(commandType string, status Status) []Record 
 			result = append(result, clone(*record))
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].CommandID < result[j].CommandID })
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].DispatchOrder != result[j].DispatchOrder {
+			return result[i].DispatchOrder < result[j].DispatchOrder
+		}
+		if result[i].CreatedAt != result[j].CreatedAt {
+			return result[i].CreatedAt < result[j].CreatedAt
+		}
+		return result[i].CommandID < result[j].CommandID
+	})
 	return result
 }
 
@@ -218,10 +324,12 @@ func (s *Store) AttachResult(commandID, resultEventID string, result json.RawMes
 	if record.ResultEventID != "" {
 		return clone(*record), nil
 	}
+	previous := clone(*record)
 	record.ResultEventID = resultEventID
 	record.ResultJSON = append(json.RawMessage(nil), result...)
 	record.UpdatedAt = time.Now().UnixMilli()
 	if err := s.saveLocked(); err != nil {
+		*record = previous
 		return Record{}, err
 	}
 	return clone(*record), nil
@@ -276,5 +384,6 @@ func atomicWrite(path string, raw []byte, mode os.FileMode) error {
 
 func clone(record Record) Record {
 	record.ResultJSON = append(json.RawMessage(nil), record.ResultJSON...)
+	record.ContextJSON = append(json.RawMessage(nil), record.ContextJSON...)
 	return record
 }

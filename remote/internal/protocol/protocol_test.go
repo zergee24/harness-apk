@@ -149,6 +149,17 @@ func TestHostStatusPayloadWithBackends(t *testing.T) {
 	}
 }
 
+func TestHostStatusPayloadExplicitEmptyBackendsSurvivesWireEncoding(t *testing.T) {
+	payload := HostStatusPayload{SchemaVersion: 1, Backends: []BackendInfo{}}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"backends":[]`) {
+		t.Fatalf("explicit empty roster was omitted: %s", raw)
+	}
+}
+
 func TestHostStatusPayloadLegacyWithoutBackends(t *testing.T) {
 	raw := `{"schemaVersion":1,"capabilities":["run.lifecycle.v1"]}`
 	var decoded HostStatusPayload

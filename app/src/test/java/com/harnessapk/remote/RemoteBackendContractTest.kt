@@ -76,7 +76,7 @@ class RemoteBackendContractTest {
             )
         }
         val event = RemoteEvent(type = "host.status", payload = payload)
-        val backends = parseRemoteBackends(event)
+        val backends = requireNotNull(parseRemoteBackends(event))
         assertEquals(2, backends.size)
         assertEquals("codex", backends[0].id)
         assertTrue("approvals.v1" in backends[0].capabilities)
@@ -85,13 +85,49 @@ class RemoteBackendContractTest {
     }
 
     @Test
-    fun legacyHostStatusWithoutBackendsReturnsEmptyList() {
+    fun legacyHostStatusWithoutBackendsReturnsNull() {
         val payload = buildJsonObject {
             put("schemaVersion", JsonPrimitive(1))
             put("capabilities", buildJsonArray { add(JsonPrimitive("run.lifecycle.v1")) })
         }
         val event = RemoteEvent(type = "host.status", payload = payload)
-        assertTrue(parseRemoteBackends(event).isEmpty())
+        assertNull(parseRemoteBackends(event))
+    }
+
+    @Test
+    fun explicitEmptyBackendListStaysEmpty() {
+        val payload = buildJsonObject {
+            put("schemaVersion", JsonPrimitive(1))
+            put("backends", buildJsonArray {})
+        }
+        val event = RemoteEvent(type = "host.status", payload = payload)
+        assertEquals(emptyList<RemoteBackend>(), parseRemoteBackends(event))
+    }
+
+    @Test
+    fun blankThreadNameFallsBackToPreviewTitle() {
+        val payload = buildJsonObject {
+            put(
+                "result",
+                buildJsonObject {
+                    put(
+                        "data",
+                        buildJsonArray {
+                            add(
+                                buildJsonObject {
+                                    put("id", JsonPrimitive("thread-1"))
+                                    put("name", JsonPrimitive("   "))
+                                    put("preview", JsonPrimitive("真实首行\n第二行"))
+                                    put("updatedAt", JsonPrimitive(1))
+                                },
+                            )
+                        },
+                    )
+                },
+            )
+        }
+
+        assertEquals("真实首行", parseThreads(RemoteEvent(type = "rpc.response", payload = payload)).single().title)
     }
 
     @Test
@@ -115,6 +151,37 @@ class RemoteBackendContractTest {
 }
 
 class RemoteBackendSelectionTest {
+
+    @Test
+    fun preparedCommandUsesOneCapturedBackendForPendingOwnershipAndPayload() {
+        val prepared = prepareRemoteCommand(
+            command = RemoteCommand(type = "turn.start", requestId = "r0", threadId = "t1", text = "hi"),
+            pending = PendingRemoteCommand(kind = "turn.start", threadId = "t1"),
+            selectedBackendId = "dsh",
+        )
+
+        assertEquals("dsh", prepared.pending?.backendId)
+        assertTrue(prepared.payload.toString().contains("\"backendId\":\"dsh\""))
+    }
+
+    @Test
+    fun preparedOutboxReplayKeepsItsEmbeddedBackend() {
+        val payload = buildJsonObject {
+            put("type", JsonPrimitive("run.start"))
+            put("requestId", JsonPrimitive("r0-replay"))
+            put("backendId", JsonPrimitive("codex"))
+        }
+
+        val prepared = prepareRemotePayload(
+            requestId = "r0-replay",
+            payload = payload,
+            pending = null,
+            selectedBackendId = "dsh",
+        )
+
+        assertTrue(prepared.payload.toString().contains("\"backendId\":\"codex\""))
+        assertNull(prepared.pending)
+    }
 
     @Test
     fun injectBackendIdAddsSelectedBackendWhenAbsent() {

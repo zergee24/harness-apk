@@ -108,6 +108,59 @@ func TestUpdateTurnAtomicallyBackfillsLegacyRoute(t *testing.T) {
 	}
 }
 
+func TestReserveAllowsOnlyOneConcurrentRouteForRun(t *testing.T) {
+	store, err := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, backendID := range []string{"codex", "dsh"} {
+		backendID := backendID
+		go func() {
+			<-start
+			results <- store.Reserve(Route{RunID: "run-1", BackendID: backendID, HostID: "host-1", DeviceID: "phone-1"})
+		}()
+	}
+	close(start)
+	successes := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful reservations=%d", successes)
+	}
+	if routes := store.ByRuns([]string{"run-1"}); len(routes) != 1 {
+		t.Fatalf("reserved routes=%#v", routes)
+	}
+}
+
+func TestMoveBackendRekeysOneExistingRun(t *testing.T) {
+	store, err := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := Route{RunID: "run-1", BackendID: "codex", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1"}
+	if err := store.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MoveBackend("run-1", "codex", "dsh"); err != nil {
+		t.Fatal(err)
+	}
+	moved, ok := store.ByRun("run-1")
+	if !ok || moved.BackendID != "dsh" {
+		t.Fatalf("moved route=%#v ok=%v", moved, ok)
+	}
+	if _, ok := store.ByThreadTurnBackend("thread-1", "turn-1", "codex"); ok {
+		t.Fatal("old backend key remained after move")
+	}
+	if matched, ok := store.ByThreadTurnBackend("thread-1", "turn-1", "dsh"); !ok || matched.RunID != "run-1" {
+		t.Fatalf("new backend key missing: %#v ok=%v", matched, ok)
+	}
+}
+
 func TestAdvanceTurnIsIdempotentAfterConcurrentWinner(t *testing.T) {
 	store, err := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
 	if err != nil {

@@ -623,7 +623,7 @@ internal fun RemoteWorkingBanner(
 @Composable
 internal fun RemoteComposer(
     isWorking: Boolean,
-    onSubmit: (String) -> Unit,
+    onSubmit: (String) -> Boolean,
     modifier: Modifier = Modifier,
     agentName: String = "Codex",
 ) {
@@ -631,8 +631,9 @@ internal fun RemoteComposer(
     fun submit() {
         val text = input.trim()
         if (text.isEmpty()) return
-        onSubmit(text)
-        input = ""
+        if (onSubmit(text)) {
+            input = ""
+        }
     }
     Row(
         modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(12.dp),

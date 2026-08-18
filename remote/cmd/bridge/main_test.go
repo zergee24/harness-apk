@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +27,34 @@ import (
 	bridgestate "github.com/harnessapk/remote/internal/state"
 )
 
+func TestCommandResponseEventCarriesCanonicalBackend(t *testing.T) {
+	legacy := commandResponseEvent(protocol.Command{}, protocol.Event{Type: "rpc.response"})
+	if legacy.BackendID != "codex" {
+		t.Fatalf("legacy response backend=%q", legacy.BackendID)
+	}
+	dsh := commandResponseEvent(protocol.Command{BackendID: "dsh"}, protocol.Event{Type: "rpc.response"})
+	if dsh.BackendID != "dsh" {
+		t.Fatalf("dsh response backend=%q", dsh.BackendID)
+	}
+}
+
+func TestExplicitLogicalEventBackendSurvivesMissingOrConflictingRoute(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes}
+	if got := b.logicalEventBackend("run-1", "dsh"); got != "dsh" {
+		t.Fatalf("missing-route backend=%q", got)
+	}
+	if err := routes.Put(runstate.Route{RunID: "run-1", BackendID: "codex", HostID: "host-1", DeviceID: "phone-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.logicalEventBackend("run-1", "dsh"); got != "dsh" {
+		t.Fatalf("conflicting-route backend=%q", got)
+	}
+}
+
 func TestDuplicateRunStartReturnsCachedResultWithoutCallingAppServer(t *testing.T) {
 	cache, err := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
 	if err != nil {
@@ -45,6 +75,236 @@ func TestDuplicateRunStartReturnsCachedResultWithoutCallingAppServer(t *testing.
 	}
 	if appServerCalls != 1 || first.ResultEventID != "event-result-1" || second.ResultEventID != first.ResultEventID {
 		t.Fatalf("calls=%d first=%#v second=%#v", appServerCalls, first, second)
+	}
+}
+
+func TestControlRunReplaysSucceededCommandAfterRouteAdvanced(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	command := protocol.Command{
+		Type: "run.steer", BackendID: "dsh", CommandID: "command-1", RequestID: "request-1",
+		RunID: "run-1", ExpectedTurnID: "turn-1", Text: "补充测试",
+	}
+	identity := runstate.ControlCommand{
+		Type: command.Type, CommandID: command.CommandID, RunID: command.RunID, DeviceID: "phone-1",
+		BackendID: command.BackendID, ExpectedTurnID: command.ExpectedTurnID, Text: command.Text,
+	}
+	if _, execute, err := cache.Begin(command.CommandID, command.Type, identity.PayloadSHA256()); err != nil || !execute {
+		t.Fatalf("begin execute=%v err=%v", execute, err)
+	}
+	if _, err := cache.Complete(command.CommandID, "event-1", json.RawMessage(`{"runId":"run-1","eventId":"event-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	bd := backend.NewFake("dsh")
+	b := &bridge{commandCache: cache, routes: routes}
+	if err := b.controlRun(context.Background(), "phone-1", command, bd); err != nil {
+		t.Fatalf("cached replay after route advance: %v", err)
+	}
+	if calls := bd.Calls(); len(calls) != 0 {
+		t.Fatalf("cached replay called backend: %#v", calls)
+	}
+}
+
+func TestUnknownControlTransitionReleasesOnlyAfterAuthoritativeNextTurn(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := backend.NewFake("dsh").OnScript("turn/steer", func(string, any) (json.RawMessage, error) {
+		return nil, errors.New("response lost after write")
+	})
+	coordinator := runstate.ControlCoordinator{
+		Cache: cache, Routes: routes, App: app,
+		Emit: func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
+	}
+	control := runstate.ControlCommand{
+		Type: "run.steer", CommandID: "command-1", RunID: "run-1", DeviceID: "phone-1",
+		BackendID: "dsh", ExpectedTurnID: "turn-1", Text: "补充测试",
+	}
+	if err := coordinator.Execute(context.Background(), control); !errors.Is(err, runstate.ErrControlOutcomeUnknown) {
+		t.Fatalf("execute error=%v", err)
+	}
+	released := make(chan struct{})
+	b := &bridge{
+		commandCache: cache, routes: routes, backends: map[string]backend.Backend{"dsh": app},
+		controlEventEmitter: func(context.Context, string, string, string, string, json.RawMessage) (string, error) {
+			return "event-2", nil
+		},
+	}
+	command := protocol.Command{
+		Type: "run.steer", CommandID: "command-1", BackendID: "dsh", RunID: "run-1",
+		ThreadID: "thread-1", ExpectedTurnID: "turn-1",
+	}
+	b.beginTurnTransition(command, func() { close(released) })
+	app.OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"}]}}`), nil
+	})
+	if err := b.reconcileUnknownTurnTransitions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-released:
+		t.Fatal("unresolved transition released without authoritative next turn")
+	default:
+	}
+	app.OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"},{"id":"turn-2"}]}}`), nil
+	})
+	if err := b.reconcileUnknownTurnTransitions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("resolved transition did not release FIFO gate")
+	}
+	if route, _ := routes.ByRunBackend("dsh", "run-1"); route.TurnID != "turn-2" {
+		t.Fatalf("route=%#v", route)
+	}
+}
+
+func TestRestartedBridgeReconcilesPersistedUnknownControlWithoutTransition(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := backend.NewFake("dsh").OnScript("turn/steer", func(string, any) (json.RawMessage, error) {
+		return nil, errors.New("response lost after write")
+	})
+	coordinator := runstate.ControlCoordinator{
+		Cache: cache, Routes: routes, App: app,
+		Emit: func(context.Context, string, string, string, json.RawMessage) (string, error) {
+			return "event-before-restart", nil
+		},
+	}
+	control := runstate.ControlCommand{
+		Type: "run.steer", CommandID: "command-restart", RunID: "run-1", DeviceID: "phone-1",
+		BackendID: "dsh", ExpectedTurnID: "turn-1", Text: "补充测试",
+	}
+	if err := coordinator.Execute(context.Background(), control); !errors.Is(err, runstate.ErrControlOutcomeUnknown) {
+		t.Fatalf("execute error=%v", err)
+	}
+	app.OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"},{"id":"turn-2"}]}}`), nil
+	})
+	restarted := &bridge{
+		commandCache: cache, routes: routes, backends: map[string]backend.Backend{"dsh": app},
+		controlEventEmitter: func(context.Context, string, string, string, string, json.RawMessage) (string, error) {
+			return "event-after-restart", nil
+		},
+	}
+	if err := restarted.reconcileUnknownTurnTransitions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, _ := cache.Lookup("command-restart")
+	if record.Status != commandcache.StatusSucceeded {
+		t.Fatalf("record=%#v", record)
+	}
+	if route, _ := routes.ByRunBackend("dsh", "run-1"); route.TurnID != "turn-2" {
+		t.Fatalf("route=%#v", route)
+	}
+}
+
+func TestRunSteerStartedNotificationKeepsTransitionUntilCommandCacheResolves(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	b := &bridge{routes: routes}
+	command := protocol.Command{
+		Type: "run.steer", CommandID: "command-1", BackendID: "dsh", RunID: "run-1",
+		ThreadID: "thread-1", ExpectedTurnID: "turn-1",
+	}
+	generation := b.beginTurnTransition(command, func() { close(released) })
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-2"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-released:
+		t.Fatal("run.steer notification released FIFO before command cache resolution")
+	default:
+	}
+	if _, ok := b.turnTransitionGeneration("dsh", "thread-1", generation); !ok {
+		t.Fatal("run.steer transition retired before command cache resolution")
+	}
+	if route, _ := routes.ByRunBackend("dsh", "run-1"); route.TurnID != "turn-2" {
+		t.Fatalf("route=%#v", route)
+	}
+}
+
+func TestUnknownLegacyTurnTransitionReleasesAfterAuthoritativeNextTurn(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "legacy:thread-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := backend.NewFake("dsh").OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"},{"id":"turn-2"}]}}`), nil
+	})
+	released := make(chan struct{})
+	b := &bridge{routes: routes, backends: map[string]backend.Backend{"dsh": app}}
+	command := protocol.Command{
+		Type: "turn.steer", BackendID: "dsh", ThreadID: "thread-1", ExpectedTurnID: "turn-1",
+	}
+	b.beginTurnTransition(command, func() { close(released) })
+
+	if err := b.reconcileUnknownTurnTransitions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("legacy resolved transition did not release FIFO gate")
+	}
+	if route, _ := routes.ByRunBackend("dsh", "legacy:thread-1"); route.TurnID != "turn-2" {
+		t.Fatalf("route=%#v", route)
 	}
 }
 
@@ -106,6 +366,25 @@ func TestBackendRestartDoesNotDuplicateHostStatusEntry(t *testing.T) {
 	}
 	if len(payload.Backends) != 1 || payload.Backends[0].ID != "dsh" {
 		t.Fatalf("backends after restart=%#v", payload.Backends)
+	}
+}
+
+func TestBackendRegistrationRacePreservesConfiguredHostStatusOrder(t *testing.T) {
+	b := &bridge{}
+	b.initializeBackendOrder([]backend.Spec{{ID: "codex"}, {ID: "dsh"}})
+	b.registerBackend(backend.NewFake("dsh"))
+	b.registerBackend(backend.NewFake("codex"))
+
+	var payload protocol.HostStatusPayload
+	if err := json.Unmarshal(b.hostStatusPayload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(payload.Backends))
+	for _, item := range payload.Backends {
+		ids = append(ids, item.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"codex", "dsh"}) {
+		t.Fatalf("backend order after reversed registration=%#v", ids)
 	}
 }
 
@@ -1209,6 +1488,253 @@ func TestContinuationHistoryCursorLazilyWalksIntoOriginalThread(t *testing.T) {
 	}
 }
 
+func TestTurnStartedDoesNotBindFrozenTerminalRoute(t *testing.T) {
+	dir := t.TempDir()
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := runstate.Route{RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1"}
+	if err := routes.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{RunID: "run-1", Status: "COMPLETED", CompletedAt: 1234}); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, terminals: terminals}
+	params := json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-late"}}`)
+	if err := b.bindStartedTurnRoute("dsh", params); err == nil {
+		t.Fatal("late turn/started bound a frozen route")
+	}
+	updated, _ := routes.ByRun("run-1")
+	if updated.TurnID != "" {
+		t.Fatalf("frozen route turn=%q", updated.TurnID)
+	}
+}
+
+func TestRouteForParamsIgnoresLegacyTerminalLedger(t *testing.T) {
+	dir := t.TempDir()
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := runstate.Route{RunID: "legacy:thread-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-next"}
+	if err := routes.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{RunID: route.RunID, Status: "COMPLETED", CompletedAt: 1234}); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, terminals: terminals}
+	params := json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-next"}}`)
+	matched, ok := b.routeForParams("dsh", params)
+	if !ok || matched.RunID != route.RunID {
+		t.Fatalf("legacy route blocked by historical terminal record: %#v ok=%v", matched, ok)
+	}
+}
+
+func TestAppServerRoutingCapturesCompletionTargetBeforeTerminalFreeze(t *testing.T) {
+	dir := t.TempDir()
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := runstate.Route{RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-old"}
+	if err := routes.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, terminals: terminals}
+	params := json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-old"}}`)
+	matched, targets := b.appServerRouting("dsh", params)
+	if matched.RunID != "run-1" || !reflect.DeepEqual(targets, []string{"phone-1"}) {
+		t.Fatalf("captured route=%#v targets=%#v", matched, targets)
+	}
+	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{RunID: "run-1", Status: "COMPLETED", CompletedAt: 1234}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.routeForParams("dsh", params); ok {
+		t.Fatal("frozen route still resolves dynamically")
+	}
+	if !reflect.DeepEqual(targets, []string{"phone-1"}) {
+		t.Fatalf("captured target changed after freeze: %#v", targets)
+	}
+}
+
+func TestRouteForParamsRejectsExactFrozenTerminalRoute(t *testing.T) {
+	dir := t.TempDir()
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := runstate.Route{RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-old"}
+	if err := routes.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{RunID: "run-1", Status: "COMPLETED", CompletedAt: 1234}); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, terminals: terminals}
+	params := json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-old"}}`)
+	if matched, ok := b.routeForParams("dsh", params); ok {
+		t.Fatalf("exact frozen route matched: %#v", matched)
+	}
+}
+
+func TestBeginTransitionAtomicallyStoresRelease(t *testing.T) {
+	b := &bridge{}
+	command := protocol.Command{Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-old"}
+	release := func() {}
+	generation := b.beginTurnTransition(command, release)
+	transition, ok := b.turnTransitionGeneration("dsh", "thread-1", generation)
+	if !ok || transition.release == nil {
+		t.Fatalf("transition release was not stored atomically: %#v ok=%v", transition, ok)
+	}
+}
+
+func TestDelayedOlderStartedDoesNotRegressNewTransition(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	if err := routes.Put(runstate.Route{RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.AdvanceTurnBackend("dsh", "run-1", "thread-1", "turn-1", "turn-2"); err != nil {
+		t.Fatal(err)
+	}
+	command := protocol.Command{Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-2"}
+	released := make(chan struct{})
+	b.beginTurnTransition(command, func() { close(released) })
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	route, _ := routes.ByRun("run-1")
+	if route.TurnID != "turn-2" {
+		t.Fatalf("route regressed to %q", route.TurnID)
+	}
+	select {
+	case <-released:
+		t.Fatal("delayed older notification ended new transition")
+	default:
+	}
+}
+
+func TestStalePredecessorStartedDoesNotEndNewTransition(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-old"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	generation := b.beginTurnTransition(command)
+	released := make(chan struct{})
+	b.setTurnTransitionRelease("dsh", "thread-1", generation, func() { close(released) })
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-old"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-released:
+		t.Fatal("stale predecessor notification ended the new transition")
+	default:
+	}
+}
+
+func TestExactStartedNotificationEndsMatchingTransition(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-old"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	generation := b.beginTurnTransition(command)
+	released := make(chan struct{})
+	b.setTurnTransitionRelease("dsh", "thread-1", generation, func() { close(released) })
+	if err := routes.AdvanceTurn("run-1", "thread-1", "turn-old", "turn-new"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-new"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("exact started notification did not end transition")
+	}
+}
+
+func TestSteerBackfillRetiresTransitionBeforeReturning(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-old"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	generation := b.beginTurnTransition(command, func() { close(released) })
+	if err := b.backfillTurnSteerRoute(command, generation, json.RawMessage(`{"turn":{"id":"turn-new"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("backfill returned before retiring transition")
+	}
+}
+
+func TestPredecessorBackfillSucceedsAfterQueuedSuccessorAdvancesRoute(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	first := protocol.Command{Type: "turn.steer", BackendID: "dsh", RunID: "run-1", ThreadID: "thread-1", ExpectedTurnID: "turn-1"}
+	if err := b.claimThread(first, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	firstGeneration := b.beginTurnTransition(first)
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-2"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.ExpectedTurnID = "turn-2"
+	b.beginTurnTransition(second)
+	if err := b.bindStartedTurnRoute("dsh", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-3"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.backfillTurnSteerRoute(first, firstGeneration, json.RawMessage(`{"turn":{"id":"turn-2"}}`)); err != nil {
+		t.Fatalf("late predecessor backfill: %v", err)
+	}
+}
+
 func TestTurnSteerStartedNotificationCanRaceAheadOfRPCBackfill(t *testing.T) {
 	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
 	if err != nil {
@@ -1221,17 +1747,157 @@ func TestTurnSteerStartedNotificationCanRaceAheadOfRPCBackfill(t *testing.T) {
 	if err := b.claimThread(command, "phone-1"); err != nil {
 		t.Fatal(err)
 	}
-	b.beginTurnTransition(command)
+	generation := b.beginTurnTransition(command)
 	params := json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-next","status":"inProgress"}}`)
 	if err := b.bindStartedTurnRoute("dsh", params); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.backfillTurnRoute(command, json.RawMessage(`{"turn":{"id":"turn-next"}}`)); err != nil {
+	if err := b.backfillTurnSteerRoute(command, generation, json.RawMessage(`{"turn":{"id":"turn-next"}}`)); err != nil {
 		t.Fatal(err)
 	}
 	route, ok := routes.ByThreadTurnBackend("thread-1", "turn-next", "dsh")
 	if !ok || route.RunID != "run-1" {
 		t.Fatalf("raced steer route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestRequestTurnStartSerializesBackendCallsForSameThread(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan int, 2)
+	releaseFirst := make(chan struct{})
+	var calls int
+	bd := backend.NewFake("dsh").OnScript("turn/start", func(method string, params any) (json.RawMessage, error) {
+		calls++
+		call := calls
+		started <- call
+		if call == 1 {
+			<-releaseFirst
+		}
+		return json.RawMessage(fmt.Sprintf(`{"turn":{"id":"turn-%d"}}`, call)), nil
+	})
+	b := &bridge{
+		commandCache: cache, routes: routes,
+		state: bridgeState{HostID: "host-1", DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{}},
+	}
+	first := protocol.Command{Type: "turn.start", BackendID: "dsh", CommandID: "command-1", RequestID: "request-1", ThreadID: "thread-1", Text: "first"}
+	second := protocol.Command{Type: "turn.start", BackendID: "dsh", CommandID: "command-2", RequestID: "request-2", ThreadID: "thread-1", Text: "second"}
+	if err := b.requestTurnStart(context.Background(), "phone-1", first, bd, legacyTurnStartParams(first)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.requestTurnStart(context.Background(), "phone-1", second, bd, legacyTurnStartParams(second)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case call := <-started:
+		if call != 1 {
+			t.Fatalf("first backend call=%d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first turn.start did not begin")
+	}
+	select {
+	case call := <-started:
+		t.Fatalf("second turn.start began before first finished: %d", call)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseFirst)
+	select {
+	case call := <-started:
+		if call != 2 {
+			t.Fatalf("second backend call=%d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second turn.start stayed blocked")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		record, ok := cache.Lookup("legacy-turn-start:command-2")
+		if ok && record.Status == commandcache.StatusSucceeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("second turn.start did not persist completion: %#v ok=%v", record, ok)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestQueuedControlDispatchRefreshesOnlyValidArrivalSnapshot(t *testing.T) {
+	if got := controlDispatchTurnID("turn-1", "turn-1", "turn-2", true); got != "turn-2" {
+		t.Fatalf("queued valid dispatch=%q", got)
+	}
+	if got := controlDispatchTurnID("turn-1", "turn-2", "turn-2", true); got != "turn-1" {
+		t.Fatalf("queued stale dispatch=%q", got)
+	}
+	if got := controlDispatchTurnID("turn-1", "turn-1", "turn-2", false); got != "turn-1" {
+		t.Fatalf("nonqueued dispatch=%q", got)
+	}
+}
+
+func TestTurnCallsAreSerializedPerBackendThread(t *testing.T) {
+	b := &bridge{}
+	waitFirst, finishFirst := b.enqueueTurnCall("dsh", "thread-1")
+	waitSecond, finishSecond := b.enqueueTurnCall("dsh", "thread-1")
+	defer finishSecond()
+	if err := waitFirst(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	blockedCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := waitSecond(blockedCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second same-thread call did not wait: %v", err)
+	}
+	finishFirst()
+	if err := waitSecond(context.Background()); err != nil {
+		t.Fatalf("second same-thread call stayed blocked: %v", err)
+	}
+	waitOther, finishOther := b.enqueueTurnCall("dsh", "thread-2")
+	defer finishOther()
+	if err := waitOther(context.Background()); err != nil {
+		t.Fatalf("different thread was blocked: %v", err)
+	}
+}
+
+func TestCancelledQueuedTurnCallDoesNotReleaseLaterCallEarly(t *testing.T) {
+	b := &bridge{}
+	waitFirst, finishFirst := b.enqueueTurnCall("dsh", "thread-1")
+	waitSecond, finishSecond := b.enqueueTurnCall("dsh", "thread-1")
+	waitThird, finishThird := b.enqueueTurnCall("dsh", "thread-1")
+	defer finishThird()
+	if err := waitFirst(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitSecond(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued cancellation=%v", err)
+	}
+	secondFinished := make(chan struct{})
+	go func() {
+		finishSecond()
+		close(secondFinished)
+	}()
+	thirdCtx, cancelThird := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelThird()
+	if err := waitThird(thirdCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("third call bypassed running first after cancellation: %v", err)
+	}
+	finishFirst()
+	select {
+	case <-secondFinished:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled queue entry did not drain")
+	}
+	if err := waitThird(context.Background()); err != nil {
+		t.Fatalf("third call stayed blocked after predecessor drained: %v", err)
 	}
 }
 
@@ -1332,6 +1998,51 @@ func TestLegacyTurnSteerClaimsExpectedTurnID(t *testing.T) {
 	}
 	if route, ok := routes.ByThreadTurn("thread-1", "turn-existing"); !ok || route.RunID != "legacy:thread-1" {
 		t.Fatalf("steer route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestTurnStartCacheCanonicalizesExplicitDefaultBackend(t *testing.T) {
+	omitted := protocol.Command{Type: "turn.start", CommandID: "command-1", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
+	explicit := omitted
+	explicit.BackendID = "codex"
+	_, omittedHash := legacyTurnStartCacheIdentity(omitted)
+	_, explicitHash := legacyTurnStartCacheIdentity(explicit)
+	if omittedHash != explicitHash {
+		t.Fatalf("default backend hashes differ: omitted=%s explicit=%s", omittedHash, explicitHash)
+	}
+}
+
+func TestTurnStartMigratesPreBackendSucceededCacheOnce(t *testing.T) {
+	cache, err := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preBackend := protocol.Command{Type: "turn.start", CommandID: "command-1", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
+	cacheID := "legacy-turn-start:command-1"
+	raw, _ := json.Marshal(preBackend)
+	digest := sha256.Sum256(raw)
+	preBackendHash := hex.EncodeToString(digest[:])
+	if _, execute, err := cache.Begin(cacheID, "turn.start", preBackendHash); err != nil || !execute {
+		t.Fatalf("legacy begin execute=%v err=%v", execute, err)
+	}
+	if _, err := cache.Complete(cacheID, "", json.RawMessage(`{"turn":{"id":"turn-1"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"}}
+	explicit := preBackend
+	explicit.BackendID = "codex"
+	result, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", explicit, backend.NewFake("codex"), legacyTurnStartParams(explicit))
+	if err != nil || outcome != turnRPCSucceeded || len(result) == 0 {
+		t.Fatalf("migrated replay outcome=%q result=%s err=%v", outcome, result, err)
+	}
+	dsh := explicit
+	dsh.BackendID = "dsh"
+	if _, _, err := b.executeTurnStartOnce(context.Background(), "phone-1", dsh, backend.NewFake("dsh"), legacyTurnStartParams(dsh)); err == nil {
+		t.Fatal("migrated turn.start cache was reusable by dsh")
 	}
 }
 
@@ -1934,6 +2645,27 @@ func TestRouteForParamsScopesEventsToOwningBackend(t *testing.T) {
 	}
 	if _, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-dsh"}`)); ok {
 		t.Fatal("codex event reached a dsh-owned thread")
+	}
+}
+
+func TestInitialBackendRosterWaitsForAllBackendsBeforeFirstBroadcast(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan backend.Backend, 2)
+	broadcasts := make(chan struct{}, 2)
+	go awaitInitialBackendRoster(ctx, ready, 2, time.Second, func() { broadcasts <- struct{}{} })
+
+	ready <- backend.NewFake("codex")
+	select {
+	case <-broadcasts:
+		t.Fatal("partial startup roster was broadcast before dsh initialized")
+	case <-time.After(30 * time.Millisecond):
+	}
+	ready <- backend.NewFake("dsh")
+	select {
+	case <-broadcasts:
+	case <-time.After(time.Second):
+		t.Fatal("full startup roster was not broadcast")
 	}
 }
 

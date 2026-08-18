@@ -29,7 +29,7 @@ object ProviderTemplates {
         ),
         ProviderTemplate(
             name = "OpenAI",
-            baseUrl = "https://happycode.vip/v1",
+            baseUrl = "https://happycodeai.com",
             defaultModel = "gpt-5.6-terra",
             modelConfigs = listOf(
                 openAiModelConfig("gpt-5.6-terra"),

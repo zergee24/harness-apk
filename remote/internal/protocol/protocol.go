@@ -40,7 +40,7 @@ type BackendInfo struct {
 type HostStatusPayload struct {
 	SchemaVersion int           `json:"schemaVersion"`
 	Capabilities  []string      `json:"capabilities,omitempty"`
-	Backends      []BackendInfo `json:"backends,omitempty"`
+	Backends      []BackendInfo `json:"backends"`
 }
 
 type PairingPayload struct {

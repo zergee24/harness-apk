@@ -7,6 +7,7 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { APPSERVER_STARTUP_SERVICE } from "./startup.js";
 import { listPersistedSessions, loadPersistedSession } from "./persist.js";
 import { serializeTurnStart } from "./turn-queue.js";
+import { apiThreadListResult } from "./thread-list.js";
 import {
 	eventsFromSeq,
 	eventsThroughTurn,
@@ -211,6 +212,8 @@ async function threadEvents(ctx, threadId) {
 }
 
 async function threadListResult(ctx, limit) {
+	const projected = await apiThreadListResult(ctx, limit);
+	if (projected !== null) return projected;
 	const merged = new Map();
 	for (const [threadId, entry] of threads) {
 		if (!isVisibleSession(entry.agent.session.header)) continue;

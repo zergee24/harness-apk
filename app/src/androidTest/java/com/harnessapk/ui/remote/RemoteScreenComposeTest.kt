@@ -345,7 +345,7 @@ class RemoteScreenComposeTest {
                     RemoteComposer(
                         isWorking = false,
                         agentName = "DeepSeek Harness",
-                        onSubmit = {},
+                        onSubmit = { true },
                     )
                     RemoteWorkingBanner(
                         startedAtMillis = 1_000L,
@@ -361,6 +361,26 @@ class RemoteScreenComposeTest {
         composeRule.onNodeWithText("DeepSeek Harness 正在处理 · 已等待 47 秒").assertIsDisplayed()
         composeRule.onAllNodesWithText("发送给 Codex").assertCountEquals(0)
         composeRule.onAllNodesWithText("Codex 正在处理", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun rejectedComposerSubmissionKeepsInputForRetry() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                RemoteComposer(isWorking = true, onSubmit = { false })
+            }
+        }
+
+        val input = composeRule.onNodeWithTag("remote-composer-input")
+        input.performTextInput("稍后继续")
+        input.performImeAction()
+
+        input.assert(
+            androidx.compose.ui.test.SemanticsMatcher.expectValue(
+                androidx.compose.ui.semantics.SemanticsProperties.EditableText,
+                androidx.compose.ui.text.AnnotatedString("稍后继续"),
+            ),
+        )
     }
 
     @Test
@@ -387,7 +407,7 @@ class RemoteScreenComposeTest {
         val sent = mutableListOf<String>()
         composeRule.setContent {
             HarnessApkTheme {
-                RemoteComposer(isWorking = false, onSubmit = { sent += it })
+                RemoteComposer(isWorking = false, onSubmit = { sent += it; true })
             }
         }
 

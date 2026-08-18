@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/harnessapk/remote/internal/commandcache"
+	"github.com/harnessapk/remote/internal/protocol"
 	"github.com/harnessapk/remote/internal/workspace"
 )
 
@@ -29,12 +30,28 @@ type StartCommand struct {
 	BindingID             string `json:"bindingId"`
 	WorkspaceID           string `json:"workspaceId"`
 	DeviceID              string `json:"deviceId"`
+	BackendID             string `json:"backendId"`
 	RepositoryFingerprint string `json:"repositoryFingerprint"`
 	Objective             string `json:"objective"`
 }
 
 func (c StartCommand) PayloadSHA256() string {
 	raw, _ := json.Marshal(c)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func (c StartCommand) legacyPayloadSHA256() string {
+	legacy := struct {
+		CommandID             string `json:"commandId"`
+		RunID                 string `json:"runId"`
+		BindingID             string `json:"bindingId"`
+		WorkspaceID           string `json:"workspaceId"`
+		DeviceID              string `json:"deviceId"`
+		RepositoryFingerprint string `json:"repositoryFingerprint"`
+		Objective             string `json:"objective"`
+	}{c.CommandID, c.RunID, c.BindingID, c.WorkspaceID, c.DeviceID, c.RepositoryFingerprint, c.Objective}
+	raw, _ := json.Marshal(legacy)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -54,6 +71,7 @@ type Coordinator struct {
 	ResolveWorkspace func(deviceID, workspaceID string) (workspace.Candidate, bool)
 	InspectWorkspace func(cwd string) (workspace.Candidate, error)
 	CaptureBaseline  func(cwd string) (workspace.Baseline, error)
+	CallTurnStart    func(ctx context.Context, threadID string, params any) (json.RawMessage, error)
 	Emit             func(ctx context.Context, deviceID, runID, eventType string, payload json.RawMessage) (string, error)
 }
 
@@ -64,15 +82,42 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 	if err := validateStartCommand(c.HostID, command); err != nil {
 		return StartResult{}, err
 	}
-	record, execute, err := c.Cache.Begin(command.CommandID, "run.start", command.PayloadSHA256())
+	payloadHash := command.PayloadSHA256()
+	legacyCache := false
+	if existing, ok := c.Cache.Lookup(command.CommandID); ok && existing.PayloadSHA256 == command.legacyPayloadSHA256() {
+		ownerBackendID := protocol.DefaultBackendID
+		if c.Routes != nil {
+			if route, found := c.Routes.ByRun(command.RunID); found {
+				ownerBackendID = route.BackendID
+			}
+		}
+		if command.BackendID != ownerBackendID {
+			return StartResult{}, errors.New("legacy run.start cache belongs to another backend")
+		}
+		payloadHash = existing.PayloadSHA256
+		legacyCache = true
+	}
+	record, execute, err := c.Cache.Begin(command.CommandID, "run.start", payloadHash)
 	if err != nil {
 		return StartResult{}, err
 	}
 	if !execute {
+		if legacyCache {
+			if _, err := c.Cache.MovePayloadHash(command.CommandID, record.PayloadSHA256, command.PayloadSHA256()); err != nil {
+				return StartResult{}, err
+			}
+		}
 		return cachedStartResult(record)
 	}
 	if c.Routes == nil || c.App == nil || c.ResolveWorkspace == nil || c.InspectWorkspace == nil || c.Emit == nil {
 		return StartResult{}, c.fail(command.CommandID, errors.New("run coordinator dependencies are incomplete"))
+	}
+	route := Route{
+		RunID: command.RunID, BindingID: command.BindingID, WorkspaceID: command.WorkspaceID,
+		HostID: c.HostID, DeviceID: command.DeviceID, BackendID: command.BackendID,
+	}
+	if err := c.Routes.Reserve(route); err != nil {
+		return StartResult{}, c.fail(command.CommandID, err)
 	}
 	startingPayload, _ := json.Marshal(map[string]string{
 		"commandId":  command.CommandID,
@@ -110,11 +155,7 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 		IsGit: workspaceBaseline.IsGit, Head: workspaceBaseline.Head, Branch: workspaceBaseline.Branch,
 		PorcelainV2Z: workspaceBaseline.PorcelainV2Z, CapturedAt: workspaceBaseline.CapturedAt,
 	})
-	route := Route{
-		RunID: command.RunID, BindingID: command.BindingID, WorkspaceID: command.WorkspaceID,
-		HostID: c.HostID, DeviceID: command.DeviceID,
-		BaselineJSON: string(baseline),
-	}
+	route.BaselineJSON = string(baseline)
 	if err := c.Routes.Put(route); err != nil {
 		return StartResult{}, c.fail(command.CommandID, err)
 	}
@@ -147,7 +188,7 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 			"outputSchema":        completionOutputSchema(),
 		}
 	}
-	turnResult, err := c.App.Call(ctx, "turn/start", turnParams(threadID))
+	turnResult, err := c.callTurnStart(ctx, threadID, turnParams(threadID))
 	if err != nil && reusedRecentThread && isThreadNotFoundError(err, threadID) {
 		result, callErr := c.App.Call(ctx, "thread/start", map[string]any{"cwd": current.CWD})
 		if callErr != nil {
@@ -162,7 +203,7 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 		if callErr = c.Routes.Put(route); callErr != nil {
 			return StartResult{}, c.unknown(command.CommandID, callErr)
 		}
-		turnResult, err = c.App.Call(ctx, "turn/start", turnParams(threadID))
+		turnResult, err = c.callTurnStart(ctx, threadID, turnParams(threadID))
 	}
 	if err != nil {
 		return StartResult{}, c.unknown(command.CommandID, err)
@@ -189,6 +230,13 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 		return StartResult{}, err
 	}
 	return result, nil
+}
+
+func (c Coordinator) callTurnStart(ctx context.Context, threadID string, params any) (json.RawMessage, error) {
+	if c.CallTurnStart != nil {
+		return c.CallTurnStart(ctx, threadID, params)
+	}
+	return c.App.Call(ctx, "turn/start", params)
 }
 
 func isThreadNotFoundError(err error, threadID string) bool {

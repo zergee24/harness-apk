@@ -141,12 +141,22 @@ func normalizeBackend(id string) string {
 
 // findRouteByRun scans the route map for the route whose RunID matches.
 func findRouteByRun(routes map[string]*Route, runID string) (*Route, bool) {
+	var found *Route
 	for _, route := range routes {
-		if route.RunID == runID {
-			return route, true
+		if route.RunID != runID {
+			continue
 		}
+		if found != nil {
+			return nil, false
+		}
+		found = route
 	}
-	return nil, false
+	return found, found != nil
+}
+
+func findRouteByBackendRun(routes map[string]*Route, backendID, runID string) (*Route, bool) {
+	route, ok := routes[routeKey(normalizeBackend(backendID), runID)]
+	return route, ok
 }
 
 // BeginProcessEpoch records the process epoch of one backend and marks that
@@ -171,6 +181,26 @@ func (s *RouteStore) BeginProcessEpoch(backendID, epoch string) error {
 	return s.saveLocked()
 }
 
+func (s *RouteStore) Reserve(route Route) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if route.RunID == "" || route.HostID == "" || route.DeviceID == "" {
+		return errors.New("route stable identity is required")
+	}
+	if _, exists := findRouteByRun(s.data.Routes, route.RunID); exists {
+		return errors.New("run route already exists")
+	}
+	route.BackendID = normalizeBackend(route.BackendID)
+	key := routeKey(route.BackendID, route.RunID)
+	copy := route
+	s.data.Routes[key] = &copy
+	if err := s.saveLocked(); err != nil {
+		delete(s.data.Routes, key)
+		return err
+	}
+	return nil
+}
+
 func (s *RouteStore) Put(route Route) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -181,6 +211,68 @@ func (s *RouteStore) Put(route Route) error {
 	copy := route
 	s.data.Routes[routeKey(route.BackendID, route.RunID)] = &copy
 	return s.saveLocked()
+}
+
+func (s *RouteStore) MoveBackend(runID, expectedBackendID, backendID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runID == "" || backendID == "" {
+		return errors.New("run and backend identity are required")
+	}
+	expectedBackendID = normalizeBackend(expectedBackendID)
+	backendID = normalizeBackend(backendID)
+	route, ok := findRouteByBackendRun(s.data.Routes, expectedBackendID, runID)
+	if !ok {
+		return errors.New("route not found")
+	}
+	if route.BackendID != expectedBackendID {
+		return errors.New("route backend identity changed")
+	}
+	if route.BackendID == backendID {
+		return nil
+	}
+	oldKey := routeKey(route.BackendID, runID)
+	updated := *route
+	updated.BackendID = backendID
+	newKey := routeKey(backendID, runID)
+	delete(s.data.Routes, oldKey)
+	s.data.Routes[newKey] = &updated
+	if err := s.saveLocked(); err != nil {
+		delete(s.data.Routes, newKey)
+		s.data.Routes[oldKey] = route
+		return err
+	}
+	return nil
+}
+
+func (s *RouteStore) AdvanceTurnBackend(backendID, runID, threadID, expectedTurnID, turnID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runID == "" || threadID == "" || expectedTurnID == "" || turnID == "" {
+		return errors.New("run, thread, expected turn, and next turn identity are required")
+	}
+	route, ok := findRouteByBackendRun(s.data.Routes, backendID, runID)
+	if !ok {
+		return errors.New("route not found")
+	}
+	if route.ThreadID != threadID {
+		return errors.New("route thread identity changed")
+	}
+	if route.TurnID == turnID {
+		return nil
+	}
+	if route.TurnID != expectedTurnID {
+		return errors.New("route expected turn identity changed")
+	}
+	updated := *route
+	updated.TurnID = turnID
+	key := routeKey(updated.BackendID, runID)
+	s.data.Routes[key] = &updated
+	if err := s.saveLocked(); err != nil {
+		s.data.Routes[key] = route
+		return err
+	}
+	return nil
 }
 
 func (s *RouteStore) AdvanceTurn(runID, threadID, expectedTurnID, turnID string) error {
@@ -207,6 +299,36 @@ func (s *RouteStore) AdvanceTurn(runID, threadID, expectedTurnID, turnID string)
 	s.data.Routes[routeKey(updated.BackendID, runID)] = &updated
 	if err := s.saveLocked(); err != nil {
 		s.data.Routes[routeKey(route.BackendID, runID)] = route
+		return err
+	}
+	return nil
+}
+
+func (s *RouteStore) UpdateTurnBackend(backendID, runID, threadID, turnID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runID == "" || threadID == "" || turnID == "" {
+		return errors.New("run, thread, and turn identity are required")
+	}
+	route, ok := findRouteByBackendRun(s.data.Routes, backendID, runID)
+	if !ok {
+		return errors.New("route not found")
+	}
+	if route.ThreadID != threadID {
+		return errors.New("route thread identity changed")
+	}
+	if route.TurnID != "" && route.TurnID != turnID {
+		return errors.New("route turn identity changed")
+	}
+	if route.TurnID == turnID {
+		return nil
+	}
+	updated := *route
+	updated.TurnID = turnID
+	key := routeKey(updated.BackendID, runID)
+	s.data.Routes[key] = &updated
+	if err := s.saveLocked(); err != nil {
+		s.data.Routes[key] = route
 		return err
 	}
 	return nil
@@ -239,6 +361,16 @@ func (s *RouteStore) UpdateTurn(runID, threadID, turnID string) error {
 		return err
 	}
 	return nil
+}
+
+func (s *RouteStore) ByRunBackend(backendID, runID string) (Route, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	route, ok := findRouteByBackendRun(s.data.Routes, backendID, runID)
+	if !ok {
+		return Route{}, false
+	}
+	return *route, true
 }
 
 func (s *RouteStore) ByRun(runID string) (Route, bool) {

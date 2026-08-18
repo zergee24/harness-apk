@@ -256,13 +256,13 @@ data class RemoteBackend(
 )
 
 /**
- * Parses the M4 `backends` list from a host.status payload. Returns an empty
- * list when the payload predates M4 (legacy host-level capabilities only);
- * callers then fall back to the single default backend view.
+ * Parses the M4 `backends` list from a host.status payload. Returns null when
+ * the payload predates M4 (legacy host-level capabilities only), while an
+ * explicitly advertised empty list remains empty.
  */
-internal fun parseRemoteBackends(event: RemoteEvent): List<RemoteBackend> {
-    val payload = event.payload as? JsonObject ?: return emptyList()
-    val backends = payload["backends"] as? JsonArray ?: return emptyList()
+internal fun parseRemoteBackends(event: RemoteEvent): List<RemoteBackend>? {
+    val payload = event.payload as? JsonObject ?: return null
+    val backends = payload["backends"] as? JsonArray ?: return null
     return backends.mapNotNull { element ->
         val item = element as? JsonObject ?: return@mapNotNull null
         val id = item.string("id")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
@@ -437,8 +437,8 @@ internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
         val rawStatus = item["status"] as? JsonObject
         RemoteThread(
             id = id,
-            title = item.string("name")?.take(60)
-                ?: item.string("preview")?.lineSequence()?.firstOrNull()?.take(60)
+            title = item.string("name")?.trim()?.takeIf(String::isNotBlank)?.take(60)
+                ?: item.string("preview")?.lineSequence()?.firstOrNull()?.trim()?.takeIf(String::isNotBlank)?.take(60)
                 ?: "未命名线程",
             preview = item.string("preview").orEmpty().take(240), cwd = item.string("cwd"),
             updatedAt = (item.long("updatedAt") ?: 0L) * 1000L,
