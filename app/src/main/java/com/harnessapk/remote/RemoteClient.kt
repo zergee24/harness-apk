@@ -43,11 +43,15 @@ internal fun remoteRpcErrorMessage(payload: JsonElement?): String {
     }
 }
 
+private fun String.isPlaceholderThreadTitle(): Boolean = this == "未命名会话" || this == "未命名线程"
+
 internal data class PendingRemoteCommand(
     val kind: String,
     val threadId: String? = null,
     val olderCursor: String? = null,
     val selectionGeneration: Long? = null,
+    val listGeneration: Long? = null,
+    val threadRevision: Long? = null,
     val backendId: String = DEFAULT_BACKEND_ID,
 )
 
@@ -104,6 +108,8 @@ class RemoteRepository(
     private val explicitlyInactiveThreads = mutableSetOf<String>()
     private val commandOwnershipLock = Any()
     private var selectionGeneration = 0L
+    private var nextThreadListGeneration = 0L
+    private var appliedThreadListGeneration = 0L
     private var preferredBackendId = DEFAULT_BACKEND_ID
     private var backendSelectionIsFallback = false
     @Volatile
@@ -158,7 +164,9 @@ class RemoteRepository(
 
     fun refreshThreads() = synchronized(commandOwnershipLock) {
         _state.value = _state.value.copy(isThreadListLoading = true, errorMessage = null)
-        if (!send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))) {
+        val generation = ++nextThreadListGeneration
+        val command = RemoteCommand(type = "thread.list", requestId = requestId("thread.list"))
+        if (!send(command, PendingRemoteCommand("thread.list", listGeneration = generation))) {
             _state.value = _state.value.copy(isThreadListLoading = false)
         }
     }
@@ -172,7 +180,8 @@ class RemoteRepository(
                 (thread.execution.state == RemoteThreadExecutionState.UNKNOWN || thread.execution.state.isActive)
             if (!needsLatestUserMessage && !needsExecution) return
             if (!requestedThreadSummaries.add(threadId)) return
-            if (!send(RemoteCommand(type = "thread.summary", requestId = requestId("thread.summary", threadId), threadId = threadId))) {
+            val command = RemoteCommand(type = "thread.summary", requestId = requestId("thread.summary", threadId), threadId = threadId)
+            if (!send(command, PendingRemoteCommand("thread.summary", threadId = threadId, threadRevision = thread.updatedAt))) {
                 requestedThreadSummaries.remove(threadId)
             }
         }
@@ -684,6 +693,20 @@ class RemoteRepository(
         val kind = pending.kind
         val pendingThreadId = pending.threadId
         val pendingSelectionGeneration = pending.selectionGeneration
+        if (kind == "thread.list" && (pending.listGeneration ?: 0L) < appliedThreadListGeneration) return
+        if (kind == "thread.summary" && pendingThreadId != null && pending.threadRevision != null) {
+            val currentRevision = _state.value.threads.firstOrNull { it.id == pendingThreadId }?.updatedAt
+            if (currentRevision != null && currentRevision != pending.threadRevision) {
+                val currentSummaryPending = pendingCommands.values.any {
+                    it.kind == "thread.summary" && it.threadId == pendingThreadId && it.threadRevision == currentRevision
+                }
+                if (!currentSummaryPending) {
+                    requestedThreadSummaries.remove(pendingThreadId)
+                    loadThreadSummary(pendingThreadId)
+                }
+                return
+            }
+        }
         if (kind == "thread.read" || kind == "thread.read.older") {
             val staleThread = pendingThreadId != null && pendingThreadId != _state.value.selectedThreadId
             val staleSelection = pendingSelectionGeneration != null && pendingSelectionGeneration != selectionGeneration
@@ -751,11 +774,17 @@ class RemoteRepository(
         }
         when (kind) {
             "thread.list" -> {
+                pending.listGeneration?.let { appliedThreadListGeneration = maxOf(appliedThreadListGeneration, it) }
                 val previousById = _state.value.threads.associateBy(RemoteThread::id)
                 val refreshed = parseThreads(event).map { thread ->
                     val previous = previousById[thread.id]
                     if (previous?.updatedAt == thread.updatedAt) {
                         thread.copy(
+                            title = if (thread.title.isPlaceholderThreadTitle() && !previous.title.isPlaceholderThreadTitle()) {
+                                previous.title
+                            } else {
+                                thread.title
+                            },
                             latestUserMessage = thread.latestUserMessage ?: previous.latestUserMessage,
                             execution = if (thread.execution.state == RemoteThreadExecutionState.UNKNOWN) {
                                 previous.execution
@@ -767,7 +796,13 @@ class RemoteRepository(
                         thread
                     }
                 }
-                requestedThreadSummaries.retainAll(refreshed.mapTo(mutableSetOf(), RemoteThread::id))
+                val refreshedIDs = refreshed.mapTo(mutableSetOf(), RemoteThread::id)
+                requestedThreadSummaries.retainAll(refreshedIDs)
+                refreshed.forEach { thread ->
+                    if (previousById[thread.id]?.updatedAt != null && previousById[thread.id]?.updatedAt != thread.updatedAt) {
+                        requestedThreadSummaries.remove(thread.id)
+                    }
+                }
                 _state.value = _state.value.copy(
                     threads = refreshed,
                     isThreadListLoading = false,
@@ -787,7 +822,7 @@ class RemoteRepository(
                             if (thread.id == threadId) {
                                 val summaryText = latestUserMessage?.trim()?.takeIf(String::isNotBlank)
                                 thread.copy(
-                                    title = if (thread.title == "未命名会话" || thread.title == "未命名线程") {
+                                    title = if (thread.title.isPlaceholderThreadTitle()) {
                                         summaryText?.lineSequence()?.firstOrNull()?.take(60) ?: thread.title
                                     } else {
                                         thread.title

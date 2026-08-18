@@ -43,6 +43,7 @@ echo "installing dsh-appserver plugin"
 mkdir -p "$PROFILE/node_modules/dsh-appserver"
 cp "$PLUGIN_DIR"/package.json "$PLUGIN_DIR"/index.js "$PLUGIN_DIR"/startup.js \
   "$PLUGIN_DIR"/translate.js "$PLUGIN_DIR"/persist.js \
+  "$PLUGIN_DIR"/thread-list.js "$PLUGIN_DIR"/turn-queue.js \
   "$PROFILE/node_modules/dsh-appserver/"
 
 cat > "$PROFILE/cordis.patch.yml" <<'YAML'

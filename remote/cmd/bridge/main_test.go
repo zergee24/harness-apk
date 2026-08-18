@@ -187,6 +187,49 @@ func TestUnknownControlTransitionReleasesOnlyAfterAuthoritativeNextTurn(t *testi
 	}
 }
 
+func TestNewRunSteerDoesNotOvertakeDurableUnknownPredecessor(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
+		ThreadID: "thread-1", TurnID: "turn-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contextJSON := json.RawMessage(`{"type":"run.steer","runId":"run-1","deviceId":"phone-1","backendId":"dsh","threadId":"thread-1","expectedTurnId":"turn-1","text":"old"}`)
+	if _, execute, err := cache.BeginWithContext("command-old", "run.steer", "hash-old", contextJSON); err != nil || !execute {
+		t.Fatalf("begin old execute=%v err=%v", execute, err)
+	}
+	if _, err := cache.MarkUnknown("command-old", errors.New("lost")); err != nil {
+		t.Fatal(err)
+	}
+	app := backend.NewFake("dsh").OnScript("thread/read", func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"thread":{"id":"thread-1","turns":[{"id":"turn-1"}]}}`), nil
+	})
+	b := &bridge{commandCache: cache, routes: routes, backends: map[string]backend.Backend{"dsh": app}}
+	command := protocol.Command{
+		Type: "run.steer", CommandID: "command-new", RequestID: "request-new", BackendID: "dsh",
+		RunID: "run-1", ExpectedTurnID: "turn-1", Text: "must wait",
+	}
+
+	if err := b.controlRun(context.Background(), "phone-1", command, app); !errors.Is(err, runstate.ErrControlOutcomeUnknown) {
+		t.Fatalf("controlRun error=%v", err)
+	}
+	if calls := app.Calls(); len(calls) != 1 || calls[0].Method != "thread/read" {
+		t.Fatalf("new steer overtook unknown predecessor: %#v", calls)
+	}
+	if _, ok := cache.Lookup("command-new"); ok {
+		t.Fatal("blocked successor was persisted as if dispatched")
+	}
+}
+
 func TestRestartedBridgeReconcilesPersistedUnknownControlWithoutTransition(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))

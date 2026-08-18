@@ -1859,6 +1859,85 @@ class RemoteRepositoryTest {
     }
 
     @Test
+    fun delayedOlderThreadListCannotOverwriteNewerListResponse() {
+        val repository = repository()
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pending["thread.list:old"] = PendingRemoteCommand("thread.list", listGeneration = 1)
+        pending["thread.list:new"] = PendingRemoteCommand("thread.list", listGeneration = 2)
+
+        repository.handlePendingRpcResponse(
+            RemoteEvent(
+                type = "rpc.response", requestId = "thread.list:new",
+                payload = Json.parseToJsonElement("""{"result":{"data":[{"id":"new-thread","preview":"新列表","updatedAt":2}]}}"""),
+            ),
+        )
+        repository.handlePendingRpcResponse(
+            RemoteEvent(
+                type = "rpc.response", requestId = "thread.list:old",
+                payload = Json.parseToJsonElement("""{"result":{"data":[{"id":"old-thread","preview":"旧列表","updatedAt":1}]}}"""),
+            ),
+        )
+
+        assertEquals(listOf("new-thread"), repository.state.value.threads.map(RemoteThread::id))
+    }
+
+    @Test
+    fun equalRevisionListRefreshPreservesSummaryDerivedTitle() {
+        val repository = repository()
+        repository.handlePendingRpcResponse(
+            RemoteEvent(
+                type = "rpc.response", requestId = "thread.list:seed",
+                payload = Json.parseToJsonElement("""{"result":{"data":[{"id":"thread-1","name":"未命名会话","updatedAt":2}]}}"""),
+            ),
+        )
+        repository.handlePendingRpcResponse(
+            RemoteEvent(
+                type = "rpc.response", requestId = "thread.summary:seed",
+                payload = Json.parseToJsonElement("""{"result":{"threadId":"thread-1","latestUserMessage":"真实问题"}}"""),
+            ),
+        )
+        repository.handlePendingRpcResponse(
+            RemoteEvent(
+                type = "rpc.response", requestId = "thread.list:refresh",
+                payload = Json.parseToJsonElement("""{"result":{"data":[{"id":"thread-1","name":"未命名会话","updatedAt":2}]}}"""),
+            ),
+        )
+
+        assertEquals("真实问题", repository.state.value.threads.single().title)
+        assertEquals("真实问题", repository.state.value.threads.single().latestUserMessage)
+    }
+
+    @Test
+    fun staleThreadSummaryCannotOverwriteANewerThreadRevision() {
+        val repository = repository()
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pending = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        setRepositoryState(
+            repository,
+            repository.state.value.copy(
+                threads = listOf(RemoteThread("thread-1", "新标题", "", "/work", 2_000L, "idle")),
+            ),
+        )
+        pending["thread.summary:old"] = PendingRemoteCommand(
+            "thread.summary", threadId = "thread-1", threadRevision = 1_000L,
+        )
+
+        repository.handlePendingRpcResponse(
+            RemoteEvent(
+                type = "rpc.response", requestId = "thread.summary:old",
+                payload = Json.parseToJsonElement("""{"result":{"threadId":"thread-1","latestUserMessage":"旧问题"}}"""),
+            ),
+        )
+
+        val thread = repository.state.value.threads.single()
+        assertEquals("新标题", thread.title)
+        assertEquals(null, thread.latestUserMessage)
+    }
+
+    @Test
     fun threadListAcceptsLatestUserMessageWithoutBreakingLegacyPreview() {
         val threads = parseThreads(
             RemoteEvent(

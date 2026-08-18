@@ -31,6 +31,7 @@ async function projectionServiceList(ctx, limit) {
 	const persistence = ctx.get("sessionPersistence");
 	if (persistence === void 0 || typeof persistence.list !== "function") return null;
 	const cache = ctx.get("sessionProjectionCache");
+	if (cache === void 0 || typeof cache.cachedSnapshot !== "function") return null;
 	const agents = ctx.get("agents");
 	const sessions = ctx.get("sessions");
 	const byID = new Map();
@@ -40,7 +41,7 @@ async function projectionServiceList(ctx, limit) {
 	}
 	const items = [];
 	for (const meta of byID.values()) {
-		if (meta.origin === "subagent" || meta.parentSession !== void 0) continue;
+		if (meta.origin === "subagent") continue;
 		let projections;
 		try {
 			projections = cache?.cachedSnapshot(meta);

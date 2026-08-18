@@ -61,6 +61,7 @@ func Open(path string) (*Store, error) {
 		s.data.Records = map[string]*Record{}
 	}
 	dirty := false
+	needsDispatchOrderBackfill := false
 	for _, record := range s.data.Records {
 		if record.Status == StatusInFlight {
 			record.Status = StatusUnknown
@@ -68,6 +69,25 @@ func Open(path string) (*Store, error) {
 			record.UpdatedAt = time.Now().UnixMilli()
 			dirty = true
 		}
+		if record.DispatchOrder == 0 {
+			needsDispatchOrderBackfill = true
+		}
+	}
+	if needsDispatchOrderBackfill {
+		records := make([]*Record, 0, len(s.data.Records))
+		for _, record := range s.data.Records {
+			records = append(records, record)
+		}
+		sort.Slice(records, func(i, j int) bool {
+			if records[i].CreatedAt != records[j].CreatedAt {
+				return records[i].CreatedAt < records[j].CreatedAt
+			}
+			return records[i].CommandID < records[j].CommandID
+		})
+		for index, record := range records {
+			record.DispatchOrder = uint64(index + 1)
+		}
+		dirty = true
 	}
 	if dirty {
 		if err := s.saveLocked(); err != nil {

@@ -51,6 +51,7 @@ type bridge struct {
 	writeMu               sync.Mutex
 	turnRouteMu           sync.Mutex
 	controlReconcileMu    sync.Mutex
+	rosterPublishMu       sync.Mutex
 	state                 bridgeState
 	path                  string
 	conn                  *websocket.Conn
@@ -69,6 +70,7 @@ type bridge struct {
 	turnCallTails         map[string]chan struct{}
 	startedTurns          map[string][]string
 	controlEventEmitter   func(context.Context, string, string, string, string, json.RawMessage) (string, error)
+	initialRosterReady    chan struct{}
 }
 
 func main() {
@@ -422,6 +424,7 @@ func executeCachedCommand(
 
 func (b *bridge) run(ctx context.Context, specs []backend.Spec) error {
 	b.initializeBackendOrder(specs)
+	b.initialRosterReady = make(chan struct{})
 	wsURL, err := relayWebSocketURL(b.state.RelayURL, "host", b.state.HostID)
 	if err != nil {
 		return err
@@ -453,7 +456,8 @@ func (b *bridge) run(ctx context.Context, specs []backend.Spec) error {
 		}
 	}()
 	backendReady := make(chan backend.Backend, len(specs))
-	go awaitInitialBackendRoster(ctx, backendReady, len(specs), 35*time.Second, func() {
+	go awaitInitialBackendRoster(ctx, backendReady, len(b.backendOrder), 35*time.Second, func() {
+		b.markInitialRosterReady()
 		b.broadcastHostStatus(ctx)
 	})
 	for _, spec := range specs {
@@ -643,7 +647,35 @@ func (b *bridge) unregisterBackend(id string) {
 	delete(b.backends, backend.NormalizeID(id))
 }
 
+func (b *bridge) markInitialRosterReady() {
+	if b.initialRosterReady == nil {
+		return
+	}
+	select {
+	case <-b.initialRosterReady:
+	default:
+		close(b.initialRosterReady)
+	}
+}
+
+func (b *bridge) initialRosterIsReady() bool {
+	if b.initialRosterReady == nil {
+		return true
+	}
+	select {
+	case <-b.initialRosterReady:
+		return true
+	default:
+		return false
+	}
+}
+
 func (b *bridge) broadcastHostStatus(ctx context.Context) {
+	if !b.initialRosterIsReady() {
+		return
+	}
+	b.rosterPublishMu.Lock()
+	defer b.rosterPublishMu.Unlock()
 	b.mu.Lock()
 	deviceIDs := make([]string, 0, len(b.state.DeviceSecrets))
 	for deviceID := range b.state.DeviceSecrets {
@@ -746,10 +778,27 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	}
 	switch command.Type {
 	case "host.status":
-		return b.sendEvent(ctx, deviceID, protocol.Event{
-			Type: "host.status", RequestID: command.RequestID, Message: "online",
-			Payload: b.hostStatusPayload(), CreatedAt: time.Now().UnixMilli(),
-		}, "")
+		sendStatus := func(sendCtx context.Context) error {
+			b.rosterPublishMu.Lock()
+			defer b.rosterPublishMu.Unlock()
+			return b.sendEvent(sendCtx, deviceID, protocol.Event{
+				Type: "host.status", RequestID: command.RequestID, Message: "online",
+				Payload: b.hostStatusPayload(), CreatedAt: time.Now().UnixMilli(),
+			}, "")
+		}
+		if b.initialRosterIsReady() {
+			return sendStatus(ctx)
+		}
+		go func() {
+			select {
+			case <-b.initialRosterReady:
+				if err := sendStatus(ctx); err != nil && ctx.Err() == nil {
+					log.Printf("send deferred backend roster to device %s: %v", deviceID, err)
+				}
+			case <-ctx.Done():
+			}
+		}()
+		return nil
 	case "event.ack":
 		if b.journal == nil {
 			return errors.New("logical journal is unavailable")
@@ -1462,6 +1511,14 @@ func (b *bridge) controlRun(ctx context.Context, deviceID string, command protoc
 	}
 	command.BackendID = route.BackendID
 	command.ThreadID = route.ThreadID
+	if command.Type == "run.steer" && b.hasDurableUnknownSteer(command.BackendID, command.ThreadID) {
+		if err := b.reconcileUnknownTurnTransitions(ctx); err != nil {
+			log.Printf("reconcile predecessor before steer %s: %v", command.CommandID, err)
+		}
+		if b.hasDurableUnknownSteer(command.BackendID, command.ThreadID) {
+			return runstate.ErrControlOutcomeUnknown
+		}
+	}
 	queued := b.hasQueuedTurnCall(command.BackendID, command.ThreadID)
 	wait, release := b.enqueueTurnCall(command.BackendID, command.ThreadID)
 	go func() {
@@ -1627,6 +1684,24 @@ func (b *bridge) hasUnknownControlReconciliation(backendID string) bool {
 			if json.Unmarshal(record.ContextJSON, &context) == nil && backend.NormalizeID(context.BackendID) == normalized {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func (b *bridge) hasDurableUnknownSteer(backendID, threadID string) bool {
+	if b.commandCache == nil {
+		return false
+	}
+	normalized := backend.NormalizeID(backendID)
+	for _, record := range b.commandCache.RecordsByTypeStatus("run.steer", commandcache.StatusUnknown) {
+		var context struct {
+			BackendID string `json:"backendId"`
+			ThreadID  string `json:"threadId"`
+		}
+		if json.Unmarshal(record.ContextJSON, &context) == nil &&
+			backend.NormalizeID(context.BackendID) == normalized && context.ThreadID == threadID {
+			return true
 		}
 	}
 	return false

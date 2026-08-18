@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { serializeTurnStart } from "./turn-queue.js";
 import { apiThreadListResult } from "./thread-list.js";
+
+test("installer copies every appserver runtime module", () => {
+	const installer = readFileSync(new URL("../install-appserver.sh", import.meta.url), "utf8");
+	assert.match(installer, /"\$PLUGIN_DIR"\/thread-list\.js/);
+	assert.match(installer, /"\$PLUGIN_DIR"\/turn-queue\.js/);
+});
 
 test("thread list uses the zero-log ApiProxy projection baseline", async () => {
 	let inspectCalls = 0;
@@ -52,20 +59,20 @@ test("thread list uses the zero-log ApiProxy projection baseline", async () => {
 test("thread list falls back to public projection services without inspecting logs", async () => {
 	let inspectCalls = 0;
 	const meta = { id: "session-cold", createdAt: 1_786_700_000_000, cwd: "/work/cold" };
+	const userFork = { id: "session-fork", parentSession: "session-cold", createdAt: 1_786_700_004_000, cwd: "/work/fork" };
 	const ctx = {
 		get(name) {
 			if (name === "sessionPersistence") return {
-				async list() { return [meta]; },
+				async list() { return [meta, userFork]; },
 				async inspect() { inspectCalls++; throw new Error("must not inspect"); },
 			};
 			if (name === "sessionProjectionCache") return {
 				cachedSnapshot(actual) {
-					assert.equal(actual, meta);
 					return { values: {
-						title: "Cold title",
+						title: actual === meta ? "Cold title" : "User fork",
 						// Cold-cache blank:true is only a checkpoint-prefix hint; without an
 						// authoritative log probe the session must stay visible.
-						sessionListMetadata: { blank: true, lastPromptAt: 1_786_700_005_000 },
+						sessionListMetadata: { blank: true, lastPromptAt: actual === meta ? 1_786_700_005_000 : 1_786_700_006_000 },
 					} };
 				},
 			};
@@ -76,10 +83,31 @@ test("thread list falls back to public projection services without inspecting lo
 	const result = await apiThreadListResult(ctx, 20);
 
 	assert.equal(inspectCalls, 0);
-	assert.deepEqual(result.data, [{
-		id: "session-cold", name: "Cold title", preview: "", cwd: "/work/cold",
-		updatedAt: 1_786_700_005, status: { type: "idle" },
-	}]);
+	assert.deepEqual(result.data, [
+		{
+			id: "session-fork", name: "User fork", preview: "", cwd: "/work/fork",
+			updatedAt: 1_786_700_006, status: { type: "idle" },
+		},
+		{
+			id: "session-cold", name: "Cold title", preview: "", cwd: "/work/cold",
+			updatedAt: 1_786_700_005, status: { type: "idle" },
+		},
+	]);
+});
+
+test("thread list defers to persisted-log compatibility path when projection cache is absent", async () => {
+	let inspectCalls = 0;
+	const ctx = {
+		get(name) {
+			if (name === "sessionPersistence") return {
+				async list() { return [{ id: "session-old", createdAt: 1, cwd: "/old" }]; },
+				async inspect() { inspectCalls++; return null; },
+			};
+		},
+	};
+
+	assert.equal(await apiThreadListResult(ctx, 20), null);
+	assert.equal(inspectCalls, 0);
 });
 
 test("same-thread turn starts are serialized before capturing another cursor", async () => {
