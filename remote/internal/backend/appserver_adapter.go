@@ -3,7 +3,10 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"syscall"
 
 	"github.com/harnessapk/remote/internal/agent"
 )
@@ -86,19 +89,16 @@ func (a *AppServerAdapter) Execute(ctx context.Context, operation agent.Operatio
 }
 
 func (a *AppServerAdapter) listThreads(ctx context.Context, op agent.ListThreads) (agent.Outcome, error) {
-	if op.Query.CWD == "" {
-		return agent.Outcome{}, invalidField("list_threads", "cwd")
-	}
 	params := struct {
-		Limit       int      `json:"limit"`
-		SortKey     string   `json:"sortKey"`
-		SortOrder   string   `json:"sortOrder"`
-		SourceKinds []string `json:"sourceKinds"`
+		Limit         int      `json:"limit"`
+		SortKey       string   `json:"sortKey"`
+		SortDirection string   `json:"sortDirection"`
+		SourceKinds   []string `json:"sourceKinds"`
 	}{
-		Limit:       50,
-		SortKey:     "updated_at",
-		SortOrder:   "desc",
-		SourceKinds: []string{"cli", "vscode", "exec", "appServer", "subAgent", "unknown"},
+		Limit:         50,
+		SortKey:       "updated_at",
+		SortDirection: "desc",
+		SourceKinds:   []string{"cli", "vscode", "exec", "appServer"},
 	}
 	raw, err := a.call(ctx, "thread/list", params)
 	if err != nil {
@@ -118,7 +118,7 @@ func (a *AppServerAdapter) listThreads(ctx context.Context, op agent.ListThreads
 		if thread.ID == "" {
 			return agent.Outcome{}, protocolError("thread/list", fmt.Errorf("thread id is missing"))
 		}
-		if thread.CWD == op.Query.CWD {
+		if op.Query.CWD == "" || thread.CWD == op.Query.CWD {
 			threads = append(threads, agent.ThreadSummary{ID: thread.ID, CWD: thread.CWD})
 		}
 	}
@@ -275,9 +275,20 @@ type textInput struct {
 func (a *AppServerAdapter) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	raw, err := a.raw.Call(ctx, method, params)
 	if err != nil {
-		return nil, fmt.Errorf("%w: backend %q method %q: %v", agent.ErrUnavailable, a.manifest.BackendID, method, err)
+		if isUnavailableError(err) {
+			return nil, fmt.Errorf("%w: backend %q method %q: %w", agent.ErrUnavailable, a.manifest.BackendID, method, err)
+		}
+		return nil, err
 	}
 	return raw, nil
+}
+
+func isUnavailableError(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 func decodeNestedID(raw json.RawMessage, field string) (string, error) {

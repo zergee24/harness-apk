@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"syscall"
 	"testing"
 
 	"github.com/harnessapk/remote/internal/agent"
@@ -111,7 +112,7 @@ func TestAppServerAdapterInterruptTurn(t *testing.T) {
 func TestAppServerAdapterListThreads(t *testing.T) {
 	raw := NewFake("codex")
 	raw.OnScript("thread/list", func(method string, params any) (json.RawMessage, error) {
-		assertJSONParams(t, params, `{"limit":50,"sortKey":"updated_at","sortOrder":"desc","sourceKinds":["cli","vscode","exec","appServer","subAgent","unknown"]}`)
+		assertJSONParams(t, params, `{"limit":50,"sortKey":"updated_at","sortDirection":"desc","sourceKinds":["cli","vscode","exec","appServer"]}`)
 		return json.RawMessage(`{"data":[{"id":"thread-1","cwd":"/wanted"},{"id":"thread-2","cwd":"/other"},{"id":"thread-3","cwd":"/wanted"}]}`), nil
 	})
 
@@ -120,6 +121,23 @@ func TestAppServerAdapterListThreads(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	want := []agent.ThreadSummary{{ID: "thread-1", CWD: "/wanted"}, {ID: "thread-3", CWD: "/wanted"}}
+	if out.Threads == nil || !reflect.DeepEqual(out.Threads.Threads, want) {
+		t.Fatalf("Execute() outcome = %#v, want %#v", out, want)
+	}
+}
+
+func TestAppServerAdapterListThreadsWithoutCWDReturnsAllThreads(t *testing.T) {
+	raw := NewFake("codex")
+	raw.OnScript("thread/list", func(method string, params any) (json.RawMessage, error) {
+		assertJSONParams(t, params, `{"limit":50,"sortKey":"updated_at","sortDirection":"desc","sourceKinds":["cli","vscode","exec","appServer"]}`)
+		return json.RawMessage(`{"data":[{"id":"thread-1","cwd":"/one"},{"id":"thread-2","cwd":"/two"}]}`), nil
+	})
+
+	out, err := NewAppServerAdapter(raw).Execute(context.Background(), agent.ListThreads{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	want := []agent.ThreadSummary{{ID: "thread-1", CWD: "/one"}, {ID: "thread-2", CWD: "/two"}}
 	if out.Threads == nil || !reflect.DeepEqual(out.Threads.Threads, want) {
 		t.Fatalf("Execute() outcome = %#v, want %#v", out, want)
 	}
@@ -192,7 +210,6 @@ func TestAppServerAdapterRejectsInvalidOperationsBeforeRawCall(t *testing.T) {
 		name string
 		op   agent.Operation
 	}{
-		{name: "list cwd", op: agent.ListThreads{}},
 		{name: "read thread id", op: agent.ReadThread{}},
 		{name: "start cwd", op: agent.StartThread{}},
 		{name: "start turn thread id", op: agent.StartTurn{Text: "hello", ClientMessageID: "message-1"}},
@@ -225,7 +242,7 @@ func TestAppServerAdapterRejectsInvalidOperationsBeforeRawCall(t *testing.T) {
 }
 
 func TestAppServerAdapterMapsUnavailableErrors(t *testing.T) {
-	for _, cause := range []error{context.Canceled, io.EOF} {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, io.EOF, io.ErrClosedPipe, syscall.EPIPE} {
 		t.Run(cause.Error(), func(t *testing.T) {
 			raw := NewFake("codex")
 			raw.OnScript("thread/start", func(string, any) (json.RawMessage, error) { return nil, cause })
@@ -234,6 +251,20 @@ func TestAppServerAdapterMapsUnavailableErrors(t *testing.T) {
 				t.Fatalf("Execute() error = %v, want ErrUnavailable", err)
 			}
 		})
+	}
+}
+
+func TestAppServerAdapterPreservesProviderErrors(t *testing.T) {
+	cause := errors.New("provider rejected request")
+	raw := NewFake("codex")
+	raw.OnScript("thread/start", func(string, any) (json.RawMessage, error) { return nil, cause })
+
+	_, err := NewAppServerAdapter(raw).Execute(context.Background(), agent.StartThread{CWD: "/worktree"})
+	if err != cause {
+		t.Fatalf("Execute() error = %v, want original error %v", err, cause)
+	}
+	if errors.Is(err, agent.ErrUnavailable) {
+		t.Fatalf("Execute() error = %v, must not be ErrUnavailable", err)
 	}
 }
 
