@@ -2,7 +2,7 @@
 
 日期：2026-08-21
 
-状态：已暂停，等待外部 Coding Agent 从 Task 2 的未提交修正继续
+状态：G1 已完成（Task 2 收口至 Task 6 自动化 Gate 全通过）；实体机冒烟为外部阻塞（ADB 未授权）。未 push。
 
 项目：`harness-apk`
 
@@ -38,13 +38,25 @@ git diff -- remote/internal/backend/appserver_adapter.go remote/internal/backend
 
 ## Repository State
 
+G1 完成后（2026-08-21）：
+
 ```text
 worktree: /Users/tony/Documents/harness-apk/.worktrees/m4-multi-backend-bridge
 branch:   codex/m4-multi-backend-bridge
-HEAD:     0aaa9a0a04caf340bbc5836addad583eff0d68af
+HEAD:     文档提交（本文档状态更新）
 upstream: origin/codex/m4-multi-backend-bridge
-ahead:    6 commits
+ahead:    12 commits（含本文档提交）
 push:     未执行
+```
+
+G1 新增提交：
+
+```text
+effdfa0 修复：收紧 App Server 适配契约
+abfce8d 重构：Run 启动改用 Agent Runtime
+c630c00 重构：Run 控制改用 Agent Runtime
+1028904 重构：Bridge 接入强类型 Runtime
++ 文档提交（计划/spec/handoff 状态更新）
 ```
 
 本次 Host Gateway 重构已提交：

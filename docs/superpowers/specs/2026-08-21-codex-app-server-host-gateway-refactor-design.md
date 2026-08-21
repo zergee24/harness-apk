@@ -2,7 +2,7 @@
 
 日期：2026-08-21
 
-状态：已确认方向，进入分阶段实施
+状态：G1 Run Runtime vertical slice 已交付（`effdfa0`..`1028904`）；实体机冒烟因 ADB 未授权外部阻塞。G2 待启动。
 
 实施基线：`codex/m4-multi-backend-bridge`，HEAD `d520703`
 
