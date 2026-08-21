@@ -21,10 +21,6 @@ var (
 	ErrCommandInFlight = errors.New("run start is already in flight")
 )
 
-type AppServerCaller interface {
-	Call(context.Context, string, any) (json.RawMessage, error)
-}
-
 type StartCommand struct {
 	CommandID             string `json:"commandId"`
 	RunID                 string `json:"runId"`

@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"syscall"
 
+	"github.com/harnessapk/remote/internal/agent"
 	"github.com/harnessapk/remote/internal/commandcache"
 )
 
@@ -49,7 +52,7 @@ func (c ControlCommand) legacyPayloadSHA256() string {
 type ControlCoordinator struct {
 	Cache      *commandcache.Store
 	Routes     *RouteStore
-	App        AppServerCaller
+	Runtime    agent.Executor
 	Emit       func(context.Context, string, string, string, json.RawMessage) (string, error)
 	EmitStable func(context.Context, string, string, string, string, json.RawMessage) (string, error)
 }
@@ -153,7 +156,7 @@ func (c ControlCoordinator) Execute(ctx context.Context, command ControlCommand)
 	if replayed, err := c.Replay(command); replayed {
 		return err
 	}
-	if c.Cache == nil || c.Routes == nil || c.App == nil || c.Emit == nil {
+	if c.Cache == nil || c.Routes == nil || c.Runtime == nil || c.Emit == nil {
 		return errors.New("run control dependencies are incomplete")
 	}
 	route, ok := c.Routes.ByRunBackend(command.BackendID, command.RunID)
@@ -182,52 +185,40 @@ func (c ControlCoordinator) Execute(ctx context.Context, command ControlCommand)
 		return reuseControlRecord(record)
 	}
 
-	var method string
-	var params any
+	var operation agent.Operation
 	var eventType, latestLine, presentationKind string
 	switch command.Type {
 	case "run.steer":
 		if command.Text == "" {
 			return c.fail(command.CommandID, errors.New("steer text is required"))
 		}
-		method = "turn/steer"
-		params = map[string]any{
-			"threadId": route.ThreadID, "expectedTurnId": dispatchTurnID,
-			"input": []map[string]string{{"type": "text", "text": command.Text}},
+		operation = agent.SteerTurn{
+			ThreadID: route.ThreadID, ExpectedTurnID: dispatchTurnID, Text: command.Text,
 		}
 		eventType, latestLine, presentationKind = "run.steered", "已补充方向", "STEER"
 	case "run.interrupt":
-		method = "turn/interrupt"
-		params = map[string]string{"threadId": route.ThreadID, "turnId": dispatchTurnID}
+		operation = agent.InterruptTurn{
+			ThreadID: route.ThreadID, TurnID: dispatchTurnID,
+		}
 		eventType, latestLine, presentationKind = "run.interrupt.accepted", "正在停止任务", "INTERRUPT"
 	default:
 		return c.fail(command.CommandID, fmt.Errorf("unsupported run control command %q", command.Type))
 	}
-	callResult, err := c.App.Call(ctx, method, params)
+	outcome, err := c.Runtime.Execute(ctx, operation)
 	if err != nil {
-		_, _ = c.Cache.MarkUnknown(command.CommandID, err)
-		return ErrControlOutcomeUnknown
-	}
-	if command.Type == "run.steer" {
-		var response struct {
-			TurnID string `json:"turnId"`
-			Turn   struct {
-				ID string `json:"id"`
-			} `json:"turn"`
-		}
-		if err := json.Unmarshal(callResult, &response); err != nil {
+		if isOutcomeUnknownError(err) {
 			_, _ = c.Cache.MarkUnknown(command.CommandID, err)
 			return ErrControlOutcomeUnknown
 		}
-		nextTurnID := response.TurnID
-		if nextTurnID == "" {
-			nextTurnID = response.Turn.ID
-		}
-		if nextTurnID == "" {
-			cause := errors.New("steer response is missing turn id")
-			_, _ = c.Cache.MarkUnknown(command.CommandID, cause)
+		return c.fail(command.CommandID, err)
+	}
+	if command.Type == "run.steer" {
+		if outcome.StartedTurn == nil || outcome.StartedTurn.ID == "" {
+			_, _ = c.Cache.MarkUnknown(command.CommandID, fmt.Errorf(
+				"%w: steer outcome is missing turn id", agent.ErrOutcomeUnknown))
 			return ErrControlOutcomeUnknown
 		}
+		nextTurnID := outcome.StartedTurn.ID
 		if err := c.Routes.AdvanceTurnBackend(route.BackendID, route.RunID, route.ThreadID, dispatchTurnID, nextTurnID); err != nil {
 			_, _ = c.Cache.MarkUnknown(command.CommandID, err)
 			return ErrControlOutcomeUnknown
@@ -257,7 +248,7 @@ func (c ControlCoordinator) Execute(ctx context.Context, command ControlCommand)
 }
 
 func (c ControlCoordinator) ReconcileUnknown(ctx context.Context, commandID string) (ControlReconciliationResult, error) {
-	if c.Cache == nil || c.Routes == nil || c.App == nil || c.Emit == nil {
+	if c.Cache == nil || c.Routes == nil || c.Runtime == nil || c.Emit == nil {
 		return ControlReconciliationResult{}, errors.New("run control reconciliation dependencies are incomplete")
 	}
 	record, ok := c.Cache.Lookup(commandID)
@@ -279,26 +270,21 @@ func (c ControlCoordinator) ReconcileUnknown(ctx context.Context, commandID stri
 	if !ok || route.DeviceID != reconciliation.DeviceID || route.ThreadID != reconciliation.ThreadID {
 		return ControlReconciliationResult{}, errors.New("control reconciliation route ownership changed")
 	}
-	result, err := c.App.Call(ctx, "thread/read", map[string]any{
-		"threadId": reconciliation.ThreadID, "includeTurns": true,
+	outcome, err := c.Runtime.Execute(ctx, agent.ReadThread{
+		ThreadID: reconciliation.ThreadID, IncludeTurns: true,
 	})
 	if err != nil {
 		return ControlReconciliationResult{}, err
 	}
-	var envelope struct {
-		Thread struct {
-			Turns []struct {
-				ID string `json:"id"`
-			} `json:"turns"`
-		} `json:"thread"`
+	if outcome.Thread == nil {
+		return ControlReconciliationResult{}, fmt.Errorf(
+			"%w: read thread outcome is missing", agent.ErrProtocol)
 	}
-	if err := json.Unmarshal(result, &envelope); err != nil {
-		return ControlReconciliationResult{}, fmt.Errorf("decode control reconciliation thread: %w", err)
-	}
+	turns := outcome.Thread.Turns
 	nextTurnID := ""
-	for index, turn := range envelope.Thread.Turns {
-		if turn.ID == reconciliation.ExpectedTurnID && index+1 < len(envelope.Thread.Turns) {
-			nextTurnID = envelope.Thread.Turns[index+1].ID
+	for index, turn := range turns {
+		if turn.ID == reconciliation.ExpectedTurnID && index+1 < len(turns) {
+			nextTurnID = turns[index+1].ID
 			break
 		}
 	}
@@ -314,7 +300,7 @@ func (c ControlCoordinator) ReconcileUnknown(ctx context.Context, commandID stri
 		}
 	} else if route.TurnID != nextTurnID {
 		nextIndex, routeIndex := -1, -1
-		for index, turn := range envelope.Thread.Turns {
+		for index, turn := range turns {
 			if turn.ID == nextTurnID {
 				nextIndex = index
 			}
@@ -344,6 +330,20 @@ func (c ControlCoordinator) ReconcileUnknown(ctx context.Context, commandID stri
 		return ControlReconciliationResult{}, err
 	}
 	return ControlReconciliationResult{Resolved: true, ThreadID: reconciliation.ThreadID, TurnID: nextTurnID}, nil
+}
+
+func isOutcomeUnknownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, agent.ErrUnavailable) || errors.Is(err, agent.ErrOutcomeUnknown) {
+		return true
+	}
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 func reuseControlRecord(record commandcache.Record) error {
