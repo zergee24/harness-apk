@@ -76,3 +76,70 @@ func TestFakeRuntimeCloseIsIdempotentAndSignalsDone(t *testing.T) {
 		t.Fatal("Done() was not observable after Close()")
 	}
 }
+
+func TestFakeRuntimeCopiesNestedCompletionSchemaOnExecute(t *testing.T) {
+	fake := NewFake(Manifest{
+		Operations: map[OperationKind]bool{OperationStartTurn: true},
+	})
+	schema := map[string]any{
+		"nested": map[string]any{
+			"label": "before",
+			"items": []any{"before"},
+		},
+	}
+
+	_, err := fake.Execute(context.Background(), StartTurn{
+		ThreadID:         "thread-1",
+		CompletionSchema: schema,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	nested := schema["nested"].(map[string]any)
+	nested["label"] = "after"
+	nested["items"].([]any)[0] = "after"
+
+	call := fake.Calls()[0].(StartTurn)
+	recorded := call.CompletionSchema["nested"].(map[string]any)
+	if recorded["label"] != "before" {
+		t.Fatalf("recorded nested label = %v, want before", recorded["label"])
+	}
+	if recorded["items"].([]any)[0] != "before" {
+		t.Fatalf("recorded nested item = %v, want before", recorded["items"].([]any)[0])
+	}
+}
+
+func TestFakeRuntimeCopiesNestedCompletionSchemaOnCalls(t *testing.T) {
+	fake := NewFake(Manifest{
+		Operations: map[OperationKind]bool{OperationStartTurn: true},
+	})
+	schema := map[string]any{
+		"nested": map[string]any{
+			"label": "before",
+			"items": []any{"before"},
+		},
+	}
+
+	_, err := fake.Execute(context.Background(), StartTurn{
+		ThreadID:         "thread-1",
+		CompletionSchema: schema,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	returned := fake.Calls()[0].(StartTurn)
+	returnedNested := returned.CompletionSchema["nested"].(map[string]any)
+	returnedNested["label"] = "changed through Calls"
+	returnedNested["items"].([]any)[0] = "changed through Calls"
+
+	recorded := fake.Calls()[0].(StartTurn)
+	recordedNested := recorded.CompletionSchema["nested"].(map[string]any)
+	if recordedNested["label"] != "before" {
+		t.Fatalf("recorded nested label = %v, want before", recordedNested["label"])
+	}
+	if recordedNested["items"].([]any)[0] != "before" {
+		t.Fatalf("recorded nested item = %v, want before", recordedNested["items"].([]any)[0])
+	}
+}

@@ -211,9 +211,42 @@ func cloneMap(input map[string]any) map[string]any {
 	}
 	clone := make(map[string]any, len(input))
 	for key, value := range input {
-		clone[key] = value
+		clone[key] = cloneSchemaValue(value)
 	}
 	return clone
+}
+
+func cloneSchemaValue(value any) any {
+	switch value := value.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		return cloneMap(value)
+	case []any:
+		clone := make([]any, len(value))
+		for index, item := range value {
+			clone[index] = cloneSchemaValue(item)
+		}
+		return clone
+	case []map[string]any:
+		clone := make([]map[string]any, len(value))
+		for index, item := range value {
+			clone[index] = cloneMap(item)
+		}
+		return clone
+	case []string:
+		return append([]string(nil), value...)
+	case []bool:
+		return append([]bool(nil), value...)
+	case []float64:
+		return append([]float64(nil), value...)
+	case []int:
+		return append([]int(nil), value...)
+	case []int64:
+		return append([]int64(nil), value...)
+	default:
+		return value
+	}
 }
 
 func cloneOutcome(outcome Outcome) Outcome {
