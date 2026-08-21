@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/harnessapk/remote/internal/agent"
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/protocol"
 	"github.com/harnessapk/remote/internal/workspace"
@@ -66,12 +67,12 @@ type StartResult struct {
 type Coordinator struct {
 	Cache            *commandcache.Store
 	Routes           *RouteStore
-	App              AppServerCaller
+	Runtime          agent.Executor
 	HostID           string
 	ResolveWorkspace func(deviceID, workspaceID string) (workspace.Candidate, bool)
 	InspectWorkspace func(cwd string) (workspace.Candidate, error)
 	CaptureBaseline  func(cwd string) (workspace.Baseline, error)
-	CallTurnStart    func(ctx context.Context, threadID string, params any) (json.RawMessage, error)
+	ExecuteTurn      func(ctx context.Context, operation agent.Operation) (agent.Outcome, error)
 	Emit             func(ctx context.Context, deviceID, runID, eventType string, payload json.RawMessage) (string, error)
 }
 
@@ -109,7 +110,7 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 		}
 		return cachedStartResult(record)
 	}
-	if c.Routes == nil || c.App == nil || c.ResolveWorkspace == nil || c.InspectWorkspace == nil || c.Emit == nil {
+	if c.Routes == nil || c.Runtime == nil || c.ResolveWorkspace == nil || c.InspectWorkspace == nil || c.Emit == nil {
 		return StartResult{}, c.fail(command.CommandID, errors.New("run coordinator dependencies are incomplete"))
 	}
 	route := Route{
@@ -166,52 +167,47 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 	}
 	reusedRecentThread := threadID != ""
 	if threadID == "" {
-		result, callErr := c.App.Call(ctx, "thread/start", map[string]any{"cwd": current.CWD})
+		outcome, callErr := c.Runtime.Execute(ctx, agent.StartThread{CWD: current.CWD})
 		if callErr != nil {
 			return StartResult{}, c.unknown(command.CommandID, callErr)
 		}
-		threadID, err = decodeThreadStartID(result)
-		if err != nil {
-			return StartResult{}, c.unknown(command.CommandID, err)
+		if outcome.StartedThread == nil || outcome.StartedThread.ID == "" {
+			return StartResult{}, c.unknown(command.CommandID, fmt.Errorf(
+				"%w: start thread outcome is missing thread id", agent.ErrProtocol))
 		}
+		threadID = outcome.StartedThread.ID
 	}
 	route.ThreadID = threadID
 	if err := c.Routes.Put(route); err != nil {
 		return StartResult{}, c.unknown(command.CommandID, err)
 	}
 
-	turnParams := func(threadID string) map[string]any {
-		return map[string]any{
-			"threadId":            threadID,
-			"input":               []map[string]string{{"type": "text", "text": command.Objective}},
-			"clientUserMessageId": command.CommandID,
-			"outputSchema":        completionOutputSchema(),
-		}
-	}
-	turnResult, err := c.callTurnStart(ctx, threadID, turnParams(threadID))
+	turnOutcome, err := c.executeTurn(ctx, command, threadID)
 	if err != nil && reusedRecentThread && isThreadNotFoundError(err, threadID) {
-		result, callErr := c.App.Call(ctx, "thread/start", map[string]any{"cwd": current.CWD})
+		outcome, callErr := c.Runtime.Execute(ctx, agent.StartThread{CWD: current.CWD})
 		if callErr != nil {
 			return StartResult{}, c.unknown(command.CommandID, callErr)
 		}
-		threadID, callErr = decodeThreadStartID(result)
-		if callErr != nil {
-			return StartResult{}, c.unknown(command.CommandID, callErr)
+		if outcome.StartedThread == nil || outcome.StartedThread.ID == "" {
+			return StartResult{}, c.unknown(command.CommandID, fmt.Errorf(
+				"%w: start thread outcome is missing thread id", agent.ErrProtocol))
 		}
+		threadID = outcome.StartedThread.ID
 		route.ThreadID = threadID
 		route.TurnID = ""
 		if callErr = c.Routes.Put(route); callErr != nil {
 			return StartResult{}, c.unknown(command.CommandID, callErr)
 		}
-		turnResult, err = c.callTurnStart(ctx, threadID, turnParams(threadID))
+		turnOutcome, err = c.executeTurn(ctx, command, threadID)
 	}
 	if err != nil {
 		return StartResult{}, c.unknown(command.CommandID, err)
 	}
-	turnID, err := decodeTurnStartID(turnResult)
-	if err != nil {
-		return StartResult{}, c.unknown(command.CommandID, err)
+	if turnOutcome.StartedTurn == nil || turnOutcome.StartedTurn.ID == "" {
+		return StartResult{}, c.unknown(command.CommandID, fmt.Errorf(
+			"%w: start turn outcome is missing turn id", agent.ErrProtocol))
 	}
+	turnID := turnOutcome.StartedTurn.ID
 	route.TurnID = turnID
 	if err := c.Routes.Put(route); err != nil {
 		return StartResult{}, c.unknown(command.CommandID, err)
@@ -232,11 +228,17 @@ func (c Coordinator) Start(ctx context.Context, command StartCommand) (StartResu
 	return result, nil
 }
 
-func (c Coordinator) callTurnStart(ctx context.Context, threadID string, params any) (json.RawMessage, error) {
-	if c.CallTurnStart != nil {
-		return c.CallTurnStart(ctx, threadID, params)
+func (c Coordinator) executeTurn(ctx context.Context, command StartCommand, threadID string) (agent.Outcome, error) {
+	operation := agent.StartTurn{
+		ThreadID:        threadID,
+		Text:            command.Objective,
+		ClientMessageID: command.CommandID,
+		CompletionSchema: completionOutputSchema(),
 	}
-	return c.App.Call(ctx, "turn/start", params)
+	if c.ExecuteTurn != nil {
+		return c.ExecuteTurn(ctx, operation)
+	}
+	return c.Runtime.Execute(ctx, operation)
 }
 
 func isThreadNotFoundError(err error, threadID string) bool {
@@ -252,52 +254,19 @@ func validateStartCommand(hostID string, command StartCommand) error {
 }
 
 func (c Coordinator) findRecentThread(ctx context.Context, cwd string) (string, error) {
-	result, err := c.App.Call(ctx, "thread/list", map[string]any{
-		"limit": 50, "sortKey": "updated_at", "sortDirection": "desc",
-		"sourceKinds": []string{"cli", "vscode", "exec", "appServer"},
-	})
+	outcome, err := c.Runtime.Execute(ctx, agent.ListThreads{Query: agent.ThreadQuery{CWD: cwd}})
 	if err != nil {
 		return "", err
 	}
-	var response struct {
-		Data []struct {
-			ID  string `json:"id"`
-			CWD string `json:"cwd"`
-		} `json:"data"`
+	if outcome.Threads == nil {
+		return "", fmt.Errorf("%w: list threads outcome is missing", agent.ErrProtocol)
 	}
-	if err := json.Unmarshal(result, &response); err != nil {
-		return "", err
-	}
-	for _, thread := range response.Data {
+	for _, thread := range outcome.Threads.Threads {
 		if thread.ID != "" && thread.CWD == cwd {
 			return thread.ID, nil
 		}
 	}
 	return "", nil
-}
-
-func decodeThreadStartID(raw json.RawMessage) (string, error) {
-	var result struct {
-		Thread struct {
-			ID string `json:"id"`
-		} `json:"thread"`
-	}
-	if json.Unmarshal(raw, &result) != nil || result.Thread.ID == "" {
-		return "", errors.New("thread/start result is missing thread id")
-	}
-	return result.Thread.ID, nil
-}
-
-func decodeTurnStartID(raw json.RawMessage) (string, error) {
-	var result struct {
-		Turn struct {
-			ID string `json:"id"`
-		} `json:"turn"`
-	}
-	if json.Unmarshal(raw, &result) != nil || result.Turn.ID == "" {
-		return "", errors.New("turn/start result is missing turn id")
-	}
-	return result.Turn.ID, nil
 }
 
 func completionOutputSchema() map[string]any {

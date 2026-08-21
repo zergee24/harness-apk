@@ -5,58 +5,83 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/harnessapk/remote/internal/agent"
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/workspace"
 )
 
-func TestRunStartUsesInjectedTurnGate(t *testing.T) {
-	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
-	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
-	app := &fakeRunAppServer{responses: map[string]json.RawMessage{
-		"thread/list": json.RawMessage(`{"data":[{"id":"thread-1","cwd":"/workspace","updatedAt":10}]}`),
-	}}
-	coordinator := Coordinator{
-		Cache: cache, Routes: routes, App: app, HostID: "host-1",
-		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
-			return candidate("fingerprint-1"), true
-		},
-		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("fingerprint-1"), nil },
-		Emit:             func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
-	}
-	calledThreadID := ""
-	coordinator.CallTurnStart = func(ctx context.Context, threadID string, params any) (json.RawMessage, error) {
-		calledThreadID = threadID
-		return json.RawMessage(`{"turn":{"id":"turn-gated"}}`), nil
-	}
+func TestRunStartUsesTypedRuntimeWithoutRawRPC(t *testing.T) {
+	coordinator, runtime := runFixture(t)
+	runtime.script(agent.OperationListThreads, scriptedStep{outcome: agent.Outcome{Threads: &agent.ThreadPage{}}})
+	runtime.script(agent.OperationStartThread, scriptedStep{outcome: agent.Outcome{StartedThread: &agent.ThreadRef{ID: "thread-new"}}})
+	runtime.script(agent.OperationStartTurn, scriptedStep{outcome: agent.Outcome{StartedTurn: &agent.TurnRef{ID: "turn-1"}}})
+
 	result, err := coordinator.Start(context.Background(), startCommand())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calledThreadID != "thread-1" || result.TurnID != "turn-gated" {
-		t.Fatalf("gated thread=%q result=%#v", calledThreadID, result)
+	if result.ThreadID != "thread-new" || result.TurnID != "turn-1" {
+		t.Fatalf("result = %#v", result)
+	}
+	calls := runtime.Calls()
+	if got, want := operationKinds(calls), []agent.OperationKind{
+		agent.OperationListThreads,
+		agent.OperationStartThread,
+		agent.OperationStartTurn,
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("kinds = %v, want %v", got, want)
+	}
+	list := calls[0].(agent.ListThreads)
+	if list.Query.CWD != "/workspace" {
+		t.Fatalf("ListThreads query = %#v", list.Query)
+	}
+	turn := calls[2].(agent.StartTurn)
+	if turn.ThreadID != "thread-new" || turn.Text != "实现 M2" ||
+		turn.ClientMessageID != "command-1" || turn.CompletionSchema == nil {
+		t.Fatalf("StartTurn = %#v", turn)
+	}
+}
+
+func TestRunStartUsesInjectedTurnGate(t *testing.T) {
+	coordinator, runtime := runFixture(t)
+	runtime.script(agent.OperationListThreads, scriptedStep{outcome: threadPage("thread-1")})
+	var gated []agent.Operation
+	coordinator.ExecuteTurn = func(_ context.Context, operation agent.Operation) (agent.Outcome, error) {
+		gated = append(gated, operation)
+		return agent.Outcome{StartedTurn: &agent.TurnRef{ID: "turn-gated"}}, nil
+	}
+
+	result, err := coordinator.Start(context.Background(), startCommand())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gated) != 1 {
+		t.Fatalf("gated calls = %#v", gated)
+	}
+	if turn, ok := gated[0].(agent.StartTurn); !ok || turn.ThreadID != "thread-1" {
+		t.Fatalf("gated operation = %#v", gated[0])
+	}
+	if result.TurnID != "turn-gated" {
+		t.Fatalf("result = %#v", result)
+	}
+	if got, want := operationKinds(runtime.Calls()), []agent.OperationKind{agent.OperationListThreads}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime kinds = %v, want %v", got, want)
 	}
 }
 
 func TestRunStartCreatesAtMostOneTurnForDuplicateCommand(t *testing.T) {
-	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
-	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
-	app := &fakeRunAppServer{responses: map[string]json.RawMessage{
-		"thread/list": json.RawMessage(`{"data":[{"id":"thread-1","cwd":"/workspace","updatedAt":10}]}`),
-		"turn/start":  json.RawMessage(`{"turn":{"id":"turn-1"}}`),
-	}}
+	coordinator, runtime := runFixture(t)
+	runtime.script(agent.OperationListThreads, scriptedStep{outcome: threadPage("thread-1")})
+	runtime.script(agent.OperationStartTurn, scriptedStep{outcome: agent.Outcome{StartedTurn: &agent.TurnRef{ID: "turn-1"}}})
 	emitted := 0
-	coordinator := Coordinator{
-		Cache: cache, Routes: routes, App: app, HostID: "host-1",
-		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
-			return candidate("fingerprint-1"), true
-		},
-		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("fingerprint-1"), nil },
-		Emit: func(_ context.Context, deviceID, runID, eventType string, payload json.RawMessage) (string, error) {
-			emitted++
-			return "event-started-1", nil
-		},
+	coordinator.Emit = func(_ context.Context, deviceID, runID, eventType string, payload json.RawMessage) (string, error) {
+		emitted++
+		return "event-started-1", nil
 	}
 	command := startCommand()
 
@@ -69,19 +94,19 @@ func TestRunStartCreatesAtMostOneTurnForDuplicateCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if app.calls["turn/start"] != 1 || emitted != 2 {
-		t.Fatalf("turn/start calls=%d emitted=%d", app.calls["turn/start"], emitted)
+	if runtime.count(agent.OperationStartTurn) != 1 || emitted != 2 {
+		t.Fatalf("start_turn calls=%d emitted=%d", runtime.count(agent.OperationStartTurn), emitted)
 	}
 	if first.ThreadID != "thread-1" || first.TurnID != "turn-1" || second != first {
 		t.Fatalf("first=%#v second=%#v", first, second)
 	}
-	route, ok := routes.ByRun("run-1")
+	route, ok := coordinator.Routes.ByRun("run-1")
 	if !ok || route.BackendID != "dsh" || route.ThreadID != "thread-1" || route.TurnID != "turn-1" || route.BaselineJSON == "" {
 		t.Fatalf("persisted route = %#v ok=%v", route, ok)
 	}
-	turnParams := app.params["turn/start"].(map[string]any)
-	if turnParams["clientUserMessageId"] != "command-1" || turnParams["outputSchema"] == nil {
-		t.Fatalf("turn/start params = %#v", turnParams)
+	turn := runtime.Calls()[1].(agent.StartTurn)
+	if turn.ClientMessageID != "command-1" || turn.CompletionSchema == nil {
+		t.Fatalf("StartTurn = %#v", turn)
 	}
 }
 
@@ -166,20 +191,9 @@ func TestRunStartMigratesLegacyCacheIdentityWithoutRoute(t *testing.T) {
 }
 
 func TestRunStartCacheRejectsSameCommandIDOnAnotherBackend(t *testing.T) {
-	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
-	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
-	app := &fakeRunAppServer{responses: map[string]json.RawMessage{
-		"thread/list": json.RawMessage(`{"data":[{"id":"thread-1","cwd":"/workspace","updatedAt":10}]}`),
-		"turn/start":  json.RawMessage(`{"turn":{"id":"turn-1"}}`),
-	}}
-	coordinator := Coordinator{
-		Cache: cache, Routes: routes, App: app, HostID: "host-1",
-		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
-			return candidate("fingerprint-1"), true
-		},
-		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("fingerprint-1"), nil },
-		Emit:             func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
-	}
+	coordinator, runtime := runFixture(t)
+	runtime.script(agent.OperationListThreads, scriptedStep{outcome: threadPage("thread-1")})
+	runtime.script(agent.OperationStartTurn, scriptedStep{outcome: agent.Outcome{StartedTurn: &agent.TurnRef{ID: "turn-1"}}})
 	command := startCommand()
 	if _, err := coordinator.Start(context.Background(), command); err != nil {
 		t.Fatal(err)
@@ -191,51 +205,45 @@ func TestRunStartCacheRejectsSameCommandIDOnAnotherBackend(t *testing.T) {
 }
 
 func TestFreshCommandCannotClobberExistingRunRouteBeforeValidation(t *testing.T) {
-	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
-	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	coordinator, runtime := runFixture(t)
 	existing := Route{
 		RunID: "run-1", BackendID: "dsh", HostID: "host-1", DeviceID: "phone-1",
 		ThreadID: "thread-existing", TurnID: "turn-existing", BaselineJSON: `{"cwd":"/existing"}`,
 	}
-	if err := routes.Put(existing); err != nil {
+	if err := coordinator.Routes.Put(existing); err != nil {
 		t.Fatal(err)
 	}
-	coordinator := Coordinator{
-		Cache: cache, Routes: routes, App: &fakeRunAppServer{}, HostID: "host-1",
-		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) { return workspace.Candidate{}, false },
-		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return workspace.Candidate{}, nil },
-		Emit: func(context.Context, string, string, string, json.RawMessage) (string, error) {
-			return "event-starting", nil
-		},
+	coordinator.ResolveWorkspace = func(deviceID, workspaceID string) (workspace.Candidate, bool) {
+		return workspace.Candidate{}, false
 	}
 	command := startCommand()
 	command.CommandID = "command-fresh"
 	if _, err := coordinator.Start(context.Background(), command); err == nil {
 		t.Fatal("fresh command reused an existing run route")
 	}
-	preserved, _ := routes.ByRun(existing.RunID)
+	preserved, _ := coordinator.Routes.ByRun(existing.RunID)
 	if preserved.ThreadID != existing.ThreadID || preserved.TurnID != existing.TurnID || preserved.BaselineJSON != existing.BaselineJSON {
 		t.Fatalf("existing route was clobbered: %#v", preserved)
+	}
+	if len(runtime.Calls()) != 0 {
+		t.Fatalf("runtime was called: %#v", runtime.Calls())
 	}
 }
 
 func TestRunStartingCanResolveBackendBeforeWorkspaceValidation(t *testing.T) {
-	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
-	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	coordinator, _ := runFixture(t)
 	seenBackend := ""
-	coordinator := Coordinator{
-		Cache: cache, Routes: routes, App: &fakeRunAppServer{}, HostID: "host-1",
-		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) { return workspace.Candidate{}, false },
-		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return workspace.Candidate{}, nil },
-		Emit: func(_ context.Context, _, runID, eventType string, _ json.RawMessage) (string, error) {
-			if eventType == "run.starting" {
-				route, ok := routes.ByRun(runID)
-				if ok {
-					seenBackend = route.BackendID
-				}
+	coordinator.ResolveWorkspace = func(deviceID, workspaceID string) (workspace.Candidate, bool) {
+		return workspace.Candidate{}, false
+	}
+	coordinator.Emit = func(_ context.Context, _, runID, eventType string, _ json.RawMessage) (string, error) {
+		if eventType == "run.starting" {
+			route, ok := coordinator.Routes.ByRun(runID)
+			if ok {
+				seenBackend = route.BackendID
 			}
-			return "event-starting", nil
-		},
+		}
+		return "event-starting", nil
 	}
 	_, _ = coordinator.Start(context.Background(), startCommand())
 	if seenBackend != "dsh" {
@@ -244,16 +252,9 @@ func TestRunStartingCanResolveBackendBeforeWorkspaceValidation(t *testing.T) {
 }
 
 func TestFingerprintMismatchStopsBeforeThreadStart(t *testing.T) {
-	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
-	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
-	app := &fakeRunAppServer{}
-	coordinator := Coordinator{
-		Cache: cache, Routes: routes, App: app, HostID: "host-1",
-		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
-			return candidate("old-fingerprint"), true
-		},
-		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("new-fingerprint"), nil },
-		Emit:             func(context.Context, string, string, string, json.RawMessage) (string, error) { return "", nil },
+	coordinator, runtime := runFixture(t)
+	coordinator.ResolveWorkspace = func(deviceID, workspaceID string) (workspace.Candidate, bool) {
+		return candidate("old-fingerprint"), true
 	}
 
 	_, err := coordinator.Start(context.Background(), startCommand())
@@ -261,30 +262,19 @@ func TestFingerprintMismatchStopsBeforeThreadStart(t *testing.T) {
 	if !errors.Is(err, ErrBindingMismatch) {
 		t.Fatalf("error=%v, want binding mismatch", err)
 	}
-	if len(app.calls) != 0 {
-		t.Fatalf("app-server was called: %#v", app.calls)
+	if len(runtime.Calls()) != 0 {
+		t.Fatalf("runtime was called: %#v", runtime.Calls())
 	}
 }
 
 func TestRunStartReplacesStaleRecentThreadBeforeStartingTurn(t *testing.T) {
-	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
-	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
-	app := &fakeRunAppServer{script: map[string][]fakeRunAppResponse{
-		"thread/list": {{result: json.RawMessage(`{"data":[{"id":"thread-stale","cwd":"/workspace","updatedAt":10}]}`)}},
-		"turn/start": {
-			{err: errors.New(`app-server error: {"code":-32600,"message":"thread not found: thread-stale"}`)},
-			{result: json.RawMessage(`{"turn":{"id":"turn-new"}}`)},
-		},
-		"thread/start": {{result: json.RawMessage(`{"thread":{"id":"thread-new"}}`)}},
-	}}
-	coordinator := Coordinator{
-		Cache: cache, Routes: routes, App: app, HostID: "host-1",
-		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
-			return candidate("fingerprint-1"), true
-		},
-		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("fingerprint-1"), nil },
-		Emit:             func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
-	}
+	coordinator, runtime := runFixture(t)
+	runtime.script(agent.OperationListThreads, scriptedStep{outcome: threadPage("thread-stale")})
+	runtime.script(agent.OperationStartThread, scriptedStep{outcome: agent.Outcome{StartedThread: &agent.ThreadRef{ID: "thread-new"}}})
+	runtime.script(agent.OperationStartTurn,
+		scriptedStep{err: errors.New(`app-server error: {"code":-32600,"message":"thread not found: thread-stale"}`)},
+		scriptedStep{outcome: agent.Outcome{StartedTurn: &agent.TurnRef{ID: "turn-new"}}},
+	)
 
 	result, err := coordinator.Start(context.Background(), startCommand())
 	if err != nil {
@@ -294,43 +284,69 @@ func TestRunStartReplacesStaleRecentThreadBeforeStartingTurn(t *testing.T) {
 	if result.ThreadID != "thread-new" || result.TurnID != "turn-new" {
 		t.Fatalf("result = %#v", result)
 	}
-	if app.calls["turn/start"] != 2 || app.calls["thread/start"] != 1 {
-		t.Fatalf("calls = %#v", app.calls)
+	if runtime.count(agent.OperationStartTurn) != 2 || runtime.count(agent.OperationStartThread) != 1 {
+		t.Fatalf("calls = %v", operationKinds(runtime.Calls()))
 	}
-	turnParams := app.paramsHistory["turn/start"]
-	if turnParams[0].(map[string]any)["threadId"] != "thread-stale" ||
-		turnParams[1].(map[string]any)["threadId"] != "thread-new" {
-		t.Fatalf("turn/start params = %#v", turnParams)
+	turns := []string{}
+	for _, call := range runtime.Calls() {
+		if turn, ok := call.(agent.StartTurn); ok {
+			turns = append(turns, turn.ThreadID)
+		}
 	}
-	route, ok := routes.ByRun("run-1")
+	if !reflect.DeepEqual(turns, []string{"thread-stale", "thread-new"}) {
+		t.Fatalf("turn thread ids = %v", turns)
+	}
+	route, ok := coordinator.Routes.ByRun("run-1")
 	if !ok || route.ThreadID != "thread-new" || route.TurnID != "turn-new" {
 		t.Fatalf("route = %#v ok=%v", route, ok)
 	}
 }
 
 func TestRunStartDoesNotRetryAmbiguousTurnFailure(t *testing.T) {
-	cache, _ := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
-	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
-	app := &fakeRunAppServer{script: map[string][]fakeRunAppResponse{
-		"thread/list": {{result: json.RawMessage(`{"data":[{"id":"thread-1","cwd":"/workspace","updatedAt":10}]}`)}},
-		"turn/start":  {{err: errors.New("connection closed before response")}},
-	}}
-	coordinator := Coordinator{
-		Cache: cache, Routes: routes, App: app, HostID: "host-1",
-		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
-			return candidate("fingerprint-1"), true
-		},
-		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("fingerprint-1"), nil },
-		Emit:             func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
-	}
+	coordinator, runtime := runFixture(t)
+	runtime.script(agent.OperationListThreads, scriptedStep{outcome: threadPage("thread-1")})
+	runtime.script(agent.OperationStartTurn,
+		scriptedStep{err: errors.New("connection closed before response")},
+	)
 
 	_, err := coordinator.Start(context.Background(), startCommand())
 
 	if !errors.Is(err, ErrCommandUnknown) {
 		t.Fatalf("error = %v, want command unknown", err)
 	}
-	if app.calls["turn/start"] != 1 || app.calls["thread/start"] != 0 {
-		t.Fatalf("ambiguous failure was retried: %#v", app.calls)
+	if runtime.count(agent.OperationStartTurn) != 1 || runtime.count(agent.OperationStartThread) != 0 {
+		t.Fatalf("ambiguous failure was retried: %v", operationKinds(runtime.Calls()))
+	}
+}
+
+func TestRunStartFailsDeterministicallyWhenThreadListFails(t *testing.T) {
+	coordinator, runtime := runFixture(t)
+	runtime.script(agent.OperationListThreads, scriptedStep{err: errors.New("provider list failure")})
+
+	_, err := coordinator.Start(context.Background(), startCommand())
+
+	if err == nil || !strings.Contains(err.Error(), "provider list failure") {
+		t.Fatalf("error = %v", err)
+	}
+	record, ok := coordinator.Cache.Lookup(startCommand().CommandID)
+	if !ok || record.Status != commandcache.StatusFailed {
+		t.Fatalf("record = %#v ok=%v", record, ok)
+	}
+}
+
+func TestRunStartMarksUnknownWhenTurnOutcomeMissingTurnID(t *testing.T) {
+	coordinator, runtime := runFixture(t)
+	runtime.script(agent.OperationListThreads, scriptedStep{outcome: threadPage("thread-1")})
+	runtime.script(agent.OperationStartTurn, scriptedStep{outcome: agent.Outcome{}})
+
+	_, err := coordinator.Start(context.Background(), startCommand())
+
+	if !errors.Is(err, ErrCommandUnknown) || !errors.Is(err, agent.ErrProtocol) {
+		t.Fatalf("error = %v, want unknown protocol violation", err)
+	}
+	record, ok := coordinator.Cache.Lookup(startCommand().CommandID)
+	if !ok || record.Status != commandcache.StatusUnknown {
+		t.Fatalf("record = %#v ok=%v", record, ok)
 	}
 }
 
@@ -346,16 +362,17 @@ func TestUnknownTurnStartReconcilesWithoutAutomaticReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes, _ := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
-	app := &fakeRunAppServer{}
-	coordinator := Coordinator{Cache: reopened, Routes: routes, App: app, HostID: "host-1"}
+	coordinator, runtime := runFixture(t)
+	coordinator.Cache = reopened
+	coordinator.Routes = routes
 
 	_, err = coordinator.Start(context.Background(), command)
 
 	if !errors.Is(err, ErrCommandUnknown) {
 		t.Fatalf("error=%v, want unknown", err)
 	}
-	if len(app.calls) != 0 {
-		t.Fatalf("unknown command was replayed: %#v", app.calls)
+	if len(runtime.Calls()) != 0 {
+		t.Fatalf("unknown command was replayed: %#v", runtime.Calls())
 	}
 }
 
@@ -374,39 +391,115 @@ func candidate(fingerprint string) workspace.Candidate {
 	}
 }
 
-type fakeRunAppServer struct {
-	responses     map[string]json.RawMessage
-	script        map[string][]fakeRunAppResponse
-	calls         map[string]int
-	params        map[string]any
-	paramsHistory map[string][]any
+func threadPage(ids ...string) agent.Outcome {
+	threads := make([]agent.ThreadSummary, 0, len(ids))
+	for _, id := range ids {
+		threads = append(threads, agent.ThreadSummary{ID: id, CWD: "/workspace"})
+	}
+	return agent.Outcome{Threads: &agent.ThreadPage{Threads: threads}}
 }
 
-type fakeRunAppResponse struct {
-	result json.RawMessage
-	err    error
+func operationKinds(calls []agent.Operation) []agent.OperationKind {
+	kinds := make([]agent.OperationKind, 0, len(calls))
+	for _, call := range calls {
+		kinds = append(kinds, call.Kind())
+	}
+	return kinds
 }
 
-func (f *fakeRunAppServer) Call(_ context.Context, method string, params any) (json.RawMessage, error) {
-	if f.calls == nil {
-		f.calls = map[string]int{}
+type scriptedStep struct {
+	outcome agent.Outcome
+	err     error
+}
+
+type scriptedRuntime struct {
+	mu       sync.Mutex
+	manifest agent.Manifest
+	steps    map[agent.OperationKind][]scriptedStep
+	calls    []agent.Operation
+}
+
+func newScriptedRuntime() *scriptedRuntime {
+	return &scriptedRuntime{
+		manifest: agent.Manifest{BackendID: "dsh", Operations: map[agent.OperationKind]bool{
+			agent.OperationListThreads:   true,
+			agent.OperationReadThread:    true,
+			agent.OperationStartThread:   true,
+			agent.OperationStartTurn:     true,
+			agent.OperationSteerTurn:     true,
+			agent.OperationInterruptTurn: true,
+		}},
+		steps: map[agent.OperationKind][]scriptedStep{},
 	}
-	f.calls[method]++
-	if f.params == nil {
-		f.params = map[string]any{}
+}
+
+func (r *scriptedRuntime) script(kind agent.OperationKind, steps ...scriptedStep) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.steps[kind] = append(r.steps[kind], steps...)
+}
+
+func (r *scriptedRuntime) Manifest() agent.Manifest {
+	return r.manifest
+}
+
+func (r *scriptedRuntime) Execute(_ context.Context, operation agent.Operation) (agent.Outcome, error) {
+	if operation == nil {
+		return agent.Outcome{}, agent.ErrInvalid
 	}
-	f.params[method] = params
-	if f.paramsHistory == nil {
-		f.paramsHistory = map[string][]any{}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.manifest.Operations[operation.Kind()] {
+		return agent.Outcome{}, agent.ErrUnsupported
 	}
-	f.paramsHistory[method] = append(f.paramsHistory[method], params)
-	if scripted := f.script[method]; len(scripted) > 0 {
-		response := scripted[0]
-		f.script[method] = scripted[1:]
-		return response.result, response.err
+	r.calls = append(r.calls, operation)
+	steps := r.steps[operation.Kind()]
+	if len(steps) == 0 {
+		return agent.Outcome{}, nil
 	}
-	if response := f.responses[method]; response != nil {
-		return response, nil
+	step := steps[0]
+	r.steps[operation.Kind()] = steps[1:]
+	return step.outcome, step.err
+}
+
+func (r *scriptedRuntime) Calls() []agent.Operation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	calls := make([]agent.Operation, len(r.calls))
+	copy(calls, r.calls)
+	return calls
+}
+
+func (r *scriptedRuntime) count(kind agent.OperationKind) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	total := 0
+	for _, call := range r.calls {
+		if call.Kind() == kind {
+			total++
+		}
 	}
-	return nil, errors.New("unexpected app-server call: " + method)
+	return total
+}
+
+func runFixture(t *testing.T) (Coordinator, *scriptedRuntime) {
+	t.Helper()
+	cache, err := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newScriptedRuntime()
+	coordinator := Coordinator{
+		Cache: cache, Routes: routes, Runtime: runtime, HostID: "host-1",
+		ResolveWorkspace: func(deviceID, workspaceID string) (workspace.Candidate, bool) {
+			return candidate("fingerprint-1"), true
+		},
+		InspectWorkspace: func(cwd string) (workspace.Candidate, error) { return candidate("fingerprint-1"), nil },
+		Emit:             func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
+	}
+	return coordinator, runtime
 }
