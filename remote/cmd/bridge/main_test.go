@@ -25,6 +25,7 @@ import (
 	"github.com/harnessapk/remote/internal/protocol"
 	runstate "github.com/harnessapk/remote/internal/run"
 	bridgestate "github.com/harnessapk/remote/internal/state"
+	"github.com/harnessapk/remote/internal/workspace"
 )
 
 func TestCommandResponseEventCarriesCanonicalBackend(t *testing.T) {
@@ -136,10 +137,10 @@ func TestUnknownControlTransitionReleasesOnlyAfterAuthoritativeNextTurn(t *testi
 		t.Fatal(err)
 	}
 	app := backend.NewFake("dsh").OnScript("turn/steer", func(string, any) (json.RawMessage, error) {
-		return nil, errors.New("response lost after write")
+		return nil, io.EOF
 	})
 	coordinator := runstate.ControlCoordinator{
-		Cache: cache, Routes: routes, App: app,
+		Cache: cache, Routes: routes, Runtime: backend.NewAppServerAdapter(app),
 		Emit: func(context.Context, string, string, string, json.RawMessage) (string, error) { return "event-1", nil },
 	}
 	control := runstate.ControlCommand{
@@ -475,10 +476,10 @@ func TestRestartedBridgeReconcilesPersistedUnknownControlWithoutTransition(t *te
 		t.Fatal(err)
 	}
 	app := backend.NewFake("dsh").OnScript("turn/steer", func(string, any) (json.RawMessage, error) {
-		return nil, errors.New("response lost after write")
+		return nil, io.EOF
 	})
 	coordinator := runstate.ControlCoordinator{
-		Cache: cache, Routes: routes, App: app,
+		Cache: cache, Routes: routes, Runtime: backend.NewAppServerAdapter(app),
 		Emit: func(context.Context, string, string, string, json.RawMessage) (string, error) {
 			return "event-before-restart", nil
 		},
@@ -2988,6 +2989,172 @@ func TestExecuteCommandUnknownBackendIsRejectedWithoutCallingOthers(t *testing.T
 	case <-called:
 		t.Fatal("a registered backend was called for an unknown backend id")
 	default:
+	}
+}
+
+func TestExecuteCommandRejectsRawRPCWithoutCallingBackend(t *testing.T) {
+	raw := backend.NewFake("codex")
+	secret := bytes.Repeat([]byte{7}, 32)
+	b := &bridge{
+		backends:     map[string]backend.Backend{"codex": raw},
+		backendOrder: []string{"codex"},
+		path:         filepath.Join(t.TempDir(), "state.json"),
+		state: bridgeState{
+			Sequences:       map[string]uint64{},
+			PendingOutbound: map[string]map[string]string{},
+			DeviceSecrets:   map[string]string{"phone-1": protocol.EncodeSecret(secret)},
+		},
+	}
+	if err := b.executeCommand(context.Background(), "phone-1", protocol.Command{
+		Type: "rpc", RequestID: "request-rpc-1", BackendID: "codex", Method: "thread/read",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := raw.Calls(); len(calls) != 0 {
+		t.Fatalf("raw backend was called: %#v", calls)
+	}
+	pending := b.state.PendingOutbound["phone-1"]
+	if len(pending) != 1 {
+		t.Fatalf("pending outbound = %d entries, want 1", len(pending))
+	}
+	for _, rawWire := range pending {
+		var wire protocol.WireMessage
+		if err := json.Unmarshal([]byte(rawWire), &wire); err != nil {
+			t.Fatal(err)
+		}
+		var event protocol.Event
+		if err := protocol.Decrypt(secret, wire, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != "error" || event.RequestID != "request-rpc-1" {
+			t.Fatalf("event = %#v", event)
+		}
+		var payload struct {
+			Code       string `json:"code"`
+			LatestLine string `json:"latestLine"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Code != "RAW_RPC_DISABLED" {
+			t.Fatalf("payload = %#v, want RAW_RPC_DISABLED", payload)
+		}
+	}
+}
+
+func TestStartRunInjectsAppServerAdapterTypedSlice(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := journal.Open(filepath.Join(dir, "logical-events.log"), bytes.Repeat([]byte{0x41}, 32), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := bytes.Repeat([]byte{5}, 32)
+	cwd := t.TempDir()
+	candidate, err := workspace.Inspect(secret, cwd, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := workspace.OpenRegistry(filepath.Join(dir, "workspaces.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.PutCandidates("device-1", []workspace.Candidate{candidate}); err != nil {
+		t.Fatal(err)
+	}
+	raw := backend.NewFake("dsh").
+		OnScript("thread/list", func(string, any) (json.RawMessage, error) {
+			return json.RawMessage(`{"data":[]}`), nil
+		}).
+		OnScript("thread/start", func(string, any) (json.RawMessage, error) {
+			return json.RawMessage(`{"thread":{"id":"thread-1"}}`), nil
+		}).
+		OnScript("turn/start", func(method string, params any) (json.RawMessage, error) {
+			rawParams, _ := json.Marshal(params)
+			var want struct {
+				ThreadID            string         `json:"threadId"`
+				ClientUserMessageID string         `json:"clientUserMessageId"`
+				OutputSchema        map[string]any `json:"outputSchema"`
+			}
+			_ = json.Unmarshal(rawParams, &want)
+			if want.ThreadID != "thread-1" || want.ClientUserMessageID != "command-run-1" || want.OutputSchema == nil {
+				return nil, fmt.Errorf("unexpected turn/start params: %s", rawParams)
+			}
+			return json.RawMessage(`{"turn":{"id":"turn-1"}}`), nil
+		})
+	b := &bridge{
+		backends: map[string]backend.Backend{"dsh": raw}, backendOrder: []string{"dsh"},
+		commandCache: cache, routes: routes, journal: store,
+		workspaces: registry,
+		path:       filepath.Join(dir, "state.json"),
+		state: bridgeState{
+			HostID: "host-1", Sequences: map[string]uint64{},
+			PendingOutbound: map[string]map[string]string{},
+			DeviceSecrets:   map[string]string{"device-1": protocol.EncodeSecret(secret)},
+		},
+	}
+	command := protocol.Command{
+		Type: "run.start", CommandID: "command-run-1", RequestID: "request-run-1", RunID: "run-1",
+		BindingID: "binding-1", WorkspaceID: candidate.WorkspaceID, BackendID: "dsh",
+		RepositoryFingerprint: candidate.RepositoryFingerprint, Objective: "完成typed slice验证",
+	}
+	if err := b.executeCommand(context.Background(), "device-1", command); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		record, ok := cache.Lookup(command.CommandID)
+		if ok && record.Status == commandcache.StatusSucceeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			record, _ := cache.Lookup(command.CommandID)
+			t.Fatalf("run.start did not succeed: record=%#v calls=%#v", record, raw.Calls())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	calls := raw.Calls()
+	methods := []string{}
+	for _, call := range calls {
+		methods = append(methods, call.Method)
+	}
+	if !reflect.DeepEqual(methods, []string{"thread/list", "thread/start", "turn/start"}) {
+		t.Fatalf("raw methods = %v", methods)
+	}
+	var started *protocol.LogicalEvent
+	for _, event := range store.Pending("host-1", "device-1") {
+		if event.Type == "run.started" {
+			copy := event
+			started = &copy
+		}
+	}
+	if started == nil {
+		t.Fatalf("run.started was not journaled: %#v", store.Pending("host-1", "device-1"))
+	}
+	var payload struct {
+		CommandID  string `json:"commandId"`
+		RunID      string `json:"runId"`
+		ThreadID   string `json:"threadId"`
+		TurnID     string `json:"turnId"`
+		LatestLine string `json:"latestLine"`
+	}
+	if err := json.Unmarshal(started.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.CommandID != "command-run-1" || payload.RunID != "run-1" ||
+		payload.ThreadID != "thread-1" || payload.TurnID != "turn-1" || payload.LatestLine != "Mac 已接收任务" {
+		t.Fatalf("run.started payload = %#v", payload)
+	}
+	route, ok := routes.ByRun("run-1")
+	if !ok || route.ThreadID != "thread-1" || route.TurnID != "turn-1" || route.BackendID != "dsh" {
+		t.Fatalf("route = %#v ok=%v", route, ok)
 	}
 }
 

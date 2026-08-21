@@ -25,6 +25,7 @@ import (
 
 	"github.com/coder/websocket"
 	appserverrpc "github.com/harnessapk/remote/internal/appserver"
+	"github.com/harnessapk/remote/internal/agent"
 	"github.com/harnessapk/remote/internal/backend"
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/completion"
@@ -872,6 +873,12 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 			}
 		})
 		return nil
+	case "rpc":
+		return b.sendCommandEvent(ctx, deviceID, command, protocol.Event{
+			Type: "error", RequestID: command.RequestID, Message: "不支持通用后端调用",
+			Payload: mustJSON(map[string]string{"code": "RAW_RPC_DISABLED", "latestLine": "不支持通用后端调用"}),
+			CreatedAt: time.Now().UnixMilli(),
+		}, "")
 	}
 	cachedControlUnknown := false
 	if command.Type == "run.steer" || command.Type == "run.interrupt" {
@@ -925,8 +932,6 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		return b.requestAppServer(ctx, deviceID, command, bd, "turn/interrupt", map[string]string{"threadId": command.ThreadID, "turnId": command.TurnID})
 	case "approval.respond":
 		return b.respondApproval(ctx, deviceID, command, bd)
-	case "rpc":
-		return b.requestAppServer(ctx, deviceID, command, bd, command.Method, decodeRaw(command.Params))
 	default:
 		return b.sendBackendEvent(ctx, backendID, deviceID, protocol.Event{
 			Type: "error", RequestID: command.RequestID,
@@ -1474,20 +1479,25 @@ func (b *bridge) startRun(ctx context.Context, deviceID string, command protocol
 		if err != nil {
 			return
 		}
+		runtime := backend.NewAppServerAdapter(bd)
 		coordinator := runstate.Coordinator{
-			Cache: b.commandCache, Routes: b.routes, App: bd, HostID: b.state.HostID,
+			Cache: b.commandCache, Routes: b.routes, Runtime: runtime, HostID: b.state.HostID,
 			ResolveWorkspace: b.workspaces.Resolve,
 			InspectWorkspace: func(cwd string) (workspace.Candidate, error) {
 				return workspace.Inspect(secret, cwd, time.Now().UnixMilli())
 			},
 			CaptureBaseline: workspace.CaptureBaseline,
-			CallTurnStart: func(turnCtx context.Context, threadID string, params any) (json.RawMessage, error) {
-				wait, release := b.enqueueTurnCall(command.BackendID, threadID)
+			ExecuteTurn: func(turnCtx context.Context, operation agent.Operation) (agent.Outcome, error) {
+				turn, ok := operation.(agent.StartTurn)
+				if !ok {
+					return agent.Outcome{}, fmt.Errorf("%w: unexpected gated operation %q", agent.ErrInvalid, operation.Kind())
+				}
+				wait, release := b.enqueueTurnCall(command.BackendID, turn.ThreadID)
 				defer release()
 				if err := wait(turnCtx); err != nil {
-					return nil, err
+					return agent.Outcome{}, err
 				}
-				return bd.Call(turnCtx, "turn/start", params)
+				return runtime.Execute(turnCtx, operation)
 			},
 			Emit: b.emitLogicalEvent,
 		}
@@ -1571,7 +1581,7 @@ func (b *bridge) controlRunWithReconciledTurn(
 		emit = b.emitLogicalEventBackend
 	}
 	coordinator := runstate.ControlCoordinator{
-		Cache: b.commandCache, Routes: b.routes, App: bd,
+		Cache: b.commandCache, Routes: b.routes, Runtime: backend.NewAppServerAdapter(bd),
 		Emit: func(emitCtx context.Context, targetDeviceID, runID, eventType string, payload json.RawMessage) (string, error) {
 			return emit(emitCtx, targetDeviceID, runID, command.BackendID, eventType, payload)
 		},
@@ -1648,7 +1658,7 @@ func (b *bridge) controlRunWithReconciledTurn(
 		reconciledTurnID = currentRoute.TurnID
 		bd = currentBackend
 		coordinator = runstate.ControlCoordinator{
-			Cache: b.commandCache, Routes: b.routes, App: bd,
+			Cache: b.commandCache, Routes: b.routes, Runtime: backend.NewAppServerAdapter(bd),
 			Emit: coordinator.Emit,
 		}
 		if b.controlEventEmitter == nil {
@@ -1980,7 +1990,7 @@ func (b *bridge) reconcileUnknownTurnTransitions(ctx context.Context) error {
 			emit = b.emitLogicalEventBackend
 		}
 		coordinator := runstate.ControlCoordinator{
-			Cache: b.commandCache, Routes: b.routes, App: bd,
+			Cache: b.commandCache, Routes: b.routes, Runtime: backend.NewAppServerAdapter(bd),
 			Emit: func(emitCtx context.Context, deviceID, runID, eventType string, payload json.RawMessage) (string, error) {
 				return emit(emitCtx, deviceID, runID, transition.backendID, eventType, payload)
 			},
@@ -2216,6 +2226,9 @@ func (b *bridge) transmitJournaledEvent(ctx context.Context, event protocol.Logi
 	}
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
+	if b.conn == nil {
+		return nil
+	}
 	return b.conn.Write(ctx, websocket.MessageText, raw)
 }
 
@@ -4228,6 +4241,9 @@ func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.
 	b.mu.Unlock()
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
+	if b.conn == nil {
+		return nil
+	}
 	return b.conn.Write(ctx, websocket.MessageText, raw)
 }
 
