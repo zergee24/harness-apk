@@ -35,13 +35,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.harnessapk.common.AppContainer
 import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.RemoteTimelineItem
 import com.harnessapk.remote.RemoteUiState
+import com.harnessapk.remote.formatRelativeTime
 import com.harnessapk.ui.markdown.MarkdownMessage
 
 @Composable
@@ -78,9 +81,28 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
             items(state.threads, key = { it.id }) { thread ->
                 Card(onClick = { container.remoteRepository.selectThread(thread.id) }, modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(thread.title, style = MaterialTheme.typography.titleMedium)
-                        if (thread.preview.isNotBlank()) Text(thread.preview, maxLines = 2)
-                        Text(thread.cwd ?: thread.status, style = MaterialTheme.typography.bodySmall)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                thread.title, style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            if (state.activeThreadId == thread.id) {
+                                Text("进行中", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        if (thread.preview.isNotBlank()) {
+                            Text(thread.preview, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                thread.cwd ?: "", style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                formatRelativeTime(System.currentTimeMillis(), thread.updatedAt),
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
