@@ -455,6 +455,28 @@ func (b *bridge) run(ctx context.Context, specs []backend.Spec) error {
 		return err
 	}
 	errorsCh := make(chan error, 2)
+	// Keepalive: ping the relay every 30s and fail the connection if the pong
+	// doesn't arrive within 15s. Without this, a half-dead TCP connection (NAT
+	// timeout, vanished peer without RST/FIN) leaves conn.Read blocked forever
+	// and the serve loop can never retry.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				pingCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				err := conn.Ping(pingCtx)
+				cancel()
+				if err != nil {
+					errorsCh <- fmt.Errorf("keepalive ping failed: %w", err)
+					return
+				}
+			}
+		}
+	}()
 	// Relay commands must remain available while individual backends initialize
 	// or restart. Backend availability is reported as a live partial roster and
 	// refreshed when supervisors register or unregister one backend.
@@ -925,7 +947,11 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		return b.requestTurnStart(ctx, deviceID, command, bd, legacyTurnStartParams(command))
 	case "turn.steer":
 		if err := b.claimThread(command, deviceID); err != nil {
-			return err
+			_ = b.sendCommandEvent(ctx, deviceID, command, protocol.Event{
+				Type: "rpc.response", RequestID: command.RequestID,
+				Payload: mustJSON(map[string]any{"error": err.Error()}), CreatedAt: time.Now().UnixMilli(),
+			}, "")
+			return nil
 		}
 		return b.requestTurnAppServer(ctx, deviceID, command, bd, "turn/steer", map[string]any{"threadId": command.ThreadID, "expectedTurnId": command.ExpectedTurnID, "input": []map[string]string{{"type": "text", "text": command.Text}}})
 	case "turn.interrupt":
