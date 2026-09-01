@@ -141,6 +141,37 @@ class RemoteRepositoryTest {
         assertEquals(null, repository.state.value.errorMessage)
     }
 
+    @Test
+    fun threadStartResponseParsesNestedShapeAndSelectsOptimisticThread() {
+        val repo = repository()
+        repo.createThread("/Users/tony/Documents/x")
+        repo.handleRpcResponse(
+            "thread.start",
+            RemoteEvent(
+                type = "rpc.response",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"result":{"thread":{"id":"t-1","cwd":"/Users/tony/Documents/x"}}}""",
+                ),
+            ),
+        )
+        assertEquals("t-1", repo.state.value.selectedThreadId)
+        assertEquals("新线程", repo.state.value.threads.first().title)
+    }
+
+    @Test
+    fun threadStartResponseParsesFlatIdShape() {
+        val repo = repository()
+        repo.createThread("/tmp")
+        repo.handleRpcResponse(
+            "thread.start",
+            RemoteEvent(
+                type = "rpc.response",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement("""{"result":{"id":"t-2"}}"""),
+            ),
+        )
+        assertEquals("t-2", repo.state.value.selectedThreadId)
+    }
+
     private fun repository(
         timeoutMillis: Long = 15_000L,
         turnCommandTimeoutMillis: Long = 130_000L,

@@ -45,6 +45,7 @@ class RemoteRepository(
     private var explicitDisconnect = false
     private var reconnectAttempt = 0
     private val pendingCommands: MutableMap<String, String> = ConcurrentHashMap()
+    private var pendingCreateCwd: String? = null
 
     fun connect() {
         val profile = profileStore.profile.value ?: return
@@ -74,7 +75,10 @@ class RemoteRepository(
     }
 
     fun clearSelection() { _state.value = _state.value.copy(selectedThreadId = null, timeline = emptyList(), approvals = emptyList()) }
-    fun createThread(cwd: String) = send(RemoteCommand(type = "thread.start", requestId = requestId("thread.start"), cwd = cwd.trim()))
+    fun createThread(cwd: String) {
+        pendingCreateCwd = cwd.trim()
+        send(RemoteCommand(type = "thread.start", requestId = requestId("thread.start"), cwd = cwd.trim()))
+    }
     fun startTurn(text: String) {
         val threadId = _state.value.selectedThreadId ?: return
         if (send(RemoteCommand(type = "turn.start", requestId = requestId("turn.start"), threadId = threadId, text = text))) {
@@ -234,7 +238,10 @@ class RemoteRepository(
     }
 
     private fun handleRpcResponse(event: RemoteEvent) {
-        val kind = event.requestId?.let(pendingCommands::remove)
+        handleRpcResponse(event.requestId?.let(pendingCommands::remove), event)
+    }
+
+    internal fun handleRpcResponse(kind: String?, event: RemoteEvent) {
         if (event.payload?.jsonObject?.get("error") != null) {
             _state.value = _state.value.copy(
                 errorMessage = event.payload.toString(),
@@ -246,8 +253,22 @@ class RemoteRepository(
         when (kind) {
             "thread.list" -> _state.value = _state.value.copy(threads = parseThreads(event))
             "thread.start" -> {
-                val id = event.payload?.jsonObject?.get("result")?.jsonObject?.get("thread")?.jsonObject?.string("id")
-                if (id != null) selectThread(id)
+                val obj = event.payload?.jsonObject?.get("result")?.jsonObject
+                val id = obj?.get("thread")?.jsonObject?.string("id")
+                    ?: obj?.string("id")
+                    ?: obj?.string("threadId")
+                if (id != null) {
+                    val existing = _state.value.threads.firstOrNull { it.id == id }
+                    val optimistic = existing ?: RemoteThread(
+                        id = id, title = "新线程", preview = "", cwd = pendingCreateCwd,
+                        updatedAt = System.currentTimeMillis(), status = "",
+                    )
+                    _state.value = _state.value.copy(
+                        threads = listOf(optimistic) + _state.value.threads.filterNot { it.id == id },
+                    )
+                    selectThread(id)
+                }
+                pendingCreateCwd = null
                 refreshThreads()
             }
             "thread.read" -> event.payload?.let(::applyThreadHistory)
