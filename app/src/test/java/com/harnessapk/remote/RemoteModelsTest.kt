@@ -25,4 +25,17 @@ class RemoteModelsTest {
             parsePairingPayload("""{"version":1,"relayUrl":"https://relay.example.com","hostId":"mac","pairingTicket":"t","pairingSecret":"s","expiresAt":999}""", 1000)
         }
     }
+
+    @Test
+    fun sanitizeThreadTextCollapsesBlankLinesAndStripsMarkers() {
+        val raw = "<codex_delegation>\n  <source_thread_id>x</source_thread_id>\n  <input>请负责任务\n\n\n## My request:\n  做这个\n</input>\n</codex_delegation>"
+        val out = sanitizeThreadText(raw)
+        assertEquals("请负责任务 做这个", out)
+    }
+
+    @Test
+    fun sanitizeThreadTextTruncates() {
+        val out = sanitizeThreadText((1..400).joinToString("") { "a" })
+        assertEquals(160, out.length)
+    }
 }
