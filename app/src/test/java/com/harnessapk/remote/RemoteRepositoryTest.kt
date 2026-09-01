@@ -180,6 +180,7 @@ class RemoteRepositoryTest {
         )
         assertEquals("t-1", repo.state.value.selectedThreadId)
         assertEquals("新线程", repo.state.value.threads.first().title)
+        assertEquals("/Users/tony/Documents/x", repo.state.value.threads.first().cwd)
     }
 
     @Test
@@ -194,6 +195,49 @@ class RemoteRepositoryTest {
             ),
         )
         assertEquals("t-2", repo.state.value.selectedThreadId)
+    }
+
+    @Test
+    fun threadStartResponseParsesThreadIdShape() {
+        val repo = repository()
+        repo.createThread("/tmp")
+        repo.handleRpcResponse(
+            "thread.start",
+            RemoteEvent(
+                type = "rpc.response",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement("""{"result":{"threadId":"t-3"}}"""),
+            ),
+        )
+        assertEquals("t-3", repo.state.value.selectedThreadId)
+    }
+
+    @Test
+    fun threadListMergePreservesSelectedOptimisticThread() {
+        val repo = repository()
+        repo.createThread("/x")
+        repo.handleRpcResponse(
+            "thread.start",
+            RemoteEvent(
+                type = "rpc.response",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"result":{"thread":{"id":"t-keep","cwd":"/x"}}}""",
+                ),
+            ),
+        )
+        assertEquals("t-keep", repo.state.value.threads.first().id)
+
+        repo.handleRpcResponse(
+            "thread.list",
+            RemoteEvent(
+                type = "rpc.response",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"result":{"data":[{"id":"t-other","name":"B","updatedAt":1,"cwd":"/b"}]}}""",
+                ),
+            ),
+        )
+
+        assertEquals("t-keep", repo.state.value.threads.first().id)
+        assertTrue(repo.state.value.threads.any { it.id == "t-other" })
     }
 
     private fun repository(

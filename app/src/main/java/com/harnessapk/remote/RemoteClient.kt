@@ -249,6 +249,7 @@ class RemoteRepository(
 
     internal fun handleRpcResponse(kind: String?, event: RemoteEvent) {
         if (event.payload?.jsonObject?.get("error") != null) {
+            if (kind == "thread.start") pendingCreateCwd = null
             _state.value = _state.value.copy(
                 errorMessage = event.payload.toString(),
                 isWorking = if (kind == "turn.start") false else _state.value.isWorking,
@@ -257,7 +258,14 @@ class RemoteRepository(
             return
         }
         when (kind) {
-            "thread.list" -> _state.value = _state.value.copy(threads = parseThreads(event))
+            "thread.list" -> {
+                val parsed = parseThreads(event)
+                val selectedId = _state.value.selectedThreadId
+                val merged = if (selectedId != null && parsed.none { it.id == selectedId }) {
+                    _state.value.threads.filter { it.id == selectedId }.take(1) + parsed
+                } else parsed
+                _state.value = _state.value.copy(threads = merged)
+            }
             "thread.start" -> {
                 val obj = event.payload?.jsonObject?.get("result")?.jsonObject
                 val id = obj?.get("thread")?.jsonObject?.string("id")
