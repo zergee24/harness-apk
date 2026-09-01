@@ -293,7 +293,13 @@ class RemoteRepository(
             "thread.read" -> event.payload?.let(::applyThreadHistory)
             "turn.start" -> {
                 val turnId = event.payload?.jsonObject?.get("result")?.jsonObject?.get("turn")?.jsonObject?.string("id")
-                _state.value = _state.value.copy(activeTurnId = turnId, isWorking = true)
+                // 迟到响应回填：看门狗可能已清掉乐观 activeThreadId，回退到发起 turn 的选中线程，
+                // 避免 activeThreadId 孤儿导致 turn/completed 永远匹配不上、isWorking 卡 true。
+                _state.value = _state.value.copy(
+                    activeTurnId = turnId,
+                    activeThreadId = _state.value.activeThreadId ?: _state.value.selectedThreadId,
+                    isWorking = true,
+                )
             }
         }
     }

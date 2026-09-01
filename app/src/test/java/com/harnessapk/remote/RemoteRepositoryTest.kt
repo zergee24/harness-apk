@@ -308,6 +308,51 @@ class RemoteRepositoryTest {
         assertTrue(repo.state.value.isWorking)
     }
 
+    @Test
+    fun turnCompletedClearsActiveStateForMatchingThread() {
+        val repo = repository()
+        repo.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"t-f","turn":{"id":"turn-f"}}}""",
+                ),
+            ),
+        )
+        assertEquals("t-f", repo.state.value.activeThreadId)
+
+        repo.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"method":"turn/completed","params":{"threadId":"t-f"}}""",
+                ),
+            ),
+        )
+
+        assertEquals(null, repo.state.value.activeThreadId)
+        assertEquals(null, repo.state.value.activeTurnId)
+        assertFalse(repo.state.value.isWorking)
+    }
+
+    @Test
+    fun turnStartedInBackgroundWhileAnotherThreadSelectedTracksWithoutWorking() {
+        val repo = repository()
+        repo.selectThread("t-a")
+        repo.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"t-b","turn":{"id":"turn-b"}}}""",
+                ),
+            ),
+        )
+
+        assertEquals("t-b", repo.state.value.activeThreadId)
+        assertEquals("turn-b", repo.state.value.activeTurnId)
+        assertFalse(repo.state.value.isWorking)
+    }
+
     private fun repository(
         timeoutMillis: Long = 30_000L,
         turnCommandTimeoutMillis: Long = 130_000L,
