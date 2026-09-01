@@ -70,7 +70,7 @@ class RemoteRepositoryTest {
 
     @Test
     fun answeredCommandDoesNotSurfaceTimeoutError() {
-        val repository = repository(timeoutMillis = 60L)
+        val repository = repository(timeoutMillis = 60L, listCommandTimeoutMillis = 60L)
         val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
         @Suppress("UNCHECKED_CAST")
         val pendingCommands = pendingField.get(repository) as MutableMap<String, String>
@@ -95,12 +95,36 @@ class RemoteRepositoryTest {
 
     @Test
     fun watchdogBudgetExemptsEventAnsweredCommandsAndExtendsTurnStart() {
-        val repository = repository(timeoutMillis = 60L, turnCommandTimeoutMillis = 1_000L)
+        val repository = repository(timeoutMillis = 60L, turnCommandTimeoutMillis = 1_000L, listCommandTimeoutMillis = 2_000L)
 
         assertEquals(null, repository.watchdogBudgetFor("host.status"))
         assertEquals(null, repository.watchdogBudgetFor("approval.respond"))
         assertEquals(1_000L, repository.watchdogBudgetFor("turn.start"))
-        assertEquals(60L, repository.watchdogBudgetFor("thread.list"))
+        assertEquals(2_000L, repository.watchdogBudgetFor("thread.list"))
+        assertEquals(2_000L, repository.watchdogBudgetFor("thread.read"))
+        assertEquals(60L, repository.watchdogBudgetFor("turn.steer"))
+    }
+
+    @Test
+    fun commandTimeoutSurfacesErrorWithoutConsumingResponse() {
+        val repository = repository(timeoutMillis = 60L)
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pendingCommands = pendingField.get(repository) as MutableMap<String, String>
+        pendingCommands["thread.start:late"] = "thread.start"
+        repository.armCommandTimeout("thread.start:late", "thread.start")
+        Thread.sleep(200)
+        assertTrue(repository.state.value.errorMessage?.contains("超时") == true)
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.start:late",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement("""{"result":{"id":"t-late"}}"""),
+            ),
+        )
+
+        assertEquals("t-late", repository.state.value.selectedThreadId)
     }
 
     @Test
@@ -173,14 +197,16 @@ class RemoteRepositoryTest {
     }
 
     private fun repository(
-        timeoutMillis: Long = 15_000L,
+        timeoutMillis: Long = 30_000L,
         turnCommandTimeoutMillis: Long = 130_000L,
+        listCommandTimeoutMillis: Long = 35_000L,
     ): RemoteRepository = RemoteRepository(
         profileStore = FakeRemoteProfileProvider(profile),
         httpClient = OkHttpClient(),
         scope = CoroutineScope(SupervisorJob()),
         commandTimeoutMillis = timeoutMillis,
         turnCommandTimeoutMillis = turnCommandTimeoutMillis,
+        listCommandTimeoutMillis = listCommandTimeoutMillis,
     )
 }
 

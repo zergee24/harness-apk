@@ -31,8 +31,9 @@ class RemoteRepository(
     private val profileStore: RemoteProfileProvider,
     private val httpClient: OkHttpClient,
     private val scope: CoroutineScope,
-    private val commandTimeoutMillis: Long = 15_000L,
+    private val commandTimeoutMillis: Long = 30_000L,
     private val turnCommandTimeoutMillis: Long = 130_000L,
+    private val listCommandTimeoutMillis: Long = 35_000L,
 ) {
     private val _state = MutableStateFlow(RemoteUiState())
     val state: StateFlow<RemoteUiState> = _state.asStateFlow()
@@ -45,6 +46,7 @@ class RemoteRepository(
     private var explicitDisconnect = false
     private var reconnectAttempt = 0
     private val pendingCommands: MutableMap<String, String> = ConcurrentHashMap()
+    private val timedOut = ConcurrentHashMap.newKeySet<String>()
     private var pendingCreateCwd: String? = null
 
     fun connect() {
@@ -65,6 +67,7 @@ class RemoteRepository(
         socket?.close(1000, "user disconnected")
         socket = null
         pendingCommands.clear()
+        timedOut.clear()
         _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.DISCONNECTED, isWorking = false)
     }
 
@@ -137,7 +140,7 @@ class RemoteRepository(
         val timeoutMillis = watchdogBudgetFor(kind) ?: return
         scope.launch {
             delay(timeoutMillis)
-            if (pendingCommands.remove(requestId) != null) {
+            if (pendingCommands.containsKey(requestId) && timedOut.add(requestId)) {
                 _state.value = _state.value.copy(
                     errorMessage = "命令 $kind 超时，Mac 未响应",
                     isWorking = if (kind == "turn.start") false else _state.value.isWorking,
@@ -150,6 +153,7 @@ class RemoteRepository(
     internal fun watchdogBudgetFor(type: String): Long? = when (type) {
         "host.status", "approval.respond" -> null // bridge 以事件应答或不回包，看门狗必然误报
         "turn.start" -> turnCommandTimeoutMillis
+        "thread.list", "thread.read" -> listCommandTimeoutMillis
         else -> commandTimeoutMillis
     }
 
@@ -238,7 +242,9 @@ class RemoteRepository(
     }
 
     private fun handleRpcResponse(event: RemoteEvent) {
-        handleRpcResponse(event.requestId?.let(pendingCommands::remove), event)
+        val kind = event.requestId?.let(pendingCommands::remove)
+        if (kind != null) timedOut.remove(event.requestId)
+        handleRpcResponse(kind, event)
     }
 
     internal fun handleRpcResponse(kind: String?, event: RemoteEvent) {
