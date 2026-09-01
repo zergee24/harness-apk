@@ -1,5 +1,6 @@
 package com.harnessapk.ui.remote
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.Refresh
@@ -57,6 +57,9 @@ fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
             Text("请先在设置中扫描 Mac Bridge 的配对二维码。")
         }
         return
+    }
+    BackHandler(enabled = state.selectedThreadId != null) {
+        container.remoteRepository.clearSelection()
     }
     if (state.selectedThreadId == null) RemoteThreadList(container, state, contentPadding)
     else RemoteThreadDetail(container, state, contentPadding)
@@ -118,8 +121,7 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
     val context = LocalContext.current
     var input by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(padding)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            IconButton(onClick = container.remoteRepository::clearSelection) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
             if (state.isWorking) IconButton(onClick = container.remoteRepository::interrupt) { Icon(Icons.Outlined.Cancel, "停止") }
         }
         LazyColumn(

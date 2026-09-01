@@ -199,6 +199,7 @@ fun HarnessApkApp(
     var captureActionBusy by remember { mutableStateOf(false) }
     var captureActionError by remember { mutableStateOf<String?>(null) }
     val remoteProfile by container.remoteProfileStore.profile.collectAsState()
+    val remoteUiState by container.remoteRepository.state.collectAsState()
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
@@ -278,7 +279,8 @@ fun HarnessApkApp(
         WikiRoutes.CitationPattern -> "引用原文"
         Routes.Updates -> "更新"
         Routes.RemoteSettings -> "Codex 远程节点"
-        Routes.RemoteControl -> "远程控制"
+        Routes.RemoteControl -> remoteUiState.threads
+            .firstOrNull { it.id == remoteUiState.selectedThreadId }?.title ?: "远程控制"
         Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
     }
@@ -390,6 +392,12 @@ fun HarnessApkApp(
                                         }
                                         Routes.WikiLibrary -> {
                                             dispatchWikiPackageImport(WikiPackageImportEvent.ImportCancelled)
+                                        }
+                                        Routes.RemoteControl -> {
+                                            if (remoteUiState.selectedThreadId != null) {
+                                                container.remoteRepository.clearSelection()
+                                                return@IconButton
+                                            }
                                         }
                                     }
                                     navController.popBackStack()
