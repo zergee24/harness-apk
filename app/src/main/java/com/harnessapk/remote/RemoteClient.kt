@@ -68,7 +68,7 @@ class RemoteRepository(
         socket = null
         pendingCommands.clear()
         timedOut.clear()
-        _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.DISCONNECTED, isWorking = false)
+        _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.DISCONNECTED, isWorking = false, activeThreadId = null, activeTurnId = null)
     }
 
     fun refreshThreads() = send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))
@@ -87,6 +87,7 @@ class RemoteRepository(
         if (send(RemoteCommand(type = "turn.start", requestId = requestId("turn.start"), threadId = threadId, text = text))) {
             _state.value = _state.value.copy(
                 isWorking = true,
+                activeThreadId = threadId,
                 timeline = _state.value.timeline + RemoteTimelineItem(UUID.randomUUID().toString(), "userMessage", text),
             )
         }
@@ -144,6 +145,8 @@ class RemoteRepository(
                 _state.value = _state.value.copy(
                     errorMessage = "命令 $kind 超时，Mac 未响应",
                     isWorking = if (kind == "turn.start") false else _state.value.isWorking,
+                    activeThreadId = if (kind == "turn.start") null else _state.value.activeThreadId,
+                    activeTurnId = if (kind == "turn.start") null else _state.value.activeTurnId,
                 )
                 _notifications.tryEmit(RemoteNotification("Codex 无响应", "命令 $kind 超时，请检查 Mac bridge 是否在线"))
             }
@@ -232,7 +235,7 @@ class RemoteRepository(
             "host.status" -> _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED)
             "error" -> {
                 val message = event.message ?: "Codex 远程任务失败"
-                _state.value = _state.value.copy(errorMessage = message, isWorking = false)
+                _state.value = _state.value.copy(errorMessage = message, isWorking = false, activeThreadId = null, activeTurnId = null)
                 _notifications.tryEmit(RemoteNotification("Codex 任务失败", message))
             }
             "rpc.response" -> handleRpcResponse(event)
@@ -253,6 +256,8 @@ class RemoteRepository(
             _state.value = _state.value.copy(
                 errorMessage = event.payload.toString(),
                 isWorking = if (kind == "turn.start") false else _state.value.isWorking,
+                activeThreadId = if (kind == "turn.start") null else _state.value.activeThreadId,
+                activeTurnId = if (kind == "turn.start") null else _state.value.activeTurnId,
             )
             _notifications.tryEmit(RemoteNotification("Codex 任务失败", "Mac 返回了错误，请打开 Harness 查看详情"))
             return
@@ -305,14 +310,31 @@ class RemoteRepository(
         val raw = event.payload?.jsonObject ?: return
         val method = raw.string("method") ?: event.method.orEmpty()
         val params = raw["params"]?.jsonObject ?: JsonObject(emptyMap())
-        if (!matchesSelectedThread(params.string("threadId"))) return
+        val eventThreadId = params.string("threadId")
+        val selected = matchesSelectedThread(eventThreadId)
         when (method) {
-            "turn/started" -> _state.value = _state.value.copy(activeTurnId = params["turn"]?.jsonObject?.string("id"), isWorking = true)
-            "turn/completed" -> {
-                _state.value = _state.value.copy(activeTurnId = null, isWorking = false)
-                _notifications.tryEmit(RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果"))
-                refreshThreads()
+            "turn/started" -> {
+                // P1-3 守卫：仅当事件属于选中线程，或当前无活动 turn 时才覆写，
+                // 避免后台委托线程的 turn/started 污染前台线程的 activeTurnId 导致 interrupt 错配。
+                if (selected || _state.value.activeThreadId == null) {
+                    _state.value = _state.value.copy(
+                        activeTurnId = params["turn"]?.jsonObject?.string("id"),
+                        activeThreadId = eventThreadId,
+                        isWorking = selected,
+                    )
+                }
             }
+            "turn/completed" -> {
+                // 只清匹配当前活动线程的状态，避免不相关线程的完成事件误清。
+                if (eventThreadId == _state.value.activeThreadId) {
+                    _state.value = _state.value.copy(activeTurnId = null, activeThreadId = null, isWorking = false)
+                    _notifications.tryEmit(RemoteNotification("Codex 已完成", "远程任务已结束，点击查看结果"))
+                    refreshThreads()
+                }
+            }
+        }
+        if (!selected) return
+        when (method) {
             "item/started", "item/completed" -> params["item"]?.let { item ->
                 timelineItem(item)?.let { addOrReplaceTimeline(it) }
             }

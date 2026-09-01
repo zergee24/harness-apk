@@ -107,6 +107,7 @@ data class RemoteUiState(
     val threads: List<RemoteThread> = emptyList(),
     val selectedThreadId: String? = null,
     val activeTurnId: String? = null,
+    val activeThreadId: String? = null,
     val timeline: List<RemoteTimelineItem> = emptyList(),
     val approvals: List<RemoteApproval> = emptyList(),
     val isWorking: Boolean = false,

@@ -240,6 +240,74 @@ class RemoteRepositoryTest {
         assertTrue(repo.state.value.threads.any { it.id == "t-other" })
     }
 
+    @Test
+    fun turnStartedEventSetsActiveThreadEvenWhenNotSelected() {
+        val repo = repository()
+        repo.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"t-run","turn":{"id":"turn-1"}}}""",
+                ),
+            ),
+        )
+        assertEquals("t-run", repo.state.value.activeThreadId)
+        assertEquals("turn-1", repo.state.value.activeTurnId)
+    }
+
+    @Test
+    fun turnStartedFromOtherThreadDoesNotClobberActiveTurn() {
+        val repo = repository()
+        repo.selectThread("t-fore")
+        repo.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"t-fore","turn":{"id":"turn-fore"}}}""",
+                ),
+            ),
+        )
+
+        repo.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"t-back","turn":{"id":"turn-back"}}}""",
+                ),
+            ),
+        )
+
+        assertEquals("turn-fore", repo.state.value.activeTurnId)
+        assertEquals("t-fore", repo.state.value.activeThreadId)
+    }
+
+    @Test
+    fun turnCompletedFromUnrelatedThreadKeepsActiveState() {
+        val repo = repository()
+        repo.selectThread("t-fore")
+        repo.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"method":"turn/started","params":{"threadId":"t-fore","turn":{"id":"turn-fore"}}}""",
+                ),
+            ),
+        )
+
+        repo.handleEvent(
+            RemoteEvent(
+                type = "codex.event",
+                payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                    """{"method":"turn/completed","params":{"threadId":"t-back"}}""",
+                ),
+            ),
+        )
+
+        assertEquals("t-fore", repo.state.value.activeThreadId)
+        assertEquals("turn-fore", repo.state.value.activeTurnId)
+        assertTrue(repo.state.value.isWorking)
+    }
+
     private fun repository(
         timeoutMillis: Long = 30_000L,
         turnCommandTimeoutMillis: Long = 130_000L,
