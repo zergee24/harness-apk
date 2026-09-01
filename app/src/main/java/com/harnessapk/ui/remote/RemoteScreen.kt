@@ -155,11 +155,19 @@ private fun RemoteThreadDetail(container: AppContainer, state: RemoteUiState, pa
     }
 }
 
+private val timelineKindLabels = mapOf(
+    "userMessage" to "用户",
+    "agentMessage" to "助手",
+    "reasoning" to "思考",
+    "commandExecution" to "命令",
+    "fileChange" to "文件变更",
+)
+
 @Composable
 private fun TimelineCard(item: RemoteTimelineItem) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(item.kind, style = MaterialTheme.typography.labelMedium)
+            Text(timelineKindLabels[item.kind] ?: item.kind, style = MaterialTheme.typography.labelMedium)
             if (item.kind == "agentMessage" || item.kind == "userMessage") {
                 MarkdownMessage(item.text)
             } else {
