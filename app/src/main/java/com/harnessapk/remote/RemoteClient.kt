@@ -24,12 +24,15 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 class RemoteRepository(
     private val profileStore: RemoteProfileProvider,
     private val httpClient: OkHttpClient,
     private val scope: CoroutineScope,
+    private val commandTimeoutMillis: Long = 15_000L,
+    private val turnCommandTimeoutMillis: Long = 130_000L,
 ) {
     private val _state = MutableStateFlow(RemoteUiState())
     val state: StateFlow<RemoteUiState> = _state.asStateFlow()
@@ -41,7 +44,7 @@ class RemoteRepository(
     private var reconnectJob: Job? = null
     private var explicitDisconnect = false
     private var reconnectAttempt = 0
-    private val pendingCommands = mutableMapOf<String, String>()
+    private val pendingCommands: MutableMap<String, String> = ConcurrentHashMap()
 
     fun connect() {
         val profile = profileStore.profile.value ?: return
@@ -60,6 +63,7 @@ class RemoteRepository(
         reconnectJob?.cancel()
         socket?.close(1000, "user disconnected")
         socket = null
+        pendingCommands.clear()
         _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.DISCONNECTED, isWorking = false)
     }
 
@@ -121,7 +125,28 @@ class RemoteRepository(
             _state.value = _state.value.copy(errorMessage = "Mac 尚未连接，请稍后重试")
             return false
         }
+        armCommandTimeout(command.requestId, command.type)
         return true
+    }
+
+    internal fun armCommandTimeout(requestId: String, kind: String) {
+        val timeoutMillis = watchdogBudgetFor(kind) ?: return
+        scope.launch {
+            delay(timeoutMillis)
+            if (pendingCommands.remove(requestId) != null) {
+                _state.value = _state.value.copy(
+                    errorMessage = "命令 $kind 超时，Mac 未响应",
+                    isWorking = if (kind == "turn.start") false else _state.value.isWorking,
+                )
+                _notifications.tryEmit(RemoteNotification("Codex 无响应", "命令 $kind 超时，请检查 Mac bridge 是否在线"))
+            }
+        }
+    }
+
+    internal fun watchdogBudgetFor(type: String): Long? = when (type) {
+        "host.status", "approval.respond" -> null // bridge 以事件应答或不回包，看门狗必然误报
+        "turn.start" -> turnCommandTimeoutMillis
+        else -> commandTimeoutMillis
     }
 
     private fun sendAck(messageId: String) {
@@ -209,9 +234,12 @@ class RemoteRepository(
     }
 
     private fun handleRpcResponse(event: RemoteEvent) {
-        val kind = pendingCommands.remove(event.requestId)
+        val kind = event.requestId?.let(pendingCommands::remove)
         if (event.payload?.jsonObject?.get("error") != null) {
-            _state.value = _state.value.copy(errorMessage = event.payload.toString())
+            _state.value = _state.value.copy(
+                errorMessage = event.payload.toString(),
+                isWorking = if (kind == "turn.start") false else _state.value.isWorking,
+            )
             _notifications.tryEmit(RemoteNotification("Codex 任务失败", "Mac 返回了错误，请打开 Harness 查看详情"))
             return
         }
