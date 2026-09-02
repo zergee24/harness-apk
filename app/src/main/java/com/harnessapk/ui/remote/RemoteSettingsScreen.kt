@@ -146,8 +146,8 @@ private fun decodeQr(bitmap: Bitmap): Result<String> = runCatching { decodeQrTex
 private suspend fun decodeQrImage(context: android.content.Context, uri: Uri): String =
     withContext(Dispatchers.IO) {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: error("无法读取图片")
+        val boundsStream = context.contentResolver.openInputStream(uri) ?: error("无法读取图片")
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
         val options = BitmapFactory.Options().apply {
             inSampleSize = qrDecodeSampleSize(bounds.outWidth, bounds.outHeight)
         }
