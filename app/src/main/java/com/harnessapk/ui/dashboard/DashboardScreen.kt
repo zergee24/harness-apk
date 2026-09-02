@@ -65,6 +65,7 @@ fun DashboardScreen(
     container: AppContainer,
     viewedStore: DashboardViewedStore,
     onExit: () -> Unit,
+    onThreadDetail: (String) -> Unit = {},
 ) {
     val dashboard by container.remoteRepository.dashboard.collectAsState()
     val connection by container.remoteRepository.state.collectAsState()
@@ -126,6 +127,7 @@ fun DashboardScreen(
             ThreadPagingGrid(
                 threads = threads,
                 onTap = { container.remoteRepository.focusThread(it.threadId) },
+                onThreadDetail = onThreadDetail,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             )
             Row(
@@ -149,6 +151,7 @@ fun DashboardScreen(
 private fun ThreadPagingGrid(
     threads: List<DashboardThread>,
     onTap: (DashboardThread) -> Unit,
+    onThreadDetail: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier = modifier) {
@@ -170,6 +173,7 @@ private fun ThreadPagingGrid(
                     thread = thread,
                     unread = false,
                     onClick = { onTap(thread) },
+                    onLongClick = { onThreadDetail(thread.threadId) },
                 )
             }
         }
@@ -193,9 +197,9 @@ private fun ThreadPagingGrid(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit) {
+private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
     val accent = Color(dashboardToneArgb(dashboardTone(thread.status)))
-    Card(modifier = Modifier.width(ThreadTileWidth).combinedClickable(onClick = onClick)) {
+    Card(modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)) {
         Row(modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp)) {
             Box(modifier = Modifier.width(14.dp).fillMaxHeight().background(accent))
             Column(

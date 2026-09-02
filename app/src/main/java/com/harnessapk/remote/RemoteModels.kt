@@ -596,6 +596,50 @@ internal fun parseDashboardThread(element: JsonElement?): DashboardThread? {
     )
 }
 
+data class DashboardDetailState(
+    val threadId: String = "",
+    val items: List<RemoteTimelineItem> = emptyList(),
+)
+
+// thread_items 的 item_json -> 远程时间线 item（复用既有渲染）。
+internal fun parseDashboardDetailItems(payload: JsonElement?): List<RemoteTimelineItem> {
+    val root = payload?.jsonObject ?: return emptyList()
+    val threadId = root.string("threadId") ?: return emptyList()
+    val arr = root["items"] as? JsonArray ?: return emptyList()
+    return arr.mapNotNull { entry ->
+        val obj = entry.jsonObject
+        val itemType = obj.string("itemType") ?: return@mapNotNull null
+        val item = obj["item"] as? JsonObject
+        val id = item?.string("id") ?: "${threadId}#${obj["item"].hashCode()}"
+        val status = item?.string("status")
+        val text = when (itemType) {
+            "agentMessage", "userMessage" -> item?.contentFirstText()
+                ?: item?.string("text").orEmpty()
+            "commandExecution" -> item?.string("command")
+                ?: item?.string("aggregatedOutput").orEmpty()
+            "fileChange" -> (item?.array("changes")?.jsonArray ?: JsonArray(emptyList()))
+                .mapNotNull { change -> change.jsonObject.string("path")?.substringAfterLast('/') }
+                .joinToString(" · ")
+                .ifBlank { item?.string("status").orEmpty() }
+            "reasoning" -> item?.array("summary")?.jsonArray?.lastOrNull()
+                ?.jsonObject?.string("text").orEmpty()
+                .ifBlank { item?.string("content").orEmpty() }
+            else -> item?.toString().orEmpty().take(200)
+        }
+        RemoteTimelineItem(
+            id = id,
+            kind = itemType,
+            text = if (obj.boolean("truncated") == true) "$text\n(超长截断)" else text,
+            status = status,
+        )
+    }
+}
+
+private fun JsonObject.contentFirstText(): String? {
+    val content = this["content"] as? JsonArray ?: return null
+    return content.mapNotNull { it.jsonObject.string("text") }.firstOrNull { it.isNotBlank() }
+}
+
 internal fun parseDashboardHost(element: JsonElement?): DashboardHost? {
     val item = element?.jsonObject ?: return null
     return DashboardHost(
