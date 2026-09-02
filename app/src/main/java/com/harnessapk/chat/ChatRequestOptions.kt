@@ -15,7 +15,7 @@ enum class ReasoningEffort(
     MAX("max", "最大"),
 }
 
-fun defaultReasoningEffort(): ReasoningEffort = ReasoningEffort.XHIGH
+fun defaultReasoningEffort(): ReasoningEffort = ReasoningEffort.MAX
 
 fun reasoningEffortForRequest(
     provider: ProviderProfile,

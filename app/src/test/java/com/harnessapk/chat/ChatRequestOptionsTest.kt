@@ -31,8 +31,8 @@ class ChatRequestOptionsTest {
     }
 
     @Test
-    fun defaultReasoningEffortIsExtraHigh() {
-        assertEquals(ReasoningEffort.XHIGH, defaultReasoningEffort())
+    fun defaultReasoningEffortIsMax() {
+        assertEquals(ReasoningEffort.MAX, defaultReasoningEffort())
     }
 
     @Test
