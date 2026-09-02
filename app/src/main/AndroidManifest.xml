@@ -109,5 +109,10 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.dashboard.DashboardActivity"
+            android:exported="false"
+            android:label="Agent 副屏" />
     </application>
 </manifest>

@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -518,6 +519,46 @@ internal fun parseWorkspaceCandidates(event: RemoteEvent): List<WorkspaceCandida
 internal fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
 internal fun JsonObject.long(key: String): Long? = string(key)?.toLongOrNull()
 internal fun JsonObject.array(key: String): JsonArray = this[key]?.jsonArray ?: JsonArray(emptyList())
+internal fun JsonObject.boolean(key: String): Boolean? = this[key]?.jsonPrimitive?.booleanOrNull
+
+// —— Agent 副屏（只读 dashboard）：bridge observer 以 plain 帧推送的线程状态 ——
+
+data class DashboardThread(
+    val threadId: String,
+    val title: String,
+    val cwd: String?,
+    val gitBranch: String?,
+    val updatedAtMs: Long,
+    val status: String,
+    val approx: Boolean = false,
+    val note: String? = null,
+    val lastEventAtMs: Long = 0,
+)
+
+data class DashboardState(val threads: List<DashboardThread> = emptyList())
+
+data class DashboardFocusResult(val threadId: String, val ok: Boolean, val message: String? = null)
+
+internal fun parseDashboardThreads(payload: JsonElement?): List<DashboardThread> {
+    val threads = payload?.jsonObject?.get("threads") as? JsonArray ?: return emptyList()
+    return threads.mapNotNull(::parseDashboardThread)
+}
+
+internal fun parseDashboardThread(element: JsonElement?): DashboardThread? {
+    val item = element?.jsonObject ?: return null
+    val id = item.string("threadId") ?: return null
+    return DashboardThread(
+        threadId = id,
+        title = item.string("title").orEmpty().ifBlank { "未命名线程" },
+        cwd = item.string("cwd"),
+        gitBranch = item.string("gitBranch"),
+        updatedAtMs = item.long("updatedAtMs") ?: 0L,
+        status = item.string("status").orEmpty(),
+        approx = item.boolean("approx") ?: false,
+        note = item.string("note"),
+        lastEventAtMs = item.long("lastEventAtMs") ?: 0L,
+    )
+}
 
 private fun JsonObject.requiredString(key: String): String =
     requireNotNull(string(key)?.takeIf { it.isNotBlank() }) { "$key is required" }

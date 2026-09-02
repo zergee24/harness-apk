@@ -1,5 +1,6 @@
 package com.harnessapk.ui.remote
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -126,6 +127,11 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    OutlinedButton(onClick = {
+                        context.startActivity(Intent(context, com.harnessapk.ui.dashboard.DashboardActivity::class.java))
+                    }) {
+                        Text("副屏模式（常亮）")
+                    }
                     OutlinedButton(onClick = { container.remoteRepository.disconnect(); container.remoteProfileStore.clear() }) {
                         Icon(Icons.Outlined.Delete, contentDescription = null); Text("移除节点")
                     }

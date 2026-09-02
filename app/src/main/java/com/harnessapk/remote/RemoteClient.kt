@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -59,6 +60,10 @@ class RemoteRepository(
     val state: StateFlow<RemoteUiState> = _state.asStateFlow()
     private val _notifications = MutableSharedFlow<RemoteNotification>(extraBufferCapacity = 8)
     val notifications: SharedFlow<RemoteNotification> = _notifications
+    private val _dashboard = MutableStateFlow(DashboardState())
+    val dashboard: StateFlow<DashboardState> = _dashboard.asStateFlow()
+    private val _focusResults = MutableSharedFlow<DashboardFocusResult>(extraBufferCapacity = 4)
+    val focusResults: SharedFlow<DashboardFocusResult> = _focusResults.asSharedFlow()
     private val outgoingSequence = AtomicLong(0)
     private val seenMessages = LinkedHashSet<String>()
     private var socket: WebSocket? = null
@@ -121,6 +126,18 @@ class RemoteRepository(
         if (!send(RemoteCommand(type = "thread.list", requestId = requestId("thread.list")))) {
             _state.value = _state.value.copy(isThreadListLoading = false)
         }
+    }
+
+    /** 副屏：请求当前整帧线程快照（bridge 以 dashboard.threads plain 帧应答）。 */
+    fun requestDashboardSnapshot() {
+        send(RemoteCommand(type = "dashboard.snapshot", requestId = requestId("dashboard.snapshot")))
+    }
+
+    /** 副屏卡片唯一动作：让 Mac 主屏聚焦对应线程；失败经 focusResults 通知。 */
+    fun focusThread(threadId: String): Boolean {
+        val sent = send(RemoteCommand(type = "thread.focus", requestId = requestId("thread.focus"), threadId = threadId))
+        if (!sent) _focusResults.tryEmit(DashboardFocusResult(threadId, ok = false, message = "Mac 尚未连接"))
+        return sent
     }
     fun loadThreadSummary(threadId: String) {
         val current = _state.value
@@ -295,6 +312,7 @@ class RemoteRepository(
             _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED, errorMessage = null)
             send(RemoteCommand(type = "host.status", requestId = requestId("host.status")))
             refreshThreads()
+            requestDashboardSnapshot()
             val profile = profileStore.profile.value
             if (profile != null) {
                 scope.launch {
@@ -455,6 +473,24 @@ class RemoteRepository(
             }
             "codex.event" -> {
                 if (matchesSelectedBackend(event)) handleCodexEvent(event)
+            }
+            "dashboard.threads" -> _dashboard.value = DashboardState(
+                threads = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs },
+            )
+            "dashboard.thread" -> parseDashboardThread(event.payload)?.let { next ->
+                val merged = (listOf(next) + _dashboard.value.threads.filterNot { it.threadId == next.threadId })
+                    .sortedByDescending { it.updatedAtMs }
+                _dashboard.value = DashboardState(threads = merged)
+            }
+            "dashboard.focus" -> {
+                val payload = event.payload as? JsonObject ?: return
+                _focusResults.tryEmit(
+                    DashboardFocusResult(
+                        threadId = payload.string("threadId").orEmpty(),
+                        ok = payload.boolean("ok") ?: false,
+                        message = payload.string("message"),
+                    ),
+                )
             }
         }
     }
