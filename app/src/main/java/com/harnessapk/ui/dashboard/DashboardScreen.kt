@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -249,6 +250,12 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                         )
                     }
                 }
+                // 摘要与上方元信息之间用细线隔离（墨水屏上比留白更清晰）。
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 2.dp),
+                    thickness = 1.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                )
                 thread.lastActivity?.takeIf(String::isNotBlank)?.let { activity ->
                     Text(
                         activity,
