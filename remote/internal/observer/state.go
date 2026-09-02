@@ -34,6 +34,7 @@ type ThreadStatus struct {
 	Note           string `json:"note,omitempty"`
 	LastEventAtMs  int64  `json:"lastEventAtMs,omitempty"`
 	ContextPercent int    `json:"contextPercent,omitempty"`
+	LastActivity   string `json:"lastActivity,omitempty"`
 }
 
 // workEvents：出现即视为「在干活」的 event_msg payload.type。
@@ -61,6 +62,10 @@ type rolloutLine struct {
 			ModelContextWindow int64           `json:"model_context_window"`
 			RateLimits         json.RawMessage `json:"rate_limits"`
 		} `json:"info"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
 	} `json:"payload"`
 }
 
@@ -75,8 +80,9 @@ type Machine struct {
 	approx         bool
 	note           string
 	lastActive     time.Time
-	contextPercent int           // 上下文占用 %（total_tokens / model_context_window）
+	contextPercent int           // 上下文占用 %（last_token_usage / model_context_window）
 	rateLimits     *QuotaSnapshot // token_count 内嵌的账户配额缓存（snake_case 已归一）
+	lastActivity   string        // 最近一条 agent 消息摘要（填充卡片中部）
 }
 
 func NewMachine() *Machine { return &Machine{} }
@@ -97,9 +103,22 @@ func (m *Machine) ObserveLine(line string, now time.Time) {
 	m.note = ""
 
 	if rl.Type == "response_item" {
-		// 桌面 app 把工具调用写在 response_item 层（event_msg 的 item/completed
-		// 可能缺位），同样视为工作信号；reasoning 只增强 thinking 位。
+		// 桌面 app 把工具调用与 agent 消息写在 response_item 层（event_msg 的
+		// 对应事件可能缺位），同样纳入工作信号与摘要来源。
 		switch pt := rl.Payload.Type; pt {
+		case "agent_message", "message":
+			for _, c := range rl.Payload.Content {
+				if c.Text != "" {
+					m.setActivity(c.Text)
+					break
+				}
+			}
+			for _, c := range rl.Payload.Content {
+				if c.Text != "" {
+					m.setActivity(c.Text)
+					break
+				}
+			}
 		case "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "local_shell_call":
 			m.sawTool = true
 			if !m.inTurn {
@@ -115,6 +134,13 @@ func (m *Machine) ObserveLine(line string, now time.Time) {
 		return
 	}
 	switch pt := rl.Payload.Type; pt {
+	case "agent_message":
+		for _, c := range rl.Payload.Content {
+			if c.Text != "" {
+				m.setActivity(c.Text)
+				break
+			}
+		}
 	case "token_count":
 		if info := rl.Payload.Info; info != nil {
 			// 上下文占用 = 最近一次请求的 token / 模型上下文窗口。
@@ -210,10 +236,33 @@ func (m *Machine) Snapshot() ThreadStatus {
 		Note:           m.note,
 		LastEventAtMs:  last,
 		ContextPercent: m.contextPercent,
+		LastActivity:   m.lastActivity,
 	}
 }
 
 // CachedQuota 返回 token_count 内嵌缓存的账户配额（最新一次）；无则 nil。
 func (m *Machine) CachedQuota() *QuotaSnapshot {
 	return m.rateLimits
+}
+
+// setActivity 记录最近一条 agent 消息摘要（压单行、截 120 字符）。
+func (m *Machine) setActivity(text string) {
+	m.lastActivity = ActivitySnippet(text)
+}
+
+// ActivitySnippet 把消息文本压成单行摘要（去换行、截 120 字符）。
+func ActivitySnippet(text string) string {
+	out := make([]rune, 0, 120)
+	for _, r := range text {
+		switch r {
+		case '\n', '\r':
+			out = append(out, ' ')
+		default:
+			out = append(out, r)
+		}
+		if len(out) >= 120 {
+			break
+		}
+	}
+	return string(out)
 }

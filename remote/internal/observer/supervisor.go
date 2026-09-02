@@ -15,6 +15,7 @@ type ThreadSnapshot struct {
 	Note           string `json:"note,omitempty"`
 	LastEventAtMs  int64  `json:"lastEventAtMs,omitempty"`
 	ContextPercent int    `json:"contextPercent,omitempty"`
+	LastActivity   string `json:"lastActivity,omitempty"`
 }
 
 // Supervisor 维护活跃线程目录与 rollout tailer 集合。
@@ -64,6 +65,7 @@ func (s *Supervisor) PollOnce(ctx context.Context, now time.Time) []ThreadSnapsh
 			Note:          st.Note,
 			LastEventAtMs: st.LastEventAtMs,
 			ContextPercent: st.ContextPercent,
+			LastActivity: st.LastActivity,
 		})
 	}
 	s.tails = next
