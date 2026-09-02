@@ -131,11 +131,12 @@ fun DashboardScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
-                HostTodayCard(
+                HostCard(
                     modifier = Modifier.weight(1f),
                     host = dashboard.host,
                     hostName = hostName,
                 )
+                TodayCard(modifier = Modifier.weight(1f), host = dashboard.host)
             }
         }
     }
@@ -303,7 +304,7 @@ private fun QuotaStripCard(modifier: Modifier = Modifier, quota: DashboardQuota?
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text("余额", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("配额", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(
                     when {
                         quota == null -> "余额未知"
@@ -333,8 +334,9 @@ private fun QuotaStripCard(modifier: Modifier = Modifier, quota: DashboardQuota?
 
 // 底部仪表带右格：主机与今日卡（今日 tokens / 连续 streak / 今日 turn /
 // 内存 / 磁盘 / load，全部来自 dashboard.host 帧）。
+// 底部仪表带中格：主机卡（资源指标来自 dashboard.host 帧）。
 @Composable
-private fun HostTodayCard(
+private fun HostCard(
     modifier: Modifier = Modifier,
     host: DashboardHost?,
     hostName: String,
@@ -345,21 +347,39 @@ private fun HostTodayCard(
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             Text(
-                "主机与今日 · $hostName",
+                "主机 · $hostName",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            InfoRow("近 7 天 tokens", if (host == null || host.weekTokens <= 0) "—" else formatTokenCount(host.weekTokens))
-            InfoRow("连续 streak", if (host != null && host.streakDays > 0) "${host.streakDays} 天" else "—")
-            InfoRow("今日 turn", if (host != null && host.todayTurns > 0) "${host.todayTurns}" else "0")
             InfoRow(
-                "内存 · 磁盘 · load",
-                when {
-                    host == null || host.memUsedPercent <= 0 -> "—"
-                    else -> "内存 ${host.memUsedPercent}% · 磁盘 ${host.diskUsedPercent}% · load ${host.load1 ?: "—"}"
-                },
+                "内存",
+                if (host == null || host.memUsedPercent <= 0) "—" else "${host.memUsedPercent}%",
+            )
+            InfoRow(
+                "磁盘",
+                if (host == null || host.diskUsedPercent <= 0) "—" else "${host.diskUsedPercent}%",
+            )
+            InfoRow("load", host?.load1?.takeIf { it.isNotBlank() } ?: "—")
+        }
+    }
+}
+
+// 底部仪表带右格：今日卡（今日 turn / 连续 streak / 近 7 天 tokens）。
+@Composable
+private fun TodayCard(modifier: Modifier = Modifier, host: DashboardHost?) {
+    Card(modifier = modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text("今日", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            InfoRow("turn", if (host != null && host.todayTurns > 0) "${host.todayTurns}" else "0")
+            InfoRow("连续 streak", if (host != null && host.streakDays > 0) "${host.streakDays} 天" else "—")
+            InfoRow(
+                "近 7 天 tokens",
+                if (host == null || host.weekTokens <= 0) "—" else formatTokenCount(host.weekTokens),
             )
         }
     }
