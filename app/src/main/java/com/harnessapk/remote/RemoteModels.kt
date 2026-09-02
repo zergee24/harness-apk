@@ -533,6 +533,17 @@ data class DashboardThread(
     val approx: Boolean = false,
     val note: String? = null,
     val lastEventAtMs: Long = 0,
+    val contextPercent: Int = 0,
+)
+
+data class DashboardHost(
+    val quota: DashboardQuota? = null,
+    val weekTokens: Long = 0,
+    val streakDays: Int = 0,
+    val todayTurns: Int = 0,
+    val memUsedPercent: Int = 0,
+    val diskUsedPercent: Int = 0,
+    val load1: String? = null,
 )
 
 data class DashboardQuota(
@@ -545,6 +556,7 @@ data class DashboardQuota(
 data class DashboardState(
     val threads: List<DashboardThread> = emptyList(),
     val quota: DashboardQuota? = null,
+    val host: DashboardHost? = null,
 )
 
 data class DashboardFocusResult(val threadId: String, val ok: Boolean, val message: String? = null)
@@ -578,6 +590,20 @@ internal fun parseDashboardThread(element: JsonElement?): DashboardThread? {
         approx = item.boolean("approx") ?: false,
         note = item.string("note"),
         lastEventAtMs = item.long("lastEventAtMs") ?: 0L,
+        contextPercent = item.long("contextPercent")?.toInt() ?: 0,
+    )
+}
+
+internal fun parseDashboardHost(element: JsonElement?): DashboardHost? {
+    val item = element?.jsonObject ?: return null
+    return DashboardHost(
+        quota = parseDashboardQuota(item["quota"]),
+        weekTokens = item.long("weekTokens") ?: 0,
+        streakDays = item.long("streakDays")?.toInt() ?: 0,
+        todayTurns = item.long("todayTurns")?.toInt() ?: 0,
+        memUsedPercent = item.long("memUsedPercent")?.toInt() ?: 0,
+        diskUsedPercent = item.long("diskUsedPercent")?.toInt() ?: 0,
+        load1 = item.string("load1"),
     )
 }
 

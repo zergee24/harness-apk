@@ -46,6 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.harnessapk.common.AppContainer
+import com.harnessapk.remote.DashboardHost
 import com.harnessapk.remote.DashboardQuota
 import com.harnessapk.remote.DashboardThread
 import com.harnessapk.remote.DashboardViewedStore
@@ -126,13 +127,13 @@ fun DashboardScreen(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             )
             Row(
-                modifier = Modifier.height(130.dp).fillMaxWidth(),
+                modifier = Modifier.height(150.dp).fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
-                InfoPanelCard(
+                HostTodayCard(
                     modifier = Modifier.weight(1f),
-                    threads = threads,
+                    host = dashboard.host,
                     hostName = hostName,
                 )
             }
@@ -226,6 +227,14 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                         color = accent,
                         maxLines = 1,
                     )
+                    if (thread.contextPercent > 0) {
+                        Text(
+                            "上下文 ${thread.contextPercent}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
                     Text(
                         dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs),
                         style = MaterialTheme.typography.labelSmall,
@@ -322,41 +331,45 @@ private fun QuotaStripCard(modifier: Modifier = Modifier, quota: DashboardQuota?
     }
 }
 
-// 底部仪表带右格：信息面板（主机、线程计数、最近活动——全部来自现有状态）。
+// 底部仪表带右格：主机与今日卡（今日 tokens / 连续 streak / 今日 turn /
+// 内存 / 磁盘 / load，全部来自 dashboard.host 帧）。
 @Composable
-private fun InfoPanelCard(
+private fun HostTodayCard(
     modifier: Modifier = Modifier,
-    threads: List<DashboardThread>,
+    host: DashboardHost?,
     hostName: String,
 ) {
-    var active = 0
-    var done = 0
-    var error = 0
-    var latestAt = 0L
-    for (t in threads) {
-        when (dashboardTone(t.status)) {
-            DashboardTone.RUNNING, DashboardTone.THINKING -> active++
-            DashboardTone.DONE -> done++
-            DashboardTone.ERROR -> error++
-            DashboardTone.IDLE -> {}
-        }
-        if (t.updatedAtMs > latestAt) latestAt = t.updatedAtMs
-        if (t.lastEventAtMs > latestAt) latestAt = t.lastEventAtMs
-    }
     Card(modifier = modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp).fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            Text("信息面板", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            InfoRow("主机", hostName)
-            InfoRow("线程", "运行 $active · 完成 $done · 出错 $error")
+            Text(
+                "主机与今日 · $hostName",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            InfoRow("近 7 天 tokens", if (host == null || host.weekTokens <= 0) "—" else formatTokenCount(host.weekTokens))
+            InfoRow("连续 streak", if (host != null && host.streakDays > 0) "${host.streakDays} 天" else "—")
+            InfoRow("今日 turn", if (host != null && host.todayTurns > 0) "${host.todayTurns}" else "0")
             InfoRow(
-                "最近活动",
-                if (latestAt > 0) dashboardRelativeTime(System.currentTimeMillis(), latestAt) else "—",
+                "内存 · 磁盘 · load",
+                when {
+                    host == null || host.memUsedPercent <= 0 -> "—"
+                    else -> "内存 ${host.memUsedPercent}% · 磁盘 ${host.diskUsedPercent}% · load ${host.load1 ?: "—"}"
+                },
             )
         }
     }
+}
+
+private fun formatTokenCount(tokens: Long): String = when {
+    tokens >= 1_000_000_000 -> "%.1fB".format(tokens / 1_000_000_000.0)
+    tokens >= 1_000_000 -> "%.1fM".format(tokens / 1_000_000.0)
+    tokens >= 1_000 -> "%.1fk".format(tokens / 1_000.0)
+    else -> tokens.toString()
 }
 
 @Composable
@@ -366,7 +379,7 @@ private fun InfoRow(label: String, value: String) {
             label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(64.dp),
+            modifier = Modifier.width(72.dp),
         )
         Text(
             value,

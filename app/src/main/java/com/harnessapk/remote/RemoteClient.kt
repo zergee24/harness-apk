@@ -477,7 +477,11 @@ class RemoteRepository(
             "dashboard.threads" -> _dashboard.value = DashboardState(
                 threads = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs },
                 quota = parseDashboardQuota(event.payload?.jsonObject?.get("quota")),
+                host = parseDashboardHost(event.payload),
             )
+            "dashboard.host" -> parseDashboardHost(event.payload)?.let { host ->
+                _dashboard.value = _dashboard.value.copy(quota = host.quota ?: _dashboard.value.quota, host = host)
+            }
             "dashboard.thread" -> parseDashboardThread(event.payload)?.let { next ->
                 val merged = (listOf(next) + _dashboard.value.threads.filterNot { it.threadId == next.threadId })
                     .sortedByDescending { it.updatedAtMs }
