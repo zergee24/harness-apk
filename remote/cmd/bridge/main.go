@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/completion"
 	"github.com/harnessapk/remote/internal/journal"
+	"github.com/harnessapk/remote/internal/observer"
 	"github.com/harnessapk/remote/internal/protocol"
 	runstate "github.com/harnessapk/remote/internal/run"
 	bridgestate "github.com/harnessapk/remote/internal/state"
@@ -75,6 +77,11 @@ type bridge struct {
 	terminals             *completion.TerminalRunStore
 	workspaces            *workspace.Registry
 	seen                  map[string]time.Time
+	dashboard             *observer.Supervisor
+	dashboardMu           sync.Mutex
+	dashboardLastSent     map[string]string
+	focusRunner           func(ctx context.Context, name string, args ...string) error
+	dashboardSender       func(ctx context.Context, deviceID string, event protocol.Event) error
 	updateState           func(string, func(*bridgeState) error) error
 	backendBackoff        time.Duration
 	turnTransitions       map[string][]turnTransition
@@ -502,6 +509,7 @@ func (b *bridge) run(ctx context.Context, specs []backend.Spec) error {
 			return backend.StartCodex(spec)
 		})
 	}
+	go b.superviseDashboard(ctx)
 	if err := b.recoverTurnStartRoutes(); err != nil {
 		log.Printf("recover turn/start routes after bridge connection: %v", err)
 	}
@@ -730,6 +738,138 @@ func (b *bridge) broadcastHostStatus(ctx context.Context) {
 	}
 }
 
+// —— 副屏 dashboard（只读 observer）：状态推送与聚焦指令 ——
+
+const (
+	dashboardTopThreads   = 8
+	dashboardPollInterval = 5 * time.Second
+)
+
+func (b *bridge) superviseDashboard(ctx context.Context) {
+	sup := observer.NewSupervisor(observer.DefaultOptions(), dashboardTopThreads)
+	b.dashboardMu.Lock()
+	b.dashboard = sup
+	b.dashboardLastSent = map[string]string{}
+	b.dashboardMu.Unlock()
+	b.publishDashboardThreads(ctx, sup.PollOnce(ctx, time.Now()))
+	ticker := time.NewTicker(dashboardPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.publishDashboardThreads(ctx, sup.PollOnce(ctx, time.Now()))
+		}
+	}
+}
+
+// publishDashboardThreads 把有变化的线程快照以 dashboard.thread 逻辑事件推给
+// 全部已配对设备；全量快照由 dashboard.snapshot 指令按需下发。
+func (b *bridge) publishDashboardThreads(ctx context.Context, snaps []observer.ThreadSnapshot) {
+	b.dashboardMu.Lock()
+	if b.dashboardLastSent == nil {
+		b.dashboardLastSent = map[string]string{}
+	}
+	var changed []observer.ThreadSnapshot
+	for _, snap := range snaps {
+		raw := string(mustJSON(snap))
+		if b.dashboardLastSent[snap.ID] == raw {
+			continue
+		}
+		b.dashboardLastSent[snap.ID] = raw
+		changed = append(changed, snap)
+	}
+	b.dashboardMu.Unlock()
+	if len(changed) == 0 {
+		return
+	}
+	b.mu.Lock()
+	deviceIDs := make([]string, 0, len(b.state.DeviceSecrets))
+	for deviceID := range b.state.DeviceSecrets {
+		deviceIDs = append(deviceIDs, deviceID)
+	}
+	b.mu.Unlock()
+	for _, snap := range changed {
+		for _, deviceID := range deviceIDs {
+			// 副屏事件走 plain 帧而非 journal：test 线 App 的 reducer 按已知 run
+			// 严格投影，未知 runId 的 journal 事件会令其抛异常；plain 帧对旧端
+			// 是未知类型静默忽略，新端在 handleEvent 消费。
+			if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.thread", mustJSON(snap)); err != nil && ctx.Err() == nil {
+				log.Printf("publish dashboard thread %s to device %s: %v", snap.ID, deviceID, err)
+			}
+		}
+	}
+}
+
+// sendDashboardSnapshot 应答 dashboard.snapshot：当前整帧以 dashboard.threads
+// 逻辑事件下发，设备收到后整表替换。
+func (b *bridge) sendDashboardSnapshot(ctx context.Context, deviceID string) {
+	b.dashboardMu.Lock()
+	sup := b.dashboard
+	var snaps []observer.ThreadSnapshot
+	if sup != nil {
+		snaps = sup.Current()
+	}
+	b.dashboardMu.Unlock()
+	if snaps == nil {
+		snaps = []observer.ThreadSnapshot{}
+	}
+	if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.threads", mustJSON(map[string]any{"threads": snaps})); err != nil && ctx.Err() == nil {
+		log.Printf("send dashboard snapshot to device %s: %v", deviceID, err)
+	}
+}
+
+// focusDashboardThread 处理 thread.focus：唤屏 + 深链激活置前（Task 1 探针
+// 定稿，不带 -g）。结果以 dashboard.focus 逻辑事件回执。
+func (b *bridge) focusDashboardThread(ctx context.Context, deviceID string, command protocol.Command) error {
+	threadID := strings.TrimSpace(command.ThreadID)
+	runner := b.focusRunner
+	if runner == nil {
+		runner = runFocusCommand
+	}
+	if !observer.ValidFocusThreadID(threadID) {
+		b.ackDashboardFocus(ctx, deviceID, threadID, errors.New("非法线程 ID"))
+		return nil
+	}
+	for _, args := range observer.FocusPlan(threadID) {
+		if err := runner(ctx, args[0], args[1:]...); err != nil {
+			if ctx.Err() == nil {
+				b.ackDashboardFocus(ctx, deviceID, threadID, err)
+			}
+			return nil
+		}
+	}
+	b.ackDashboardFocus(ctx, deviceID, threadID, nil)
+	return nil
+}
+
+func (b *bridge) ackDashboardFocus(ctx context.Context, deviceID, threadID string, err error) {
+	payload := map[string]any{"threadId": threadID, "ok": err == nil}
+	if err != nil {
+		payload["message"] = err.Error()
+	}
+	if e := b.sendDashboardFrame(ctx, deviceID, "dashboard.focus", mustJSON(payload)); e != nil && ctx.Err() == nil {
+		log.Printf("ack dashboard focus to device %s: %v", deviceID, e)
+	}
+}
+
+// sendDashboardFrame 以 plain 帧下发副屏事件（不经 journal，避免 test 线
+// reducer 对未知 run 抛异常）；dashboardSender 仅供测试注入。
+func (b *bridge) sendDashboardFrame(ctx context.Context, deviceID, eventType string, payload json.RawMessage) error {
+	event := protocol.Event{Type: eventType, Payload: payload, CreatedAt: time.Now().UnixMilli()}
+	if sender := b.dashboardSender; sender != nil {
+		return sender(ctx, deviceID, event)
+	}
+	return b.sendEvent(ctx, deviceID, event, "")
+}
+
+func runFocusCommand(ctx context.Context, name string, args ...string) error {
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	return exec.CommandContext(cctx, name, args...).Run()
+}
+
 // backendFor resolves the backend for a command/event; empty id means the
 // default backend.
 func (b *bridge) backendFor(id string) backend.Backend {
@@ -895,6 +1035,13 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 			}
 		})
 		return nil
+	case "dashboard.snapshot":
+		b.enqueueRecoveryWork("", func() {
+			b.sendDashboardSnapshot(ctx, deviceID)
+		})
+		return nil
+	case "thread.focus":
+		return b.focusDashboardThread(ctx, deviceID, command)
 	case "rpc":
 		return b.sendCommandEvent(ctx, deviceID, command, protocol.Event{
 			Type: "error", RequestID: command.RequestID, Message: "不支持通用后端调用",
