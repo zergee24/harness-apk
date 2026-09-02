@@ -80,6 +80,8 @@ type bridge struct {
 	dashboard             *observer.Supervisor
 	dashboardMu           sync.Mutex
 	dashboardLastSent     map[string]string
+	dashboardQuota        *observer.QuotaSnapshot
+	dashboardQuotaSent    string
 	focusRunner           func(ctx context.Context, name string, args ...string) error
 	dashboardSender       func(ctx context.Context, deviceID string, event protocol.Event) error
 	updateState           func(string, func(*bridgeState) error) error
@@ -741,8 +743,9 @@ func (b *bridge) broadcastHostStatus(ctx context.Context) {
 // —— 副屏 dashboard（只读 observer）：状态推送与聚焦指令 ——
 
 const (
-	dashboardTopThreads   = 8
-	dashboardPollInterval = 5 * time.Second
+	dashboardTopThreads      = 8
+	dashboardPollInterval    = 5 * time.Second
+	dashboardQuotaPollTicks  = 12
 )
 
 func (b *bridge) superviseDashboard(ctx context.Context) {
@@ -752,14 +755,18 @@ func (b *bridge) superviseDashboard(ctx context.Context) {
 	b.dashboardLastSent = map[string]string{}
 	b.dashboardMu.Unlock()
 	b.publishDashboardThreads(ctx, sup.PollOnce(ctx, time.Now()))
+	b.refreshDashboardQuota(ctx)
 	ticker := time.NewTicker(dashboardPollInterval)
 	defer ticker.Stop()
-	for {
+	for tick := 1; ; tick++ {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			b.publishDashboardThreads(ctx, sup.PollOnce(ctx, time.Now()))
+			if tick%dashboardQuotaPollTicks == 0 {
+				b.refreshDashboardQuota(ctx)
+			}
 		}
 	}
 }
@@ -815,9 +822,64 @@ func (b *bridge) sendDashboardSnapshot(ctx context.Context, deviceID string) {
 	if snaps == nil {
 		snaps = []observer.ThreadSnapshot{}
 	}
-	if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.threads", mustJSON(map[string]any{"threads": snaps})); err != nil && ctx.Err() == nil {
+	quota := b.dashboardQuotaCopy()
+	payload := map[string]any{"threads": snaps, "quota": quota}
+	if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.threads", mustJSON(payload)); err != nil && ctx.Err() == nil {
 		log.Printf("send dashboard snapshot to device %s: %v", deviceID, err)
 	}
+}
+
+// refreshDashboardQuota 经默认后端调用 app-server 的 account/rateLimits/read
+// （原生通道，不依赖外部配额软件），变更时以 dashboard.quota plain 帧广播。
+func (b *bridge) refreshDashboardQuota(ctx context.Context) {
+	bd := b.backendFor("")
+	if bd == nil {
+		log.Printf("dashboard quota: default backend not registered yet")
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	raw, err := bd.Call(cctx, "account/rateLimits/read", map[string]any{})
+	if err != nil {
+		log.Printf("dashboard quota: rateLimits read failed: %v", err)
+		return
+	}
+	quota, ok := observer.ParseQuota(raw)
+	if !ok {
+		log.Printf("dashboard quota: unparseable payload %.200s", raw)
+		return
+	}
+
+	b.dashboardMu.Lock()
+	b.dashboardQuota = &quota
+	unchanged := b.dashboardQuotaSent == string(mustJSON(quota))
+	b.dashboardQuotaSent = string(mustJSON(quota))
+	b.dashboardMu.Unlock()
+	if unchanged {
+		return
+	}
+	b.mu.Lock()
+	deviceIDs := make([]string, 0, len(b.state.DeviceSecrets))
+	for deviceID := range b.state.DeviceSecrets {
+		deviceIDs = append(deviceIDs, deviceID)
+	}
+	b.mu.Unlock()
+	for _, deviceID := range deviceIDs {
+		if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.quota", mustJSON(quota)); err != nil && ctx.Err() == nil {
+			log.Printf("publish dashboard quota to device %s: %v", deviceID, err)
+		}
+	}
+}
+
+// dashboardQuotaCopy 返回最近一次配额快照；nil 表示尚未获取到。
+func (b *bridge) dashboardQuotaCopy() *observer.QuotaSnapshot {
+	b.dashboardMu.Lock()
+	defer b.dashboardMu.Unlock()
+	if b.dashboardQuota == nil {
+		return nil
+	}
+	copy := *b.dashboardQuota
+	return &copy
 }
 
 // focusDashboardThread 处理 thread.focus：唤屏 + 深链激活置前（Task 1 探针
@@ -1036,9 +1098,11 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		})
 		return nil
 	case "dashboard.snapshot":
-		b.enqueueRecoveryWork("", func() {
-			b.sendDashboardSnapshot(ctx, deviceID)
-		})
+		// 不走恢复队列：队列被慢任务占住时快照会静默积压，而副屏快照
+		// 只读 sqlite/内存状态，直接带超时执行即可。
+		cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		b.sendDashboardSnapshot(cctx, deviceID)
+		cancel()
 		return nil
 	case "thread.focus":
 		return b.focusDashboardThread(ctx, deviceID, command)

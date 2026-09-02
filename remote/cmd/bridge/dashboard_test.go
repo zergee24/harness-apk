@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/harnessapk/remote/internal/backend"
 	"github.com/harnessapk/remote/internal/observer"
 	"github.com/harnessapk/remote/internal/protocol"
 )
@@ -239,5 +240,42 @@ func TestSupervisorPollOnceMergesCatalogAndTail(t *testing.T) {
 	}
 	if sup.Current() == nil || len(sup.Current()) != 1 {
 		t.Fatalf("Current 应保留上一帧")
+	}
+}
+
+func TestRefreshDashboardQuotaPublishesOnChange(t *testing.T) {
+	frames := &[]recordedFrame{}
+	fake := backend.NewFake("codex").OnScript("account/rateLimits/read", func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"rateLimits":{"primary":{"usedPercent":66,"resetsAt":1788927739},"planType":"pro"}}`), nil
+	})
+	b := &bridge{
+		state: bridgeState{
+			HostID:        "host-1",
+			DeviceSecrets: map[string]string{"device-1": "bogus-secret"},
+		},
+		backends:        map[string]backend.Backend{"codex": fake},
+		dashboardSender: func(_ context.Context, deviceID string, event protocol.Event) error {
+			*frames = append(*frames, recordedFrame{deviceID: deviceID, event: event})
+			return nil
+		},
+	}
+	b.refreshDashboardQuota(context.Background())
+	events := framesByType(t, frames, "device-1", "dashboard.quota")
+	if len(events) != 1 {
+		t.Fatalf("期望 1 条 dashboard.quota，得到 %d", len(events))
+	}
+	var quota observer.QuotaSnapshot
+	if err := json.Unmarshal(events[0].Payload, &quota); err != nil {
+		t.Fatal(err)
+	}
+	if quota.UsedPercent != 66 || quota.RemainingPercent != 34 {
+		t.Fatalf("quota = %#v", quota)
+	}
+
+	// 未变化不重发
+	before := len(*frames)
+	b.refreshDashboardQuota(context.Background())
+	if after := len(*frames); after != before {
+		t.Fatalf("未变化不应重发: %d -> %d", before, after)
 	}
 }
