@@ -743,7 +743,7 @@ func (b *bridge) broadcastHostStatus(ctx context.Context) {
 // —— 副屏 dashboard（只读 observer）：状态推送与聚焦指令 ——
 
 const (
-	dashboardTopThreads      = 8
+	dashboardTopThreads      = 18
 	dashboardPollInterval    = 5 * time.Second
 	dashboardQuotaPollTicks  = 12
 )
