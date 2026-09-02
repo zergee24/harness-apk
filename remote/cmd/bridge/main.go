@@ -86,6 +86,7 @@ type bridge struct {
 	hostStatsReader       func(ctx context.Context) (observer.HostStats, error)
 	todayTurnsReader      func(ctx context.Context) (int, bool)
 	todayString           func() string
+	threadHistoryDB       string
 	focusRunner           func(ctx context.Context, name string, args ...string) error
 	dashboardSender       func(ctx context.Context, deviceID string, event protocol.Event) error
 	updateState           func(string, func(*bridgeState) error) error
@@ -914,6 +915,49 @@ func (b *bridge) refreshDashboardHost(ctx context.Context) {
 	}
 }
 
+// sendDashboardDetail 应答 dashboard.detail：按 24h 活跃白名单校验后回
+// 最近 50 条 items（thread_items 原样透传，超长截断）。
+func (b *bridge) sendDashboardDetail(ctx context.Context, deviceID, threadID string) error {
+	threadID = strings.TrimSpace(threadID)
+	if !observer.ValidFocusThreadID(threadID) {
+		b.ackDashboardFocus(ctx, deviceID, threadID, errors.New("非法线程 ID"))
+		return nil
+	}
+	b.dashboardMu.Lock()
+	sup := b.dashboard
+	var known bool
+	if sup != nil {
+		for _, snap := range sup.Current() {
+			if snap.ID == threadID {
+				known = true
+				break
+			}
+		}
+	}
+	b.dashboardMu.Unlock()
+	if !known {
+		b.ackDashboardFocus(ctx, deviceID, threadID, errors.New("线程不在活跃列表"))
+		return nil
+	}
+	dbPath := b.threadHistoryDB
+	if dbPath == "" {
+		dbPath = observer.ThreadHistoryDBPath()
+	}
+	items, ok := observer.DetailItems(ctx, dbPath, threadID, 50)
+	if !ok {
+		b.ackDashboardFocus(ctx, deviceID, threadID, errors.New("详情读取失败"))
+		return nil
+	}
+	if items == nil {
+		items = []observer.DetailItem{}
+	}
+	payload := map[string]any{"threadId": threadID, "items": items}
+	if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.detail", mustJSON(payload)); err != nil && ctx.Err() == nil {
+		log.Printf("send dashboard detail to device %s: %v", deviceID, err)
+	}
+	return nil
+}
+
 func (b *bridge) dashboardCachedQuota() *observer.QuotaSnapshot {
 	if sup := b.dashboard; sup != nil {
 		if q := sup.CachedQuota(); q != nil {
@@ -962,7 +1006,11 @@ func (b *bridge) readTodayTurns(ctx context.Context) (int, bool) {
 		n, ok := b.todayTurnsReader(ctx)
 		return n, ok
 	}
-	return observer.TodayTurnCount(ctx, observer.ThreadHistoryDBPath(), observer.LocalMidnightSec(b.dashboardTodayString()))
+	dbPath := b.threadHistoryDB
+	if dbPath == "" {
+		dbPath = observer.ThreadHistoryDBPath()
+	}
+	return observer.TodayTurnCount(ctx, dbPath, observer.LocalMidnightSec(b.dashboardTodayString()))
 }
 
 // dashboardQuotaCopy 返回最近一次配额快照；nil 表示尚未获取到。
@@ -1200,6 +1248,8 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		return nil
 	case "thread.focus":
 		return b.focusDashboardThread(ctx, deviceID, command)
+	case "dashboard.detail":
+		return b.sendDashboardDetail(ctx, deviceID, command.ThreadID)
 	case "rpc":
 		return b.sendCommandEvent(ctx, deviceID, command, protocol.Event{
 			Type: "error", RequestID: command.RequestID, Message: "不支持通用后端调用",

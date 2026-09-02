@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -284,5 +285,69 @@ func TestRefreshDashboardHostPublishesQuota(t *testing.T) {
 	b.refreshDashboardHost(context.Background())
 	if after := len(*frames); after != before {
 		t.Fatalf("未变化不应重发: %d -> %d", before, after)
+	}
+}
+
+func TestDashboardDetailWhitelistAndItems(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "thread_history_1.sqlite")
+	setup := []string{
+		"CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT, item_id TEXT, rollout_ordinal INTEGER, item_type TEXT, item_json TEXT)",
+		"INSERT INTO thread_items VALUES ('11111111-2222-3333-4444-555555555555','tu2','i3',3,'agentMessage','{\"type\":\"agentMessage\",\"text\":\"最新结论\"}')",
+		"INSERT INTO thread_items VALUES ('11111111-2222-3333-4444-555555555555','tu1','i1',1,'userMessage','{\"type\":\"userMessage\",\"text\":\"起点\"}')",
+		"INSERT INTO thread_items VALUES ('11111111-2222-3333-4444-555555555555','tu1','i2',2,'commandExecution','{\"type\":\"commandExecution\",\"command\":\"ls\"}')",
+	}
+	for _, stmt := range setup {
+		cmd := exec.Command(observer.SQLite3Bin, db, stmt)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("sqlite 失败: %v\n%s", err, out)
+		}
+	}
+	frames := &[]recordedFrame{}
+	b := &bridge{
+		state: bridgeState{HostID: "host-1", DeviceSecrets: map[string]string{"device-1": "bogus"}},
+		threadHistoryDB:  db,
+		dashboardSender: func(_ context.Context, deviceID string, event protocol.Event) error {
+			*frames = append(*frames, recordedFrame{deviceID: deviceID, event: event})
+			return nil
+		},
+	}
+	sup := observer.NewSupervisor(observer.DefaultOptions(), 8)
+	sup.Seed([]observer.ThreadSnapshot{{ThreadInfo: observer.ThreadInfo{ID: "11111111-2222-3333-4444-555555555555"}}})
+	b.dashboard = sup
+
+	b.sendDashboardDetail(context.Background(), "device-1", "11111111-2222-3333-4444-555555555555")
+	events := framesByType(t, frames, "device-1", "dashboard.detail")
+	if len(events) != 1 {
+		t.Fatalf("期望 1 条 dashboard.detail，得到 %d", len(events))
+	}
+	var payload struct {
+		ThreadID string `json:"threadId"`
+		Items    []struct {
+			ItemType string `json:"itemType"`
+			Item     struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"item"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ThreadID != "11111111-2222-3333-4444-555555555555" || len(payload.Items) != 3 {
+		t.Fatalf("详情 = %#v", payload)
+	}
+	if payload.Items[0].Item.Text != "起点" || payload.Items[2].Item.Text != "最新结论" {
+		t.Fatalf("items 应按时间正序: %#v", payload.Items)
+	}
+
+	// 非白名单线程：不回 detail 帧，只回拒绝 ack
+	before := len(framesByType(t, frames, "device-1", "dashboard.detail"))
+	b.sendDashboardDetail(context.Background(), "device-1", "ffffffff-2222-3333-4444-555555555555")
+	if after := len(framesByType(t, frames, "device-1", "dashboard.detail")); after != before {
+		t.Fatalf("非白名单线程不应回 detail 帧")
+	}
+	if acks := framesByType(t, frames, "device-1", "dashboard.focus"); len(acks) == 0 {
+		t.Fatal("拒绝应有 dashboard.focus 回执")
 	}
 }

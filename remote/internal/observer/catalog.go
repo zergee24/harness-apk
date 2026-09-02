@@ -21,7 +21,9 @@ import (
 	"time"
 )
 
-const sqlite3Bin = "/usr/bin/sqlite3"
+const SQLite3Bin = "/usr/bin/sqlite3"
+
+const sqlite3Bin = SQLite3Bin
 
 // ThreadInfo 是副屏卡片需要的最小线程快照。
 type ThreadInfo struct {
@@ -249,4 +251,60 @@ func LocalMidnightSec(today string) int64 {
 		return time.Now().Unix()
 	}
 	return parsed.Unix()
+}
+
+// DetailItem 是线程详情的单条 item（thread_items 原样透传，超长截断）。
+type DetailItem struct {
+	ItemType  string          `json:"itemType"`
+	Item      json.RawMessage `json:"item"`
+	Truncated bool            `json:"truncated,omitempty"`
+}
+
+// DetailItems 按 rollout_ordinal 倒序取最近 limit 条 items（返回时反转为
+// 时间正序）。单条 item_json 超过 itemJSONLimit 视为超长：截断并置
+// Truncated，App 端展示截断提示。
+func DetailItems(ctx context.Context, dbPath, threadID string, limit int) ([]DetailItem, bool) {
+	const itemJSONLimit = 8192
+	if limit <= 0 {
+		limit = 50
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if !ValidFocusThreadID(threadID) {
+		return nil, false
+	}
+	query := fmt.Sprintf("SELECT item_type, item_json FROM thread_items WHERE thread_id = '%s' ORDER BY rollout_ordinal DESC LIMIT %d", threadID, limit)
+	cmd := exec.CommandContext(cctx, sqlite3Bin, "-readonly", "-json", dbPath, query)
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return nil, false
+	}
+	var rows []struct {
+		ItemType string `json:"item_type"`
+		ItemJSON string `json:"item_json"`
+	}
+	out := strings.TrimSpace(stdout.String())
+	if out == "" {
+		return []DetailItem{}, true
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return nil, false
+	}
+	items := make([]DetailItem, 0, len(rows))
+	for i := len(rows) - 1; i >= 0; i-- {
+		r := rows[i]
+		item := r.ItemJSON
+		truncated := false
+		if len(item) > itemJSONLimit {
+			item = item[:itemJSONLimit]
+			truncated = true
+		}
+		items = append(items, DetailItem{
+			ItemType:  r.ItemType,
+			Item:      json.RawMessage(item),
+			Truncated: truncated,
+		})
+	}
+	return items, true
 }
