@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -51,8 +52,7 @@ import com.harnessapk.remote.DashboardViewedStore
 import com.harnessapk.remote.RemoteConnectionStatus
 import kotlin.math.ceil
 
-private val ThreadTileWidth = 310.dp
-private val ThreadRowHeight = 118.dp
+private val ThreadTileWidth = 260.dp
 
 // 一屏卡片工作台（上下结构）：上方两行横宽卡线程区（横滑翻页 + 页码点），
 // 底部仪表带 = 余额环状卡 + Command Keys 预留卡；副屏只读不写，
@@ -123,10 +123,10 @@ fun DashboardScreen(
             ThreadPagingGrid(
                 threads = threads,
                 onTap = { container.remoteRepository.focusThread(it.threadId) },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
             )
             Row(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
+                modifier = Modifier.height(130.dp).fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
@@ -147,16 +147,15 @@ private fun ThreadPagingGrid(
     onTap: (DashboardThread) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val gridHeight = ThreadRowHeight * 2 + 8.dp
-    BoxWithConstraints(modifier = modifier.height(gridHeight)) {
+    BoxWithConstraints(modifier = modifier) {
         val gridState = rememberLazyGridState()
         val columns = (maxWidth / (ThreadTileWidth + 8.dp)).toInt().coerceAtLeast(1)
-        val pageSize = (columns * 2).coerceAtLeast(1)
+        val pageSize = (columns * 3).coerceAtLeast(1)
         val pages = ceil(threads.size.toDouble() / pageSize).toInt().coerceAtLeast(1)
         val page = (gridState.firstVisibleItemIndex / pageSize).coerceIn(0, pages - 1)
 
         LazyHorizontalGrid(
-            rows = GridCells.Fixed(2),
+            rows = GridCells.Fixed(3),
             state = gridState,
             modifier = Modifier.fillMaxSize(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -193,22 +192,20 @@ private fun ThreadPagingGrid(
 private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit) {
     val accent = Color(dashboardToneArgb(dashboardTone(thread.status)))
     Card(modifier = Modifier.width(ThreadTileWidth).combinedClickable(onClick = onClick)) {
-        Row(modifier = Modifier.fillMaxWidth().height(ThreadRowHeight)) {
+        Row(modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp)) {
             Box(modifier = Modifier.width(6.dp).fillMaxHeight().background(accent))
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxHeight()
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.Start,
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         thread.title,
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
@@ -234,6 +231,20 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
+                    )
+                }
+                val place = thread.cwd?.substringAfterLast('/') ?: ""
+                val location = buildString {
+                    append(place)
+                    thread.gitBranch?.takeIf(String::isNotBlank)?.let { append(" · ").append(it) }
+                }
+                if (location.isNotBlank()) {
+                    Text(
+                        location,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -344,7 +355,6 @@ private fun InfoPanelCard(
                 "最近活动",
                 if (latestAt > 0) dashboardRelativeTime(System.currentTimeMillis(), latestAt) else "—",
             )
-            InfoRow("余额", "见左侧余额环 · 按周窗口重置")
         }
     }
 }
