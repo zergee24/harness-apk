@@ -2231,6 +2231,14 @@ func (b *bridge) resumeLogicalEvents(ctx context.Context, deviceID string, comma
 		if event.Sequence <= command.HighestContiguousSequence {
 			continue
 		}
+		// 副屏事件已改走 plain 帧；journal 里存量的 dashboard 事件只作废不重放——
+		// test 线 reducer 对未知 run 抛异常且永远无法 ACK，会形成崩溃循环。
+		if strings.HasPrefix(event.Type, "dashboard.") {
+			if err := b.journal.Ack(b.state.HostID, deviceID, event.Sequence); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := b.transmitJournaledEvent(ctx, event); err != nil {
 			return err
 		}
