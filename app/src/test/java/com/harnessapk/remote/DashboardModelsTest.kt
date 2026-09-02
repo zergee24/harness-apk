@@ -1,6 +1,7 @@
 package com.harnessapk.remote
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -57,5 +58,23 @@ class DashboardModelsTest {
     fun parseDashboardThreadsEmptyOnBadPayload() {
         assertEquals(emptyList<DashboardThread>(), parseDashboardThreads(null))
         assertEquals(emptyList<DashboardThread>(), parseDashboardThreads(Json.parseToJsonElement("""{"other":1}""")))
+    }
+
+    @Test
+    fun parseDashboardQuotaFromSnapshotPayload() {
+        val payload = Json.parseToJsonElement(
+            """{"threads":[],"quota":{"usedPercent":66,"remainingPercent":34,"resetsAtMs":1788927739000,"planType":"pro"}}""",
+        )
+        val quota = parseDashboardQuota(payload.jsonObject["quota"])!!
+        assertEquals(66, quota.usedPercent)
+        assertEquals(34, quota.remainingPercent)
+        assertEquals(1788927739000L, quota.resetsAtMs)
+        assertEquals("pro", quota.planType)
+    }
+
+    @Test
+    fun parseDashboardQuotaToleratesMissing() {
+        assertNull(parseDashboardQuota(null))
+        assertNull(parseDashboardQuota(Json.parseToJsonElement("""{"threads":[]}""")))
     }
 }

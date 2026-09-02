@@ -476,11 +476,15 @@ class RemoteRepository(
             }
             "dashboard.threads" -> _dashboard.value = DashboardState(
                 threads = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs },
+                quota = parseDashboardQuota(event.payload?.jsonObject?.get("quota")),
             )
             "dashboard.thread" -> parseDashboardThread(event.payload)?.let { next ->
                 val merged = (listOf(next) + _dashboard.value.threads.filterNot { it.threadId == next.threadId })
                     .sortedByDescending { it.updatedAtMs }
-                _dashboard.value = DashboardState(threads = merged)
+                _dashboard.value = _dashboard.value.copy(threads = merged)
+            }
+            "dashboard.quota" -> parseDashboardQuota(event.payload)?.let { quota ->
+                _dashboard.value = _dashboard.value.copy(quota = quota)
             }
             "dashboard.focus" -> {
                 val payload = event.payload as? JsonObject ?: return

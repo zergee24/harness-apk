@@ -535,9 +535,30 @@ data class DashboardThread(
     val lastEventAtMs: Long = 0,
 )
 
-data class DashboardState(val threads: List<DashboardThread> = emptyList())
+data class DashboardQuota(
+    val usedPercent: Int,
+    val remainingPercent: Int,
+    val resetsAtMs: Long = 0,
+    val planType: String? = null,
+)
+
+data class DashboardState(
+    val threads: List<DashboardThread> = emptyList(),
+    val quota: DashboardQuota? = null,
+)
 
 data class DashboardFocusResult(val threadId: String, val ok: Boolean, val message: String? = null)
+
+internal fun parseDashboardQuota(element: JsonElement?): DashboardQuota? {
+    val item = element?.jsonObject ?: return null
+    val used = item.long("usedPercent")?.toInt() ?: return null
+    return DashboardQuota(
+        usedPercent = used,
+        remainingPercent = item.long("remainingPercent")?.toInt() ?: (100 - used),
+        resetsAtMs = item.long("resetsAtMs") ?: 0,
+        planType = item.string("planType"),
+    )
+}
 
 internal fun parseDashboardThreads(payload: JsonElement?): List<DashboardThread> {
     val threads = payload?.jsonObject?.get("threads") as? JsonArray ?: return emptyList()
