@@ -243,7 +243,7 @@ func TestSupervisorPollOnceMergesCatalogAndTail(t *testing.T) {
 	}
 }
 
-func TestRefreshDashboardQuotaPublishesOnChange(t *testing.T) {
+func TestRefreshDashboardHostPublishesQuota(t *testing.T) {
 	frames := &[]recordedFrame{}
 	fake := backend.NewFake("codex").OnScript("account/rateLimits/read", func(string, any) (json.RawMessage, error) {
 		return json.RawMessage(`{"rateLimits":{"primary":{"usedPercent":66,"resetsAt":1788927739},"planType":"pro"}}`), nil
@@ -259,22 +259,29 @@ func TestRefreshDashboardQuotaPublishesOnChange(t *testing.T) {
 			return nil
 		},
 	}
-	b.refreshDashboardQuota(context.Background())
-	events := framesByType(t, frames, "device-1", "dashboard.quota")
+	b.refreshDashboardHost(context.Background())
+	events := framesByType(t, frames, "device-1", "dashboard.host")
 	if len(events) != 1 {
-		t.Fatalf("期望 1 条 dashboard.quota，得到 %d", len(events))
+		t.Fatalf("期望 1 条 dashboard.host，得到 %d", len(events))
 	}
-	var quota observer.QuotaSnapshot
-	if err := json.Unmarshal(events[0].Payload, &quota); err != nil {
+	var hostFrame struct {
+		Quota      observer.QuotaSnapshot `json:"quota"`
+		TodayTurns *int                   `json:"todayTurns"`
+		Load1      string                 `json:"load1"`
+	}
+	if err := json.Unmarshal(events[0].Payload, &hostFrame); err != nil {
 		t.Fatal(err)
 	}
-	if quota.UsedPercent != 66 || quota.RemainingPercent != 34 {
-		t.Fatalf("quota = %#v", quota)
+	if hostFrame.Quota.UsedPercent != 66 || hostFrame.Quota.RemainingPercent != 34 {
+		t.Fatalf("quota = %#v", hostFrame.Quota)
+	}
+	if hostFrame.TodayTurns == nil {
+		t.Fatalf("todayTurns 字段缺失: %#v", hostFrame)
 	}
 
 	// 未变化不重发
 	before := len(*frames)
-	b.refreshDashboardQuota(context.Background())
+	b.refreshDashboardHost(context.Background())
 	if after := len(*frames); after != before {
 		t.Fatalf("未变化不应重发: %d -> %d", before, after)
 	}

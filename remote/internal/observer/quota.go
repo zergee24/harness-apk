@@ -54,3 +54,31 @@ func stringOrEmpty(p *string) string {
 }
 
 var ErrQuotaUnavailable = errors.New("observer: quota unavailable")
+
+// ParseQuotaSnake 解析 token_count 事件内嵌的 snake_case rate_limits：
+// {"primary":{"used_percent":52.0,"resets_at":1788748055},"plan_type":"pro"}
+func ParseQuotaSnake(raw json.RawMessage) (QuotaSnapshot, bool) {
+	if len(raw) == 0 {
+		return QuotaSnapshot{}, false
+	}
+	var root struct {
+		Primary *struct {
+			UsedPercent *float64 `json:"used_percent"`
+			ResetsAt    int64    `json:"resets_at"`
+		} `json:"primary"`
+		PlanType *string `json:"plan_type"`
+	}
+	if err := json.Unmarshal(raw, &root); err != nil || root.Primary == nil || root.Primary.UsedPercent == nil {
+		return QuotaSnapshot{}, false
+	}
+	used := int(*root.Primary.UsedPercent + 0.5)
+	q := QuotaSnapshot{
+		UsedPercent:      used,
+		RemainingPercent: 100 - used,
+		PlanType:         stringOrEmpty(root.PlanType),
+	}
+	if root.Primary.ResetsAt > 0 {
+		q.ResetsAtMs = root.Primary.ResetsAt * 1000
+	}
+	return q, true
+}

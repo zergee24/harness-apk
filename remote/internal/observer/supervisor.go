@@ -10,10 +10,11 @@ import (
 // ThreadSnapshot 合并目录信息与运行状态，是副屏卡片的一帧。
 type ThreadSnapshot struct {
 	ThreadInfo
-	Status        Status `json:"status"`
-	Approx        bool   `json:"approx,omitempty"`
-	Note          string `json:"note,omitempty"`
-	LastEventAtMs int64  `json:"lastEventAtMs,omitempty"`
+	Status         Status `json:"status"`
+	Approx         bool   `json:"approx,omitempty"`
+	Note           string `json:"note,omitempty"`
+	LastEventAtMs  int64  `json:"lastEventAtMs,omitempty"`
+	ContextPercent int    `json:"contextPercent,omitempty"`
 }
 
 // Supervisor 维护活跃线程目录与 rollout tailer 集合。
@@ -62,6 +63,7 @@ func (s *Supervisor) PollOnce(ctx context.Context, now time.Time) []ThreadSnapsh
 			Approx:        st.Approx,
 			Note:          st.Note,
 			LastEventAtMs: st.LastEventAtMs,
+			ContextPercent: st.ContextPercent,
 		})
 	}
 	s.tails = next
@@ -82,4 +84,25 @@ func (s *Supervisor) Seed(snaps []ThreadSnapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.latest = snaps
+}
+
+// CachedQuota 返回各线程 tailer 缓存中最新的 token_count 内嵌配额；
+// 无任何缓存时 nil（调用方回退到 60s 轮询结果）。
+func (s *Supervisor) CachedQuota() *QuotaSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var best *QuotaSnapshot
+	var bestActive time.Time
+	for _, tl := range s.tails {
+		q := tl.m.CachedQuota()
+		if q == nil {
+			continue
+		}
+		if best == nil || tl.m.lastActive.After(bestActive) {
+			copy := *q
+			best = &copy
+			bestActive = tl.m.lastActive
+		}
+	}
+	return best
 }

@@ -82,6 +82,10 @@ type bridge struct {
 	dashboardLastSent     map[string]string
 	dashboardQuota        *observer.QuotaSnapshot
 	dashboardQuotaSent    string
+	dashboardHostSent     string
+	hostStatsReader       func(ctx context.Context) (observer.HostStats, error)
+	todayTurnsReader      func(ctx context.Context) (int, bool)
+	todayString           func() string
 	focusRunner           func(ctx context.Context, name string, args ...string) error
 	dashboardSender       func(ctx context.Context, deviceID string, event protocol.Event) error
 	updateState           func(string, func(*bridgeState) error) error
@@ -755,7 +759,7 @@ func (b *bridge) superviseDashboard(ctx context.Context) {
 	b.dashboardLastSent = map[string]string{}
 	b.dashboardMu.Unlock()
 	b.publishDashboardThreads(ctx, sup.PollOnce(ctx, time.Now()))
-	b.refreshDashboardQuota(ctx)
+	b.refreshDashboardHost(ctx)
 	ticker := time.NewTicker(dashboardPollInterval)
 	defer ticker.Stop()
 	for tick := 1; ; tick++ {
@@ -765,7 +769,7 @@ func (b *bridge) superviseDashboard(ctx context.Context) {
 		case <-ticker.C:
 			b.publishDashboardThreads(ctx, sup.PollOnce(ctx, time.Now()))
 			if tick%dashboardQuotaPollTicks == 0 {
-				b.refreshDashboardQuota(ctx)
+				b.refreshDashboardHost(ctx)
 			}
 		}
 	}
@@ -827,33 +831,72 @@ func (b *bridge) sendDashboardSnapshot(ctx context.Context, deviceID string) {
 	if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.threads", mustJSON(payload)); err != nil && ctx.Err() == nil {
 		log.Printf("send dashboard snapshot to device %s: %v", deviceID, err)
 	}
+	// 快照同时补发最近一帧 dashboard.host：host 帧仅在变化时广播，
+	// 重连设备若错过上一次变更，靠这里补齐主机与今日数据。
+	b.dashboardMu.Lock()
+	hostRaw := b.dashboardHostSent
+	b.dashboardMu.Unlock()
+	if hostRaw != "" {
+		if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.host", json.RawMessage(hostRaw)); err != nil && ctx.Err() == nil {
+			log.Printf("send dashboard host snapshot to device %s: %v", deviceID, err)
+		}
+	}
 }
 
-// refreshDashboardQuota 经默认后端调用 app-server 的 account/rateLimits/read
-// （原生通道，不依赖外部配额软件），变更时以 dashboard.quota plain 帧广播。
-func (b *bridge) refreshDashboardQuota(ctx context.Context) {
-	bd := b.backendFor("")
-	if bd == nil {
-		log.Printf("dashboard quota: default backend not registered yet")
-		return
-	}
-	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	raw, err := bd.Call(cctx, "account/rateLimits/read", map[string]any{})
-	if err != nil {
-		log.Printf("dashboard quota: rateLimits read failed: %v", err)
-		return
-	}
-	quota, ok := observer.ParseQuota(raw)
-	if !ok {
-		log.Printf("dashboard quota: unparseable payload %.200s", raw)
-		return
+// refreshDashboardHost 采集全局卡数据并按需广播 dashboard.host 帧：
+// 配额（优先 tailer 内嵌缓存，回退 account/rateLimits/read 轮询）+
+// account/usage/read 摘要（今日 tokens、连续 streak）+ 今日 turn 数 +
+// 主机内存/磁盘/load。全部来源原生通道，不依赖外部配额软件。
+func (b *bridge) refreshDashboardHost(ctx context.Context) {
+	quota := b.dashboardCachedQuota()
+	if quota == nil {
+		bd := b.backendFor("")
+		if bd == nil {
+			log.Printf("dashboard host: default backend not registered yet")
+			return
+		}
+		cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		raw, err := bd.Call(cctx, "account/rateLimits/read", map[string]any{})
+		if err != nil {
+			log.Printf("dashboard host: rateLimits read failed: %v", err)
+			return
+		}
+		parsed, ok := observer.ParseQuota(raw)
+		if !ok {
+			log.Printf("dashboard host: unparseable rateLimits payload %.200s", raw)
+			return
+		}
+		quota = &parsed
+		b.dashboardMu.Lock()
+		b.dashboardQuota = &parsed
+		b.dashboardMu.Unlock()
 	}
 
+	usage, usageOK := b.fetchUsageSummary(ctx)
+	hostStats, hostOK := b.readHostStats(ctx)
+	todayTurns, turnsOK := b.readTodayTurns(ctx)
+	if !usageOK && !hostOK && !turnsOK {
+		return
+	}
+	frame := map[string]any{"quota": quota}
+	if usageOK {
+		frame["weekTokens"] = usage.WeekTokens
+		frame["streakDays"] = usage.CurrentStreakDays
+		frame["dailyBuckets"] = usage.DailyBuckets
+	}
+	if turnsOK {
+		frame["todayTurns"] = todayTurns
+	}
+	if hostOK {
+		frame["memUsedPercent"] = hostStats.MemUsedPercent
+		frame["diskUsedPercent"] = hostStats.DiskUsedPercent
+		frame["load1"] = hostStats.Load1
+	}
+	raw := string(mustJSON(frame))
 	b.dashboardMu.Lock()
-	b.dashboardQuota = &quota
-	unchanged := b.dashboardQuotaSent == string(mustJSON(quota))
-	b.dashboardQuotaSent = string(mustJSON(quota))
+	unchanged := b.dashboardHostSent == raw
+	b.dashboardHostSent = raw
 	b.dashboardMu.Unlock()
 	if unchanged {
 		return
@@ -865,10 +908,61 @@ func (b *bridge) refreshDashboardQuota(ctx context.Context) {
 	}
 	b.mu.Unlock()
 	for _, deviceID := range deviceIDs {
-		if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.quota", mustJSON(quota)); err != nil && ctx.Err() == nil {
-			log.Printf("publish dashboard quota to device %s: %v", deviceID, err)
+		if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.host", json.RawMessage(raw)); err != nil && ctx.Err() == nil {
+			log.Printf("publish dashboard host to device %s: %v", deviceID, err)
 		}
 	}
+}
+
+func (b *bridge) dashboardCachedQuota() *observer.QuotaSnapshot {
+	if sup := b.dashboard; sup != nil {
+		if q := sup.CachedQuota(); q != nil {
+			return q
+		}
+	}
+	b.dashboardMu.Lock()
+	defer b.dashboardMu.Unlock()
+	return b.dashboardQuota
+}
+
+func (b *bridge) fetchUsageSummary(ctx context.Context) (observer.UsageSummary, bool) {
+	bd := b.backendFor("")
+	if bd == nil {
+		return observer.UsageSummary{}, false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	raw, err := bd.Call(cctx, "account/usage/read", map[string]any{})
+	if err != nil {
+		log.Printf("dashboard host: usage read failed: %v", err)
+		return observer.UsageSummary{}, false
+	}
+	return observer.ParseUsage(raw, b.dashboardTodayString())
+}
+
+func (b *bridge) readHostStats(ctx context.Context) (observer.HostStats, bool) {
+	if b.hostStatsReader != nil {
+		stats, err := b.hostStatsReader(ctx)
+		return stats, err == nil
+	}
+	stats, err := observer.ReadHostStats()
+	return stats, err == nil
+}
+
+// dashboardTodayString 返回本地今日日期（YYYY-MM-DD）；测试可注入。
+func (b *bridge) dashboardTodayString() string {
+	if b.todayString != nil {
+		return b.todayString()
+	}
+	return time.Now().Format("2006-01-02")
+}
+
+func (b *bridge) readTodayTurns(ctx context.Context) (int, bool) {
+	if b.todayTurnsReader != nil {
+		n, ok := b.todayTurnsReader(ctx)
+		return n, ok
+	}
+	return observer.TodayTurnCount(ctx, observer.ThreadHistoryDBPath(), observer.LocalMidnightSec(b.dashboardTodayString()))
 }
 
 // dashboardQuotaCopy 返回最近一次配额快照；nil 表示尚未获取到。

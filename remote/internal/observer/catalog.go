@@ -213,3 +213,40 @@ func findRollout(sessionsDir, threadID string) (string, bool) {
 }
 
 var ErrNoThreads = errors.New("observer: 目录为空")
+
+// TodayTurnCount 统计 thread_history_1.sqlite 里本地零点之后的 turn 数
+// （started_at 为秒级时间戳）。读不到时 ok=false，调用方保持上次值。
+func TodayTurnCount(ctx context.Context, dbPath string, midnightSec int64) (int, bool) {
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	query := fmt.Sprintf("SELECT COUNT(*) FROM thread_turns WHERE started_at >= %d", midnightSec)
+	cmd := exec.CommandContext(cctx, sqlite3Bin, "-readonly", "-json", dbPath, query)
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return 0, false
+	}
+	var rows []struct {
+		Count int `json:"COUNT(*)"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &rows); err != nil || len(rows) == 0 {
+		return 0, false
+	}
+	return rows[0].Count, true
+}
+
+// ThreadHistoryDBPath 返回今日 turn 计数所在的 thread_history 库路径。
+func ThreadHistoryDBPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "thread_history_1.sqlite")
+}
+
+// LocalMidnightSec 返回 today（YYYY-MM-DD，本地时区）零点的秒级时间戳；
+// today 解析失败时回退到当前时刻，使计数窗口退化为「现在起算」。
+func LocalMidnightSec(today string) int64 {
+	parsed, err := time.ParseInLocation("2006-01-02", today, time.Local)
+	if err != nil {
+		return time.Now().Unix()
+	}
+	return parsed.Unix()
+}

@@ -28,11 +28,12 @@ const (
 
 // ThreadStatus 是推给副屏的单线程状态快照。
 type ThreadStatus struct {
-	ThreadID      string `json:"threadId"`
-	Status        Status `json:"status"`
-	Approx        bool   `json:"approx,omitempty"`
-	Note          string `json:"note,omitempty"`
-	LastEventAtMs int64  `json:"lastEventAtMs,omitempty"`
+	ThreadID       string `json:"threadId"`
+	Status         Status `json:"status"`
+	Approx         bool   `json:"approx,omitempty"`
+	Note           string `json:"note,omitempty"`
+	LastEventAtMs  int64  `json:"lastEventAtMs,omitempty"`
+	ContextPercent int    `json:"contextPercent,omitempty"`
 }
 
 // workEvents：出现即视为「在干活」的 event_msg payload.type。
@@ -50,6 +51,16 @@ type rolloutLine struct {
 	Type    string `json:"type"`
 	Payload struct {
 		Type string `json:"type"`
+		Info *struct {
+			LastTokenUsage *struct {
+				TotalTokens int64 `json:"total_tokens"`
+			} `json:"last_token_usage"`
+			TotalTokenUsage *struct {
+				TotalTokens int64 `json:"total_tokens"`
+			} `json:"total_token_usage"`
+			ModelContextWindow int64           `json:"model_context_window"`
+			RateLimits         json.RawMessage `json:"rate_limits"`
+		} `json:"info"`
 	} `json:"payload"`
 }
 
@@ -57,13 +68,15 @@ type rolloutLine struct {
 // 活性 = 任何成功解析的新行（含最高频的 token_count）；
 // 状态只由 event_msg 的 payload.type 驱动。
 type Machine struct {
-	terminal   Status // "" 表示无终态；done/error 后直到新 task_started 都冻结
-	inTurn     bool   // 处于未终结的 turn 内（task_started 或种子窗口里的工作事件）
-	sawTool    bool
-	sawReason  bool
-	approx     bool
-	note       string
-	lastActive time.Time
+	terminal       Status // "" 表示无终态；done/error 后直到新 task_started 都冻结
+	inTurn         bool   // 处于未终结的 turn 内（task_started 或种子窗口里的工作事件）
+	sawTool        bool
+	sawReason      bool
+	approx         bool
+	note           string
+	lastActive     time.Time
+	contextPercent int           // 上下文占用 %（total_tokens / model_context_window）
+	rateLimits     *QuotaSnapshot // token_count 内嵌的账户配额缓存（snake_case 已归一）
 }
 
 func NewMachine() *Machine { return &Machine{} }
@@ -102,6 +115,28 @@ func (m *Machine) ObserveLine(line string, now time.Time) {
 		return
 	}
 	switch pt := rl.Payload.Type; pt {
+	case "token_count":
+		if info := rl.Payload.Info; info != nil {
+			// 上下文占用 = 最近一次请求的 token / 模型上下文窗口。
+			// total_token_usage 是 turn 内跨请求累计值，长对话会远超窗口，
+			// 不能当上下文口径（实测 53167%）。
+			tokens := int64(-1)
+			if info.LastTokenUsage != nil {
+				tokens = info.LastTokenUsage.TotalTokens
+			} else if info.TotalTokenUsage != nil {
+				tokens = info.TotalTokenUsage.TotalTokens
+			}
+			if tokens >= 0 && info.ModelContextWindow > 0 {
+				pct := int(float64(tokens) / float64(info.ModelContextWindow) * 100)
+				if pct > 100 {
+					pct = 100
+				}
+				m.contextPercent = pct
+			}
+			if q, ok := ParseQuotaSnake(info.RateLimits); ok {
+				m.rateLimits = &q
+			}
+		}
 	case "task_started":
 		m.inTurn = true
 		m.sawTool = false
@@ -170,9 +205,15 @@ func (m *Machine) Snapshot() ThreadStatus {
 		last = m.lastActive.UnixMilli()
 	}
 	return ThreadStatus{
-		Status:        m.derive(),
-		Approx:        m.approx,
-		Note:          m.note,
-		LastEventAtMs: last,
+		Status:         m.derive(),
+		Approx:         m.approx,
+		Note:           m.note,
+		LastEventAtMs:  last,
+		ContextPercent: m.contextPercent,
 	}
+}
+
+// CachedQuota 返回 token_count 内嵌缓存的账户配额（最新一次）；无则 nil。
+func (m *Machine) CachedQuota() *QuotaSnapshot {
+	return m.rateLimits
 }
