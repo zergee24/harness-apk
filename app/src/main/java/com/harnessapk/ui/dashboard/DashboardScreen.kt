@@ -195,7 +195,7 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
     val accent = Color(dashboardToneArgb(dashboardTone(thread.status)))
     Card(modifier = Modifier.width(ThreadTileWidth).combinedClickable(onClick = onClick)) {
         Row(modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp)) {
-            Box(modifier = Modifier.width(6.dp).fillMaxHeight().background(accent))
+            Box(modifier = Modifier.width(14.dp).fillMaxHeight().background(accent))
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -248,6 +248,15 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                             maxLines = 1,
                         )
                     }
+                }
+                thread.lastActivity?.takeIf(String::isNotBlank)?.let { activity ->
+                    Text(
+                        activity,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }
