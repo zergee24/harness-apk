@@ -231,8 +231,7 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                         modifier = Modifier.padding(start = 10.dp),
                     )
                 }
-                Spacer(modifier = Modifier.weight(1f))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+Row(verticalAlignment = Alignment.CenterVertically) {
                     val place = thread.cwd?.substringAfterLast('/') ?: ""
                     Text(
                         listOf(place, dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs))
@@ -259,15 +258,14 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                     thickness = 1.dp,
                     color = MaterialTheme.colorScheme.outlineVariant,
                 )
-                thread.lastActivity?.takeIf(String::isNotBlank)?.let { activity ->
-                    Text(
-                        activity,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                Text(
+                    thread.lastActivity?.takeIf(String::isNotBlank)
+                        ?: "等待 agent 输出…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
