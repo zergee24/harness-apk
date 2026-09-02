@@ -207,7 +207,7 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                         thread.title,
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
@@ -220,13 +220,25 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                                 .background(Color(0xFFFF5C5C)),
                         )
                     }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         dashboardStatusLabel(thread),
                         style = MaterialTheme.typography.labelMedium,
                         color = accent,
                         maxLines = 1,
+                        modifier = Modifier.padding(start = 10.dp),
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val place = thread.cwd?.substringAfterLast('/') ?: ""
+                    Text(
+                        listOf(place, dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs))
+                            .filter { it.isNotBlank() }
+                            .joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
                     if (thread.contextPercent > 0) {
                         Text(
@@ -236,26 +248,6 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                             maxLines = 1,
                         )
                     }
-                    Text(
-                        dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
-                val place = thread.cwd?.substringAfterLast('/') ?: ""
-                val location = buildString {
-                    append(place)
-                    thread.gitBranch?.takeIf(String::isNotBlank)?.let { append(" · ").append(it) }
-                }
-                if (location.isNotBlank()) {
-                    Text(
-                        location,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
                 }
             }
         }
