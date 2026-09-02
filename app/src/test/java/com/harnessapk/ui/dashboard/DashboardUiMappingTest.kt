@@ -63,4 +63,34 @@ class DashboardUiMappingTest {
         assertEquals("3 小时前", dashboardRelativeTime(now, now - 3 * 3_600_000L))
         assertEquals("昨天", dashboardRelativeTime(now, now - 30 * 3_600_000L))
     }
+
+    @Test
+    fun consoleSortPutsAttentionFirst() {
+        val running = thread("running").copy(threadId = "running", updatedAtMs = 100)
+        val error = thread("error").copy(threadId = "error", updatedAtMs = 50)
+        val done = thread("done").copy(threadId = "done", updatedAtMs = 400)
+        val idle = thread("idle").copy(threadId = "idle", updatedAtMs = 300)
+        val sorted = sortDashboardThreadsForConsole(listOf(idle, done, running, error))
+        assertEquals(
+            listOf("error", "running", "done", "idle"),
+            sorted.map { it.threadId },
+        )
+    }
+
+    @Test
+    fun consoleSortKeepsRecentFirstWithinSamePriority() {
+        val a = thread("running").copy(threadId = "a", updatedAtMs = 100)
+        val b = thread("running").copy(threadId = "b", updatedAtMs = 200)
+        assertEquals(listOf("b", "a"), sortDashboardThreadsForConsole(listOf(a, b)).map { it.threadId })
+    }
+
+    @Test
+    fun summaryCountsAttentionAndOmitsIdle() {
+        val threads = listOf(
+            thread("running"), thread("thinking"), thread("done"),
+            thread("done"), thread("error"), thread("idle"),
+        )
+        assertEquals("运行 2 · 完成 2 · 出错 1", dashboardSummaryLabel(threads))
+        assertEquals("全部空闲", dashboardSummaryLabel(listOf(thread("idle"))))
+    }
 }

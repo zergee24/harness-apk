@@ -2,7 +2,7 @@ package com.harnessapk.ui.dashboard
 
 import com.harnessapk.remote.DashboardThread
 
-// 副屏卡片的纯映射层：状态 → 语义色/文案/相对时间，全部无 Android 依赖，可离线单测。
+// 副屏卡片的纯映射层：状态 → 语义色/文案/排序/汇总，全部无 Android 依赖，可离线单测。
 
 enum class DashboardTone { THINKING, RUNNING, DONE, ERROR, IDLE }
 
@@ -57,4 +57,40 @@ fun dashboardRelativeTime(nowMs: Long, timeMs: Long): String {
             "${cal.get(java.util.Calendar.MONTH) + 1}-${cal.get(java.util.Calendar.DAY_OF_MONTH)}"
         }
     }
+}
+
+// 一屏控制台：需关注的状态置顶（出错 > 运行 > 思考），随后完成、空闲；
+// 同组内按最近活动倒序。
+fun dashboardSortPriority(status: String): Int = when (dashboardTone(status)) {
+    DashboardTone.ERROR -> 0
+    DashboardTone.RUNNING -> 1
+    DashboardTone.THINKING -> 2
+    DashboardTone.DONE -> 3
+    DashboardTone.IDLE -> 4
+}
+
+fun sortDashboardThreadsForConsole(threads: List<DashboardThread>): List<DashboardThread> =
+    threads.sortedWith(
+        compareBy({ dashboardSortPriority(it.status) }, { -it.updatedAtMs }),
+    )
+
+// 顶栏一句话汇总：只统计需关注的量，空闲不提。
+fun dashboardSummaryLabel(threads: List<DashboardThread>): String {
+    var active = 0
+    var done = 0
+    var error = 0
+    for (t in threads) {
+        when (dashboardTone(t.status)) {
+            DashboardTone.RUNNING, DashboardTone.THINKING -> active++
+            DashboardTone.DONE -> done++
+            DashboardTone.ERROR -> error++
+            DashboardTone.IDLE -> {}
+        }
+    }
+    val parts = buildList {
+        if (active > 0) add("运行 $active")
+        if (done > 0) add("完成 $done")
+        if (error > 0) add("出错 $error")
+    }
+    return if (parts.isEmpty()) "全部空闲" else parts.joinToString(" · ")
 }

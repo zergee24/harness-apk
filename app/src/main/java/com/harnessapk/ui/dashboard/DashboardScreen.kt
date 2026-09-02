@@ -1,17 +1,24 @@
 package com.harnessapk.ui.dashboard
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -38,8 +45,8 @@ import com.harnessapk.remote.DashboardThread
 import com.harnessapk.remote.DashboardViewedStore
 import com.harnessapk.remote.RemoteConnectionStatus
 
-// 副屏 dashboard：只读不写、无二级界面、无跳转。
-// 卡片的唯一动作 = 点击后让 Mac 主屏聚焦对应线程（thread.focus 深链）。
+// 一屏卡片工作台：所有线程以紧凑卡片铺满一屏、不滚动；
+// 卡片唯一动作 = 点按让 Mac 主屏聚焦对应线程；副屏只读不写。
 @Composable
 fun DashboardScreen(
     container: AppContainer,
@@ -67,25 +74,33 @@ fun DashboardScreen(
         }
     }
 
+    val threads = remember(dashboard.threads) { sortDashboardThreadsForConsole(dashboard.threads) }
+
     Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Agent 副屏", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Agent 副屏", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        dashboardSummaryLabel(threads),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 val connected = connection.connectionStatus == RemoteConnectionStatus.CONNECTED
                 Text(
                     if (connected) "Mac 已连接" else "Mac 未连接",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.labelSmall,
                     color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
                 )
                 TextButton(onClick = onExit) { Text("退出") }
             }
-            val threads = dashboard.threads
             if (threads.isEmpty()) {
                 Text(
                     "暂无活跃线程。在 Mac 上开始一个 Codex 任务后，这里会实时亮起。",
@@ -93,13 +108,15 @@ fun DashboardScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 150.dp),
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(threads, key = { it.threadId }) { thread ->
-                    DashboardCard(
+                    ConsoleTile(
                         thread = thread,
                         unread = isDashboardUnread(thread, viewedStore.lastViewedAt(thread.threadId)),
                         onClick = { container.remoteRepository.focusThread(thread.threadId) },
@@ -110,53 +127,47 @@ fun DashboardScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun DashboardCard(thread: DashboardThread, unread: Boolean, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            val tone = dashboardTone(thread.status)
-            Box(
-                modifier = Modifier
-                    .size(14.dp)
-                    .clip(CircleShape)
-                    .background(Color(dashboardToneArgb(tone))),
-            )
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    thread.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                val subtitle = buildString {
-                    append(dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs))
-                    thread.cwd?.takeIf(String::isNotBlank)?.let { append(" · ").append(it) }
-                    thread.gitBranch?.takeIf(String::isNotBlank)?.let { append(" · ").append(it) }
-                }
-                if (subtitle.isNotBlank()) {
-                    Text(subtitle, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                if (thread.approx) {
+private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit) {
+    val accent = Color(dashboardToneArgb(dashboardTone(thread.status)))
+    Card(modifier = Modifier.combinedClickable(onClick = onClick)) {
+        Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+            Box(modifier = Modifier.width(5.dp).fillMaxHeight().background(accent))
+            Column(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        dashboardStatusLabel(thread),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFFFFB020),
+                        thread.title,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
-                } else {
-                    Text(dashboardStatusLabel(thread), style = MaterialTheme.typography.labelSmall)
+                    if (unread) {
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 6.dp)
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFFF5C5C)),
+                        )
+                    }
                 }
-            }
-            if (unread) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFFF5C5C)),
+                Text(
+                    dashboardStatusLabel(thread),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = accent,
+                    maxLines = 1,
+                )
+                Text(
+                    dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
             }
         }
