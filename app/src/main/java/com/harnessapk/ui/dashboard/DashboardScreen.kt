@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -153,12 +154,12 @@ private fun ThreadPagingGrid(
     BoxWithConstraints(modifier = modifier) {
         val gridState = rememberLazyGridState()
         val columns = (maxWidth / (ThreadTileWidth + 8.dp)).toInt().coerceAtLeast(1)
-        val pageSize = (columns * 3).coerceAtLeast(1)
+        val pageSize = (columns * 2).coerceAtLeast(1)
         val pages = ceil(threads.size.toDouble() / pageSize).toInt().coerceAtLeast(1)
         val page = (gridState.firstVisibleItemIndex / pageSize).coerceIn(0, pages - 1)
 
         LazyHorizontalGrid(
-            rows = GridCells.Fixed(3),
+            rows = GridCells.Fixed(2),
             state = gridState,
             modifier = Modifier.fillMaxSize(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -200,8 +201,9 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
             Column(
                 modifier = Modifier
                     .weight(1f)
+                    .fillMaxHeight()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -229,6 +231,7 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                         modifier = Modifier.padding(start = 10.dp),
                     )
                 }
+                Spacer(modifier = Modifier.weight(1f))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     val place = thread.cwd?.substringAfterLast('/') ?: ""
                     Text(
@@ -261,7 +264,7 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                         activity,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 2,
+                        maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
