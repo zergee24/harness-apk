@@ -86,6 +86,7 @@
                 <data android:scheme="file" />
                 <data android:mimeType="application/vnd.harness.hbundle" />
                 <data android:mimeType="application/vnd.harness.hwiki+zip" />
+                <data android:mimeType="application/vnd.harness.hconfig" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -94,6 +95,7 @@
 
                 <data android:mimeType="application/vnd.harness.hbundle" />
                 <data android:mimeType="application/vnd.harness.hwiki+zip" />
+                <data android:mimeType="application/vnd.harness.hconfig" />
                 <data android:mimeType="application/zip" />
                 <data android:mimeType="application/x-zip-compressed" />
                 <data android:mimeType="application/octet-stream" />

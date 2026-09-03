@@ -108,6 +108,26 @@ class ProviderRepository(
         dao.delete(current)
     }
 
+    /**
+     * 按 name + baseUrl 匹配的 upsert：已存在则更新，否则新建。返回 provider id
+     * 与是否为新建。用于 `.hconfig` 配置包导入。
+     */
+    suspend fun upsertProvider(draft: ProviderDraft): ProviderUpsertResult {
+        requireHttpsBaseUrl(draft.baseUrl)
+        requireProviderFields(draft)
+        require(draft.apiKey.isNotBlank()) { "API Key 不能为空" }
+        val normalizedBaseUrl = draft.baseUrl.trim().trimEnd('/')
+        val existing = dao.getAll().firstOrNull {
+            it.name == draft.name.trim() && it.baseUrl == normalizedBaseUrl
+        }
+        return if (existing != null) {
+            updateProvider(existing.id, draft)
+            ProviderUpsertResult(providerId = existing.id, created = false)
+        } else {
+            ProviderUpsertResult(providerId = saveProvider(draft), created = true)
+        }
+    }
+
     suspend fun getApiKey(providerId: String): String {
         val entity = dao.findById(providerId) ?: throw AppError.ProviderMissing()
         val cipherText = entity.encryptedApiKey ?: throw AppError.ApiKeyMissing()
@@ -152,6 +172,11 @@ class ProviderRepository(
 data class ProviderWithKey(
     val profile: ProviderProfile,
     val apiKey: String,
+)
+
+data class ProviderUpsertResult(
+    val providerId: String,
+    val created: Boolean,
 )
 
 private fun ProviderProfileEntity.toDomain(): ProviderProfile = ProviderProfile(

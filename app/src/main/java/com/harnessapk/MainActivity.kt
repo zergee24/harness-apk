@@ -16,6 +16,7 @@ import com.harnessapk.chat.ChatExecutionService
 import com.harnessapk.capture.toIncomingShareRequest
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
 import com.harnessapk.agent.externalAgentBundleUri
+import com.harnessapk.packageformat.CONFIG_PACKAGE_MIME_TYPE
 import com.harnessapk.ui.HarnessApkApp
 import com.harnessapk.ui.theme.HarnessApkTheme
 import com.harnessapk.wiki.H_WIKI_MIME_TYPE
@@ -27,6 +28,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private var incomingAgentBundleUri by mutableStateOf<String?>(null)
     private var incomingWikiPackageUri by mutableStateOf<String?>(null)
+    private var incomingConfigPackageUri by mutableStateOf<String?>(null)
     private var incomingRemoteRunId by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,6 +41,8 @@ class MainActivity : ComponentActivity() {
                     onIncomingAgentBundleUriConsumed = { incomingAgentBundleUri = null },
                     incomingWikiPackageUri = incomingWikiPackageUri?.let(Uri::parse),
                     onIncomingWikiPackageUriConsumed = { incomingWikiPackageUri = null },
+                    incomingConfigPackageUri = incomingConfigPackageUri?.let(Uri::parse),
+                    onIncomingConfigPackageUriConsumed = { incomingConfigPackageUri = null },
                     incomingRemoteRunId = incomingRemoteRunId,
                     onIncomingRemoteRunConsumed = { incomingRemoteRunId = null },
                 )
@@ -66,8 +70,13 @@ class MainActivity : ComponentActivity() {
         incomingRemoteRunId = intent.getStringExtra(EXTRA_REMOTE_RUN_ID)?.takeIf(String::isNotBlank)
         incomingAgentBundleUri = null
         incomingWikiPackageUri = null
+        incomingConfigPackageUri = null
         val packageUri = intent.wikiPackageUri()
         val packageHandled = when {
+            intent.type == CONFIG_PACKAGE_MIME_TYPE && packageUri != null -> {
+                incomingConfigPackageUri = packageUri.toString()
+                true
+            }
             intent.type == H_WIKI_MIME_TYPE && packageUri != null -> {
                 acceptWikiPackage(intent, packageUri)
                 true
@@ -80,6 +89,10 @@ class MainActivity : ComponentActivity() {
                 isGenericWikiPackageMimeType(intent.type) &&
                 packageUri != null -> {
                 when {
+                    contentResolver.displayName(packageUri).isHconfigFileName() -> {
+                        incomingConfigPackageUri = packageUri.toString()
+                        true
+                    }
                     contentResolver.displayName(packageUri).isHwikiFileName() -> {
                         acceptWikiPackage(intent, packageUri)
                         true
@@ -134,3 +147,5 @@ private fun ContentResolver.displayName(uri: Uri): String? = runCatching {
 private fun String?.isHwikiFileName(): Boolean = this?.endsWith(".hwiki", ignoreCase = true) == true
 
 private fun String?.isHbundleFileName(): Boolean = this?.endsWith(".hbundle", ignoreCase = true) == true
+
+private fun String?.isHconfigFileName(): Boolean = this?.endsWith(".hconfig", ignoreCase = true) == true

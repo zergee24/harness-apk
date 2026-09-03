@@ -27,6 +27,11 @@ fun settingsDestinations(
         description = "维护供应商、模型列表和默认模型。",
     ),
     SettingsDestination(
+        id = "config",
+        title = "配置包",
+        description = "导出模型与语音配置给家人设备，或从配置包导入。",
+    ),
+    SettingsDestination(
         id = "search",
         title = "搜索能力",
         description = "配置会话可用的联网搜索。",

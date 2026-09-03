@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.core.content.IntentCompat
 import com.harnessapk.agent.H_BUNDLE_MIME_TYPE
+import com.harnessapk.packageformat.CONFIG_PACKAGE_MIME_TYPE
 import com.harnessapk.wiki.H_WIKI_MIME_TYPE
 
 enum class IncomingShareRouteKind {
@@ -28,6 +29,10 @@ fun classifyIncomingShare(
     }
     if (mimeType == H_BUNDLE_MIME_TYPE || names.any { it.endsWith(".hbundle") }) {
         return IncomingShareRouteKind.AGENT_BUNDLE
+    }
+    // .hconfig 由 MainActivity 的配置包分支处理，不能落入普通分享捕获
+    if (mimeType == CONFIG_PACKAGE_MIME_TYPE || names.any { it.endsWith(".hconfig") }) {
+        return IncomingShareRouteKind.NONE
     }
     val shareAction = action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE
     return if (shareAction && (hasText || streamCount > 0)) {

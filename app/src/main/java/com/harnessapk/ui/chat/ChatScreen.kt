@@ -900,6 +900,13 @@ fun ChatScreen(
         }
     }
 
+    // 全局「搜索能力」开启时，新会话默认联网（人物会话仍强制关闭）
+    LaunchedEffect(webSearchSettings.enabled, conversation?.id, isAgentConversation) {
+        if (webSearchSettings.enabled && !isAgentConversation) {
+            webSearchEnabled = true
+        }
+    }
+
     LaunchedEffect(sessionConfigRequestKey) {
         if (sessionConfigRequestKey > 0) {
             showSessionConfig = true

@@ -76,6 +76,8 @@ import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
 import com.harnessapk.ui.search.GlobalSearchScreen
 import com.harnessapk.ui.settings.SettingsScreen
+import com.harnessapk.ui.settings.ConfigPackageExportScreen
+import com.harnessapk.ui.settings.ConfigPackageImportScreen
 import com.harnessapk.ui.skills.SkillsScreen
 import com.harnessapk.ui.theme.ModeTheme
 import com.harnessapk.ui.updater.StartupUpdateAction
@@ -133,6 +135,16 @@ object Routes {
         )
     }
 
+    const val ConfigPackageExport = "config-package-export"
+    const val ConfigPackageImportPattern = "config-package-import?uri={uri}"
+
+    fun configPackageImport(uri: String?): String =
+        if (uri.isNullOrBlank()) {
+            "config-package-import"
+        } else {
+            "config-package-import?uri=${Uri.encode(uri)}"
+        }
+
     fun remoteRun(runId: String): String = "remote-run/${Uri.encode(runId)}"
 }
 
@@ -169,6 +181,8 @@ fun HarnessApkApp(
     onIncomingAgentBundleUriConsumed: () -> Unit = {},
     incomingWikiPackageUri: Uri? = null,
     onIncomingWikiPackageUriConsumed: () -> Unit = {},
+    incomingConfigPackageUri: Uri? = null,
+    onIncomingConfigPackageUriConsumed: () -> Unit = {},
     incomingRemoteRunId: String? = null,
     onIncomingRemoteRunConsumed: () -> Unit = {},
 ) {
@@ -187,6 +201,7 @@ fun HarnessApkApp(
     var chatWikiScopeRequestKey by remember { mutableStateOf(0) }
     var chatSearchRequestKey by remember { mutableStateOf(0) }
     var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
+    var configImportWelcome by remember { mutableStateOf<String?>(null) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
     var remoteProjectToStart by remember { mutableStateOf<Project?>(null) }
@@ -210,6 +225,7 @@ fun HarnessApkApp(
         }
     }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
+    val simpleMode by container.settingsStore.simpleMode.collectAsState(initial = false)
     val captureDraft by container.captureDraftRepository.activeDraft.collectAsState()
     val captureTransferState by container.captureImportCoordinator.transferState.collectAsState()
     var captureProjects by remember { mutableStateOf<List<Project>>(emptyList()) }
@@ -298,6 +314,8 @@ fun HarnessApkApp(
         WikiRoutes.SourcePattern -> "原文"
         WikiRoutes.CitationPattern -> "引用原文"
         Routes.Updates -> "更新"
+        Routes.ConfigPackageExport -> "配置包"
+        Routes.ConfigPackageImportPattern -> "导入配置包"
         Routes.RemoteSettings -> "Codex 远程节点"
         Routes.RemoteControl -> "远程控制"
         Routes.Activity -> "任务动态"
@@ -323,6 +341,12 @@ fun HarnessApkApp(
         incomingWikiPackageUri?.toString()?.let { uri ->
             dispatchWikiPackageImport(WikiPackageImportEvent.ExternalPackageReceived(uri))
             onIncomingWikiPackageUriConsumed()
+        }
+    }
+    LaunchedEffect(incomingConfigPackageUri) {
+        incomingConfigPackageUri?.toString()?.let { uri ->
+            navController.navigate(Routes.configPackageImport(uri)) { launchSingleTop = true }
+            onIncomingConfigPackageUriConsumed()
         }
     }
     LaunchedEffect(incomingRemoteRunId) {
@@ -527,6 +551,8 @@ fun HarnessApkApp(
                         onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
                         onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                         onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
+                        welcomeMessage = configImportWelcome,
+                        onWelcomeDismissed = { configImportWelcome = null },
                     )
                     MainMode.WORK -> Column(
                         modifier = Modifier
@@ -587,6 +613,11 @@ fun HarnessApkApp(
                         onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                         onOpenUpdates = { navController.navigate(Routes.Updates) },
                         onOpenRemote = { navController.navigate(Routes.RemoteSettings) },
+                        onOpenConfigPackage = { navController.navigate(Routes.ConfigPackageExport) },
+                        simpleMode = simpleMode,
+                        onSimpleModeChange = { value ->
+                            scope.launch { container.settingsStore.setSimpleMode(value) }
+                        },
                         showUpdateBadge = showUpdateBadge,
                     )
                 }
@@ -657,6 +688,33 @@ fun HarnessApkApp(
                     onStopVoiceInput = voiceInput.stop,
                     onVoiceInputConsumed = voiceInput.consume,
                     contentPadding = padding,
+                )
+            }
+            composable(Routes.ConfigPackageExport) {
+                ConfigPackageExportScreen(
+                    container = container,
+                    contentPadding = padding,
+                    onOpenImport = { navController.navigate(Routes.configPackageImport(uri = null)) },
+                )
+            }
+            composable(
+                route = Routes.ConfigPackageImportPattern,
+                arguments = listOf(
+                    navArgument("uri") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                ),
+            ) { entry ->
+                ConfigPackageImportScreen(
+                    container = container,
+                    contentPadding = padding,
+                    packageUri = entry.arguments?.getString("uri"),
+                    onApplied = { message ->
+                        configImportWelcome = message
+                        navController.popBackStack(Routes.Conversations, inclusive = false)
+                    },
                 )
             }
             composable(Routes.Providers) {

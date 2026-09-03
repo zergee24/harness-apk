@@ -956,6 +956,7 @@ private fun ConversationMemory.toMemoryEntity(): ConversationMemoryEntity = Conv
 private class ExecuteProviderProfileDao : ProviderProfileDao {
     var row: ProviderProfileEntity? = null
     override fun observeEnabled(): Flow<List<ProviderProfileEntity>> = MutableStateFlow(listOfNotNull(row))
+    override suspend fun getAll(): List<ProviderProfileEntity> = listOfNotNull(row)
     override suspend fun findById(id: String) = row?.takeIf { it.id == id }
     override suspend fun firstEnabled() = row?.takeIf { it.enabled }
     override suspend fun insert(entity: ProviderProfileEntity) { row = entity }

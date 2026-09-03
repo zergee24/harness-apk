@@ -13,6 +13,9 @@ interface ProviderProfileDao {
     @Query("SELECT * FROM provider_profiles WHERE enabled = 1 ORDER BY updatedAt DESC")
     fun observeEnabled(): Flow<List<ProviderProfileEntity>>
 
+    @Query("SELECT * FROM provider_profiles")
+    suspend fun getAll(): List<ProviderProfileEntity>
+
     @Query("SELECT * FROM provider_profiles WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): ProviderProfileEntity?
 

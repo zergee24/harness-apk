@@ -2,6 +2,7 @@ package com.harnessapk.common
 
 import android.content.Context
 import android.os.StatFs
+import android.speech.SpeechRecognizer
 import androidx.room.Room
 import androidx.room.withTransaction
 import com.harnessapk.activity.ActivityRepository
@@ -76,6 +77,8 @@ import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderCapabilityCatalogClient
 import com.harnessapk.provider.parseProviderCapabilityCatalogJson
 import com.harnessapk.security.ApiKeyCipher
+import com.harnessapk.security.ResilientStringCipher
+import com.harnessapk.configpackage.ConfigPackageApplier
 import com.harnessapk.voice.VoiceCredentialStore
 import com.harnessapk.search.LocalSearchRepository
 import com.harnessapk.session.PromptOptimizerUseCase
@@ -173,11 +176,12 @@ class AppContainer(
         AppDatabase.MIGRATION_22_23,
         AppDatabase.MIGRATION_23_24,
     ).addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK).build()
-    val apiKeyCipher = ApiKeyCipher()
+    // 卓易通等容器可能没有可用的 AndroidKeyStore；三个密钥库统一走 Keystore 优先 + 软件回退
+    val apiKeyCipher = ResilientStringCipher(appContext, "harness_apk_provider_keys")
     val settingsStore = AppSettingsStore(appContext)
     val voiceCredentialStore = VoiceCredentialStore(
         appContext,
-        ApiKeyCipher("harness_apk_voice_keys"),
+        ResilientStringCipher(appContext, "harness_apk_voice_keys"),
     )
     val gitCredentialStore = GitCredentialStore(appContext, apiKeyCipher)
     val json: Json = Json {
@@ -189,7 +193,7 @@ class AppContainer(
     val webSearchHttpClient = AppHttpClients.webSearch()
     val providerCatalogHttpClient = AppHttpClients.providerCatalog()
     val remoteHttpClient = AppHttpClients.remote()
-    val remoteProfileStore = RemoteProfileStore(appContext, ApiKeyCipher("harness_apk_remote_keys"))
+    val remoteProfileStore = RemoteProfileStore(appContext, ResilientStringCipher(appContext, "harness_apk_remote_keys"))
     val homeModeStore = HomeModeStore(appContext)
     val remoteEnrollmentClient = RemoteEnrollmentClient(remoteHttpClient)
     val aliyunPushManager = AliyunPushManager(appContext)
@@ -221,6 +225,14 @@ class AppContainer(
         dao = database.providerProfileDao(),
         cipher = apiKeyCipher,
         timeProvider = SystemTimeProvider,
+    )
+    val configPackageApplier = ConfigPackageApplier(
+        providerRepository = providerRepository,
+        voiceCredentialStore = voiceCredentialStore,
+        settingsStore = settingsStore,
+        systemRecognitionAvailable = {
+            runCatching { SpeechRecognizer.isRecognitionAvailable(appContext) }.getOrDefault(false)
+        },
     )
     val providerCapabilityCatalogClient = ProviderCapabilityCatalogClient(providerCatalogHttpClient, json)
     val chatRepository = ChatRepository(

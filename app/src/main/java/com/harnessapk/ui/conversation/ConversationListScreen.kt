@@ -68,14 +68,28 @@ fun ConversationListScreen(
     onOpenAgentPackages: () -> Unit = {},
     onOpenWikiLibrary: () -> Unit = {},
     onOpenGlobalSearch: () -> Unit = {},
+    welcomeMessage: String? = null,
+    onWelcomeDismissed: () -> Unit = {},
 ) {
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
+    val simpleMode by container.settingsStore.simpleMode.collectAsState(initial = false)
     val scope = rememberCoroutineScope()
     var conversationToEdit by remember { mutableStateOf<Conversation?>(null) }
     var titleDraft by remember { mutableStateOf("") }
     val visibleConversations = remember(conversations) { lifeConversations(conversations) }
     val agentsById = remember(agents) { agents.associateBy { it.id } }
+
+    welcomeMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = onWelcomeDismissed,
+            title = { Text("配置完成") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = onWelcomeDismissed) { Text("好的") }
+            },
+        )
+    }
 
     conversationToEdit?.let { conversation ->
         AlertDialog(
@@ -119,12 +133,26 @@ fun ConversationListScreen(
         verticalArrangement = Arrangement.spacedBy(HarnessSpacing.item),
     ) {
         item {
-            QuickEntryRow(
-                onOpenAgentPackages = onOpenAgentPackages,
-                onOpenWikiLibrary = onOpenWikiLibrary,
-                onOpenGlobalSearch = onOpenGlobalSearch,
-                onCreateConversation = onCreateConversation,
-            )
+            if (simpleMode) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    FilledIconButton(
+                        modifier = Modifier.size(56.dp),
+                        onClick = onCreateConversation,
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = "新建对话")
+                    }
+                }
+            } else {
+                QuickEntryRow(
+                    onOpenAgentPackages = onOpenAgentPackages,
+                    onOpenWikiLibrary = onOpenWikiLibrary,
+                    onOpenGlobalSearch = onOpenGlobalSearch,
+                    onCreateConversation = onCreateConversation,
+                )
+            }
         }
         conversationItems(
             conversations = visibleConversations,
