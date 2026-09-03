@@ -31,10 +31,30 @@ class ProjectSessionLaunchUiStateTest {
     @Test
     fun workbenchTabGuidanceExplainsEachExistingTab() {
         assertEquals("在当前项目内开始或继续工作", projectWorkbenchTabGuidance(ProjectWorkbenchTab.CONVERSATIONS))
-        assertEquals("查看会话沉淀和已写入文件", projectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER))
-        assertEquals("查看当前分支和工作区变更", projectWorkbenchTabGuidance(ProjectWorkbenchTab.GIT))
+        assertEquals("查看会话沉淀、已写入文件和 Git 变更", projectWorkbenchTabGuidance(ProjectWorkbenchTab.FOLDER))
     }
 
+    @Suppress("DEPRECATION")
+    @Test
+    fun visibleWorkbenchTabsHideFoldedGitTab() {
+        assertEquals(
+            listOf(ProjectWorkbenchTab.CONVERSATIONS, ProjectWorkbenchTab.FOLDER),
+            visibleWorkbenchTabs(),
+        )
+        assertFalse(visibleWorkbenchTabs().contains(ProjectWorkbenchTab.GIT))
+    }
+
+    @Test
+    fun projectGitBarStateDerivesBarPresentation() {
+        assertEquals(ProjectGitBarState.NotAvailable, projectGitBarState(null))
+        assertEquals(ProjectGitBarState.Clean, projectGitBarState(gitStatus("main", isClean = true, changeCount = 0)))
+        assertEquals(
+            ProjectGitBarState.Changed(2),
+            projectGitBarState(gitStatus("main", isClean = false, changeCount = 2)),
+        )
+    }
+
+    @Suppress("DEPRECATION")
     @Test
     fun workbenchTabGuidanceUsesProjectDeliverableEmptinessForFolder() {
         assertTrue(
@@ -219,9 +239,9 @@ class ProjectSessionLaunchUiStateTest {
     }
 
     @Test
-    fun workbenchTargetsMapToFolderAndGitTabs() {
+    fun gitTargetMapsToFolderTabLikeFilesTarget() {
         assertEquals(ProjectWorkbenchTab.FOLDER, projectWorkbenchTab(ProjectWorkbenchDestination.FILES))
-        assertEquals(ProjectWorkbenchTab.GIT, projectWorkbenchTab(ProjectWorkbenchDestination.GIT))
+        assertEquals(ProjectWorkbenchTab.FOLDER, projectWorkbenchTab(ProjectWorkbenchDestination.GIT))
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -352,9 +372,8 @@ class ProjectSessionLaunchUiStateTest {
     }
 
     @Test
-    fun gitRefreshIsOnlyTriggeredBySelectingGitTab() {
-        assertTrue(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.GIT))
-        assertFalse(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.FOLDER))
+    fun gitRefreshIsTriggeredBySelectingFolderTab() {
+        assertTrue(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.FOLDER))
         assertFalse(shouldRefreshGitOnTabSelection(ProjectWorkbenchTab.CONVERSATIONS))
     }
 
@@ -383,10 +402,9 @@ class ProjectSessionLaunchUiStateTest {
     }
 
     @Test
-    fun projectSelectionRefreshesGitOnlyWhileGitTabIsActive() {
-        assertTrue(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.GIT, "project-q"))
-        assertFalse(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.FOLDER, "project-q"))
-        assertFalse(shouldRefreshGitForProjectSelection(ProjectWorkbenchTab.GIT, null))
+    fun projectSelectionRefreshesGitRegardlessOfTab() {
+        assertTrue(shouldRefreshGitForProjectSelection("project-q"))
+        assertFalse(shouldRefreshGitForProjectSelection(null))
     }
 
     @Test

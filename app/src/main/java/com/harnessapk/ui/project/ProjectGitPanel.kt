@@ -1,5 +1,6 @@
 package com.harnessapk.ui.project
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,6 +10,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountTree
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -28,6 +31,82 @@ import com.harnessapk.git.GitBranchSummary
 import com.harnessapk.git.GitFileChange
 import com.harnessapk.git.GitStatusSummary
 import com.harnessapk.ui.theme.HarnessSpacing
+
+@Composable
+internal fun ProjectGitBar(
+    status: GitStatusSummary?,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    onInitRepository: () -> Unit,
+    onCloneRepository: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        when {
+            status == null -> Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "当前项目还不是 Git 仓库",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        onClick = onInitRepository,
+                    ) { Text("初始化 Git") }
+                    OutlinedButton(
+                        modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+                        onClick = onCloneRepository,
+                    ) { Text("克隆仓库") }
+                }
+            }
+            status.isClean -> ProjectGitBarToggleRow(
+                label = "${status.currentBranch} · 工作区干净",
+                expanded = expanded,
+                onToggleExpanded = onToggleExpanded,
+            )
+            else -> ProjectGitBarToggleRow(
+                label = "${status.currentBranch} · ${status.files.size} 项变更",
+                expanded = expanded,
+                onToggleExpanded = onToggleExpanded,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProjectGitBarToggleRow(
+    label: String,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = HarnessSpacing.minimumTouchTarget)
+            .clickable(onClick = onToggleExpanded)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.AccountTree, contentDescription = null)
+        Text(
+            modifier = Modifier.weight(1f),
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Icon(
+            imageVector = if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+            contentDescription = if (expanded) "收起 Git 区" else "展开 Git 区",
+        )
+    }
+}
 
 @Composable
 internal fun ProjectGitPanel(

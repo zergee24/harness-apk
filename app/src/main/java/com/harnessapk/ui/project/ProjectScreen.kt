@@ -214,10 +214,9 @@ internal fun selectedDeliverableIdForRefresh(
 }
 
 internal fun shouldRefreshGitOnTabSelection(tab: ProjectWorkbenchTab): Boolean =
-    tab == ProjectWorkbenchTab.GIT
+    tab == ProjectWorkbenchTab.FOLDER
 
-internal fun shouldRefreshGitForProjectSelection(tab: ProjectWorkbenchTab, projectId: String?): Boolean =
-    shouldRefreshGitOnTabSelection(tab) && projectId != null
+internal fun shouldRefreshGitForProjectSelection(projectId: String?): Boolean = projectId != null
 
 internal fun shouldShowProjectWorkbenchTabGuidance(
     tab: ProjectWorkbenchTab,
@@ -292,6 +291,7 @@ internal fun ProjectScreen(
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedDeliverableId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(defaultProjectWorkbenchTab()) }
+    var gitSectionExpanded by rememberSaveable { mutableStateOf(false) }
     var artifactText by rememberSaveable { mutableStateOf("") }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var artifactFilter by rememberSaveable { mutableStateOf(defaultProjectArtifactFilter()) }
@@ -594,7 +594,8 @@ internal fun ProjectScreen(
             }.onSuccess { project ->
                 selectProject(project.id)
                 searchQuery = ""
-                selectedTab = ProjectWorkbenchTab.GIT
+                selectedTab = ProjectWorkbenchTab.FOLDER
+                gitSectionExpanded = true
                 showCloneRepositoryDialog = false
                 statusText = "已克隆仓库：${project.name}"
                 refreshProjects()
@@ -794,16 +795,19 @@ internal fun ProjectScreen(
         }
 
         val targetTab = projectWorkbenchTab(target.destination)
-        val refreshAlreadySelectedGit = shouldRefreshGitForProjectSelection(targetTab, project.id) &&
-            selectedProjectId == project.id && selectedTab == ProjectWorkbenchTab.GIT
+        val refreshGitForTarget = shouldRefreshGitForProjectSelection(project.id) &&
+            selectedProjectId == project.id && selectedTab == targetTab
         selectProject(project.id, invalidateDeliverableRefresh = false)
         selectedTab = targetTab
         searchQuery = ""
         artifactFilter = ProjectArtifactFilter.ALL
         collapsedDirectoryPaths = emptySet()
+        if (target.destination == ProjectWorkbenchDestination.GIT) {
+            gitSectionExpanded = true
+        }
         if (target.destination == ProjectWorkbenchDestination.FILES) {
             publishDeliverableRefresh(checkNotNull(targetedFilesRefresh))
-        } else if (refreshAlreadySelectedGit) {
+        } else if (refreshGitForTarget) {
             refreshGitState(project)
         }
         onWorkbenchTargetConsumed(target.requestKey)
@@ -836,11 +840,15 @@ internal fun ProjectScreen(
         }
     }
 
-    LaunchedEffect(selectedProject, selectedTab) {
-        if (shouldRefreshGitForProjectSelection(selectedTab, selectedProject?.id)) {
+    LaunchedEffect(selectedProject) {
+        if (shouldRefreshGitForProjectSelection(selectedProject?.id)) {
             refreshGitState(selectedProject)
-        } else if (selectedTab == ProjectWorkbenchTab.GIT) {
-            refreshGitState(null)
+        }
+    }
+
+    LaunchedEffect(selectedTab) {
+        if (shouldRefreshGitOnTabSelection(selectedTab)) {
+            refreshGitState(selectedProject)
         }
     }
 
@@ -1067,9 +1075,9 @@ internal fun ProjectScreen(
                 ProjectWorkbenchTabs(
                     selectedTab = selectedTab,
                     onSelectTab = { tab ->
-                        val refreshAlreadySelectedGit = shouldRefreshGitOnTabSelection(tab) && tab == selectedTab
+                        val refreshAlreadySelectedFolder = shouldRefreshGitOnTabSelection(tab) && tab == selectedTab
                         selectedTab = tab
-                        if (refreshAlreadySelectedGit) refreshGitState()
+                        if (refreshAlreadySelectedFolder) refreshGitState()
                     },
                 )
             }
@@ -1109,7 +1117,37 @@ internal fun ProjectScreen(
                         }
                     }
                 }
-                ProjectWorkbenchTab.FOLDER -> {
+                ProjectWorkbenchTab.FOLDER, ProjectWorkbenchTab.GIT -> {
+                    item {
+                        ProjectGitBar(
+                            status = gitStatus,
+                            expanded = gitSectionExpanded,
+                            onToggleExpanded = { gitSectionExpanded = !gitSectionExpanded },
+                            onInitRepository = { initGitRepository(selectedProject) },
+                            onCloneRepository = { showCloneRepositoryDialog = true },
+                        )
+                    }
+
+                    if (gitSectionExpanded && gitStatus != null) {
+                        item {
+                            ProjectGitPanel(
+                                status = gitStatus,
+                                branches = gitBranches,
+                                pendingCommitCount = pendingCommitPaths.size,
+                                onOpenPendingCommit = { openPendingCommit(selectedProject) },
+                                onInitRepository = { initGitRepository(selectedProject) },
+                                onCloneRepository = { showCloneRepositoryDialog = true },
+                                onRefresh = { refreshGitState() },
+                                onCommit = { showCommitDialog = true },
+                                onPush = { pushCurrentBranch(selectedProject) },
+                                onFetch = { fetchRemote(selectedProject) },
+                                onPull = { pullFastForward(selectedProject) },
+                                onCreateBranch = { showBranchDialog = true },
+                                onCheckoutBranch = { checkoutBranch(selectedProject, it) },
+                            )
+                        }
+                    }
+
                     item {
                         OutlinedTextField(
                             modifier = Modifier.fillMaxWidth(),
@@ -1227,25 +1265,6 @@ internal fun ProjectScreen(
                         )
                     }
                 }
-                ProjectWorkbenchTab.GIT -> {
-                    item {
-                        ProjectGitPanel(
-                            status = gitStatus,
-                            branches = gitBranches,
-                            pendingCommitCount = pendingCommitPaths.size,
-                            onOpenPendingCommit = { openPendingCommit(selectedProject) },
-                            onInitRepository = { initGitRepository(selectedProject) },
-                            onCloneRepository = { showCloneRepositoryDialog = true },
-                            onRefresh = { refreshGitState() },
-                            onCommit = { showCommitDialog = true },
-                            onPush = { pushCurrentBranch(selectedProject) },
-                            onFetch = { fetchRemote(selectedProject) },
-                            onPull = { pullFastForward(selectedProject) },
-                            onCreateBranch = { showBranchDialog = true },
-                            onCheckoutBranch = { checkoutBranch(selectedProject, it) },
-                        )
-                    }
-                }
             }
         }
     }
@@ -1260,7 +1279,7 @@ private fun ProjectWorkbenchTabs(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        ProjectWorkbenchTab.entries.forEach { tab ->
+        visibleWorkbenchTabs().forEach { tab ->
             FilterChip(
                 modifier = Modifier
                     .weight(1f)

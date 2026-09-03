@@ -12,8 +12,12 @@ import java.util.TimeZone
 internal enum class ProjectWorkbenchTab(val label: String) {
     CONVERSATIONS("会话"),
     FOLDER("文件夹"),
+    @Deprecated("已折叠进文件夹页 Git 区；仅为 rememberSaveable 陈旧恢复态保留枚举值")
     GIT("Git"),
 }
+
+internal fun visibleWorkbenchTabs(): List<ProjectWorkbenchTab> =
+    listOf(ProjectWorkbenchTab.CONVERSATIONS, ProjectWorkbenchTab.FOLDER)
 
 internal data class ProjectWorkbenchOverview(
     val conversationLabel: String,
@@ -37,8 +41,7 @@ internal fun projectWorkbenchOverview(
 
 internal fun projectWorkbenchTabGuidance(tab: ProjectWorkbenchTab): String = when (tab) {
     ProjectWorkbenchTab.CONVERSATIONS -> "在当前项目内开始或继续工作"
-    ProjectWorkbenchTab.FOLDER -> "查看会话沉淀和已写入文件"
-    ProjectWorkbenchTab.GIT -> "查看当前分支和工作区变更"
+    ProjectWorkbenchTab.FOLDER, ProjectWorkbenchTab.GIT -> "查看会话沉淀、已写入文件和 Git 变更"
 }
 
 internal enum class ProjectWorkbenchDestination { CONVERSATIONS, FILES, GIT }
@@ -53,11 +56,22 @@ internal data class ProjectWorkbenchTarget(
 internal fun projectWorkbenchTab(destination: ProjectWorkbenchDestination): ProjectWorkbenchTab =
     when (destination) {
         ProjectWorkbenchDestination.CONVERSATIONS -> ProjectWorkbenchTab.CONVERSATIONS
-        ProjectWorkbenchDestination.FILES -> ProjectWorkbenchTab.FOLDER
-        ProjectWorkbenchDestination.GIT -> ProjectWorkbenchTab.GIT
+        ProjectWorkbenchDestination.FILES, ProjectWorkbenchDestination.GIT -> ProjectWorkbenchTab.FOLDER
     }
 
 internal fun defaultProjectWorkbenchTab(): ProjectWorkbenchTab = ProjectWorkbenchTab.CONVERSATIONS
+
+internal sealed interface ProjectGitBarState {
+    data object NotAvailable : ProjectGitBarState
+    data object Clean : ProjectGitBarState
+    data class Changed(val count: Int) : ProjectGitBarState
+}
+
+internal fun projectGitBarState(status: GitStatusSummary?): ProjectGitBarState = when {
+    status == null -> ProjectGitBarState.NotAvailable
+    status.isClean -> ProjectGitBarState.Clean
+    else -> ProjectGitBarState.Changed(status.files.size)
+}
 
 internal enum class ProjectHeaderAction {
     NEW_SESSION,
