@@ -116,9 +116,6 @@
             android:name=".ui.dashboard.DashboardActivity"
             android:exported="false"
             android:label="Agent 副屏" />
-        <activity
-            android:name=".ui.dashboard.DashboardDetailActivity"
-            android:exported="false"
-            android:label="线程详情" />
+
     </application>
 </manifest>
