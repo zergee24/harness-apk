@@ -1,12 +1,81 @@
 package state
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/harnessapk/remote/internal/protocol"
 )
+
+func TestStateV1ToV2PreservesCredentialsAndForcesInitialGapSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	v1 := map[string]any{
+		"relayUrl": "https://relay.example", "hostId": "host-1", "hostName": "Mac",
+		"hostToken": "host-token", "pendingPairingSecrets": map[string]string{"ticket": "pair-secret"},
+		"deviceSecrets":   map[string]string{"device-1": "device-secret"},
+		"sequences":       map[string]uint64{"device-1": 41},
+		"pendingOutbound": map[string]map[string]string{"device-1": {"wire-1": "opaque-wire"}},
+	}
+	raw, _ := json.Marshal(v1)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := LoadBridge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SchemaVersion != 2 || state.HostToken != "host-token" || state.DeviceSecrets["device-1"] != "device-secret" || state.Sequences["device-1"] != 41 {
+		t.Fatalf("migrated state = %#v", state)
+	}
+	if !state.NeedsInitialGapSnapshot || len(state.PendingOutbound) != 0 {
+		t.Fatalf("legacy pending was guessed instead of forcing snapshot: %#v", state)
+	}
+	reloaded, err := LoadBridge(path)
+	if err != nil || reloaded.SchemaVersion != 2 || !reloaded.NeedsInitialGapSnapshot {
+		t.Fatalf("reloaded state=%#v err=%v", reloaded, err)
+	}
+}
+
+func TestBridgeStatePersistsLogicalThreadContinuations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	initial := BridgeData{
+		SchemaVersion:   BridgeSchemaVersion,
+		RelayURL:        "https://relay.example",
+		HostID:          "host-1",
+		HostName:        "Mac",
+		HostToken:       "host-token",
+		Pending:         map[string]string{},
+		DeviceSecrets:   map[string]string{},
+		Sequences:       map[string]uint64{},
+		PendingOutbound: map[string]map[string]string{},
+		JournalKey:      base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		ThreadContinuations: map[string]ThreadContinuation{
+			"thread-root": {
+				RootThreadID: "thread-root",
+				ThreadIDs:    []string{"thread-root", "thread-current"},
+				Name:         "review",
+				CWD:          "/workspace/project",
+			},
+		},
+	}
+	if err := SaveBridge(path, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := LoadBridge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := reloaded.ThreadContinuations["thread-root"]
+	if record.RootThreadID != "thread-root" || record.Name != "review" || record.CWD != "/workspace/project" || len(record.ThreadIDs) != 2 || record.ThreadIDs[1] != "thread-current" {
+		t.Fatalf("continuation=%#v", record)
+	}
+}
 
 func TestPairingIsSingleUseAndDeviceCanBeRevoked(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "relay.json"))

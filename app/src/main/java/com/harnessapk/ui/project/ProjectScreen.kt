@@ -88,6 +88,11 @@ import com.harnessapk.markdownpdf.AndroidMarkdownPdfWriter
 import com.harnessapk.project.ProjectArtifactType
 import com.harnessapk.project.Project
 import com.harnessapk.project.ProjectDeliverable
+import com.harnessapk.remote.RemoteConnectionStatus
+import com.harnessapk.remote.remoteFeatureAvailability
+import com.harnessapk.storage.ProjectRemoteBindingEntity
+import com.harnessapk.storage.RemoteRunEntity
+import com.harnessapk.ui.activity.remoteRunStatusLabel
 import com.harnessapk.ui.components.ActionableEmptyState
 import com.harnessapk.ui.components.ComfortListRow
 import com.harnessapk.ui.components.InlineStatusMessage
@@ -263,6 +268,8 @@ internal fun ProjectScreen(
     onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
     onOpenSession: (String) -> Unit,
+    onStartRemoteRun: (Project) -> Unit = {},
+    onOpenRemoteRun: (String) -> Unit = {},
     onOpenGlobalSearch: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -270,6 +277,12 @@ internal fun ProjectScreen(
     val scope = rememberCoroutineScope()
     val markdownPdfWriter = remember { AndroidMarkdownPdfWriter() }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
+    val remoteProfile by container.remoteProfileStore.profile.collectAsState()
+    val remoteState by container.remoteRepository.state.collectAsState()
+    val remoteAvailability = remember(remoteState.capabilities) {
+        remoteFeatureAvailability(remoteState.capabilities)
+    }
+    val remoteRunCapabilityKnown = remoteState.connectionStatus == RemoteConnectionStatus.CONNECTED
     var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
     var projectsLoaded by remember { mutableStateOf(false) }
     var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
@@ -298,10 +311,14 @@ internal fun ProjectScreen(
     var projectToRename by remember { mutableStateOf<Project?>(null) }
     var gitStatus by remember { mutableStateOf<GitStatusSummary?>(null) }
     var gitBranches by remember { mutableStateOf<List<GitBranchSummary>>(emptyList()) }
+    var remoteBinding by remember { mutableStateOf<ProjectRemoteBindingEntity?>(null) }
+    var openRemoteRun by remember { mutableStateOf<RemoteRunEntity?>(null) }
+    var showRemoteBindingSheet by rememberSaveable { mutableStateOf(false) }
 
     val selectedProject = projects.firstOrNull { it.id == selectedProjectId }
     val pendingCommitPaths = appliedProjectPaths[selectedProject?.id].orEmpty()
         .filter { path -> gitStatus?.files?.any { it.path == path } == true }
+    val hasActiveRemoteBinding = remoteBinding?.hostId == remoteProfile?.hostId
     val visibleDeliverables = filterProjectArtifacts(deliverables, artifactFilter)
     val artifactTree = remember(visibleDeliverables) { buildProjectArtifactTree(visibleDeliverables) }
     val visibleTreeItems = remember(artifactTree, collapsedDirectoryPaths) {
@@ -803,6 +820,22 @@ internal fun ProjectScreen(
         publishDeliverableRefresh(ordinaryRefresh)
     }
 
+    LaunchedEffect(selectedProjectId) {
+        val projectId = selectedProjectId
+        if (projectId == null) {
+            remoteBinding = null
+            openRemoteRun = null
+        } else {
+            val selectedBackend = remoteState.selectedBackendId
+            val remoteState = withContext(container.dispatchers.io) {
+                container.remoteBindingRepository.bindingForProject(projectId, selectedBackend) to
+                    container.database.remoteDao().latestOpenRunForProject(projectId)
+            }
+            remoteBinding = remoteState.first
+            openRemoteRun = remoteState.second
+        }
+    }
+
     LaunchedEffect(selectedProject, selectedTab) {
         if (shouldRefreshGitForProjectSelection(selectedTab, selectedProject?.id)) {
             refreshGitState(selectedProject)
@@ -917,6 +950,40 @@ internal fun ProjectScreen(
         )
     }
 
+    val bindingProject = selectedProject
+    val bindingProfile = remoteProfile
+    if (showRemoteBindingSheet && bindingProject != null && bindingProfile != null) {
+        ProjectRemoteBindingSheet(
+            projectName = bindingProject.name,
+            hostName = bindingProfile.hostName,
+            candidates = remoteState.workspaceCandidates,
+            candidatesLoaded = remoteState.workspaceCandidatesLoaded,
+            existingBinding = remoteBinding,
+            onDismiss = { showRemoteBindingSheet = false },
+            onBind = { candidate, confirmed ->
+                scope.launch {
+                    runCatching {
+                        withContext(container.dispatchers.io) {
+                            container.remoteBindingRepository.bind(
+                                projectId = bindingProject.id,
+                                backendId = remoteState.selectedBackendId,
+                                hostId = bindingProfile.hostId,
+                                candidate = candidate,
+                                confirmFingerprintChange = confirmed,
+                            )
+                        }
+                    }.onSuccess { binding ->
+                        remoteBinding = binding
+                        showRemoteBindingSheet = false
+                        onStartRemoteRun(bindingProject)
+                    }.onFailure { error ->
+                        statusText = error.toUserMessage()
+                    }
+                }
+            },
+        )
+    }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -934,12 +1001,33 @@ internal fun ProjectScreen(
                     selectProject(it.id)
                     searchQuery = ""
                 },
-                onCreateProject = { showNewProjectDialog = true },
                 onOpenGlobalSearch = onOpenGlobalSearch,
                 onCloneRepository = { showCloneRepositoryDialog = true },
                 onCreateSession = {
                     selectedProject?.let { project ->
                         onCreateSession(project)
+                    }
+                },
+                remoteActionLabel = remoteProfile?.let {
+                    openRemoteRun?.let { run -> remoteRunStatusLabel(run.status) } ?: when {
+                        remoteRunCapabilityKnown && !remoteAvailability.canStartM2Run -> "Mac Bridge 需升级"
+                        hasActiveRemoteBinding -> "交给 Mac"
+                        else -> "在 Mac 上继续"
+                    }
+                },
+                onRemoteAction = {
+                    selectedProject?.let { project ->
+                        val run = openRemoteRun
+                        if (run != null) {
+                            onOpenRemoteRun(run.id)
+                        } else if (remoteRunCapabilityKnown && !remoteAvailability.canStartM2Run) {
+                            statusText = "当前 Mac Bridge 未声明 Remote Run v1 能力，请升级后重连"
+                        } else if (!hasActiveRemoteBinding) {
+                            showRemoteBindingSheet = true
+                            container.remoteRepository.requestWorkspaceCandidates()
+                        } else {
+                            onStartRemoteRun(project)
+                        }
                     }
                 },
                 onImportProjectPackage = {
@@ -1210,10 +1298,11 @@ private fun ProjectHeader(
     projects: List<Project>,
     overview: ProjectWorkbenchOverview,
     onSelectProject: (Project) -> Unit,
-    onCreateProject: () -> Unit,
     onOpenGlobalSearch: () -> Unit,
     onCloneRepository: () -> Unit,
     onCreateSession: () -> Unit,
+    remoteActionLabel: String?,
+    onRemoteAction: () -> Unit,
     onImportProjectPackage: () -> Unit,
     onExportProjectPackage: () -> Unit,
     onShareProjectPackage: () -> Unit,
@@ -1311,41 +1400,27 @@ private fun ProjectHeader(
     ) {
         Box {
             if (selectedProject == null) {
-                Column(
+                Row(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "未选择项目",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(
-                                text = "创建项目后从会话开始长期工作",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        IconButton(onClick = onOpenGlobalSearch) {
-                            Icon(Icons.Outlined.Search, contentDescription = "全局搜索")
-                        }
-                        overflowMenu()
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "项目工作台",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = "会话、文件与交付物集中在这里",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                    Button(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = HarnessSpacing.primaryControlHeight),
-                        onClick = onCreateProject,
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = null)
-                        Text("新建项目")
+                    IconButton(onClick = onOpenGlobalSearch) {
+                        Icon(Icons.Outlined.Search, contentDescription = "全局搜索")
                     }
+                    overflowMenu()
                 }
             } else {
                 ProjectWorkbenchHeader(
@@ -1353,6 +1428,8 @@ private fun ProjectHeader(
                     overview = overview,
                     onSelectProject = { projectMenuExpanded = true },
                     onCreateSession = onCreateSession,
+                    remoteActionLabel = remoteActionLabel,
+                    onRemoteAction = onRemoteAction,
                     overflowContent = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = onOpenGlobalSearch) {
@@ -1388,6 +1465,8 @@ internal fun ProjectWorkbenchHeader(
     overview: ProjectWorkbenchOverview,
     onSelectProject: () -> Unit,
     onCreateSession: () -> Unit,
+    remoteActionLabel: String? = null,
+    onRemoteAction: () -> Unit = {},
     overflowContent: @Composable () -> Unit,
 ) {
     Column(
@@ -1454,6 +1533,16 @@ internal fun ProjectWorkbenchHeader(
         ) {
             Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null)
             Text("新建项目会话")
+        }
+        if (remoteActionLabel != null) {
+            OutlinedButton(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = HarnessSpacing.primaryControlHeight),
+                onClick = onRemoteAction,
+            ) {
+                Text(remoteActionLabel)
+            }
         }
     }
 }
@@ -1710,8 +1799,8 @@ private fun EmptyProjectConversationState(onCreateSession: () -> Unit) {
 @Composable
 private fun EmptyProjectState(onCreateProject: () -> Unit) {
     ActionableEmptyState(
-        title = "还没有项目",
-        message = "项目用于长期沉淀上下文、会话和交付物。",
+        title = "从一个项目开始",
+        message = "为长期工作建立独立空间，继续会话、管理文件，也可以交给 Mac。",
         actionLabel = "新建项目",
         onAction = onCreateProject,
         icon = Icons.Outlined.Folder,

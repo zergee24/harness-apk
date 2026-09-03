@@ -2,27 +2,25 @@ package com.harnessapk.ui
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,6 +29,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,11 +41,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -58,9 +58,13 @@ import com.harnessapk.HarnessApkApplication
 import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.chat.Conversation
 import com.harnessapk.project.Project
+import com.harnessapk.remote.RemoteConnectionService
 import com.harnessapk.ui.capture.CaptureDestinationSheet
 import com.harnessapk.ui.capture.CaptureTransferOverlay
 import com.harnessapk.ui.agent.AgentPackagesScreen
+import com.harnessapk.ui.activity.RemoteRunObjectiveSheet
+import com.harnessapk.ui.activity.ActivityScreen
+import com.harnessapk.ui.activity.RunDetailScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.chat.ConversationWikiTopBarAction
 import com.harnessapk.ui.conversation.ConversationListScreen
@@ -72,8 +76,9 @@ import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
 import com.harnessapk.ui.search.GlobalSearchScreen
 import com.harnessapk.ui.settings.SettingsScreen
+import com.harnessapk.ui.settings.ConfigPackageExportScreen
+import com.harnessapk.ui.settings.ConfigPackageImportScreen
 import com.harnessapk.ui.skills.SkillsScreen
-import com.harnessapk.ui.theme.HarnessSpacing
 import com.harnessapk.ui.theme.ModeTheme
 import com.harnessapk.ui.updater.StartupUpdateAction
 import com.harnessapk.ui.updater.UpdateSettingsScreen
@@ -87,6 +92,7 @@ import com.harnessapk.ui.wiki.WikiRecoveryState
 import com.harnessapk.ui.wiki.WikiRoutes
 import com.harnessapk.ui.wiki.WikiSearchScreen
 import com.harnessapk.ui.wiki.WikiSourceReaderScreen
+import com.harnessapk.ui.dashboard.DashboardActivity
 import com.harnessapk.ui.remote.RemoteScreen
 import com.harnessapk.ui.remote.RemoteSettingsScreen
 import com.harnessapk.updater.UpdateCheckResult
@@ -106,6 +112,8 @@ object Routes {
     const val Updates = "updates"
     const val RemoteSettings = "remote-settings"
     const val RemoteControl = "remote-control"
+    const val Activity = "activity"
+    const val RemoteRunPattern = "remote-run/{runId}"
     const val ChatPattern =
         "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}"
 
@@ -126,6 +134,18 @@ object Routes {
             ),
         )
     }
+
+    const val ConfigPackageExport = "config-package-export"
+    const val ConfigPackageImportPattern = "config-package-import?uri={uri}"
+
+    fun configPackageImport(uri: String?): String =
+        if (uri.isNullOrBlank()) {
+            "config-package-import"
+        } else {
+            "config-package-import?uri=${Uri.encode(uri)}"
+        }
+
+    fun remoteRun(runId: String): String = "remote-run/${Uri.encode(runId)}"
 }
 
 internal fun chatRouteQuery(
@@ -161,6 +181,10 @@ fun HarnessApkApp(
     onIncomingAgentBundleUriConsumed: () -> Unit = {},
     incomingWikiPackageUri: Uri? = null,
     onIncomingWikiPackageUriConsumed: () -> Unit = {},
+    incomingConfigPackageUri: Uri? = null,
+    onIncomingConfigPackageUriConsumed: () -> Unit = {},
+    incomingRemoteRunId: String? = null,
+    onIncomingRemoteRunConsumed: () -> Unit = {},
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -177,10 +201,18 @@ fun HarnessApkApp(
     var chatWikiScopeRequestKey by remember { mutableStateOf(0) }
     var chatSearchRequestKey by remember { mutableStateOf(0) }
     var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
+    var configImportWelcome by remember { mutableStateOf<String?>(null) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
     var workbenchRequestKey by rememberSaveable { mutableStateOf(0) }
+    var remoteProjectToStart by remember { mutableStateOf<Project?>(null) }
+    var remoteRunStartBusy by remember { mutableStateOf(false) }
+    var remoteRunStartError by remember { mutableStateOf<String?>(null) }
     val isHomeRoute = route == Routes.Conversations || route == null
-    val container = (LocalContext.current.applicationContext as HarnessApkApplication).container
+    val context = LocalContext.current
+    val dashboardLaunch = {
+        context.startActivity(android.content.Intent(context, com.harnessapk.ui.dashboard.DashboardActivity::class.java))
+    }
+    val container = (context.applicationContext as HarnessApkApplication).container
     val homeModeStore = container.homeModeStore
     var mainMode by rememberSaveable { mutableStateOf(homeModeStore.mode.value) }
     var themeSourceMode by rememberSaveable { mutableStateOf(homeModeStore.themeSourceMode.value) }
@@ -193,6 +225,7 @@ fun HarnessApkApp(
         }
     }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
+    val simpleMode by container.settingsStore.simpleMode.collectAsState(initial = false)
     val captureDraft by container.captureDraftRepository.activeDraft.collectAsState()
     val captureTransferState by container.captureImportCoordinator.transferState.collectAsState()
     var captureProjects by remember { mutableStateOf<List<Project>>(emptyList()) }
@@ -200,6 +233,9 @@ fun HarnessApkApp(
     var captureActionError by remember { mutableStateOf<String?>(null) }
     val remoteProfile by container.remoteProfileStore.profile.collectAsState()
     val remoteUiState by container.remoteRepository.state.collectAsState()
+    val activityState by container.activityRepository.state.collectAsState(
+        initial = com.harnessapk.activity.ActivityState(),
+    )
     var updateCheckResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val currentConversationId = backStackEntry?.arguments?.getString("conversationId")
     val showUpdateBadge = shouldShowUpdateBadge(updateCheckResult)
@@ -278,9 +314,12 @@ fun HarnessApkApp(
         WikiRoutes.SourcePattern -> "原文"
         WikiRoutes.CitationPattern -> "引用原文"
         Routes.Updates -> "更新"
+        Routes.ConfigPackageExport -> "配置包"
+        Routes.ConfigPackageImportPattern -> "导入配置包"
         Routes.RemoteSettings -> "Codex 远程节点"
         Routes.RemoteControl -> remoteUiState.threads
             .firstOrNull { it.id == remoteUiState.selectedThreadId }?.title ?: "远程控制"
+        Routes.Activity -> "任务动态"
         Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
     }
@@ -303,6 +342,18 @@ fun HarnessApkApp(
         incomingWikiPackageUri?.toString()?.let { uri ->
             dispatchWikiPackageImport(WikiPackageImportEvent.ExternalPackageReceived(uri))
             onIncomingWikiPackageUriConsumed()
+        }
+    }
+    LaunchedEffect(incomingConfigPackageUri) {
+        incomingConfigPackageUri?.toString()?.let { uri ->
+            navController.navigate(Routes.configPackageImport(uri)) { launchSingleTop = true }
+            onIncomingConfigPackageUriConsumed()
+        }
+    }
+    LaunchedEffect(incomingRemoteRunId) {
+        incomingRemoteRunId?.let { runId ->
+            navController.navigate(Routes.remoteRun(runId)) { launchSingleTop = true }
+            onIncomingRemoteRunConsumed()
         }
     }
     val onCreateConversation: () -> Unit = {
@@ -376,7 +427,39 @@ fun HarnessApkApp(
         modifier = Modifier.testTag("theme-${effectiveThemeMode.name}"),
         topBar = {
             if (isHomeRoute) {
-                HomeStatusBarInset()
+                TopAppBar(
+                    title = { Text(topLevelTitle(mainMode, currentProjectName)) },
+                    actions = {
+                        if (mainMode == MainMode.WORK && remoteProfile != null) {
+                            TextButton(onClick = { navController.navigate(Routes.RemoteControl) }) {
+                                Icon(Icons.Outlined.Dns, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("远程")
+                            }
+                            TextButton(onClick = dashboardLaunch) {
+                                Text("副屏")
+                            }
+                        }
+                        if (mainMode == MainMode.LIFE || mainMode == MainMode.WORK) {
+                            IconButton(
+                                onClick = { navController.navigate(Routes.Activity) },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "${activityState.pendingCount} 个待处理任务"
+                                },
+                            ) {
+                                BadgedBox(
+                                    badge = {
+                                        if (activityState.pendingCount > 0) {
+                                            Badge { Text(activityState.pendingCount.coerceAtMost(99).toString()) }
+                                        }
+                                    },
+                                ) {
+                                    Icon(Icons.Outlined.Notifications, contentDescription = null)
+                                }
+                            }
+                        }
+                    },
+                )
             } else {
                 TopAppBar(
                     title = { Text(title) },
@@ -384,6 +467,10 @@ fun HarnessApkApp(
                         if (canGoBack) {
                             IconButton(
                                 onClick = {
+                                    if (route == Routes.RemoteControl && remoteUiState.selectedThreadId != null) {
+                                        container.remoteRepository.clearSelection()
+                                        return@IconButton
+                                    }
                                     when (route) {
                                         Routes.AgentPackages -> {
                                             dispatchAgentPackageImport(
@@ -471,21 +558,14 @@ fun HarnessApkApp(
                         onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
                         onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                         onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
+                        welcomeMessage = configImportWelcome,
+                        onWelcomeDismissed = { configImportWelcome = null },
                     )
                     MainMode.WORK -> Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(top = padding.calculateTopPadding()),
                     ) {
-                        val profile = remoteProfile
-                        if (profile != null) {
-                            RemoteEntryCard(
-                                hostName = profile.hostName,
-                                onClick = { navController.navigate(Routes.RemoteControl) },
-                                modifier = Modifier
-                                    .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 8.dp),
-                            )
-                        }
                         ProjectScreen(
                             container = container,
                             contentPadding = PaddingValues(
@@ -517,6 +597,11 @@ fun HarnessApkApp(
                             onOpenSession = { conversationId ->
                                 navController.navigate(Routes.chat(conversationId = conversationId))
                             },
+                            onStartRemoteRun = { project ->
+                                remoteRunStartError = null
+                                remoteProjectToStart = project
+                            },
+                            onOpenRemoteRun = { runId -> navController.navigate(Routes.remoteRun(runId)) },
                             onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                             modifier = Modifier.weight(1f),
                         )
@@ -535,6 +620,11 @@ fun HarnessApkApp(
                         onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                         onOpenUpdates = { navController.navigate(Routes.Updates) },
                         onOpenRemote = { navController.navigate(Routes.RemoteSettings) },
+                        onOpenConfigPackage = { navController.navigate(Routes.ConfigPackageExport) },
+                        simpleMode = simpleMode,
+                        onSimpleModeChange = { value ->
+                            scope.launch { container.settingsStore.setSimpleMode(value) }
+                        },
                         showUpdateBadge = showUpdateBadge,
                     )
                 }
@@ -605,6 +695,33 @@ fun HarnessApkApp(
                     onStopVoiceInput = voiceInput.stop,
                     onVoiceInputConsumed = voiceInput.consume,
                     contentPadding = padding,
+                )
+            }
+            composable(Routes.ConfigPackageExport) {
+                ConfigPackageExportScreen(
+                    container = container,
+                    contentPadding = padding,
+                    onOpenImport = { navController.navigate(Routes.configPackageImport(uri = null)) },
+                )
+            }
+            composable(
+                route = Routes.ConfigPackageImportPattern,
+                arguments = listOf(
+                    navArgument("uri") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                ),
+            ) { entry ->
+                ConfigPackageImportScreen(
+                    container = container,
+                    contentPadding = padding,
+                    packageUri = entry.arguments?.getString("uri"),
+                    onApplied = { message ->
+                        configImportWelcome = message
+                        navController.popBackStack(Routes.Conversations, inclusive = false)
+                    },
                 )
             }
             composable(Routes.Providers) {
@@ -770,6 +887,25 @@ fun HarnessApkApp(
             composable(Routes.RemoteControl) {
                 RemoteScreen(container = container, contentPadding = padding)
             }
+            composable(Routes.Activity) {
+                ActivityScreen(
+                    container = container,
+                    contentPadding = padding,
+                    onOpenChat = { navController.navigate(Routes.chat(it)) },
+                    onOpenRun = { navController.navigate(Routes.remoteRun(it)) },
+                )
+            }
+            composable(
+                route = Routes.RemoteRunPattern,
+                arguments = listOf(navArgument("runId") { type = NavType.StringType }),
+            ) { entry ->
+                RunDetailScreen(
+                    container = container,
+                    runId = entry.arguments?.getString("runId").orEmpty(),
+                    contentPadding = padding,
+                    onBack = navController::popBackStack,
+                )
+            }
             composable(Routes.GlobalSearch) {
                 GlobalSearchScreen(
                     container = container,
@@ -796,6 +932,45 @@ fun HarnessApkApp(
         state = captureTransferState,
         onDismissError = container.captureImportCoordinator::clearTransferError,
     )
+    remoteProjectToStart?.let { project ->
+        RemoteRunObjectiveSheet(
+            projectName = project.name,
+            busy = remoteRunStartBusy,
+            errorMessage = remoteRunStartError,
+            onDismiss = {
+                if (!remoteRunStartBusy) remoteProjectToStart = null
+            },
+            onSend = { objective ->
+                scope.launch {
+                    remoteRunStartBusy = true
+                    remoteRunStartError = null
+                    runCatching {
+                        val binding = withContext(container.dispatchers.io) {
+                            requireNotNull(
+                                container.remoteBindingRepository.bindingForProject(
+                                    project.id,
+                                    remoteUiState.selectedBackendId,
+                                ),
+                            ) {
+                                "项目尚未绑定 Mac 工作区"
+                            }
+                        }
+                        container.remoteRunLauncher.launch(project, binding, objective)
+                    }.onSuccess { launched ->
+                        remoteProjectToStart = null
+                        RemoteConnectionService.start(context)
+                        navController.navigate(Routes.remoteRun(launched.run.id))
+                        scope.launch(container.dispatchers.io) {
+                            container.remoteTransport.flush()
+                        }
+                    }.onFailure { error ->
+                        remoteRunStartError = error.message ?: "任务排队失败"
+                    }
+                    remoteRunStartBusy = false
+                }
+            },
+        )
+    }
     captureDraft?.let { draft ->
         CaptureDestinationSheet(
             draft = draft,
@@ -849,37 +1024,3 @@ internal fun chatTopBarTitle(
     ?.title
     ?.takeIf { it.isNotBlank() }
     ?: "对话"
-
-@Composable
-private fun HomeStatusBarInset() {
-    Box(modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars))
-}
-
-@Composable
-private fun RemoteEntryCard(
-    hostName: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    ElevatedCard(onClick = onClick, modifier = modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Icon(Icons.Outlined.Dns, contentDescription = null)
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Codex 远程控制", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    text = hostName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Icon(
-                Icons.AutoMirrored.Outlined.KeyboardArrowRight,
-                contentDescription = "进入远程控制",
-            )
-        }
-    }
-}

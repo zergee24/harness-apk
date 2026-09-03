@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    {
+      "id": "M2-GOLD-1",
+      "name": "绑定项目后原子发起任务",
+      "automatedEvidence": [
+        "RemoteRunStartInstrumentedTest",
+        "CoordinatorTestDuplicateStartDoesNotCreateSecondTurn"
+      ],
+      "manualRequired": true,
+      "manualReason": "需真实 Relay、Mac Bridge 和 Codex app-server 验证三次点击预算"
+    },
+    {
+      "id": "M2-GOLD-2",
+      "name": "断网十分钟后重放完成事件且只有一个 Turn",
+      "automatedEvidence": [
+        "TestReplayPreservesLogicalIdentityAndRefreshesWireEnvelope",
+        "reconnectAfterTenMinutesResumesFromPersistedCursorWithoutClearingRoom"
+      ],
+      "manualRequired": true,
+      "manualReason": "模拟器协议 fixture 不能替代目标荣耀真机后台十分钟与真实网络切换"
+    },
+    {
+      "id": "M2-GOLD-3",
+      "name": "审批期间 Android 进程死亡并从 Room 恢复",
+      "automatedEvidence": [
+        "RemoteRunRecoveryInstrumentedTest",
+        "RemoteApprovalActionInstrumentedTest"
+      ],
+      "manualRequired": true,
+      "manualReason": "需目标荣耀真机验证锁屏、通知入口和 OEM 后台限制"
+    },
+    {
+      "id": "M2-GOLD-4",
+      "name": "重复审批或停止只产生一次副作用",
+      "automatedEvidence": [
+        "TestDuplicateApprovalResponseCallsAppServerAndEmitsResultOnce",
+        "TestDuplicateSteerCallsAppServerAndEmitsOnce",
+        "steerAndInterruptOnlyBecomeTerminalFromLogicalResults"
+      ],
+      "manualRequired": false
+    },
+    {
+      "id": "M2-GOLD-5",
+      "name": "Bridge WebSocket 重连保持路由且不重启 app-server",
+      "automatedEvidence": [
+        "TestRouteStoreSurvivesRestart",
+        "reconnectFlushesPersistentOutboxAfterLogicalResume"
+      ],
+      "manualRequired": true,
+      "manualReason": "需真实 Bridge 进程与 Relay WebSocket 连接记录进程 PID 和 process epoch"
+    },
+    {
+      "id": "M2-GOLD-6",
+      "name": "Journal Gap 禁用审批并由 Snapshot 恢复",
+      "automatedEvidence": [
+        "TestCompactionRecordsGapBeforeDroppingUnackedEvents",
+        "gapDisablesPendingApprovalUntilSnapshotReconciliationCompletes",
+        "gapThenSnapshotReconcilesRunsApprovalsAndCursor"
+      ],
+      "manualRequired": false
+    },
+    {
+      "id": "M2-GOLD-7",
+      "name": "没有已知测试命令时完成卡显示测试未验证",
+      "automatedEvidence": [
+        "TestAgentClaimDoesNotBecomePassedTestEvidence",
+        "missingTestEventRendersUnverified",
+        "completionAndUnknownTimelineRemainReadableAt320DpAndFont13"
+      ],
+      "manualRequired": false
+    }
+  ]
+}

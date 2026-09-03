@@ -12,11 +12,15 @@
 
 日期：2026-08-08
 
+最近更新：2026-08-09
+
 实施周期：2026-09-08 至 2026-10-07
 
-目标分支：`test`
+实施分支：`codex/m2-cross-device-run`
 
-当前状态：`PLANNING_DONE`；G0 fixture 与 G1 migration 测试可启动，G0 退出/G2 前需补齐 Go 1.23 工具链，三个产品边界在第 2 节集中确认
+人工合并目标：`test`（本分支不自动合并、不推送）
+
+当前状态：`IN_PROGRESS`；G0/G1/G2/G3/G4/G5 已完成，G6 手机时间线、控制命令与完成证据实施中；三个产品边界继续采用第 2 节默认建议
 
 ## 1. Source Of Truth 与范围纪律
 
@@ -30,7 +34,7 @@
 
 冲突处理：产品目标和不可协商原则优先；本文件对实现细节的收敛优先于 Spec 中仅有概念、没有可重试数据或协议字段的示例。若要改变“项目是唯一长期归属”“不自动写文件/Commit/Push”“不新增任务 Tab”，必须先更新产品计划和 Spec，不能在实现中静默扩大。
 
-本轮只新增本计划文档，不修改功能代码，尤其不修改当前正在进行的 M1 阿里云实时语音文件。
+实施只在 `/Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run` 和 `codex/m2-cross-device-run` 进行；不修改主工作树中的 M1 阿里云实时语音文件，不自动合并回 `test`。
 
 并行隔离是硬约束：M2 实施必须同时使用独立 Git worktree/分支、独立 AVD、独占 emulator console/adb 端口和独立 ADB server port。禁止复用 M1 的模拟器数据目录、`emulator-5554`、默认 5037 ADB 会话或任何未显式声明 owner 的真机。
 
@@ -108,7 +112,7 @@
 - Relay 只保存最多 100 个未过期 Wire 包；Drain 后删除，不承担任务事实存储。
 - Bridge `bridge.json` 已持久化 Host/Device Secret、Transport Sequence 和加密后的 Pending Wire，但过期包会被删除。
 - `threadOwners`、app-server pending request 和重复消息缓存都在内存。
-- 当前环境 PATH 没有 Go；`go test ./...`、`go vet ./...` 和 `go build` 尚未得到本轮新证据。G2 前必须提供 Go 1.23+。
+- 系统 PATH 没有 Go；M2 已在 `/Users/tony/.local/share/harness-apk-m2/go1.26.5` 安装并校验独立 Go 1.26.5 ARM64 工具链，不改系统级 PATH。`go test ./...`、`go vet ./...` 和 `go build ./cmd/relay ./cmd/bridge` 基线通过。
 
 ### 3.4 Codex app-server 实测契约
 
@@ -140,6 +144,8 @@ export ANDROID_ADB_SERVER_PORT="$HARNESS_M2_ADB_SERVER_PORT"
 export ANDROID_SERIAL="$HARNESS_M2_SERIAL"
 export ADB_LOCAL_TRANSPORT_MAX_PORT=5553
 ```
+
+当前实施已创建独立 AVD `HarnessM2Api36`，尚未启动；设备 Gate 启动前仍必须按下述规则验证 5039 server 只列出 M2 serial。
 
 隔离规则：
 
@@ -472,12 +478,12 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 
 | Gate | 可独立验收交付物 | 依赖 | 状态 | 退出证据 |
 | --- | --- | --- | --- | --- |
-| G0 | 协议 fixture、决策映射、基线和工具链 | M1 文档可见 | PENDING | Android contract tests 绿；Go 1.23 可用；记录 app-server version/schema；独立 AVD/ADB 端口已分配 |
-| G1 | Room 22、领域状态机、持久 Outbox | G0 | PENDING | 21 -> 22 fixture、FK/唯一性、进程重读和非法转换测试绿 |
-| G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | PENDING | Go unit/vet/build 绿；过期 Wire 可从同 Logical Event 重封装 |
-| G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | PENDING | 已绑定项目 3 次点击内进入 QUEUED/RUNNING；无路径输入；重复 start 一次执行 |
-| G4 | Resume、Replay、Gap、Snapshot、进程恢复 | G3 | PENDING | 10 分钟断网、Android kill、Bridge WebSocket reconnect 全部恢复 |
-| G5 | Activity、审批、通知精确深链 | G4 | PENDING | 同一 Pending Approval 从通知/Activity 到同一记录；重复点击一次生效 |
+| G0 | 协议 fixture、决策映射、基线和工具链 | M1 文档可见 | DONE | `9280954`；Android 988/0/0；Go test/vet/build 绿；app-server 0.147 schema 已锁定；独立 AVD/ADB 端口已分配 |
+| G1 | Room 22、领域状态机、持久 Outbox | G0 | DONE | `c2e6c42`、`5244a23`；21 -> 22 fixture、FK/唯一性、进程重读、Gap、去重和非法转换测试绿 |
+| G2 | Bridge state v2、Journal、命令幂等、app-server adapter | G0 | DONE | `71dd536`、`fbdd639`；Go unit/vet/build/race 绿；同 Logical Event 重封装、旧 IN_FLIGHT 变 UNKNOWN、route/epoch 恢复通过 |
+| G3 | Workspace Candidate、Binding、项目内原子 Run 启动 | G1+G2 | DONE | `adcae43`、`a1c0891`；项目页无路径输入；Run + Outbox 单事务；重复 start 仅一次 `turn/start`；隔离设备 7/7 |
+| G4 | Resume、Replay、Gap、Snapshot、进程恢复 | G3 | DONE | `6504845`；10 分钟旧事件重新封装、Room 重开、重复事件、Gap/Snapshot、旧 epoch 审批与重连 Outbox 恢复测试绿 |
+| G5 | Activity、审批、通知精确深链 | G4 | DONE | `2af4bae`；同一 Pending Approval 从通知/Activity 到同一记录；重复点击只入一条 Outbox 且 Bridge 只响应一次 |
 | G6 | 手机时间线、完成卡、测试/Git 证据 | G5 | PENDING | 10k event 分页、未测试显示未验证、窄屏/字体 1.3 通过 |
 | G7 | 七条故障黄金链路与 test 发布候选 | G6 | PENDING | JVM/Instrumentation/Go/真机证据、迁移与回滚说明齐全 |
 
@@ -495,7 +501,7 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 - Create: `app/src/test/java/com/harnessapk/remote/RemoteProtocolContractTest.kt`
 - Modify: `app/src/main/java/com/harnessapk/remote/RemoteModels.kt`
 
-- [ ] **Step 1: 写失败的 Android 决策和必填字段测试**
+- [x] **Step 1: 写失败的 Android 决策和必填字段测试**
 
 ```kotlin
 @Test fun approvalWireUsesCurrentAppServerDecisionNames() {
@@ -514,17 +520,17 @@ Relay 不新增明文 Run 数据库，只补协议兼容/离线队列回归测�
 @Test fun unsupportedBridgeCapabilitiesDisableRunStartButKeepLegacyHistory()
 ```
 
-- [ ] **Step 2: 运行测试并确认旧 `allow/deny` 映射失败**
+- [x] **Step 2: 运行测试并确认旧 `allow/deny` 映射失败**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.RemoteProtocolContractTest'`
 
 Expected: FAIL，`approvalDecisionForWire` 或 `RemoteM2Command` 尚不存在。
 
-- [ ] **Step 3: 增加最小 DTO、显式枚举和 tolerant decoder**
+- [x] **Step 3: 增加最小 DTO、显式枚举和 tolerant decoder**
 
 生产 decoder 必须忽略未知 Item 字段，但对 `commandId/runId/sequence/eventId` 缺失直接拒绝。Go fixture 只保留 M2 消费的字段；不复制完整生成 schema。能力矩阵必须覆盖 M2 App + 旧 Bridge、旧 App + M2 Bridge、未知 app-server Item 三组组合；旧 Bridge 只能保留历史 Remote Screen，不能显示可发起 M2 Run 的假入口。
 
-- [ ] **Step 4: 运行 Android + Go contract tests**
+- [x] **Step 4: 运行 Android + Go contract tests**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.*'`
 
@@ -532,7 +538,7 @@ Run: `cd remote && go test ./internal/appserver ./internal/protocol`
 
 Expected: PASS；Go 命令若不存在则 G0 保持 BLOCKED，不以静态阅读替代。
 
-- [ ] **Step 5: 提交 G0**
+- [x] **Step 5: 提交 G0**
 
 ```bash
 git add app/src/main/java/com/harnessapk/remote/RemoteModels.kt \
@@ -551,7 +557,7 @@ git commit -m "测试：锁定M2远程协议契约"
 - Modify: `app/src/main/java/com/harnessapk/common/AppContainer.kt`
 - Modify: `app/src/androidTest/java/com/harnessapk/storage/AppDatabaseTest.kt`
 
-- [ ] **Step 1: 写真实 21 -> 22 失败测试**
+- [x] **Step 1: 写真实 21 -> 22 失败测试**
 
 测试名固定为：
 
@@ -561,23 +567,23 @@ git commit -m "测试：锁定M2远程协议契约"
 @Test fun duplicateHostDeviceLogicalSequenceIsRejected()
 ```
 
-- [ ] **Step 2: 运行 migration test 确认 version/table 失败**
+- [x] **Step 2: 运行 migration test 确认 version/table 失败**
 
 Run: `./gradlew :app:compileDebugAndroidTestKotlin`
 
 Expected: FAIL，缺少 entity/DAO/Migration 21 -> 22。
 
-- [ ] **Step 3: 按第 5 节精确字段新增实体、DAO、索引和 `MIGRATION_21_22`**
+- [x] **Step 3: 按第 5 节精确字段新增实体、DAO、索引和 `MIGRATION_21_22`**
 
 `AppDatabase` 必须：version 改 22、注册六类 entity/DAO、在 `AppContainer.addMigrations` 末尾追加 `MIGRATION_21_22`。不得改写 `MIGRATION_20_21`。
 
-- [ ] **Step 4: 在 API 36 模拟器执行迁移和 FK 验证**
+- [x] **Step 4: 在 API 36 模拟器执行迁移和 FK 验证**
 
 Run: `ADB_LOCAL_TRANSPORT_MAX_PORT=5553 ANDROID_ADB_SERVER_PORT="$HARNESS_M2_ADB_SERVER_PORT" ANDROID_SERIAL="$HARNESS_M2_SERIAL" ./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.harnessapk.storage.AppDatabaseTest`
 
 Expected: PASS；日志显示 v21 数据保留、v22 六表为空、无 FK violation。
 
-- [ ] **Step 5: 提交迁移**
+- [x] **Step 5: 提交迁移**
 
 ```bash
 git add app/src/main/java/com/harnessapk/storage/RemoteEntities.kt \
@@ -599,7 +605,7 @@ git commit -m "功能：新增M2远程任务持久化模型"
 - Create: `app/src/test/java/com/harnessapk/remote/RemoteCommandOutboxTest.kt`
 - Create: `app/src/androidTest/java/com/harnessapk/remote/RemoteEventReducerInstrumentedTest.kt`
 
-- [ ] **Step 1: 写状态机、去重、Gap 和进程重读失败测试**
+- [x] **Step 1: 写状态机、去重、Gap 和进程重读失败测试**
 
 ```kotlin
 @Test fun terminalRunRejectsLateRunningEvent()
@@ -608,13 +614,13 @@ git commit -m "功能：新增M2远程任务持久化模型"
 @Test fun pendingCommandCanBeRebuiltFromPayloadAfterRepositoryRecreation()
 ```
 
-- [ ] **Step 2: 运行定向测试并确认缺少实现**
+- [x] **Step 2: 运行定向测试并确认缺少实现**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.Remote*Test'`
 
 Expected: FAIL，缺少 repository/outbox/reducer。
 
-- [ ] **Step 3: 用 `database.withTransaction` 实现单事务 Reduce**
+- [x] **Step 3: 用 `database.withTransaction` 实现单事务 Reduce**
 
 核心边界必须是：
 
@@ -634,13 +640,13 @@ suspend fun apply(event: LogicalEvent): ReduceResult = database.withTransaction 
 }
 ```
 
-- [ ] **Step 4: 验证重建后 commandId/payload/hash 不变**
+- [x] **Step 4: 验证重建后 commandId/payload/hash 不变**
 
 Run: `./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin`
 
 Expected: PASS；编码相同命令两次得到相同 canonical hash，重发不生成新 commandId。
 
-- [ ] **Step 5: 提交领域基础**
+- [x] **Step 5: 提交领域基础**
 
 ```bash
 git add app/src/main/java/com/harnessapk/remote/RemoteRunRepository.kt \
@@ -666,7 +672,7 @@ git commit -m "功能：持久化远程任务状态与命令队列"
 - Modify: `remote/cmd/bridge/main_test.go`
 - Create: `remote/cmd/relay/main_test.go`
 
-- [ ] **Step 1: 写“先 Journal 后发送”、重封装和命令重复测试**
+- [x] **Step 1: 写“先 Journal 后发送”、重封装和命令重复测试**
 
 ```go
 func TestReplayKeepsLogicalIdentityAndRefreshesWireEnvelope(t *testing.T)
@@ -677,23 +683,23 @@ func TestStateV1ToV2PreservesCredentialsAndForcesInitialGapSnapshot(t *testing.T
 func TestRelayRemainsOpaqueAndKeepsWireV1TTLBehavior(t *testing.T)
 ```
 
-- [ ] **Step 2: 运行并确认旧 PendingOutbound 行为失败**
+- [x] **Step 2: 运行并确认旧 PendingOutbound 行为失败**
 
 Run: `cd remote && go test ./internal/journal ./internal/commandcache ./cmd/bridge`
 
 Expected: FAIL，包/接口不存在。
 
-- [ ] **Step 3: 实现加密 append log、ACK/compact 和命令账本**
+- [x] **Step 3: 实现加密 append log、ACK/compact 和命令账本**
 
 写盘顺序固定：临时文件/append -> `Sync` -> rename/state update -> 网络发送。所有重复结果返回第一次的 result Logical Event ID；不能重新构造第二个业务结果。state v1 -> v2 原位升级保留 Host/Device credential 和 transport sequence；旧 `PendingOutbound` 因没有逻辑身份只触发一次 `Gap + Snapshot`，不猜测重放。Relay 仍只看加密 Wire，不新增 Run 明文状态。
 
-- [ ] **Step 4: 运行 Go 完整门禁**
+- [x] **Step 4: 运行 Go 完整门禁**
 
 Run: `cd remote && go test ./... && go vet ./... && go build ./cmd/relay ./cmd/bridge`
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交 Bridge 持久层**
+- [x] **Step 5: 提交 Bridge 持久层**
 
 ```bash
 git add remote/internal/journal remote/internal/commandcache \
@@ -712,7 +718,7 @@ git commit -m "功能：持久化Bridge事件与命令幂等"
 - Create: `remote/internal/run/routes_test.go`
 - Modify: `remote/cmd/bridge/main.go`
 
-- [ ] **Step 1: 写 request future、epoch 和路由恢复失败测试**
+- [x] **Step 1: 写 request future、epoch 和路由恢复失败测试**
 
 ```go
 func TestCallCorrelatesResponseWithoutBlockingEventDispatch(t *testing.T)
@@ -721,23 +727,23 @@ func TestRouteSurvivesWebSocketReconnectAndBridgeStateReload(t *testing.T)
 func TestNewProcessEpochInvalidatesOldServerRequestIDs(t *testing.T)
 ```
 
-- [ ] **Step 2: 运行定向 Go 测试**
+- [x] **Step 2: 运行定向 Go 测试**
 
 Run: `cd remote && go test ./internal/appserver ./internal/run`
 
 Expected: FAIL，旧 appServer/pending/threadOwners 都只在 `main.go` 内存中。
 
-- [ ] **Step 3: 实现并发安全 `Call`、通知分发和 route store**
+- [x] **Step 3: 实现并发安全 `Call`、通知分发和 route store**
 
 app-server stdout 只有一个 reader；response 投递 pending future，notification 同时送 Run Coordinator。任何 future 超时都写命令 `UNKNOWN`，不能用新 request ID 静默重试。
 
-- [ ] **Step 4: 运行 race detector**
+- [x] **Step 4: 运行 race detector**
 
 Run: `cd remote && go test -race ./internal/appserver ./internal/run ./cmd/bridge`
 
 Expected: PASS，无 map race、goroutine leak。
 
-- [ ] **Step 5: 提交 adapter**
+- [x] **Step 5: 提交 adapter**
 
 ```bash
 git add remote/internal/appserver remote/internal/run remote/cmd/bridge/main.go
@@ -757,7 +763,7 @@ git commit -m "重构：隔离Codex协议适配与任务路由"
 - Modify: `app/src/main/java/com/harnessapk/ui/project/ProjectScreen.kt`
 - Modify: `app/src/main/java/com/harnessapk/ui/HarnessApkApp.kt`
 
-- [ ] **Step 1: 写 remote 脱敏、Candidate 排序、空候选、fingerprint mismatch 和项目生命周期测试**
+- [x] **Step 1: 写 remote 脱敏、Candidate 排序、空候选、fingerprint mismatch 和项目生命周期测试**
 
 固定 fixture 包含：带 user/token/query 的 HTTPS remote、scp remote、无 Git 目录、symlink cwd、detached HEAD。
 
@@ -767,7 +773,7 @@ git commit -m "重构：隔离Codex协议适配与任务路由"
 @Test fun rebindingRequiresExplicitConfirmationWhenFingerprintChanges()
 ```
 
-- [ ] **Step 2: 运行 Go/Kotlin 定向测试确认入口不存在**
+- [x] **Step 2: 运行 Go/Kotlin 定向测试确认入口不存在**
 
 Run: `cd remote && go test ./internal/workspace`
 
@@ -775,17 +781,17 @@ Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.WorkspaceC
 
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 Bridge inspect 和项目页绑定 Sheet**
+- [x] **Step 3: 实现 Bridge inspect 和项目页绑定 Sheet**
 
 项目页动作文案严格为：未绑定“在 Mac 上继续”、已绑定“交给 Mac”、有开放 Run 显示最新状态并进入详情。候选为空只显示“先在 Mac Codex 中打开一次该项目”，没有路径输入框。
 
-- [ ] **Step 4: Compose 验证 320dp/字体 1.3 和凭证不泄漏**
+- [x] **Step 4: Compose 验证 320dp/字体 1.3 和凭证不泄漏**
 
 Run: `ADB_LOCAL_TRANSPORT_MAX_PORT=5553 ANDROID_ADB_SERVER_PORT="$HARNESS_M2_ADB_SERVER_PORT" ANDROID_SERIAL="$HARNESS_M2_SERIAL" ./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.harnessapk.ui.project.ProjectRemoteBindingSheetTest`
 
 Expected: PASS；完整 URL/Token 不在语义树，主按钮 48dp。
 
-- [ ] **Step 5: 提交 Binding**
+- [x] **Step 5: 提交 Binding**
 
 ```bash
 git add remote/internal/workspace \
@@ -809,7 +815,7 @@ git commit -m "功能：绑定项目与Mac工作区"
 - Create: `app/src/main/java/com/harnessapk/ui/activity/RunDetailScreen.kt`
 - Create: `app/src/androidTest/java/com/harnessapk/remote/RemoteRunStartInstrumentedTest.kt`
 
-- [ ] **Step 1: 写重复 start、离线排队、fingerprint 变化和半完成恢复测试**
+- [x] **Step 1: 写重复 start、离线排队、fingerprint 变化和半完成恢复测试**
 
 ```go
 func TestRunStartCreatesAtMostOneTurnForDuplicateCommand(t *testing.T)
@@ -817,7 +823,7 @@ func TestFingerprintMismatchStopsBeforeThreadStart(t *testing.T)
 func TestUnknownTurnStartReconcilesWithoutAutomaticReplay(t *testing.T)
 ```
 
-- [ ] **Step 2: 运行 G3 测试并确认失败**
+- [x] **Step 2: 运行 G3 测试并确认失败**
 
 Run: `cd remote && go test ./internal/run`
 
@@ -825,15 +831,15 @@ Run: `./gradlew :app:compileDebugAndroidTestKotlin`
 
 Expected: FAIL，缺少 coordinator/Run Detail。
 
-- [ ] **Step 3: 实现第 6.3 节固定编排和 100ms 本地 QUEUED**
+- [x] **Step 3: 实现第 6.3 节固定编排和 100ms 本地 QUEUED**
 
 Android 点击发送必须在一个 Room 事务创建 Run + `run.start` Outbox，导航只依赖本地 runId；不能等待 WebSocket/app-server。
 
-- [ ] **Step 4: 运行 Android fake Bridge + Go fake app-server 验收**
+- [x] **Step 4: 运行 Android fake Bridge + Go fake app-server 验收**
 
 Expected: 同一个 command 发两次只有一次 `turn/start`；App 离线时 Run 为 QUEUED；成功后 threadId/turnId 写回同一个 Run。
 
-- [ ] **Step 5: 提交纵向切片**
+- [x] **Step 5: 提交纵向切片**
 
 ```bash
 git add remote/internal/run \
@@ -853,11 +859,11 @@ git commit -m "功能：从项目原子发起远程任务"
 - Modify: `remote/internal/journal/store.go`
 - Modify: `remote/internal/run/coordinator.go`
 
-- [ ] **Step 1: 写 10 分钟断网、kill、乱序、Gap 和 Snapshot 测试**
+- [x] **Step 1: 写 10 分钟断网、kill、乱序、Gap 和 Snapshot 测试**
 
 Snapshot fixture 必须同时覆盖：运行中、待审批、已完成但缺一段时间线、旧 process epoch 审批。
 
-- [ ] **Step 2: 运行测试确认当前 Wire TTL 会丢事件**
+- [x] **Step 2: 运行测试确认当前 Wire TTL 会丢事件**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.RemoteSyncCoordinatorTest'`
 
@@ -865,15 +871,15 @@ Run: `cd remote && go test ./internal/journal ./internal/run`
 
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 resume -> replay -> contiguous ACK -> gap snapshot**
+- [x] **Step 3: 实现 resume -> replay -> contiguous ACK -> gap snapshot**
 
 页面恢复顺序：Room 旧状态立即渲染 -> `正在核对` 辅助状态 -> 后台 resume；不能先清空列表。
 
-- [ ] **Step 4: 执行进程死亡 instrumentation**
+- [x] **Step 4: 执行进程死亡 instrumentation**
 
 Expected: kill/relaunch 后首屏仍显示原 Run/Approval；同 Event 不重复 Timeline/通知；Gap 期间审批按钮禁用。
 
-- [ ] **Step 5: 提交恢复链路**
+- [x] **Step 5: 提交恢复链路**
 
 ```bash
 git add app/src/main/java/com/harnessapk/remote/RemoteSyncCoordinator.kt \
@@ -901,7 +907,7 @@ git commit -m "功能：恢复跨端任务与逻辑事件"
 - Modify: `app/src/main/AndroidManifest.xml`
 - Modify: `app/src/main/java/com/harnessapk/ui/HarnessApkApp.kt`
 
-- [ ] **Step 1: 写 Activity 分组、风险、脱敏、深链和重复通知动作测试**
+- [x] **Step 1: 写 Activity 分组、风险、脱敏、深链和重复通知动作测试**
 
 ```kotlin
 @Test fun pendingApprovalAppearsOnceInNeedsAction()
@@ -912,21 +918,21 @@ git commit -m "功能：恢复跨端任务与逻辑事件"
 @Test fun lockedDeviceRequiresUnlockBeforeHighRiskApproval()
 ```
 
-- [ ] **Step 2: 运行测试确认现通知只能打开根页面**
+- [x] **Step 2: 运行测试确认现通知只能打开根页面**
 
 Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.activity.*' --tests 'com.harnessapk.remote.Remote*'`
 
 Expected: FAIL。
 
-- [ ] **Step 3: 实现合并 Flow、精确 PendingIntent 和 Receiver 入队**
+- [x] **Step 3: 实现合并 Flow、精确 PendingIntent 和 Receiver 入队**
 
 Activity 只查询：需要处理、进行中、7 天/50 条最近完成；本地 ChatExecution 与远程 Run 只在读模型合流，不复制或改写原执行行。通知 Receiver 只向 Outbox 插命令；只有 command.result/Snapshot 能改审批状态。高风险审批即使由通知进入，也必须解锁后在 Approval Detail 确认。
 
-- [ ] **Step 4: Compose/通知验收**
+- [x] **Step 4: Compose/通知验收**
 
 Expected: Life/Work 顶栏都能打开同一 Activity；徽标语义为“2 个待处理任务”；通知“查看”直达 runId；重复拒绝只生效一次。
 
-- [ ] **Step 5: 提交 Activity/Approval**
+- [x] **Step 5: 提交 Activity/Approval**
 
 ```bash
 git add app/src/main/java/com/harnessapk/activity \
@@ -953,7 +959,7 @@ git commit -m "功能：统一任务活动与远程审批"
 - Modify: `app/src/main/java/com/harnessapk/ui/activity/RunDetailScreen.kt`
 - Create: `app/src/androidTest/java/com/harnessapk/ui/activity/RunDetailScreenTest.kt`
 
-- [ ] **Step 1: 写事件压缩、测试分类、Git 基线和未验证测试**
+- [x] **Step 1: 写事件压缩、测试分类、Git 基线和未验证测试**
 
 ```go
 func TestAgentClaimDoesNotBecomePassedTestEvidence(t *testing.T)
@@ -969,7 +975,7 @@ func TestCommittedChangesRemainVisibleWhenWorkingTreeIsClean(t *testing.T)
 @Test fun stopRemainsPendingUntilInterruptResultOrSnapshotArrives()
 ```
 
-- [ ] **Step 2: 运行 Go/Kotlin 测试确认当前 raw JSON 展示失败**
+- [x] **Step 2: 运行 Go/Kotlin 测试确认当前 raw JSON 展示失败**
 
 Run: `cd remote && go test ./internal/completion`
 
@@ -977,15 +983,15 @@ Run: `./gradlew :app:testDebugUnitTest --tests 'com.harnessapk.remote.RemoteComp
 
 Expected: FAIL。
 
-- [ ] **Step 3: 实现结构化 evidence 和最近 100 条分页 UI**
+- [x] **Step 3: 实现结构化 evidence 和最近 100 条分页 UI**
 
 时间线不可压缩：原目标、steer、审批决定、停止、完成。可压缩：同 item started/completed、连续 phase、Agent delta。转向和停止都先持久化 Outbox；按钮本地只进入“发送中”，不得在 Bridge 确认前把 Run 乐观改成已转向或已停止。
 
-- [ ] **Step 4: 执行 320dp/字体 1.3/TalkBack/10k event 验收**
+- [x] **Step 4: 执行 320dp/字体 1.3/TalkBack/10k event 验收**
 
 Expected: 首屏 p95 < 200ms；长命令只在展开证据区横向滚动；完成卡文件/测试/Git/遗留均有明确值或“未验证”。
 
-- [ ] **Step 5: 提交完成体验**
+- [x] **Step 5: 提交完成体验**
 
 ```bash
 git add remote/internal/completion \
@@ -1007,11 +1013,11 @@ git commit -m "功能：提供手机可读时间线与完成证据"
 - Modify: `remote/deploy/com.harnessapk.remote-bridge.plist`
 - Create: `docs/releases/0.3.0.md`
 
-- [ ] **Step 1: 建立七条故障黄金链路的可重复脚本/fixture**
+- [x] **Step 1: 建立七条故障黄金链路的可重复脚本/fixture**
 
 见第 11 节；每条记录设备、Android、Bridge/Codex 版本、命令、结果、截图/日志路径和 commit SHA。
 
-- [ ] **Step 2: 运行完整自动化**
+- [x] **Step 2: 运行完整自动化**
 
 ```bash
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
@@ -1025,11 +1031,11 @@ Expected: 全绿；若唯一失败仍来自并行 M1，必须由 M1 owner 给出
 
 至少使用目标荣耀真机 + Mac Bridge；模拟器不能替代 Push、后台限制、10 分钟断网和通知解锁验收。
 
-- [ ] **Step 4: 更新 Bridge state v1 -> v2 升级/备份/回滚文档**
+- [x] **Step 4: 更新 Bridge state v1 -> v2 升级/备份/回滚文档**
 
 升级前备份 `~/.harness-remote`；验证权限、Journal 恢复、旧 Remote Screen 只读兼容；回滚使用兼容 state v2 的 Bridge build，不删除 state 文件。
 
-- [ ] **Step 5: 提交验收台账，不推送**
+- [x] **Step 5: 提交验收台账，不推送**
 
 ```bash
 git add docs/superpowers/plans/2026-09-08-m2-acceptance-checklist.md \
@@ -1081,7 +1087,7 @@ git commit -m "测试：完成M2跨端任务验收"
 
 ### 12.1 执行顺序
 
-1. 记录原工作树的 M1 实时语音 dirty 文件与当前 `test` SHA；从已提交的 `test` 创建 `/Users/tony/.codex/worktrees/m2-cross-device-run-harness-apk` + `codex/m2-cross-device-run`，新 worktree 必须 clean，禁止带入语音改动。
+1. 记录原工作树的 M1 实时语音 dirty 文件与当前 `test` SHA；从已提交的 `test` 创建 `/Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run` + `codex/m2-cross-device-run`，新 worktree 必须 clean，禁止带入语音改动。
 2. 若 `HarnessM2Api36` 不存在，使用已安装的 `system-images;android-36;google_apis;arm64-v8a` 创建独立 AVD；按第 3.5 节分配 emulator console/bridge port、ADB server port 和 serial。确认 M2 server 只看到 M2 设备，并确认所有同机并行任务都显式选 serial；否则切到独立 VM/主机。
 3. 补齐 Go 1.23+，执行 `go version`，再跑 Remote baseline。
 4. 执行 Task 1：锁定 app-server fixture 与 approval decision mapping。
@@ -1093,7 +1099,7 @@ git commit -m "测试：完成M2跨端任务验收"
 
 ```bash
 git worktree add -b codex/m2-cross-device-run \
-  /Users/tony/.codex/worktrees/m2-cross-device-run-harness-apk test
+  /Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run test
 
 /Users/tony/Library/Android/sdk/cmdline-tools/latest/bin/avdmanager create avd \
   --name HarnessM2Api36 \
@@ -1105,18 +1111,18 @@ git worktree add -b codex/m2-cross-device-run \
 
 ### 12.2 第一批验收
 
-- [ ] 记录 `test` 基线 SHA；若原工作树又出现 M1 语音 WIP，明确列出并保留，M2 worktree/暂存区没有语音文件。
-- [ ] M2 使用独立 AVD；`HARNESS_M2_ADB_SERVER_PORT/HARNESS_M2_EMULATOR_CONSOLE_PORT/HARNESS_M2_EMULATOR_ADB_PORT/HARNESS_M2_SERIAL` 已记录，`adb -P "$HARNESS_M2_ADB_SERVER_PORT" devices -l` 只包含 M2 serial。
-- [ ] 所有设备命令和 connected test 同时显式指定 ADB server port 与 serial；没有裸 `adb` 或裸 `connectedDebugAndroidTest`。
-- [ ] 同机并行 owner 已确认也显式指定自己的 serial；无法确认时，M2 设备 Gate 已迁移到独立 VM/主机。
-- [ ] `go version` >= 1.23；`go test ./...` 基线结果已记录。
-- [ ] 本机 app-server 版本和最小 schema fixture 已记录，旧 `allow/allowAlways/deny` 有回归测试阻止。
-- [ ] Room version 从 21 只增加到 22；`MIGRATION_20_21` 未改写。
-- [ ] v21 的 Context Snapshot V2、本地搜索、Agent/Wiki 数据升级后逐项保持。
-- [ ] Outbox 重建后 commandId、payloadJson、payloadSha256 不变。
-- [ ] 同 Event ID 和同 `(hostId, deviceId, sequence)` 不产生第二次 Timeline/Approval 副作用。
-- [ ] Gap 不推进 contiguous cursor，开放 Run 进入 RECONCILING。
-- [ ] G0/G1 分别使用中文 scoped commit；不推送远端。
+- [x] `test` 基线 SHA 为 `77de5f4`；原工作树与 M2 worktree 均无 M1 语音 WIP，M2 暂存区没有语音文件。
+- [x] M2 使用独立 AVD `HarnessM2Api36`；ADB server `5039`、emulator console/adb `15662/15663`、serial `emulator-15662`，测试期间 5039 只包含 M2 serial。
+- [x] 所有设备命令和 connected test 同时显式指定 ADB server port 与 serial；未对默认 5037 下的真机或 `emulator-5554` 执行安装、测试、清理等设备操作。
+- [x] M2 ADB 以 `--one-device emulator-15662` 和 `ADB_LOCAL_TRANSPORT_MAX_PORT=5553` 启动；高位端口 M2 emulator 不出现在默认 5037，测试完成后只关闭 `emulator-15662` 与 5039。
+- [x] 独立 Go 1.26.5；`go test ./...`、`go vet ./...` 和 Bridge/Relay build 基线结果已记录。
+- [x] 本机 app-server 版本和最小 schema fixture 已记录，旧 `allow/allowAlways/deny` 有回归测试阻止。
+- [x] Room version 从 21 只增加到 22；`MIGRATION_20_21` 未改写。
+- [x] v21 的 Context Snapshot V2、本地搜索、Agent/Wiki 数据升级后逐项保持，六张 M2 表为空且无 FK violation。
+- [x] Outbox 重建后 commandId、payloadJson、payloadSha256 不变；对象 key 排序、数组顺序保留。
+- [x] 同 Event ID 和同 `(hostId, deviceId, sequence)` 不产生第二次 Timeline/Approval 副作用。
+- [x] Gap 不推进 contiguous cursor，开放 Run 进入 RECONCILING。
+- [x] G0/G1 均使用中文 scoped commit；未推送远端。
 
 ## 13. Out Of Scope
 
@@ -1137,3 +1143,94 @@ git worktree add -b codex/m2-cross-device-run \
 - 遇到并行 Room migration，M2 使用下一个可用版本并补完整链式迁移，禁止改写已进入 `test` 的 migration。
 - 遇到 app-server schema 变化，先更新 G0 fixture/mapper，再改生产解析；不能在 UI 层临时兼容字符串。
 - 若 G4 恢复黄金链路未通过，按产品计划范围熔断：顺延时间线视觉优化和丰富完成卡，不牺牲 Binding、Run 持久化或审批可达。
+
+## 15. Gate 进度台账
+
+### 2026-08-09 / G0
+
+- 状态：`DONE`
+- Commit：`9280954 测试：锁定M2远程协议契约`
+- RED：Android 因 `ApprovalDecision/RemoteM2Command/LogicalEvent` API 缺失编译失败；Go 因 `DecodeThreadRead/DecodeServerRequest` 缺失编译失败；稳定身份测试在旧宽松 decoder 上按预期失败。
+- GREEN：`./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain` -> `988 tests / 0 failures / 0 errors`；Go `test ./...`、`vet ./...`、`build ./cmd/relay ./cmd/bridge` 全部退出 0。
+- 环境：worktree `/Users/tony/Documents/harness-apk/.worktrees/m2-cross-device-run`；Go 1.26.5 darwin/arm64；AVD `HarnessM2Api36` 已创建未启动；app-server `0.147.0-alpha.6.5`。
+- 已知限制：G0 只锁契约，当前 Bridge 的 `requestUserInput` 误分类和 Android 内存 UI state 在后续 G2/G5 修正。
+
+### 2026-08-09 / G1
+
+- 状态：`DONE`
+- Commit：`c2e6c42 功能：新增M2远程任务持久化模型`；`5244a23 功能：持久化远程任务状态与命令队列`
+- RED：Room 测试因六类 entity/DAO/`MIGRATION_21_22` 缺失编译失败；领域测试因 repository/outbox/reducer 缺失编译失败；首轮设备测试另抓到 `INSERT OR REPLACE remote_runs` 会触发 Event/Approval 级联删除，去重测试按预期失败为 `GAP`。
+- GREEN：`./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin --console=plain` -> `990 tests / 0 failures / 0 errors`；`AppDatabaseTest` -> `30/30`；`RemoteEventReducerInstrumentedTest` -> `2/2`；新增的 21 -> 22 单测再次定向执行 `1/1`。所有命令退出 0。
+- 迁移证据：数据库版本精确为 22；v21 会话、消息、Context Snapshot V2、Agent/Wiki、本地搜索数据保持；六张 M2 表初始为空；Run/Event/Approval FK、Binding 非级联和 `(hostId,deviceId,sequence)` 唯一约束通过。
+- 恢复证据：终态拒绝迟到 RUNNING；同 Logical Event 不重复时间线或审批；Gap 不推进 cursor 并将开放 Run 标为 `RECONCILING`；Outbox 跨实例按同一 `commandId/payloadJson/payloadSha256` 重建。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。默认 5037 仅看到既有 `emulator-5554`/真机，未看到 M2 emulator；Gate 后 M2 emulator 与 5039 已关闭。
+- 已知限制：G1 只建立 Android 持久层和 reducer；尚未接 Bridge Journal/命令账本、网络 Logical ACK 或 UI。`requestUserInput` 的真实失败恢复仍在 G2/G5 落地。
+
+### 2026-08-09 / G2
+
+- 状态：`DONE`
+- Commit：`71dd536 功能：持久化Bridge事件与命令幂等`；`fbdd639 重构：隔离Codex协议适配与任务路由`
+- RED：Journal、命令账本、Logical Event 与 state v1 -> v2 升级接口缺失；app-server 单 reader/future、持久 route、process epoch 接口缺失，定向测试均先编译失败。
+- GREEN：`go test ./... && go vet ./... && go build ./cmd/relay ./cmd/bridge` 全部退出 0；`go test -race ./internal/appserver ./internal/run ./cmd/bridge` 退出 0。
+- 恢复证据：加密 Journal 写盘后才可发送，文件中不出现事件明文；同 Logical Event 重放时业务身份稳定且 Wire ID/nonce/transport sequence/TTL 刷新；compact 丢弃未 ACK 记录前先落 Gap；state v1 -> v2 保留 credential/sequence，对无逻辑身份的旧 PendingOutbound 只触发 Gap + Snapshot；旧 `IN_FLIGHT` 命令重启后转 `UNKNOWN`，重复命令返回首次缓存结果。
+- adapter 证据：app-server stdout 只有一个 reader；并发 `Call` 由 future 关联且不阻塞通知；route 在 WebSocket/Bridge 重载后恢复；process epoch 变化将旧 server request 标为 `STALE`；`requestUserInput` 独立建模，不再伪装为 approval。
+- 设备隔离：G2 为纯 Go Gate，不启动模拟器、不连接 ADB；默认 5037 设备未被操作。
+- 已知限制：尚未接通真实 `run.start` 纵向链路，命令账本与 route 的完整编排在 G3；Logical ACK/resume/snapshot 的端到端恢复在 G4。
+
+### 2026-08-09 / G3
+
+- 状态：`DONE`
+- Commit：`adcae43 功能：绑定项目与Mac工作区`；`a1c0891 功能：从项目原子发起远程任务`
+- RED：Go Workspace inspect 与 Coordinator API 缺失而编译失败；Android WorkspaceCandidate/绑定判断与 Run Launcher API 缺失而编译失败。
+- GREEN：Android 全量 unit `994/0/0/0`；隔离设备 `ProjectRemoteBindingSheetTest 2/2`、`RemoteProjectLifecycleTest 2/2`、`RemoteRunStartInstrumentedTest 3/3`；Go `test ./...`、`vet ./...`、Bridge/Relay build 全部退出 0；G3 Go race 定向测试退出 0。
+- Binding 证据：symlink cwd 规范化；HTTPS userinfo/query/fragment 与 scp user 被剥离；Git/非 Git 指纹稳定；detached HEAD 显示短 SHA；候选仅来自最近 Thread 与 Bridge CLI 注册目录；Android 无路径输入，空候选固定提示；项目解绑/删除均保留历史 Run 快照。
+- Run 证据：Android 在同一 Room 事务写入 `QUEUED` Run 与完整 canonical Outbox；重复本地 launch 重建同一 payload/hash；离线 flush 保持 PENDING/QUEUED；写 Outbox 失败回滚 Run。Bridge 重查 workspaceId/fingerprint、保存 Git baseline 与 route，再调用 `turn/start(clientUserMessageId=commandId)`；重复命令只调用一次 `turn/start`；崩溃遗留 `IN_FLIGHT -> UNKNOWN` 后不自动重放。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。5039 验收时只保留 `emulator-15662`；未操作默认 5037 设备。
+- 已知限制：Logical Event 已写加密 Journal，但 Android 的 resume/replay/contiguous ACK 与 Snapshot 尚未接入，进入 G4；真实 Relay + Codex app-server 黄金链路留到 G7 真机验收。
+
+### 2026-08-09 / G4
+
+- 状态：`DONE`
+- Commit：`6504845 功能：恢复跨端任务与逻辑事件`
+- RED：Android 缺少 `RemoteSyncCoordinator`、Snapshot model 与恢复测试而编译失败；Bridge 缺少 Journal head/gap 判断、`sync.resume` 与 `run.snapshot` 分支。
+- GREEN：Android 全量 unit `999/0/0/0` 与 assembleDebug 退出 0；隔离设备 `RemoteRunRecoveryInstrumentedTest 1/1`；Go `go test` 与 `go test -race` 定向覆盖 `internal/journal`、`internal/run`、`cmd/bridge`，全部退出 0。
+- 恢复证据：10 分钟前的 Logical Event 使用相同业务 Event ID 和新 Wire TTL/nonce/transport sequence 重放；Android 只在 Room 事务提交后发送 contiguous ACK；乱序进入 Gap 且不越过缺口 ACK；Snapshot 恢复运行中、待审批和已完成 Run，缺失时间线不伪造；旧 process epoch 审批转 `STALE`。文件型 Room 关闭重开后 Run/Approval 立即可读，同 Event 重放无重复副作用；WebSocket 重连先 resume 再冲刷持久化 Outbox。
+- 边界保护：Bridge 将设备上报 cursor 限制在 Journal head，设备 cursor 超前时强制 Snapshot；Gap 期间 Pending Approval 动作统一禁用。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。测试前 5039 仅列出 `emulator-15662`；未对默认 5037 或其他设备执行命令。
+- 已知限制：本 Gate 使用持久层重开和协议 fixture 验证恢复语义；真实 Relay 断网 10 分钟、Bridge 进程重启和目标荣耀真机通知/后台限制仍归 G7 黄金链路，不以模拟器替代。
+
+### 2026-08-09 / G5
+
+- 状态：`DONE`
+- Commit：`2af4bae 功能：统一任务活动与远程审批`；`aeebfc7 修复：限制远程审批通知动作`
+- RED：Activity 读模型、审批安全策略、通知计划/Receiver 和 Compose 分组 API 缺失导致测试编译失败；Bridge `approval.respond` 未接命令账本且审批仍只发旧内存 Event。首轮全量测试另发现旧 `homeTopBarOnlyReservesTheStatusBarInset` 与 M2 “Life/Work 顶栏共享 Activity 入口”产品契约冲突，已按新 source-of-truth 升级断言。
+- GREEN：Android 全量 unit `1006/0/0/0` 与 assembleDebug 退出 0；隔离设备 `ActivityScreenTest`、`RemoteApprovalActionInstrumentedTest`、`RemoteEventReducerInstrumentedTest` 合计 `5/5`，补充审批终结回归 `1/1`；Go 全量 test/vet/build 与 `commandcache/journal/run/bridge` race 全部退出 0。
+- Activity 证据：只读取本地 ChatExecution 与远程 Run/Approval，不复制执行行；需要处理、进行中、最近 7 天/最多 50 条完成三组互斥；Life/Work 顶栏使用同一入口，徽标语义为“n 个待处理任务”，点击项按原始 conversationId/runId 精确路由。
+- 审批证据：Bridge 将 app-server Approval 转成持久 Logical Event，Snapshot 账本保留已脱敏动作/目标/风险；Android 在 Room 入库前递归脱敏 token、URL query 和敏感 JSON key。所有风险级别的通知都只提供“查看/拒绝”，不显示命令正文且不能批准；允许一次必须解锁后进入详情页，高风险再二次确认；Gap 期间按钮禁用。
+- 幂等证据：通知/详情页只写稳定 `approval.respond` Outbox，不乐观删除或解决 Approval；重复拒绝生成同一 commandId 和一条 Outbox。Bridge 命令账本只调用一次 app-server Respond、只发一个结果 Event；结果 Event 或 Snapshot 才把 Approval/Outbox 置为终态。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。模拟器意外退出时，首次设备命令因 5039 空列表安全停止，未安装到其他设备；随后只重启同一 M2 AVD/端口完成测试，未操作默认 5037。
+- 已知限制：阿里云 Push、通知锁屏/后台限制和目标荣耀真机解锁仍需 G7 真机证据；旧 Remote Control 只保留兼容路径，M2 新审批以 Room Activity/Run Detail 为权威入口。
+
+### 2026-08-09 / G6
+
+- 状态：`DONE`
+- Commit：`0c37b7e 功能：提供手机可读时间线与完成证据`
+- RED：Go completion API 缺失导致三条证据测试编译失败；Android completion parser、timeline presentation 和 Run command coordinator 缺失导致对应测试编译失败。通知聚焦测试首次被 G6 RED source-set 编译阻断，补齐最小协调器后恢复正常验证，没有隐藏或删除 RED 测试。
+- GREEN：Android 全量 unit `1015/0/0/0` 与 assembleDebug 退出 0；隔离设备 Run Detail/Reducer 合计 `7/7`，分页补丁后 Run Detail `2/2` 再次通过；Go 全量 test/vet/build 退出 0。Bridge control/completion/workspace 定向测试全部退出 0。
+- 时间线证据：Bridge 将 started/completed、Agent delta、structured user input 翻译为脱敏 Logical Event；同 item upsert、连续 Agent delta 压缩，原目标/steer/审批决定/停止/完成保持独立。Android 首屏 Room 查询仅最近 100 条，并提供每次 100 条的向上分页；未知 Item 显示“正在处理”且只在展开诊断区显示脱敏 payload。
+- 命令证据：steer/interrupt 先进入 Room Outbox，同类型并发点击在 Mutex 内复用单一 commandId；Bridge 按 command cache 只调用一次 `turn/steer` 或 `turn/interrupt`。发送成功只产生 Logical result，不乐观改变 Run 终态；interrupt 保持 `ACCEPTED`，直至 `run.cancelled/run.completed/run.failed` 或 Snapshot 才终结；不确定结果转 `UNKNOWN + RECONCILING` 且不重放可能有副作用的命令。
+- 完成证据：文件来自 `fileChange`、Git HEAD diff 与新增 status 记录；测试只接受 allowlist 命令且以 exit code 判定；Git 基于 Bridge 只读 inspect；summary/unresolved 优先结构化 output。Agent 自述不能生成绿色测试，任何缺项显示“未验证”；Logical Event、Run completion 与 Snapshot completion 入 Room 前递归脱敏。
+- 性能/移动端证据：独立 AVD 上 10,000 条 Event 查询最近 100 条的 10 次样本为 `[9, 5, 6, 6, 6, 6, 6, 6, 5, 6]ms`，p95=`9ms`；320dp、字体 1.3 下未知事件、完成卡和 48dp 操作按钮通过 Compose 断言；长命令只在展开诊断区横向滚动；完成卡具备 TalkBack 内容描述。M2 不展示不可用的“沉淀到项目”按钮。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。每次 connected test 前 5039 均只列出 `emulator-15662`，未操作默认 5037 或 USB 真机。
+- 已知限制：模拟器不能替代目标荣耀真机的 Push、锁屏、后台限制和 10 分钟真实断网验收；真实 Relay + Mac Bridge + Codex app-server 黄金链路、Bridge 升级/回滚演练归 G7。
+
+### 2026-08-09 / G7
+
+- 状态：`IN_PROGRESS`（实现与自动化 `DONE`；目标荣耀真机 + 真实 Relay/Mac Bridge 人工验收 `PENDING`）
+- Commit：`bedf209 测试：建立M2发布验收门禁`
+- 门禁资产：新增 `remote/scripts/m2-automated-acceptance.sh` 与 `remote/testdata/m2-fault-matrix.json`；脚本拒绝默认 5037、拒绝非 emulator serial，并要求独立 ADB server 恰好只有声明设备。新增 0.3.0 RC 说明、Bridge state v1 -> v2 完整目录备份/兼容回滚文档，并为 launchd 增加 restrictive umask、restart throttle、Background/Aqua session 与最小 PATH。
+- 自动化：脚本最终退出码 0。Android JVM `1015/0/0/0`，assembleDebug 成功；独立设备全量 `210/0/0/0`，总时长 3m12s；Go `test -race ./...`、`vet ./...`、Relay/Bridge build 全部退出 0；shell/JSON/plist/diff 静态检查全部退出 0。
+- 调试记录：首次全量设备套件只有 `HarnessApkAppNavigationTest` 4 项失败，根因是 `onNodeWithText("我的")` 同时匹配顶部标题和底部 Tab。未修改产品 UI；将导航验收收紧为唯一 `nav-ME` 节点可见且 selected 后，测试类 `5/5`、完整套件 `210/210`。
+- 性能：全量套件的 10,000 Event 最近 100 条查询样本 `[6, 6, 6, 5, 5, 5, 5, 4, 5, 5]ms`，p95=`6ms`；仍提供每次 100 条向上分页。
+- 设备隔离：owner=M2；AVD `HarnessM2Api36`（API 36）；ADB server `5039`；console/adb `15662/15663`；serial `emulator-15662`；`--one-device` + `ADB_LOCAL_TRANSPORT_MAX_PORT=5553`。完整 210 项套件只在该 serial 上运行，未访问默认 5037 或 USB 真机。
+- 人工 PENDING：M2-GOLD-1/2/3/5 仍需目标荣耀真机和真实 Relay + Mac Bridge + 当前 Codex app-server，覆盖三次点击、真实十分钟断网、Push/OEM 后台/锁屏解锁、WebSocket 重连时 PID/process epoch。执行清单与独立 ADB 5040 建议见 `docs/superpowers/plans/2026-09-08-m2-acceptance-checklist.md`；完成前 G7 和 0.3.0 正式发布不得标 `DONE`。

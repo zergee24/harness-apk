@@ -18,6 +18,8 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.AccountTree
+import androidx.compose.material.icons.outlined.CancelPresentation
+import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
@@ -27,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -46,6 +49,9 @@ fun SettingsScreen(
     onOpenWikiLibrary: () -> Unit,
     onOpenUpdates: () -> Unit,
     onOpenRemote: () -> Unit = {},
+    onOpenConfigPackage: () -> Unit = {},
+    simpleMode: Boolean = false,
+    onSimpleModeChange: (Boolean) -> Unit = {},
     showUpdateBadge: Boolean = false,
 ) {
     Column(
@@ -70,10 +76,35 @@ fun SettingsScreen(
                     "agents" -> onOpenAgentPackages
                     "wikis" -> onOpenWikiLibrary
                     "updates" -> onOpenUpdates
+                    "config" -> onOpenConfigPackage
                     else -> ({})
                 },
             )
         }
+        SimpleModeRow(checked = simpleMode, onCheckedChange = onSimpleModeChange)
+    }
+}
+
+@Composable
+private fun SimpleModeRow(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        tonalElevation = 1.dp,
+    ) {
+        ListItem(
+            leadingContent = {
+                Icon(Icons.Outlined.CancelPresentation, contentDescription = null)
+            },
+            headlineContent = { Text("生活简洁模式") },
+            supportingContent = { Text("生活页只保留新建对话和最近会话，适合家人使用。") },
+            trailingContent = {
+                Switch(checked = checked, onCheckedChange = onCheckedChange)
+            },
+        )
     }
 }
 
@@ -128,5 +159,6 @@ private fun iconFor(id: String): ImageVector = when (id) {
     "agents" -> Icons.Outlined.Extension
     "wikis" -> Icons.AutoMirrored.Outlined.MenuBook
     "updates" -> Icons.Outlined.SystemUpdate
+    "config" -> Icons.Outlined.IosShare
     else -> Icons.Outlined.Settings
 }

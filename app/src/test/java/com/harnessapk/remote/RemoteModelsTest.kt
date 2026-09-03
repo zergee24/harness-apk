@@ -36,6 +36,6 @@ class RemoteModelsTest {
     @Test
     fun sanitizeThreadTextTruncates() {
         val out = sanitizeThreadText((1..400).joinToString("") { "a" })
-        assertEquals(160, out.length)
+        assertEquals(240, out.length)
     }
 }

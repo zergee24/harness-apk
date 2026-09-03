@@ -21,6 +21,18 @@ interface ChatExecutionEntryDao {
     @Query("SELECT * FROM chat_execution_entries WHERE status IN (:statuses) ORDER BY createdAt ASC")
     suspend fun listByStatuses(statuses: List<String>): List<ChatExecutionEntryEntity>
 
+    @Query("SELECT * FROM chat_execution_entries WHERE status IN (:statuses) ORDER BY updatedAt DESC")
+    fun observeByStatuses(statuses: List<String>): Flow<List<ChatExecutionEntryEntity>>
+
+    @Query(
+        """
+        SELECT * FROM chat_execution_entries
+        WHERE status NOT IN ('QUEUED', 'RUNNING') AND updatedAt >= :since
+        ORDER BY updatedAt DESC LIMIT :limit
+        """,
+    )
+    fun observeRecentTerminal(since: Long, limit: Int): Flow<List<ChatExecutionEntryEntity>>
+
     @Query("SELECT * FROM chat_execution_entries WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): ChatExecutionEntryEntity?
 

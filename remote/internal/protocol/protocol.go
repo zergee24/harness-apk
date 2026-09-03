@@ -13,6 +13,36 @@ import (
 
 const Version = 1
 
+// DefaultBackendID is the backend used when a command or event carries no
+// backendId. Legacy clients never set BackendID and keep talking to it.
+const DefaultBackendID = "codex"
+
+// M4 backend capability names. Existing host-level capability names
+// (workspace.candidates.v1, run.lifecycle.v1, logical-replay.v1,
+// completion-evidence.v2, ...) remain valid per backend.
+const (
+	CapabilityApprovals = "approvals.v1"
+	CapabilityUserInput = "user-input.v1"
+)
+
+// BackendInfo describes one backend exposed by a host.
+type BackendInfo struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Capabilities []string `json:"capabilities"`
+}
+
+// HostStatusPayload is the payload of the host.status event.
+// SchemaVersion 1 keeps the legacy host-level Capabilities field for old
+// clients; Backends carries the per-backend list added by M4. New clients
+// prefer Backends and fall back to the legacy single-backend view when it is
+// absent.
+type HostStatusPayload struct {
+	SchemaVersion int           `json:"schemaVersion"`
+	Capabilities  []string      `json:"capabilities,omitempty"`
+	Backends      []BackendInfo `json:"backends,omitempty"`
+}
+
 type PairingPayload struct {
 	Version       int    `json:"version"`
 	RelayURL      string `json:"relayUrl"`
@@ -38,21 +68,47 @@ type WireMessage struct {
 }
 
 type Command struct {
-	Type            string          `json:"type"`
-	RequestID       string          `json:"requestId"`
-	ThreadID        string          `json:"threadId,omitempty"`
-	TurnID          string          `json:"turnId,omitempty"`
-	Text            string          `json:"text,omitempty"`
-	CWD             string          `json:"cwd,omitempty"`
-	ExpectedTurnID  string          `json:"expectedTurnId,omitempty"`
-	ServerRequestID json.RawMessage `json:"serverRequestId,omitempty"`
-	Decision        string          `json:"decision,omitempty"`
-	Method          string          `json:"method,omitempty"`
-	Params          json.RawMessage `json:"params,omitempty"`
+	Type                      string          `json:"type"`
+	BackendID                 string          `json:"backendId,omitempty"`
+	CommandID                 string          `json:"commandId,omitempty"`
+	RequestID                 string          `json:"requestId"`
+	RunID                     string          `json:"runId,omitempty"`
+	ApprovalID                string          `json:"approvalId,omitempty"`
+	ProcessEpoch              string          `json:"processEpoch,omitempty"`
+	BindingID                 string          `json:"bindingId,omitempty"`
+	WorkspaceID               string          `json:"workspaceId,omitempty"`
+	RepositoryFingerprint     string          `json:"repositoryFingerprint,omitempty"`
+	Objective                 string          `json:"objective,omitempty"`
+	ContextSnapshot           json.RawMessage `json:"contextSnapshot,omitempty"`
+	ThreadID                  string          `json:"threadId,omitempty"`
+	TurnID                    string          `json:"turnId,omitempty"`
+	Text                      string          `json:"text,omitempty"`
+	CWD                       string          `json:"cwd,omitempty"`
+	ExpectedTurnID            string          `json:"expectedTurnId,omitempty"`
+	ServerRequestID           json.RawMessage `json:"serverRequestId,omitempty"`
+	Decision                  string          `json:"decision,omitempty"`
+	Method                    string          `json:"method,omitempty"`
+	Params                    json.RawMessage `json:"params,omitempty"`
+	HighestContiguousSequence uint64          `json:"highestContiguousSequence,omitempty"`
+	OpenRunIDs                []string        `json:"openRunIds,omitempty"`
+}
+
+type LogicalEvent struct {
+	SchemaVersion int             `json:"schemaVersion"`
+	EventID       string          `json:"eventId"`
+	HostID        string          `json:"hostId"`
+	DeviceID      string          `json:"deviceId"`
+	RunID         string          `json:"runId"`
+	BackendID     string          `json:"backendId,omitempty"`
+	Sequence      uint64          `json:"sequence"`
+	Type          string          `json:"type"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
+	CreatedAt     int64           `json:"createdAt"`
 }
 
 type Event struct {
 	Type      string          `json:"type"`
+	BackendID string          `json:"backendId,omitempty"`
 	RequestID string          `json:"requestId,omitempty"`
 	Method    string          `json:"method,omitempty"`
 	ThreadID  string          `json:"threadId,omitempty"`

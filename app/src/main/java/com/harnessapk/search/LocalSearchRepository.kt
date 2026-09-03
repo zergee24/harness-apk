@@ -12,13 +12,20 @@ class LocalSearchRepository(
 ) {
     suspend fun rebuildTokens(projects: List<Project> = emptyList()) = withContext(dispatchers.io) {
         dao.listDocuments().forEach { document ->
-            dao.replaceFts(document.id, LocalSearchTokenizer.indexedText(document.title, document.body))
+            val searchText = if (
+                document.sourceType in PROJECT_DERIVED_SOURCE_TYPES && document.searchableText.isNotBlank()
+            ) {
+                document.searchableText
+            } else {
+                LocalSearchTokenizer.indexedText(document.title, document.body)
+            }
+            dao.replaceFts(document.id, searchText)
         }
         if (projects.isNotEmpty()) replaceProjects(projects)
     }
 
     suspend fun replaceProjects(projects: List<Project>) = withContext(dispatchers.io) {
-        dao.deleteProjectFts()
+        dao.deleteProjectNameFts()
         dao.deleteProjectDocuments()
         projects.forEach { project ->
             val document = LocalSearchDocumentEntity(
@@ -61,12 +68,16 @@ class LocalSearchRepository(
         require(limit in 1..100) { "搜索数量必须在 1 到 100 之间" }
         val match = LocalSearchTokenizer.matchExpression(normalized)
         val fts = if (match.isBlank()) emptyList() else dao.searchFts(match, limit)
-        val contains = dao.searchContains(normalized, limit)
-        (fts + contains)
+        val candidates = if (match.isBlank()) dao.searchContains(normalized, limit) else fts
+        candidates
             .distinctBy(LocalSearchDocumentEntity::id)
             .sortedWith(compareByDescending<LocalSearchDocumentEntity> { it.updatedAt }.thenBy { it.id })
             .take(limit)
             .map { it.toResult(normalized) }
+    }
+
+    private companion object {
+        val PROJECT_DERIVED_SOURCE_TYPES = setOf("CONTEXT", "MARKDOWN", "RUN_EVIDENCE")
     }
 }
 

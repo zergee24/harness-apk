@@ -4,19 +4,29 @@ import com.harnessapk.common.TimeProvider
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
+enum class ProjectFileRevisionState {
+    CURRENT,
+    UPDATED,
+    DELETED,
+    UNAVAILABLE,
+}
+
 class FileProjectRepository(
     rootDirectory: File,
     private val timeProvider: TimeProvider,
     private val onProjectUpsert: suspend (Project) -> Unit = {},
     private val onProjectDelete: suspend (String) -> Unit = {},
+    private val onProjectContentChanged: suspend (Project) -> Unit = {},
 ) {
     private val projectsRoot = rootDirectory.resolve("projects")
+    private val retiredProjectIdsRoot = rootDirectory.resolve(".harness/retired-project-ids")
 
     suspend fun createProject(name: String): Project {
         val trimmedName = name.trim()
@@ -102,6 +112,7 @@ class FileProjectRepository(
 
     suspend fun deleteProject(projectId: String) {
         val project = projectDirectory(projectId)
+        retireProjectId(projectId)
         if (!project.deleteRecursively()) {
             throw ProjectWorkspaceException("删除项目失败：$projectId")
         }
@@ -124,6 +135,7 @@ class FileProjectRepository(
             }
             check(temporary.renameTo(destination)) { "导入项目文件失败" }
             projectDirectory(projectId).setLastModified(timeProvider.nowMillis())
+            notifyProjectContentChanged(projectId)
             return "files/${destination.name}"
         } catch (error: Throwable) {
             temporary.delete()
@@ -163,6 +175,7 @@ class FileProjectRepository(
         contextFile.parentFile?.mkdirs()
         contextFile.writeText(markdown)
         excludeLocalHarnessMetadata(project)
+        notifyProjectContentChanged(projectId)
     }
 
     suspend fun createDeliverable(
@@ -182,7 +195,7 @@ class FileProjectRepository(
         val file = checkedProjectFile(project, relativePath)
         file.parentFile?.mkdirs()
         file.writeText(markdown ?: defaultMarkdown(template, trimmedTitle))
-        return deliverableFromFile(project, file, template)
+        return deliverableFromFile(project, file, template).also { notifyProjectContentChanged(projectId) }
     }
 
     suspend fun listDeliverables(projectId: String): List<ProjectDeliverable> {
@@ -209,11 +222,50 @@ class FileProjectRepository(
 
     fun resolveProjectDirectory(projectId: String): File = projectDirectory(projectId)
 
+    suspend fun projectFileRevisionIsCurrent(
+        projectId: String,
+        relativePath: String,
+        expectedSha256: String,
+    ): Boolean = projectFileRevisionState(projectId, relativePath, expectedSha256) ==
+        ProjectFileRevisionState.CURRENT
+
+    suspend fun projectFileRevisionState(
+        projectId: String,
+        relativePath: String,
+        expectedSha256: String,
+    ): ProjectFileRevisionState = runCatching {
+        val file = checkedProjectFile(projectDirectory(projectId), relativePath)
+        if (!file.isFile) return@runCatching ProjectFileRevisionState.DELETED
+        val metadataHash = sha256("$relativePath:${file.length()}:${file.lastModified()}".encodeToByteArray())
+        if (expectedSha256.equals(metadataHash, ignoreCase = true)) {
+            return@runCatching ProjectFileRevisionState.CURRENT
+        }
+        if (file.length() > MAX_LIVE_REVISION_HASH_BYTES) {
+            return@runCatching ProjectFileRevisionState.UPDATED
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        val contentHash = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        if (expectedSha256.equals(contentHash, ignoreCase = true)) {
+            ProjectFileRevisionState.CURRENT
+        } else {
+            ProjectFileRevisionState.UPDATED
+        }
+    }.getOrDefault(ProjectFileRevisionState.UNAVAILABLE)
+
     suspend fun writeDeliverable(projectId: String, deliverableId: String, markdown: String) {
         val project = projectDirectory(projectId)
         val file = checkedProjectFile(project, deliverableId)
         file.parentFile?.mkdirs()
         file.writeText(markdown)
+        notifyProjectContentChanged(projectId)
     }
 
     fun validateMarkdownFilePath(projectId: String, relativePath: String): String {
@@ -235,7 +287,9 @@ class FileProjectRepository(
         val file = checkedProjectFile(project, normalizedPath)
         file.parentFile?.mkdirs()
         file.writeText(markdown)
-        return deliverableFromFile(project, file, templateFor(project, file))
+        return deliverableFromFile(project, file, templateFor(project, file)).also {
+            notifyProjectContentChanged(projectId)
+        }
     }
 
     suspend fun writePdfExport(
@@ -278,7 +332,9 @@ class FileProjectRepository(
         val file = checkedProjectFile(project, relativePath)
         file.parentFile?.mkdirs()
         file.writeText(summary.markdown)
-        return deliverableFromFile(project, file, DeliverableTemplate.SESSION)
+        return deliverableFromFile(project, file, DeliverableTemplate.SESSION).also {
+            notifyProjectContentChanged(projectId)
+        }
     }
 
     suspend fun exportProjectZip(projectId: String, outputStream: OutputStream) {
@@ -339,7 +395,10 @@ class FileProjectRepository(
             moveImportedProject(contentRoot, tempRoot, finalRoot)
             ensureProjectScaffold(finalRoot, projectName)
             finalRoot.setLastModified(timeProvider.nowMillis())
-            return projectFromDirectory(finalRoot)
+            return projectFromDirectory(finalRoot).also { project ->
+                runCatching { onProjectUpsert(project) }
+                runCatching { onProjectContentChanged(project) }
+            }
         } catch (error: Throwable) {
             tempRoot.deleteRecursively()
             throw error
@@ -352,6 +411,12 @@ class FileProjectRepository(
             throw ProjectWorkspaceException("未找到项目：$projectId")
         }
         return project
+    }
+
+    private suspend fun notifyProjectContentChanged(projectId: String) {
+        val project = projectDirectory(projectId)
+        project.setLastModified(timeProvider.nowMillis())
+        runCatching { onProjectContentChanged(projectFromDirectory(project)) }
     }
 
     private fun projectFromDirectory(directory: File): Project {
@@ -388,6 +453,10 @@ class FileProjectRepository(
         }
         return file
     }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { byte -> "%02x".format(byte) }
 
     private fun checkedImportFile(project: File, relativePath: String): File {
         val root = project.canonicalFile
@@ -583,12 +652,25 @@ class FileProjectRepository(
         val base = safeFileName(name).ifBlank { UUID.randomUUID().toString() }
         var candidate = base
         var counter = 2
-        while (projectsRoot.resolve(candidate).exists()) {
+        while (projectsRoot.resolve(candidate).exists() || retiredProjectIdMarker(candidate).isFile) {
             candidate = "$base-$counter"
             counter += 1
         }
         return candidate
     }
+
+    private fun retireProjectId(projectId: String) {
+        if (!retiredProjectIdsRoot.isDirectory && !retiredProjectIdsRoot.mkdirs()) {
+            throw ProjectWorkspaceException("无法持久化项目代际标记：$projectId")
+        }
+        val marker = retiredProjectIdMarker(projectId)
+        if (!marker.isFile && !marker.createNewFile()) {
+            throw ProjectWorkspaceException("无法持久化项目代际标记：$projectId")
+        }
+    }
+
+    private fun retiredProjectIdMarker(projectId: String): File =
+        retiredProjectIdsRoot.resolve(sha256(projectId.encodeToByteArray()))
 
     private fun safeFileName(value: String): String {
         val normalized = value
@@ -611,6 +693,7 @@ class FileProjectRepository(
     }
 
     private companion object {
+        const val MAX_LIVE_REVISION_HASH_BYTES = 2L * 1024 * 1024
         val markdownDirectories = listOf(
             "requirements",
             "solutions",

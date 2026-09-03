@@ -41,6 +41,10 @@ class AppSettingsStore(private val context: Context) {
         it[HAS_SEEN_IMAGE_PRIVACY_NOTICE] ?: false
     }
 
+    val simpleMode: Flow<Boolean> = context.appSettingsDataStore.data.map {
+        it[SIMPLE_MODE] ?: false
+    }
+
     val defaultModelPreference: Flow<DefaultModelPreference> = context.appSettingsDataStore.data.map {
         DefaultModelPreference(
             providerId = it[DEFAULT_PROVIDER_ID]?.takeIf(String::isNotBlank),
@@ -96,6 +100,10 @@ class AppSettingsStore(private val context: Context) {
         context.appSettingsDataStore.edit {
             it[HAS_SEEN_IMAGE_PRIVACY_NOTICE] = value
         }
+    }
+
+    suspend fun setSimpleMode(value: Boolean) {
+        context.appSettingsDataStore.edit { it[SIMPLE_MODE] = value }
     }
 
     suspend fun setDefaultModelPreference(providerId: String, model: String) {
@@ -217,6 +225,7 @@ class AppSettingsStore(private val context: Context) {
 
     companion object {
         private val HAS_SEEN_IMAGE_PRIVACY_NOTICE = booleanPreferencesKey("has_seen_image_privacy_notice")
+        private val SIMPLE_MODE = booleanPreferencesKey("simple_mode")
         private val DEFAULT_PROVIDER_ID = stringPreferencesKey("default_provider_id")
         private val DEFAULT_MODEL = stringPreferencesKey("default_model")
         private val WEB_SEARCH_ENABLED = booleanPreferencesKey("web_search_enabled")

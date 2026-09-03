@@ -419,6 +419,8 @@ private class FakeProviderProfileDao : ProviderProfileDao {
 
     override fun observeEnabled(): Flow<List<ProviderProfileEntity>> = flow
 
+    override suspend fun getAll(): List<ProviderProfileEntity> = rows.values.toList()
+
     override suspend fun findById(id: String): ProviderProfileEntity? = rows[id]
 
     override suspend fun firstEnabled(): ProviderProfileEntity? = rows.values.firstOrNull { it.enabled }

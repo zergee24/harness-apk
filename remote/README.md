@@ -70,6 +70,38 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.harnessapk.remote-br
 
 The bridge launches `codex app-server --listen stdio://`. The normal Codex login and workspace permissions on that Mac remain authoritative.
 
+The launch agent uses a restrictive umask and throttles restart loops. If `codex` is not available on the launchd `PATH`, add `--codex /absolute/path/to/codex` to `ProgramArguments`; do not copy login credentials into the plist.
+
+## 2.5 DeepSeek Harness backend (M4)
+
+The bridge can drive a second backend on the same Mac — DeepSeek Harness —
+through the same canonical app-server JSON-RPC surface, so one phone controls
+Codex and dsh side by side. Install the dsh appserver profile once:
+
+```bash
+cd remote
+bash dsh/install-appserver.sh
+```
+
+Then start the bridge with both backends:
+
+```bash
+harness-bridge serve --backend codex --backend dsh
+```
+
+Behavior notes for the dsh backend (v1):
+
+- It advertises the canonical capabilities minus `approvals.v1` and
+  `user-input.v1`: dsh's permission model is sandbox presets, not interactive
+  server requests, so the phone shows no approval entry for dsh runs.
+- `turn/interrupt` is not mapped yet (the turn keeps running on the Mac);
+  thread history, steering, streaming deltas and completion all work.
+- Sessions persist in `~/.dsh/sessions` and survive bridge restarts; the
+  plugin loads them through dsh's own persistence service.
+- Requires dsh 0.1.0-rc.6 or newer on PATH; the plugin package lives in
+  `remote/dsh/appserver/` (source of truth; the profile copy is installed by
+  the script).
+
 ## 3. Pair Harness
 
 Generate a five-minute, one-use QR code on the Mac:
@@ -96,10 +128,133 @@ Never commit these values. Build and install the APK, then grant notification pe
 
 - Relay health: `GET /healthz`
 - Relay state backup: back up the Docker `relay-data` volume with server-side encryption.
-- Bridge logs: `/tmp/harness-remote-bridge.log` and `/tmp/harness-remote-bridge.error.log`
+- Bridge logs: `/tmp/harness-remote-bridge.log` and `/tmp/harness-remote-bridge.error.log`. Multi-backend logs are tagged per backend (`start backend dsh`, `backend codex exited (...)`, `serve backends: codex=codex, dsh=dsh`).
 - Pairing expires after five minutes and cannot be reused.
 - Wire messages expire after five minutes and are authenticated against routing metadata to prevent tampering.
-- The relay accepts messages up to 1 MiB and JSON HTTP bodies up to 64 KiB.
+- The relay accepts encrypted Wire messages up to 8 MiB and JSON HTTP bodies up to 64 KiB. Bridge projections keep mobile thread history and live events substantially below that transport ceiling.
+
+### Bridge state and upgrades (M4)
+
+`~/.harness-remote` holds `bridge.json`, `routes.json`, `logical-events.log`,
+`commands.json`, `terminal-runs.json` and `workspaces.json`. M4 upgrades are
+additive:
+
+- `bridge.json` stays schema v2; the new `backends` section is optional and
+  older bridges ignore it.
+- `routes.json` migrates schema v1 → v2 automatically on first load: routes
+  and approvals gain `backendId` (legacy rows become `codex`) and route keys
+  become `(backendID, runID)`. Process epochs are per backend, so one backend
+  restart only stales that backend's pending approvals.
+- `logical-events.log` events gain an optional `backendId` field; journal
+  replay preserves it and old entries replay with an empty backend id
+  (treated as `codex`).
+
+Upgrade and rollback discipline (unchanged from M2): stop the launch agent and
+back up the whole state directory before upgrading:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.harnessapk.remote-bridge.plist
+BACKUP_DIR="${HOME}/.harness-remote-backup-$(date +%Y%m%d-%H%M%S)"
+cp -a "${HOME}/.harness-remote" "$BACKUP_DIR"
+chmod -R go-rwx "$BACKUP_DIR"
+```
+
+Rollback must use a Bridge build that understands the current state schema
+(v2 routes are readable by a v2 bridge; a legacy v1-only binary is not a
+valid rollback target after migration). Never delete only one ledger file —
+the ledgers form one recovery set.
+
+### Multi-backend serve flags
+
+```text
+harness-bridge serve --backend codex --backend dsh
+harness-bridge serve --backend codex                    # codex only (default)
+harness-bridge serve --backend aux=/path/to/appserver   # any canonical app-server executable
+```
+
+`--backend` is repeatable. A bare `codex` or `dsh` resolves a known backend
+(codex uses `--codex`; dsh uses `dsh --profile appserver --listen stdio://`);
+`<id>=<executable>` registers any executable speaking the canonical
+app-server JSON-RPC protocol under that id.
+
+### Bridge state v1 -> v2
+
+Bridge v2 adds an encrypted Logical Event journal plus command, route and workspace ledgers beside `bridge.json` in `~/.harness-remote`. On first load it preserves the host token, device secrets and transport sequences. Legacy pending outbound ciphertext has no stable Logical Event identity, so migration discards that queue and forces a Gap + Snapshot instead of guessing delivery.
+
+Before upgrading, stop the launch agent and take a permission-preserving backup of the whole state directory:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.harnessapk.remote-bridge.plist
+BRIDGE_STATE_DIR="${HOME}/.harness-remote"
+BRIDGE_BACKUP_DIR="${HOME}/.harness-remote-backup-$(date +%Y%m%d-%H%M%S)"
+cp -a "$BRIDGE_STATE_DIR" "$BRIDGE_BACKUP_DIR"
+chmod -R go-rwx "$BRIDGE_BACKUP_DIR"
+```
+
+Install the v2 binary, bootstrap the launch agent, then verify `bridge.json` has `schemaVersion: 2`, the logs contain no decode error, and the phone completes resume/Snapshot reconciliation. Keep the backup until one complete Run and one approval round trip have succeeded.
+
+Rollback must use a Bridge build that understands state v2. Stop the launch agent, move the current directory aside, restore the complete backup atomically at the directory level, and bootstrap the compatible build. Never delete only `logical-events.log`, `commands.json` or `routes.json`; the ledgers form one recovery set. A legacy v1-only binary is not a valid rollback target after migration.
+
+### M3 capabilities and completion ledger
+
+M3 keeps Wire v1 and Logical Event v1. Capability negotiation is an additive encrypted payload on `host.status`:
+
+```json
+{
+  "schemaVersion": 1,
+  "capabilities": [
+    "workspace.candidates.v1",
+    "run.lifecycle.v1",
+    "logical-replay.v1",
+    "completion-evidence.v2",
+    "turn-command-idempotency.v1",
+    "thread-history-pagination.v1",
+    "thread-latest-user-message.v1",
+    "thread-execution-status.v1"
+  ]
+}
+```
+
+Older phones may ignore this payload. Newer phones require all three M2 run capabilities before enabling project Run, and must fail closed for an unsupported payload schema. Missing `completion-evidence.v2`, `turn-command-idempotency.v1`, `thread-history-pagination.v1`, `thread-latest-user-message.v1`, or `thread-execution-status.v1` means the corresponding behavior must stay disabled; capability absence is not permission to guess support. The latest-user-message and execution-status capabilities share a bounded `thread/turns/list` summary request. Android requests it lazily only for visible cards, polls active cards every three seconds, and stops after a terminal state; it does not load every thread's full history during list refresh. Execution states are additive `RUNNING`, `COMPLETED`, `FAILED`, `INTERRUPTED`, and fail-closed `UNKNOWN`. An app-server turn persisted as `interrupted` without `completedAt` is treated as still running because an external Codex writer may still own it; a persisted `interrupted` turn with `completedAt` is terminal.
+
+Bridge state v2 now treats these files as one recovery set beside `bridge.json`:
+
+- `logical-events.log`: encrypted Logical Event journal and replay source.
+- `commands.json`: durable command idempotency, including legacy `turn.start` `UNKNOWN` reconciliation.
+- `routes.json`: `(runId, threadId, turnId, deviceId)` routing and approval ownership.
+- `workspaces.json`: registered/candidate workspace bindings.
+- `terminal-runs.json`: first terminal status, frozen completion JSON/SHA-256/workspace locator, terminal observations and journal publication markers.
+
+On the first terminal observation, Bridge persists reconciliation before reading final evidence. A completed Run is frozen before `run.completed` is journaled. Startup, WebSocket reconnect and phone `sync.resume` retry pending reconciliation; if the ledger is frozen but the journal event is absent, Bridge republishes the same stable event identity. Gap/Snapshot reads only frozen terminal values. It never reconstructs a terminal completion from the current Mac workspace.
+
+Workspace or Git inspection failure produces `UNVERIFIED` evidence with a reason, never a synthetic `CLEAN`. If a ledger rename succeeds but directory Sync reports an uncertain result, Bridge keeps the first terminal value and stops later writes in that process rather than risk overwriting it.
+
+For legacy `turn.start`, `CommandID` (or `RequestID` when no command ID exists) is the durable idempotency boundary and is also sent as `clientUserMessageId`. A persisted thread can be listed or read without being loaded into the current app-server process. If the first `turn/start` is definitively rejected with `thread not found`, Bridge first reads metadata with `includeTurns=false`. A rollout within the direct-resume boundary is resumed under the same thread ID, then `turn/start` is safely retried once with the same client message identity. A larger rollout uses lazy continuation instead of an unbounded resume: Bridge requests the newest eight turns with `itemsView=summary`, copies only bounded user/agent text (24 KiB total), starts a related thread in the exact same cwd, and supplies the handoff as `untrusted` `additionalContext`; the user's new text remains the only visible turn input. Bridge durably records the physical thread chain, collapses it to one logical conversation card with the original title, and walks older physical threads only when Android requests an older history page. Tool output is not copied, and omitted model context must be verified from the workspace or confirmed with the user. If Codex app-server succeeds but TurnID parsing or route persistence fails, Bridge returns `UNKNOWN/RECONCILING` with `retrySafe=false`, saves the app-server result when available, and retries only the local route update. It does not call `turn/start` a second time for an ambiguous outcome.
+
+Operational checks:
+
+1. Never print or upload the raw state files: they can contain private completion text, commands, paths and encrypted event data.
+2. Check Bridge logs for ledger decode/hash errors, persistent `UNKNOWN`, directory Sync failures, or repeated reconciliation failures.
+3. For a pending terminal or route reconciliation, keep the compatible Bridge running and reconnect the phone or issue normal `sync.resume`; do not edit JSON or delete a single ledger.
+4. Mac-only files remain Mac-only. M3 adds no Relay file transfer and no Bridge file write-back; use explicit Git Fetch or a separately confirmed import workflow.
+
+Before any M3 Bridge upgrade or rollback, stop the launch agent and take a permission-preserving backup of the whole `~/.harness-remote` directory as shown above. A valid rollback binary must understand Bridge state v2, completion evidence v2, `terminal-runs.json` schema v2, terminal reconciliation/publication markers and turn-command idempotency. If no compatible rollback binary is available, leave the current Bridge stopped or running with the mobile M3 entry disabled; do not start a legacy binary against the directory.
+
+After restoring a complete compatible backup, verify in order: Bridge state opens without decode/hash errors, `host.status` reports only capabilities the binary actually implements, phone resume/Snapshot converges, one Run completes with an unchanged frozen completion after reconnect, and a repeated `turn.start` identity does not create a second Turn. Keep both the pre-change and failed-attempt directories until those checks finish. Never restore `terminal-runs.json`, `commands.json` or `logical-events.log` independently.
+
+### M2 automated acceptance
+
+The automated suite refuses ADB 5037 and requires an isolated emulator server containing exactly one declared serial:
+
+```bash
+export ANDROID_HOME=/absolute/path/to/Android/sdk
+export HARNESS_M2_ADB_SERVER_PORT=5039
+export HARNESS_M2_SERIAL=emulator-15662
+export ADB_LOCAL_TRANSPORT_MAX_PORT=5553
+remote/scripts/m2-automated-acceptance.sh
+```
+
+The scenario manifest is `remote/testdata/m2-fault-matrix.json`. Entries marked `manualRequired` still require the target Honor phone, real Relay, Mac Bridge and Codex app-server; emulator results must not be recorded as substitutes for Push, OEM background limits, lock-screen approval or the real ten-minute disconnect.
 
 Run checks from `remote/`:
 

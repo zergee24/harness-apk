@@ -46,6 +46,8 @@ import java.util.UUID
 internal sealed interface MarkdownLinkTarget {
     data class WikiCitation(val citationId: String) : MarkdownLinkTarget
 
+    data class ProjectEvidence(val evidenceId: String) : MarkdownLinkTarget
+
     data class ExternalUrl(val url: String) : MarkdownLinkTarget
 
     data object Ignored : MarkdownLinkTarget
@@ -57,12 +59,31 @@ internal fun markdownLinkTarget(destination: String): MarkdownLinkTarget {
         "harness-wiki" -> citationIdFromUri(uri)
             ?.let(MarkdownLinkTarget::WikiCitation)
             ?: MarkdownLinkTarget.Ignored
+        "harness-project" -> projectEvidenceIdFromUri(uri)
+            ?.let(MarkdownLinkTarget::ProjectEvidence)
+            ?: MarkdownLinkTarget.Ignored
         "http", "https" -> destination
             .takeIf { uri.host?.isNotBlank() == true }
             ?.let(MarkdownLinkTarget::ExternalUrl)
             ?: MarkdownLinkTarget.Ignored
         else -> MarkdownLinkTarget.Ignored
     }
+}
+
+private fun projectEvidenceIdFromUri(uri: URI): String? {
+    if (
+        uri.host != "evidence" ||
+        uri.port != -1 ||
+        uri.userInfo != null ||
+        uri.query != null ||
+        uri.fragment != null
+    ) {
+        return null
+    }
+    val rawId = uri.rawPath?.removePrefix("/")
+        ?.takeIf { uri.rawPath == "/$it" }
+        ?: return null
+    return rawId.takeIf { PROJECT_EVIDENCE_ID.matches(it) }
 }
 
 private fun citationIdFromUri(uri: URI): String? {
@@ -83,14 +104,27 @@ private fun citationIdFromUri(uri: URI): String? {
 }
 
 private const val MARKDOWN_LINK_ANNOTATION = "markdown-link"
+private val PROJECT_EVIDENCE_ID = Regex("[A-Za-z0-9_-]{1,128}")
 private val INTERNAL_WIKI_CITATION_MARKDOWN_LINK = Regex(
     """\[([^\[\]\n]*)]\(harness-wiki://citation/([0-9A-Fa-f-]{36})\)""",
 )
+private val INTERNAL_PROJECT_EVIDENCE_MARKDOWN_LINK = Regex(
+    """\[([^\[\]\n]*)]\(harness-project://evidence/([A-Za-z0-9_-]{1,128})\)""",
+)
 
 internal fun markdownTextForCopy(markdown: String): String =
-    INTERNAL_WIKI_CITATION_MARKDOWN_LINK.replace(markdown) { match ->
-        val destination = "harness-wiki://citation/${match.groupValues[2]}"
-        if (markdownLinkTarget(destination) is MarkdownLinkTarget.WikiCitation) {
+    INTERNAL_PROJECT_EVIDENCE_MARKDOWN_LINK.replace(
+        INTERNAL_WIKI_CITATION_MARKDOWN_LINK.replace(markdown) { match ->
+            val destination = "harness-wiki://citation/${match.groupValues[2]}"
+            if (markdownLinkTarget(destination) is MarkdownLinkTarget.WikiCitation) {
+                match.groupValues[1]
+            } else {
+                match.value
+            }
+        },
+    ) { match ->
+        val destination = "harness-project://evidence/${match.groupValues[2]}"
+        if (markdownLinkTarget(destination) is MarkdownLinkTarget.ProjectEvidence) {
             match.groupValues[1]
         } else {
             match.value

@@ -1,5 +1,6 @@
 package com.harnessapk.ui.remote
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -42,6 +43,7 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.harnessapk.common.AppContainer
+import com.harnessapk.remote.remoteFeatureAvailability
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -51,6 +53,7 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val profile by container.remoteProfileStore.profile.collectAsState()
+    val remoteState by container.remoteRepository.state.collectAsState()
     val pushTarget by container.aliyunPushManager.deviceId.collectAsState()
     var pairingText by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -105,6 +108,17 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
                     Text(profile!!.hostName, style = MaterialTheme.typography.titleMedium)
                     Text(profile!!.relayUrl, style = MaterialTheme.typography.bodyMedium)
                     Text("设备 ${profile!!.deviceId.take(10)}…", style = MaterialTheme.typography.bodySmall)
+                    Text("连接状态：${connectionLabel(remoteState.connectionStatus)}", style = MaterialTheme.typography.bodySmall)
+                    val availability = remoteFeatureAvailability(remoteState.capabilities)
+                    Text(
+                        when {
+                            remoteState.connectionStatus != com.harnessapk.remote.RemoteConnectionStatus.CONNECTED -> "Remote Run：等待 Mac 连接"
+                            availability.canStartM2Run && availability.canUseM3CompletionEvidence -> "Remote Run：已就绪（含完成证据）"
+                            availability.canStartM2Run -> "Remote Run：可用，Mac Bridge 需升级以支持完成证据"
+                            else -> "Remote Run：Mac Bridge 能力未就绪"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Text(
                         when {
                             pushTarget == null -> "阿里云推送未配置，前台通知仍可用"
@@ -113,6 +127,11 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    OutlinedButton(onClick = {
+                        context.startActivity(Intent(context, com.harnessapk.ui.dashboard.DashboardActivity::class.java))
+                    }) {
+                        Text("副屏模式（常亮）")
+                    }
                     OutlinedButton(onClick = { container.remoteRepository.disconnect(); container.remoteProfileStore.clear() }) {
                         Icon(Icons.Outlined.Delete, contentDescription = null); Text("移除节点")
                     }

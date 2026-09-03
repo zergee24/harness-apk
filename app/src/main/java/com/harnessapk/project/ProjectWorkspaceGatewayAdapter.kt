@@ -13,6 +13,7 @@ import com.harnessapk.session.WorkspaceProject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import java.security.MessageDigest
 
 class ProjectWorkspaceGatewayAdapter(
     private val repository: FileProjectRepository,
@@ -76,21 +77,33 @@ class ProjectWorkspaceGatewayAdapter(
         updates: List<MarkdownUpdateProposal>,
     ): MarkdownBatchApplyResult {
         currentCoroutineContext().ensureActive()
-        val validations = updates.map { proposal ->
+        val normalized = updates.map { proposal ->
             proposal to try {
-                Result.success(proposal.copy(path = repository.validateMarkdownFilePath(projectId, proposal.path)))
+                val validated = proposal.copy(path = repository.validateMarkdownFilePath(projectId, proposal.path))
+                Result.success(validated)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 Result.failure(error)
             }
         }
+        val duplicatePaths = normalized.mapNotNull { (_, result) -> result.getOrNull()?.path }
+            .groupingBy { it.lowercase() }
+            .eachCount()
+            .filterValues { it > 1 }
+            .keys
         return MarkdownBatchApplyResult(
-            results = validations.map { (originalProposal, validation) ->
+            results = normalized.map { (originalProposal, validation) ->
                 validation.fold(
                     onSuccess = { validatedProposal ->
                         try {
                             currentCoroutineContext().ensureActive()
+                            if (validatedProposal.path.lowercase() in duplicatePaths) {
+                                throw ProjectWorkspaceException("同一批次包含重复 Markdown 路径：${validatedProposal.path}")
+                            }
+                            // Keep the revision check adjacent to the write. This also prevents an
+                            // earlier proposal in this batch from invalidating a later baseline.
+                            validateProposalBaseline(projectId, validatedProposal)
                             val deliverable = repository.writeMarkdownFile(
                                 projectId = projectId,
                                 relativePath = validatedProposal.path,
@@ -125,6 +138,24 @@ class ProjectWorkspaceGatewayAdapter(
                 )
             },
         )
+    }
+
+    private fun validateProposalBaseline(projectId: String, proposal: MarkdownUpdateProposal) {
+        val file = repository.resolveDeliverableFile(projectId, proposal.path)
+        if (proposal.expectedAbsent && file.exists()) {
+            throw ProjectWorkspaceException("文件已存在，草稿的新建基线已变化：${proposal.path}")
+        }
+        proposal.baselineSha256?.let { expected ->
+            if (!file.isFile) {
+                throw ProjectWorkspaceException("文件基线已变化或文件已删除：${proposal.path}")
+            }
+            val actual = MessageDigest.getInstance("SHA-256")
+                .digest(file.readBytes())
+                .joinToString("") { byte -> "%02x".format(byte) }
+            if (!actual.equals(expected, ignoreCase = true)) {
+                throw ProjectWorkspaceException("文件基线已变化，请重新审核：${proposal.path}")
+            }
+        }
     }
 
 }

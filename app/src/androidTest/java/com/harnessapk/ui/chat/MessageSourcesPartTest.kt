@@ -63,6 +63,37 @@ class MessageSourcesPartTest {
         }
     }
 
+    @Test
+    fun projectCitationTokenOpensExactEvidenceWithoutExpandingThePanel() {
+        val opened = mutableListOf<String>()
+        val state = MessageSourcesUiState(
+            wikiGroups = emptyList(),
+            agentSources = emptyList(),
+            projectSources = listOf("依据 1 · context.md · 关键决策"),
+            projectEvidenceIds = listOf("evidence-1"),
+            projectTokens = listOf("⟦P1⟧"),
+        )
+        composeRule.setContent {
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = 1.3f)) {
+                MaterialTheme {
+                    Box(modifier = Modifier.width(320.dp)) {
+                        MessageSourcesPart(
+                            state = state,
+                            onOpenWikiCitation = {},
+                            onOpenProjectSource = opened::add,
+                        )
+                    }
+                }
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("打开项目来源 ⟦P1⟧")
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.runOnIdle { assertEquals(listOf("evidence-1"), opened) }
+    }
+
     private fun citation(id: String, ordinal: Int, sourceTitle: String) = MessageWikiCitation(
         id = id,
         messageId = "message-1",

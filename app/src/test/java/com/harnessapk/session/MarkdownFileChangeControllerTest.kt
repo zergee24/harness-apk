@@ -58,16 +58,16 @@ class MarkdownFileChangeControllerTest {
     }
 
     @Test
-    fun markReadyFailsEmptyPlanWithoutWritingRawContent() {
-        val failed = controller.markReady(
+    fun markReadyTreatsEmptyPlanAsNormalNoChanges() {
+        val noChanges = controller.markReady(
             state = controller.createPlanningDraft("conversation", "project", "user-1"),
             plan = MarkdownUpdatePlan(proposals = emptyList()),
             snapshots = emptyList(),
         )
 
-        assertEquals(MarkdownFileChangeStatus.FAILED, failed.draft.status)
-        assertEquals("没有生成可审核的 Markdown 更新", failed.draft.summary)
-        assertTrue(failed.items.isEmpty())
+        assertEquals(MarkdownFileChangeStatus.NO_CHANGES, noChanges.draft.status)
+        assertEquals("没有需要沉淀的稳定内容", noChanges.draft.summary)
+        assertTrue(noChanges.items.isEmpty())
     }
 
     @Test

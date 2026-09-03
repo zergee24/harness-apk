@@ -203,7 +203,7 @@ val appVersionCode = providers.gradleProperty("versionCodeOverride")
     .orElse(2000000)
     .get()
 val appVersionName = providers.gradleProperty("versionNameOverride")
-    .orElse("0.2.5")
+    .orElse("0.5.0")
     .get()
 
 android {
@@ -340,6 +340,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("androidx.room:room-runtime:2.8.4")
     implementation("androidx.room:room-ktx:2.8.4")
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
     ksp("androidx.room:room-compiler:2.8.4")
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

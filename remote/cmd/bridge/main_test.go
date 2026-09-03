@@ -1,24 +1,1959 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	appserverrpc "github.com/harnessapk/remote/internal/appserver"
+	"github.com/harnessapk/remote/internal/backend"
+	"github.com/harnessapk/remote/internal/commandcache"
+	"github.com/harnessapk/remote/internal/completion"
+	"github.com/harnessapk/remote/internal/journal"
+	"github.com/harnessapk/remote/internal/protocol"
+	runstate "github.com/harnessapk/remote/internal/run"
+	bridgestate "github.com/harnessapk/remote/internal/state"
 )
 
+func TestDuplicateRunStartReturnsCachedResultWithoutCallingAppServer(t *testing.T) {
+	cache, err := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appServerCalls := 0
+	call := func() (string, json.RawMessage, error) {
+		appServerCalls++
+		return "event-result-1", json.RawMessage(`{"runId":"run-1"}`), nil
+	}
+	first, err := executeCachedCommand(cache, "command-1", "run.start", "payload-hash", call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := executeCachedCommand(cache, "command-1", "run.start", "payload-hash", call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appServerCalls != 1 || first.ResultEventID != "event-result-1" || second.ResultEventID != first.ResultEventID {
+		t.Fatalf("calls=%d first=%#v second=%#v", appServerCalls, first, second)
+	}
+}
+
+func TestHostStatusAdvertisesLegacyCapsAndPerBackendList(t *testing.T) {
+	codex := backend.NewFake("codex").SetCapabilities(backend.CodexCapabilities())
+	dsh := backend.NewFake("dsh").SetCapabilities([]string{"run.lifecycle.v1", "workspace.candidates.v1"})
+	b := &bridge{
+		backends:     map[string]backend.Backend{"codex": codex, "dsh": dsh},
+		backendOrder: []string{"codex", "dsh"},
+	}
+	var payload struct {
+		SchemaVersion int                    `json:"schemaVersion"`
+		Capabilities  []string               `json:"capabilities"`
+		Backends      []protocol.BackendInfo `json:"backends"`
+	}
+	if err := json.Unmarshal(b.hostStatusPayload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SchemaVersion != 1 {
+		t.Fatalf("schemaVersion=%d", payload.SchemaVersion)
+	}
+	// Legacy host-level capabilities stay the default backend's, so old
+	// clients keep their M2/M3 behavior.
+	if !reflect.DeepEqual(payload.Capabilities, backend.CodexCapabilities()) {
+		t.Fatalf("capabilities=%#v", payload.Capabilities)
+	}
+	if len(payload.Backends) != 2 || payload.Backends[0].ID != "codex" || payload.Backends[1].ID != "dsh" {
+		t.Fatalf("backends=%#v", payload.Backends)
+	}
+	if !reflect.DeepEqual(payload.Backends[1].Capabilities, []string{"run.lifecycle.v1", "workspace.candidates.v1"}) {
+		t.Fatalf("dsh caps=%#v", payload.Backends[1].Capabilities)
+	}
+}
+
+func TestHostStatusOmitsUnavailableBackends(t *testing.T) {
+	codex := backend.NewFake("codex").SetCapabilities(backend.CodexCapabilities())
+	b := &bridge{
+		backends:     map[string]backend.Backend{"codex": codex},
+		backendOrder: []string{"codex", "dsh"}, // dsh crashed
+	}
+	var payload protocol.HostStatusPayload
+	if err := json.Unmarshal(b.hostStatusPayload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Backends) != 1 || payload.Backends[0].ID != "codex" {
+		t.Fatalf("backends=%#v", payload.Backends)
+	}
+}
+
+func TestRuntimeStateSavePreservesPairingCreatedAfterBridgeStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	initial := bridgeState{
+		SchemaVersion: 2, RelayURL: "https://relay.example.com", HostID: "host-1", HostName: "Mac", HostToken: "token",
+		Pending: map[string]string{}, DeviceSecrets: map[string]string{"phone-old": protocol.EncodeSecret(bytes.Repeat([]byte{1}, 32))},
+		Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{},
+	}
+	if err := saveBridgeState(path, initial); err != nil {
+		t.Fatal(err)
+	}
+	runningState, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{state: runningState, path: path}
+	external, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external.Pending["ticket-new"] = protocol.EncodeSecret(bytes.Repeat([]byte{2}, 32))
+	if err := saveBridgeState(path, external); err != nil {
+		t.Fatal(err)
+	}
+
+	bridge.mu.Lock()
+	bridge.state.Sequences["phone-old"] = 3
+	err = bridge.persistStateLocked()
+	bridge.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	saved, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Pending["ticket-new"] == "" || saved.Sequences["phone-old"] != 3 {
+		t.Fatalf("pending=%v sequence=%d", saved.Pending["ticket-new"] != "", saved.Sequences["phone-old"])
+	}
+}
+
+func TestRunningBridgeClaimsPairingCreatedAfterStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	initial := bridgeState{
+		SchemaVersion: 2, RelayURL: "https://relay.example.com", HostID: "host-1", HostName: "Mac", HostToken: "token",
+		Pending: map[string]string{}, DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{},
+		PendingOutbound: map[string]map[string]string{},
+	}
+	if err := saveBridgeState(path, initial); err != nil {
+		t.Fatal(err)
+	}
+	runningState, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{state: runningState, path: path}
+	wantSecret := protocol.EncodeSecret(bytes.Repeat([]byte{7}, 32))
+	external, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external.Pending["ticket-new"] = wantSecret
+	if err := saveBridgeState(path, external); err != nil {
+		t.Fatal(err)
+	}
+
+	bridge.mu.Lock()
+	gotSecret, err := bridge.claimPairingSecretLocked("ticket-new", "phone-new")
+	bridge.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSecret != wantSecret {
+		t.Fatalf("secret mismatch")
+	}
+	saved, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.DeviceSecrets["phone-new"] != wantSecret || saved.Pending["ticket-new"] != "" {
+		t.Fatalf("device enrolled=%v pending removed=%v", saved.DeviceSecrets["phone-new"] == wantSecret, saved.Pending["ticket-new"] == "")
+	}
+}
+
+func TestPairingClaimWriteFailureLeavesRuntimeStateUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.json")
+	wantSecret := protocol.EncodeSecret(bytes.Repeat([]byte{9}, 32))
+	initial := bridgeState{
+		SchemaVersion: 2, RelayURL: "https://relay.example.com", HostID: "host-1", HostName: "Mac", HostToken: "token",
+		Pending: map[string]string{"ticket-new": wantSecret}, DeviceSecrets: map[string]string{},
+		Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{}, JournalKey: "journal-key",
+	}
+	if err := saveBridgeState(path, initial); err != nil {
+		t.Fatal(err)
+	}
+	runningState, err := loadBridgeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{
+		state: runningState,
+		path:  path,
+		updateState: func(_ string, update func(*bridgeState) error) error {
+			onDisk, loadErr := loadBridgeState(path)
+			if loadErr != nil {
+				return loadErr
+			}
+			if updateErr := update(&onDisk); updateErr != nil {
+				return updateErr
+			}
+			return errors.New("injected atomic write failure")
+		},
+	}
+
+	bridge.mu.Lock()
+	_, err = bridge.claimPairingSecretLocked("ticket-new", "phone-new")
+	bridge.mu.Unlock()
+	if err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if bridge.state.DeviceSecrets["phone-new"] != "" || bridge.state.Pending["ticket-new"] != wantSecret {
+		t.Fatalf(
+			"runtime mutated after failed persistence: device=%v pending=%v",
+			bridge.state.DeviceSecrets["phone-new"] != "",
+			bridge.state.Pending["ticket-new"] == wantSecret,
+		)
+	}
+}
+
+func TestDuplicateApprovalResponseCallsAppServerAndEmitsResultOnce(t *testing.T) {
+	cache, err := commandcache.Open(filepath.Join(t.TempDir(), "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := protocol.Command{
+		Type: "approval.respond", CommandID: "approval:1:decline", RequestID: "approval:1:decline",
+		RunID: "run-1", ApprovalID: "approval-1", ProcessEpoch: "epoch-1",
+		ServerRequestID: json.RawMessage(`7`), Decision: "decline",
+	}
+	respondCalls, emitCalls := 0, 0
+	execute := func() error {
+		return executeApprovalCommand(
+			context.Background(), cache, command,
+			func() error { return nil },
+			func() error { respondCalls++; return nil },
+			func(context.Context, string, string, string, json.RawMessage) (string, error) {
+				emitCalls++
+				return "event-result-1", nil
+			},
+		)
+	}
+	if err := execute(); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(); err != nil {
+		t.Fatal(err)
+	}
+	if respondCalls != 1 || emitCalls != 1 {
+		t.Fatalf("respond=%d emit=%d", respondCalls, emitCalls)
+	}
+}
+
+func TestApprovalLogicalPayloadRedactsSecretsAndClassifiesHighRisk(t *testing.T) {
+	payload := approvalLogicalPayload(backend.Message{BackendID: "codex",
+		ID: json.RawMessage(`7`), Method: "item/commandExecution/requestApproval",
+		Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","command":"sudo curl https://api.example.com?access_token=top-secret"}`),
+	}, "approval-1", "epoch-1")
+	if string(payload) == "" || bytes.Contains(payload, []byte("top-secret")) {
+		t.Fatalf("payload did not redact secret: %s", payload)
+	}
+	var decoded map[string]any
+	_ = json.Unmarshal(payload, &decoded)
+	if decoded["risk"] != "HIGH" || decoded["approvalId"] != "approval-1" {
+		t.Fatalf("payload=%s", payload)
+	}
+}
+
 func TestEventTargetsOnlyThreadOwner(t *testing.T) {
-	bridge := &bridge{threadOwners: map[string]string{"thread-a": "phone-a"}}
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{RunID: "run-a", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-a", TurnID: "turn-a"}); err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{routes: routes}
 	params := json.RawMessage(`{"threadId":"thread-a","turn":{"id":"turn-a"}}`)
 
-	if got := bridge.eventTargets(params); !reflect.DeepEqual(got, []string{"phone-a"}) {
+	if got := bridge.eventTargets("codex", params); !reflect.DeepEqual(got, []string{"phone-a"}) {
 		t.Fatalf("targets = %#v", got)
 	}
 }
 
 func TestUnownedEventIsNotBroadcast(t *testing.T) {
-	bridge := &bridge{threadOwners: map[string]string{"thread-a": "phone-a"}}
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{RunID: "run-a", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-a"}); err != nil {
+		t.Fatal(err)
+	}
+	bridge := &bridge{routes: routes}
 
-	if got := bridge.eventTargets(json.RawMessage(`{"threadId":"thread-b"}`)); len(got) != 0 {
+	if got := bridge.eventTargets("codex", json.RawMessage(`{"threadId":"thread-b"}`)); len(got) != 0 {
 		t.Fatalf("targets = %#v", got)
+	}
+}
+
+func TestSnapshotStatusMapsAuthoritativeTurnState(t *testing.T) {
+	completed, line := snapshotStatus(json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"completed"}}]}}`), "turn-1")
+	if completed != "COMPLETED" || line != "任务已完成" {
+		t.Fatalf("completed=%q line=%q", completed, line)
+	}
+	running, _ := snapshotStatus(json.RawMessage(`{"thread":{"turns":[{"id":"turn-2","status":{"type":"inProgress"}}]}}`), "turn-2")
+	if running != "RUNNING" {
+		t.Fatalf("running=%q", running)
+	}
+}
+
+func TestSnapshotStatusKeepsUnknownOrMissingTurnReconciling(t *testing.T) {
+	for name, raw := range map[string]json.RawMessage{
+		"unknown":        json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"futureStatus"}}]}}`),
+		"missing":        json.RawMessage(`{"thread":{"turns":[{"id":"other-turn","status":{"type":"completed"}}]}}`),
+		"empty identity": json.RawMessage(`{"thread":{"turns":[{"id":"latest-turn","status":{"type":"inProgress"}}]}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			turnID := "turn-1"
+			if name == "empty identity" {
+				turnID = ""
+			}
+			status, _ := snapshotStatus(raw, turnID)
+			if status != "RECONCILING" {
+				t.Fatalf("status=%q", status)
+			}
+		})
+	}
+}
+
+func TestTimelineLogicalPayloadTranslatesUnknownItemAndRedactsSecrets(t *testing.T) {
+	eventType, payload, ok := timelineLogicalPayload(
+		"item/completed",
+		json.RawMessage(`{"threadId":"thread-1","item":{"id":"item-1","type":"futureTool","token":"top-secret","status":"completed"}}`),
+	)
+	if !ok || eventType != "run.timeline" || !bytes.Contains(payload, []byte(`"presentationKind":"STATUS"`)) {
+		t.Fatalf("type=%q payload=%s ok=%v", eventType, payload, ok)
+	}
+	if bytes.Contains(payload, []byte("top-secret")) {
+		t.Fatalf("timeline payload leaked secret: %s", payload)
+	}
+}
+
+func TestTurnSnapshotExtractsStructuredCompletionAndLastAgentMessage(t *testing.T) {
+	turn, ok := turnSnapshot(json.RawMessage(`{"thread":{"turns":[{
+		"id":"turn-1","status":{"type":"completed"},
+		"items":[{"type":"agentMessage","text":"真实摘要"}],
+		"structuredOutput":{"summary":"结构化摘要","unresolved":[]}
+	}]}}`), "turn-1")
+	if !ok || turn.LastAgentMessage != "真实摘要" || !bytes.Contains(turn.StructuredOutput, []byte("结构化摘要")) {
+		t.Fatalf("turn=%#v ok=%v", turn, ok)
+	}
+}
+
+func TestMobileThreadReadResultKeepsLatestConversationAndBoundsLargeToolOutput(t *testing.T) {
+	hugeOutput := strings.Repeat("tool-output-", 180_000)
+	raw, err := json.Marshal(map[string]any{
+		"thread": map[string]any{
+			"id": "thread-1", "cwd": "/workspace/harness-apk",
+			"turns": []any{
+				map[string]any{"id": "turn-old", "status": map[string]any{"type": "completed"}, "items": []any{
+					map[string]any{"id": "tool-old", "type": "commandExecution", "command": "run tests", "aggregatedOutput": hugeOutput, "status": "completed"},
+				}},
+				map[string]any{"id": "turn-latest", "status": map[string]any{"type": "completed"}, "items": []any{
+					map[string]any{"id": "user-latest", "type": "userMessage", "content": []any{map[string]any{"type": "text", "text": "请检查渲染"}}},
+					map[string]any{"id": "agent-latest", "type": "agentMessage", "text": "# READY\n\n**渲染正常**", "status": "completed"},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	projected, err := mobileThreadReadResult(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projected) > 640<<10 {
+		t.Fatalf("mobile thread response is still too large: %d bytes", len(projected))
+	}
+	if bytes.Contains(projected, []byte(hugeOutput[:1024])) {
+		t.Fatal("unbounded tool output remained in mobile history")
+	}
+	if !bytes.Contains(projected, []byte("请检查渲染")) || !bytes.Contains(projected, []byte("渲染正常")) {
+		t.Fatalf("latest conversation was lost: %s", projected)
+	}
+	var decoded struct {
+		Thread struct {
+			Turns []struct {
+				Items []map[string]any `json:"items"`
+			} `json:"turns"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(projected, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Thread.Turns) == 0 || len(decoded.Thread.Turns[len(decoded.Thread.Turns)-1].Items) != 2 {
+		t.Fatalf("projected shape is not compatible with thread/read: %s", projected)
+	}
+}
+
+func TestMobileThreadSummaryResultUsesLatestUserMessageWithoutReadingFullHistory(t *testing.T) {
+	raw := json.RawMessage(`{"data":[
+		{"id":"turn-latest","items":[
+			{"id":"user-latest","type":"userMessage","content":[{"type":"text","text":"这是最新一句用户的话"}]},
+			{"id":"agent-latest","type":"agentMessage","text":"最新回复"}
+		],"itemsView":"summary"},
+		{"id":"turn-older","items":[
+			{"id":"user-older","type":"userMessage","text":"这是最早一句用户的话"}
+		],"itemsView":"summary"}
+	]}`)
+
+	projected, err := mobileThreadSummaryResult("thread-1", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary struct {
+		ThreadID          string `json:"threadId"`
+		LatestUserMessage string `json:"latestUserMessage"`
+	}
+	if err := json.Unmarshal(projected, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.ThreadID != "thread-1" || summary.LatestUserMessage != "这是最新一句用户的话" {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestMobileThreadSummaryResultReportsUnfinishedLatestTurnAsRunning(t *testing.T) {
+	raw := json.RawMessage(`{"data":[
+		{"id":"turn-active","status":"interrupted","startedAt":1234,"completedAt":null,"items":[
+			{"id":"user-active","type":"userMessage","text":"请继续执行"}
+		],"itemsView":"summary"},
+		{"id":"turn-completed","status":"completed","startedAt":1000,"completedAt":1100,"items":[]}
+	]}`)
+
+	projected, err := mobileThreadSummaryResult("thread-1", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary struct {
+		Execution struct {
+			State       string `json:"state"`
+			TurnID      string `json:"turnId"`
+			StartedAt   int64  `json:"startedAt"`
+			CompletedAt *int64 `json:"completedAt"`
+		} `json:"execution"`
+	}
+	if err := json.Unmarshal(projected, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Execution.State != "RUNNING" || summary.Execution.TurnID != "turn-active" ||
+		summary.Execution.StartedAt != 1234 || summary.Execution.CompletedAt != nil {
+		t.Fatalf("execution=%#v", summary.Execution)
+	}
+}
+
+func TestMobileThreadSummaryResultMapsPersistedTerminalTurnStates(t *testing.T) {
+	for _, test := range []struct {
+		status string
+		want   string
+	}{
+		{status: "completed", want: "COMPLETED"},
+		{status: "failed", want: "FAILED"},
+		{status: "interrupted", want: "INTERRUPTED"},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			projected, err := mobileThreadSummaryResult("thread-1", json.RawMessage(fmt.Sprintf(
+				`{"data":[{"id":"turn-1","status":%q,"startedAt":1000,"completedAt":1100,"items":[]}]}`,
+				test.status,
+			)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var summary struct {
+				Execution struct {
+					State string `json:"state"`
+				} `json:"execution"`
+			}
+			if err := json.Unmarshal(projected, &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.Execution.State != test.want {
+				t.Fatalf("state=%q want=%q", summary.Execution.State, test.want)
+			}
+		})
+	}
+}
+
+func TestThreadReadUsesPaginatedSummaryHistoryInsteadOfFullRollout(t *testing.T) {
+	reader, serverWriter := io.Pipe()
+	requests := make(chan struct {
+		Method string
+		Params map[string]any
+	}, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	client := appserverrpc.NewClient(reader, writerFunc(func(requestRaw []byte) (int, error) {
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params map[string]any  `json:"params"`
+		}
+		if err := json.Unmarshal(requestRaw, &request); err != nil {
+			return 0, err
+		}
+		requests <- struct {
+			Method string
+			Params map[string]any
+		}{Method: request.Method, Params: request.Params}
+		result := `{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}`
+		if request.Method == "thread/turns/list" {
+			result = `{"data":[{"id":"turn-new","items":[]}],"nextCursor":"older-page"}`
+		}
+		_, err := serverWriter.Write([]byte(fmt.Sprintf(`{"id":%s,"result":%s}`+"\n", request.ID, result)))
+		return len(requestRaw), err
+	}), "epoch-page")
+	client.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		_ = serverWriter.Close()
+		_ = reader.Close()
+	})
+	initialState := bridgeState{
+		DeviceSecrets:   map[string]string{"device-1": "invalid-on-purpose"},
+		Sequences:       map[string]uint64{},
+		PendingOutbound: map[string]map[string]string{},
+	}
+	diskState := cloneBridgeState(initialState)
+	responsePersisted := make(chan struct{}, 1)
+	b := &bridge{
+		backends: map[string]backend.Backend{"codex": newTestBackend(client)}, backendOrder: []string{"codex"}, state: initialState,
+		updateState: func(_ string, update func(*bridgeState) error) error {
+			if err := update(&diskState); err != nil {
+				return err
+			}
+			select {
+			case responsePersisted <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+
+	if err := b.executeCommand(ctx, "device-1", protocol.Command{
+		Type: "thread.read", RequestID: "request-1", ThreadID: "thread-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := <-requests
+	if first.Method != "thread/read" || first.Params["includeTurns"] != false {
+		t.Fatalf("first request=%s params=%#v; mobile history must read metadata only", first.Method, first.Params)
+	}
+	second := <-requests
+	if second.Method != "thread/turns/list" || second.Params["itemsView"] != "summary" || second.Params["sortDirection"] != "desc" {
+		t.Fatalf("second request=%s params=%#v; mobile history must use descending summary pages", second.Method, second.Params)
+	}
+	select {
+	case <-responsePersisted:
+	case <-time.After(time.Second):
+		t.Fatal("thread.read did not finish persisting its async response state")
+	}
+}
+
+func TestThreadSummaryReadsOnlyRecentSummaryTurns(t *testing.T) {
+	reader, serverWriter := io.Pipe()
+	requests := make(chan struct {
+		Method string
+		Params map[string]any
+	}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	client := appserverrpc.NewClient(reader, writerFunc(func(requestRaw []byte) (int, error) {
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params map[string]any  `json:"params"`
+		}
+		if err := json.Unmarshal(requestRaw, &request); err != nil {
+			return 0, err
+		}
+		requests <- struct {
+			Method string
+			Params map[string]any
+		}{Method: request.Method, Params: request.Params}
+		result := `{"data":[{"id":"turn-new","items":[{"id":"user-new","type":"userMessage","text":"最新问题"}],"itemsView":"summary"}]}`
+		_, err := serverWriter.Write([]byte(fmt.Sprintf(`{"id":%s,"result":%s}`+"\n", request.ID, result)))
+		return len(requestRaw), err
+	}), "epoch-summary")
+	client.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		_ = serverWriter.Close()
+		_ = reader.Close()
+	})
+	initialState := bridgeState{
+		DeviceSecrets:   map[string]string{"device-1": "invalid-on-purpose"},
+		Sequences:       map[string]uint64{},
+		PendingOutbound: map[string]map[string]string{},
+	}
+	diskState := cloneBridgeState(initialState)
+	responsePersisted := make(chan struct{}, 1)
+	b := &bridge{
+		backends: map[string]backend.Backend{"codex": newTestBackend(client)}, backendOrder: []string{"codex"}, state: initialState,
+		updateState: func(_ string, update func(*bridgeState) error) error {
+			if err := update(&diskState); err != nil {
+				return err
+			}
+			select {
+			case responsePersisted <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+
+	if err := b.executeCommand(ctx, "device-1", protocol.Command{
+		Type: "thread.summary", RequestID: "summary-1", ThreadID: "thread-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case request := <-requests:
+		if request.Method != "thread/turns/list" || request.Params["threadId"] != "thread-1" ||
+			request.Params["itemsView"] != "summary" || request.Params["sortDirection"] != "desc" ||
+			request.Params["limit"] != float64(3) {
+			t.Fatalf("request=%s params=%#v", request.Method, request.Params)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("thread.summary did not request a bounded summary page")
+	}
+	select {
+	case <-responsePersisted:
+	case <-time.After(time.Second):
+		t.Fatal("thread.summary did not finish persisting its async response state")
+	}
+}
+
+func TestMobileThreadHistoryResultRestoresChronologicalOrderAndCursor(t *testing.T) {
+	result, err := mobileThreadHistoryResult(
+		json.RawMessage(`{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}`),
+		json.RawMessage(`{"data":[{"id":"turn-new","items":[{"id":"agent-new","type":"agentMessage","text":"new"}]},{"id":"turn-old","items":[{"id":"user-old","type":"userMessage","text":"old"}]}],"nextCursor":"cursor-older"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Thread struct {
+			Turns []struct {
+				ID string `json:"id"`
+			} `json:"turns"`
+		} `json:"thread"`
+		MobileHistory struct {
+			OlderCursor string `json:"olderCursor"`
+			HasOlder    bool   `json:"hasOlder"`
+		} `json:"mobileHistory"`
+	}
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{decoded.Thread.Turns[0].ID, decoded.Thread.Turns[1].ID}; !reflect.DeepEqual(got, []string{"turn-old", "turn-new"}) {
+		t.Fatalf("turn order=%#v", got)
+	}
+	if decoded.MobileHistory.OlderCursor != "cursor-older" || !decoded.MobileHistory.HasOlder {
+		t.Fatalf("mobile history=%#v", decoded.MobileHistory)
+	}
+}
+
+func TestMobileThreadHistoryResultBoundsSummaryTextAndDropsUnapprovedFields(t *testing.T) {
+	hugeText := strings.Repeat("private-summary-", 100_000)
+	page, err := json.Marshal(map[string]any{
+		"data": []any{
+			map[string]any{
+				"id": "turn-new",
+				"items": []any{
+					map[string]any{
+						"id": "agent-new", "type": "agentMessage", "text": hugeText,
+						"privatePayload": hugeText, "status": "completed",
+					},
+				},
+			},
+		},
+		"nextCursor": "cursor-older",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := mobileThreadHistoryResult(
+		json.RawMessage(`{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}`),
+		page,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) > maxMobileThreadResultBytes || bytes.Contains(result, []byte("privatePayload")) {
+		t.Fatalf("paginated mobile history was not projected and bounded: %d bytes", len(result))
+	}
+	if !bytes.Contains(result, []byte("内容过长，已截断")) || !bytes.Contains(result, []byte("cursor-older")) {
+		t.Fatalf("paginated history lost truncation marker or cursor: %s", result)
+	}
+}
+
+func TestMobileThreadHistoryResultKeepsEveryTurnCoveredByReturnedCursor(t *testing.T) {
+	hugeText := strings.Repeat("summary-near-limit-", 8_000)
+	turns := make([]any, 0, mobileThreadHistoryPageSize)
+	for index := 0; index < mobileThreadHistoryPageSize; index++ {
+		turns = append(turns, map[string]any{
+			"id": fmt.Sprintf("turn-%d", index),
+			"items": []any{
+				map[string]any{"id": fmt.Sprintf("user-%d", index), "type": "userMessage", "text": hugeText},
+				map[string]any{"id": fmt.Sprintf("agent-%d", index), "type": "agentMessage", "text": hugeText},
+			},
+		})
+	}
+	page, err := json.Marshal(map[string]any{"data": turns, "nextCursor": "next-page"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := mobileThreadHistoryResult(
+		json.RawMessage(`{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}`),
+		page,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Thread struct {
+			Turns []struct {
+				ID string `json:"id"`
+			} `json:"turns"`
+		} `json:"thread"`
+		MobileHistory struct {
+			OlderCursor string `json:"olderCursor"`
+		} `json:"mobileHistory"`
+	}
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(result) > maxMobileThreadResultBytes || len(decoded.Thread.Turns) != mobileThreadHistoryPageSize {
+		t.Fatalf("cursor skipped projected-out turns: bytes=%d turns=%d", len(result), len(decoded.Thread.Turns))
+	}
+	if decoded.MobileHistory.OlderCursor != "next-page" {
+		t.Fatalf("older cursor=%q", decoded.MobileHistory.OlderCursor)
+	}
+}
+
+func TestMobileCodexEventEnvelopeWhitelistsTimelineAndBoundsItemPayload(t *testing.T) {
+	hugeOutput := strings.Repeat("private-tool-output-", 100_000)
+	params, err := json.Marshal(map[string]any{
+		"threadId": "thread-1", "turnId": "turn-1",
+		"item": map[string]any{
+			"id": "item-1", "type": "commandExecution", "command": "git status",
+			"aggregatedOutput": hugeOutput, "status": "completed", "exitCode": 0,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, ok := mobileCodexEventEnvelope(backend.Message{BackendID: "codex",
+		Method: "item/completed", Params: params,
+	}, "epoch-1")
+	if !ok {
+		t.Fatal("timeline event was dropped")
+	}
+	if len(envelope) > 96<<10 || bytes.Contains(envelope, []byte("private-tool-output")) {
+		t.Fatalf("mobile event remained unbounded: %d bytes", len(envelope))
+	}
+	if !bytes.Contains(envelope, []byte("git status")) || !bytes.Contains(envelope, []byte(`"exitCode":0`)) {
+		t.Fatalf("command summary was lost: %s", envelope)
+	}
+	if _, ok := mobileCodexEventEnvelope(backend.Message{BackendID: "codex",
+		Method: "account/updated", Params: json.RawMessage(`{"profile":"large internal payload"}`),
+	}, "epoch-1"); ok {
+		t.Fatal("unrelated app-server event was forwarded to the phone")
+	}
+}
+
+func TestRouteForParamsUsesThreadAndTurnAcrossMultipleProjectBindings(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := runstate.Route{
+		RunID: "run-a", BindingID: "project-a", HostID: "host-a", DeviceID: "phone-a",
+		ThreadID: "thread-shared", TurnID: "turn-a",
+	}
+	second := runstate.Route{
+		RunID: "run-b", BindingID: "project-b", HostID: "host-a", DeviceID: "phone-b",
+		ThreadID: "thread-shared", TurnID: "turn-b",
+	}
+	if err := routes.Put(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(second); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes}
+
+	completionRoute, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared","turn":{"id":"turn-b"}}`))
+	if !ok || completionRoute.RunID != "run-b" || completionRoute.BindingID != "project-b" {
+		t.Fatalf("completion route = %#v ok=%v", completionRoute, ok)
+	}
+	approvalRoute, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared","turnId":"turn-a","itemId":"approval-a"}`))
+	if !ok || approvalRoute.RunID != "run-a" || approvalRoute.BindingID != "project-a" {
+		t.Fatalf("approval route = %#v ok=%v", approvalRoute, ok)
+	}
+}
+
+func TestRouteForParamsWithoutTurnRequiresOneActiveRoute(t *testing.T) {
+	dir := t.TempDir()
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []runstate.Route{
+		{RunID: "run-a", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-shared", TurnID: "turn-a"},
+		{RunID: "run-b", HostID: "host-a", DeviceID: "phone-b", ThreadID: "thread-shared", TurnID: "turn-b"},
+	} {
+		if err := routes.Put(route); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := &bridge{routes: routes, terminals: terminals}
+	if route, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared"}`)); ok {
+		t.Fatalf("ambiguous thread event routed to %#v", route)
+	}
+	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{
+		RunID: "run-a", Status: "COMPLETED", CompletionJSON: json.RawMessage(`{"schemaVersion":2}`), CompletedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	route, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared"}`))
+	if !ok || route.RunID != "run-b" {
+		t.Fatalf("unique active route = %#v ok=%v", route, ok)
+	}
+}
+
+func TestRouteForParamsWithUnknownTurnDoesNotFallBackToLegacyEmptyTurnRoute(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "legacy-run", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-shared",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes}
+	if route, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-shared","turnId":"unknown-turn"}`)); ok {
+		t.Fatalf("unknown exact turn fell back to legacy route: %#v", route)
+	}
+}
+
+func TestLegacyTurnStartBackfillsRealTurnIDBeforeRouting(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.start", ThreadID: "thread-1", BindingID: "project-1"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.backfillTurnRoute(command, json.RawMessage(`{"turn":{"id":"turn-real"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	route, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-1","turnId":"turn-real"}`))
+	if !ok || route.RunID != "legacy:thread-1" || route.DeviceID != "phone-1" {
+		t.Fatalf("backfilled route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestLegacyTurnStartResumesPersistedThreadBeforeSafeRetry(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests []appServerTestRequest
+	app := appProcessScripted(t, func(request appServerTestRequest) (json.RawMessage, json.RawMessage) {
+		requests = append(requests, request)
+		switch len(requests) {
+		case 1:
+			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
+		case 2:
+			return json.RawMessage(`{"thread":{"id":"thread-1"}}`), nil
+		case 3:
+			return json.RawMessage(`{"thread":{"id":"thread-1"}}`), nil
+		default:
+			return json.RawMessage(`{"turn":{"id":"turn-real"}}`), nil
+		}
+	})
+	b := &bridge{
+		backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"}, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	command := protocol.Command{
+		Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "继续任务",
+	}
+
+	result, outcome, err := b.executeTurnStartOnce(
+		context.Background(), "phone-1", command, b.backendFor("codex"), legacyTurnStartParams(command),
+	)
+
+	if err != nil || outcome != turnRPCSucceeded || string(result) != `{"turn":{"id":"turn-real"}}` {
+		t.Fatalf("result=%s outcome=%q err=%v", result, outcome, err)
+	}
+	if got := []string{requests[0].Method, requests[1].Method, requests[2].Method, requests[3].Method}; !reflect.DeepEqual(got, []string{"turn/start", "thread/read", "thread/resume", "turn/start"}) {
+		t.Fatalf("methods=%v", got)
+	}
+	if requests[1].Params["threadId"] != "thread-1" || requests[1].Params["includeTurns"] != false {
+		t.Fatalf("metadata params=%#v", requests[1].Params)
+	}
+	if requests[2].Params["threadId"] != "thread-1" || requests[2].Params["excludeTurns"] != true {
+		t.Fatalf("resume params=%#v", requests[2].Params)
+	}
+	for _, index := range []int{0, 3} {
+		if requests[index].Params["clientUserMessageId"] != "request-1" {
+			t.Fatalf("turn params[%d]=%#v", index, requests[index].Params)
+		}
+	}
+	if route, ok := routes.ByThreadTurn("thread-1", "turn-real"); !ok || route.DeviceID != "phone-1" {
+		t.Fatalf("route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestLegacyTurnStartDoesNotAttemptAnUnboundedResumeWhenMetadataReadFails(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var methods []string
+	app := appProcessScripted(t, func(request appServerTestRequest) (json.RawMessage, json.RawMessage) {
+		methods = append(methods, request.Method)
+		switch len(methods) {
+		case 1:
+			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
+		case 2:
+			return nil, json.RawMessage(`{"code":-32603,"message":"metadata unavailable"}`)
+		default:
+			t.Fatalf("unexpected unbounded resume request: %#v", request)
+			return nil, nil
+		}
+	})
+	b := &bridge{backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"}, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{
+		Type: "turn.start", RequestID: "request-metadata-failure", ThreadID: "thread-1", Text: "继续任务",
+	}
+
+	_, outcome, err := b.executeTurnStartOnce(
+		context.Background(), "phone-1", command, b.backendFor("codex"), legacyTurnStartParams(command),
+	)
+
+	if err == nil || outcome != turnRPCFailed || !strings.Contains(err.Error(), "metadata unavailable") {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if !reflect.DeepEqual(methods, []string{"turn/start", "thread/read"}) {
+		t.Fatalf("methods=%v", methods)
+	}
+}
+
+func TestLegacyTurnStartContinuesAnOversizedPersistedThreadWithoutResume(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolloutPath := filepath.Join(dir, "oversized-thread.jsonl")
+	file, err := os.Create(rolloutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(300 << 20); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var requests []appServerTestRequest
+	app := appProcessScripted(t, func(request appServerTestRequest) (json.RawMessage, json.RawMessage) {
+		requests = append(requests, request)
+		switch len(requests) {
+		case 1:
+			return nil, json.RawMessage(`{"code":-32600,"message":"thread not found: thread-1"}`)
+		case 2:
+			return json.RawMessage(fmt.Sprintf(`{"thread":{"id":"thread-1","name":"review","cwd":"/workspace/project","path":%q}}`, rolloutPath)), nil
+		case 3:
+			return json.RawMessage(`{"data":[{"id":"turn-new","items":[{"id":"user-new","type":"userMessage","text":"最新用户要求"},{"id":"agent-new","type":"agentMessage","text":"最新处理结论"},{"id":"tool-new","type":"commandExecution","command":"printenv VERY_SECRET"}]},{"id":"turn-old","items":[{"id":"user-old","type":"userMessage","text":"较早用户背景"},{"id":"agent-old","type":"agentMessage","text":"较早处理结论"}]}]}`), nil
+		case 4:
+			return json.RawMessage(`{"thread":{"id":"thread-continuation"},"cwd":"/workspace/project"}`), nil
+		case 5:
+			return json.RawMessage(`{"turn":{"id":"turn-real"}}`), nil
+		default:
+			t.Fatalf("unexpected app-server request: %#v", request)
+			return nil, nil
+		}
+	})
+	b := &bridge{
+		backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"}, commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	b.updateState = func(_ string, update func(*bridgeState) error) error {
+		persisted := cloneBridgeState(b.state)
+		return update(&persisted)
+	}
+	command := protocol.Command{
+		Type: "turn.start", RequestID: "request-oversized", ThreadID: "thread-1", Text: "继续任务",
+	}
+
+	result, outcome, err := b.executeTurnStartOnce(
+		context.Background(), "phone-1", command, b.backendFor("codex"), legacyTurnStartParams(command),
+	)
+
+	if err != nil || outcome != turnRPCSucceeded {
+		t.Fatalf("result=%s outcome=%q err=%v", result, outcome, err)
+	}
+	methods := make([]string, len(requests))
+	for index := range requests {
+		methods[index] = requests[index].Method
+	}
+	if !reflect.DeepEqual(methods, []string{"turn/start", "thread/read", "thread/turns/list", "thread/start", "turn/start"}) {
+		t.Fatalf("methods=%v", methods)
+	}
+	if requests[2].Params["threadId"] != "thread-1" || requests[2].Params["limit"] != float64(8) && requests[2].Params["limit"] != 8 || requests[2].Params["itemsView"] != "summary" {
+		t.Fatalf("lazy history params=%#v", requests[2].Params)
+	}
+	if requests[3].Params["cwd"] != "/workspace/project" {
+		t.Fatalf("continuation thread params=%#v", requests[3].Params)
+	}
+	if requests[4].Params["threadId"] != "thread-continuation" || requests[4].Params["clientUserMessageId"] != "request-oversized" {
+		t.Fatalf("continuation turn params=%#v", requests[4].Params)
+	}
+	input := requests[4].Params["input"].([]any)
+	if len(input) != 1 || input[0].(map[string]any)["text"] != "继续任务" {
+		t.Fatalf("continuation input=%#v", input)
+	}
+	additional := requests[4].Params["additionalContext"].(map[string]any)
+	history := additional["harness.lazyContinuation.history"].(map[string]any)
+	if history["kind"] != "untrusted" {
+		t.Fatalf("history context=%#v", history)
+	}
+	handoff, _ := history["value"].(string)
+	for _, expected := range []string{"较早用户背景", "较早处理结论", "最新用户要求", "最新处理结论"} {
+		if !strings.Contains(handoff, expected) {
+			t.Fatalf("handoff missing %q: %q", expected, handoff)
+		}
+	}
+	if strings.Contains(handoff, "printenv VERY_SECRET") || len([]byte(handoff)) > maxMobilePaginatedTextBytes {
+		t.Fatalf("handoff leaked tool output or exceeded bound: %q", handoff)
+	}
+	var response struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+		Continuation struct {
+			ThreadID              string `json:"threadId"`
+			ContinuedFromThreadID string `json:"continuedFromThreadId"`
+			CWD                   string `json:"cwd"`
+		} `json:"continuation"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Turn.ID != "turn-real" || response.Continuation.ThreadID != "thread-continuation" || response.Continuation.ContinuedFromThreadID != "thread-1" || response.Continuation.CWD != "/workspace/project" {
+		t.Fatalf("continuation result=%s", result)
+	}
+	if _, ok := routes.ByThreadTurn("thread-1", "turn-real"); ok {
+		t.Fatal("continuation turn must not be routed under the oversized source thread")
+	}
+	if route, ok := routes.ByThreadTurn("thread-continuation", "turn-real"); !ok || route.DeviceID != "phone-1" {
+		t.Fatalf("continuation route=%#v ok=%v", route, ok)
+	}
+	record := b.state.ThreadContinuations["thread-1"]
+	if record.RootThreadID != "thread-1" || record.Name != "review" || !reflect.DeepEqual(record.ThreadIDs, []string{"thread-1", "thread-continuation"}) {
+		t.Fatalf("persisted continuation=%#v", record)
+	}
+	replayed, replayedOutcome, replayedErr := b.executeTurnStartOnce(
+		context.Background(), "phone-1", command, b.backendFor("codex"), legacyTurnStartParams(command),
+	)
+	if replayedErr != nil || replayedOutcome != turnRPCSucceeded || string(replayed) != string(result) || len(requests) != 5 {
+		t.Fatalf("replayed=%s outcome=%q err=%v appCalls=%d", replayed, replayedOutcome, replayedErr, len(requests))
+	}
+}
+
+func TestMobileThreadListCollapsesContinuationUnderOriginalTitle(t *testing.T) {
+	result, err := mobileThreadListResult(
+		json.RawMessage(`{"data":[
+			{"id":"thread-current","preview":"Reply exactly OK","cwd":"/workspace/project","updatedAt":20},
+			{"id":"thread-root","name":"review","preview":"hello","cwd":"/workspace/project","updatedAt":10},
+			{"id":"thread-other","name":"other","preview":"keep me","cwd":"/workspace/other","updatedAt":5}
+		]}`),
+		map[string]bridgestate.ThreadContinuation{
+			"thread-root": {
+				RootThreadID: "thread-root",
+				ThreadIDs:    []string{"thread-root", "thread-current"},
+				Name:         "review",
+				CWD:          "/workspace/project",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Data) != 2 || response.Data[0]["id"] != "thread-current" || response.Data[0]["name"] != "review" || response.Data[0]["continuedFromThreadId"] != "thread-root" || response.Data[1]["id"] != "thread-other" {
+		t.Fatalf("collapsed list=%s", result)
+	}
+}
+
+func TestContinuationHistoryCursorLazilyWalksIntoOriginalThread(t *testing.T) {
+	record := bridgestate.ThreadContinuation{
+		RootThreadID: "thread-root",
+		ThreadIDs:    []string{"thread-root", "thread-current"},
+	}
+	older := continuationOlderCursor(record, "thread-current", nil)
+	if older == nil || *older == "" {
+		t.Fatal("continuation did not expose original history")
+	}
+	target, cursor, err := continuationHistoryRequest("thread-current", *older, &record)
+	if err != nil || target != "thread-root" || cursor != "" {
+		t.Fatalf("history request target=%q cursor=%q err=%v", target, cursor, err)
+	}
+	next := "root-page-2"
+	older = continuationOlderCursor(record, "thread-root", &next)
+	target, cursor, err = continuationHistoryRequest("thread-current", *older, &record)
+	if err != nil || target != "thread-root" || cursor != next {
+		t.Fatalf("paged history target=%q cursor=%q err=%v", target, cursor, err)
+	}
+}
+
+func TestLegacyTurnSteerClaimsExpectedTurnID(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.steer", ThreadID: "thread-1", ExpectedTurnID: "turn-existing"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if route, ok := routes.ByThreadTurn("thread-1", "turn-existing"); !ok || route.RunID != "legacy:thread-1" {
+		t.Fatalf("steer route=%#v ok=%v", route, ok)
+	}
+}
+
+func TestLegacyTurnStartBackfillFailureIsPersistentUnknownAndNotReexecuted(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "commands.json")
+	cache, err := commandcache.Open(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appCalls := 0
+	b := &bridge{
+		backends: map[string]backend.Backend{"codex": appProcessReturningCounted(t, json.RawMessage(`{"turn":{}}`), &appCalls)}, backendOrder: []string{"codex"},
+		commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	command := protocol.Command{Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
+	params := map[string]any{"threadId": command.ThreadID}
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, b.backendFor("codex"), params); err == nil || outcome != turnRPCUnknown {
+		t.Fatalf("first outcome=%q err=%v", outcome, err)
+	}
+
+	reopened, err := commandcache.Open(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.commandCache = reopened
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, b.backendFor("codex"), params); err == nil || outcome != turnRPCUnknown {
+		t.Fatalf("retry outcome=%q err=%v", outcome, err)
+	}
+	if appCalls != 1 {
+		t.Fatalf("turn/start app-server calls=%d", appCalls)
+	}
+	cacheID, _ := legacyTurnStartCacheIdentity(command)
+	record, ok := reopened.Lookup(cacheID)
+	if !ok || record.Status != commandcache.StatusUnknown || len(record.ResultJSON) == 0 {
+		t.Fatalf("persistent unknown record=%#v ok=%v", record, ok)
+	}
+}
+
+func TestLegacyTurnStartRouteSaveFailureDoesNotReexecuteAppServer(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := commandcache.Open(filepath.Join(dir, "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeStateDir := filepath.Join(dir, "route-state")
+	routes, err := runstate.OpenRoutes(filepath.Join(routeStateDir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appCalls := 0
+	injectRouteSaveFailure := func() {
+		if err := os.RemoveAll(routeStateDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(routeStateDir, []byte("blocks route persistence"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := &bridge{
+		backends: map[string]backend.Backend{"codex": appProcessReturningHooked(t, json.RawMessage(`{"turn":{"id":"turn-real"}}`), &appCalls, injectRouteSaveFailure)}, backendOrder: []string{"codex"},
+		commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"},
+	}
+	command := protocol.Command{Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
+	params := map[string]any{"threadId": command.ThreadID}
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, b.backendFor("codex"), params); err == nil || outcome != turnRPCUnknown {
+		t.Fatalf("first outcome=%q err=%v", outcome, err)
+	}
+	if route, ok := routes.ByRun("legacy:thread-1"); !ok || route.TurnID != "" {
+		t.Fatalf("failed route save leaked TurnID in memory: %#v ok=%v", route, ok)
+	}
+	if _, outcome, err := b.executeTurnStartOnce(context.Background(), "phone-1", command, b.backendFor("codex"), params); err == nil || outcome != turnRPCUnknown {
+		t.Fatalf("retry outcome=%q err=%v", outcome, err)
+	}
+	if appCalls != 1 {
+		t.Fatalf("turn/start app-server calls=%d", appCalls)
+	}
+}
+
+func TestUnknownTurnStartResponseIsExplicitlyNotRetrySafe(t *testing.T) {
+	payload := turnRPCResponsePayload(nil, turnRPCUnknown, errors.New("route persistence failed"))
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["outcome"] != "UNKNOWN" || decoded["status"] != "RECONCILING" || decoded["retrySafe"] != false {
+		t.Fatalf("unknown response=%s", payload)
+	}
+	if _, ordinaryError := decoded["error"]; ordinaryError {
+		t.Fatalf("unknown outcome was encoded as ordinary retryable error: %s", payload)
+	}
+}
+
+func TestPersistentUnknownTurnStartCanReconcileWithoutCallingAppServer(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "commands.json")
+	cache, err := commandcache.Open(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{commandCache: cache, routes: routes, state: bridgeState{HostID: "host-1"}}
+	command := protocol.Command{Type: "turn.start", RequestID: "request-1", ThreadID: "thread-1", Text: "开始"}
+	if err := b.claimThread(command, "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	cacheID, payloadHash := legacyTurnStartCacheIdentity(command)
+	if _, execute, err := cache.Begin(cacheID, "turn.start", payloadHash); err != nil || !execute {
+		t.Fatalf("begin execute=%v err=%v", execute, err)
+	}
+	pending := mustJSON(turnStartReconciliation{
+		Command: command, Result: json.RawMessage(`{"turn":{"id":"turn-real"}}`),
+	})
+	if _, err := cache.MarkUnknownWithResult(cacheID, errors.New("injected route persistence failure"), pending); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := commandcache.Open(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.commandCache = reopened
+	if err := b.recoverTurnStartRoutes(); err != nil {
+		t.Fatal(err)
+	}
+	if route, ok := routes.ByThreadTurn("thread-1", "turn-real"); !ok || route.DeviceID != "phone-1" {
+		t.Fatalf("reconciled route=%#v ok=%v", route, ok)
+	}
+	if record, ok := reopened.Lookup(cacheID); !ok || record.Status != commandcache.StatusSucceeded {
+		t.Fatalf("reconciled command=%#v ok=%v", record, ok)
+	}
+}
+
+func TestSnapshotLedgerMissDoesNotExposeLiveTerminalState(t *testing.T) {
+	for _, status := range []string{"completed", "failed", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			terminals, err := completion.OpenTerminalRunStore(filepath.Join(t.TempDir(), "terminal-runs.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			app := appProcessReturning(t, json.RawMessage(fmt.Sprintf(
+				`{"thread":{"turns":[{"id":"turn-1","status":{"type":%q}}]}}`, status,
+			)))
+			b := &bridge{backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"}, terminals: terminals}
+			snapshot, err := b.snapshotForRoute(context.Background(), runstate.Route{
+				RunID: "run-1", ThreadID: "thread-1", TurnID: "turn-1",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Status != "RECONCILING" || len(snapshot.CompletionJSON) != 0 || snapshot.CompletedAt != 0 {
+				t.Fatalf("ledger miss exposed live terminal state: %#v", snapshot)
+			}
+			if pending := terminals.PendingObservations(); len(pending) != 0 {
+				t.Fatalf("snapshot rebuilt terminal evidence indirectly: %#v", pending)
+			}
+		})
+	}
+}
+
+func TestCompleteRunTemporaryThreadReadFailureDoesNotFreezeFailedTerminal(t *testing.T) {
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(t.TempDir(), "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := appserverrpc.NewClient(strings.NewReader(""), writerFunc(func([]byte) (int, error) {
+		return 0, errors.New("temporary app-server disconnect")
+	}), "epoch-1")
+	b := bridgeForTerminalTest(t, newTestBackend(client), terminals)
+	b.completeRun(context.Background(), runstate.Route{
+		RunID: "run-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1",
+	}, json.RawMessage(`{"status":{"type":"completed"}}`))
+	if record, frozen := terminals.Lookup("run-1"); frozen {
+		t.Fatalf("temporary read failure froze terminal state: %#v", record)
+	}
+	if pending := terminals.PendingObservations(); len(pending) != 1 || pending[0].RunID != "run-1" {
+		t.Fatalf("terminal observation was not retained for retry: %#v", pending)
+	}
+}
+
+func TestCompleteRunMissingTargetTurnDoesNotFreezeFailedTerminal(t *testing.T) {
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(t.TempDir(), "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := bridgeForTerminalTest(
+		t,
+		appProcessReturning(t, json.RawMessage(`{"thread":{"turns":[{"id":"other-turn","status":{"type":"completed"}}]}}`)),
+		terminals,
+	)
+	b.completeRun(context.Background(), runstate.Route{
+		RunID: "run-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1",
+	}, json.RawMessage(`{"status":{"type":"completed"}}`))
+	if record, frozen := terminals.Lookup("run-1"); frozen {
+		t.Fatalf("missing target turn froze terminal state: %#v", record)
+	}
+}
+
+func TestUnknownCompletionStatusDoesNotFreezeCompletedTerminal(t *testing.T) {
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(t.TempDir(), "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := bridgeForTerminalTest(
+		t,
+		appProcessReturning(t, json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"futureStatus"}}]}}`)),
+		terminals,
+	)
+	b.completeRun(context.Background(), runstate.Route{
+		RunID: "run-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1",
+	}, json.RawMessage(`{}`))
+	if record, frozen := terminals.Lookup("run-1"); frozen {
+		t.Fatalf("unknown status froze completed terminal: %#v", record)
+	}
+	if got := completionTurnStatus(json.RawMessage(`{}`), json.RawMessage(`{"type":"futureStatus"}`)); got != "unknown" {
+		t.Fatalf("unknown status normalized as %q", got)
+	}
+}
+
+func TestCompletionTurnStatusUsesExplicitTerminalWhitelist(t *testing.T) {
+	tests := []struct {
+		name     string
+		params   json.RawMessage
+		fallback json.RawMessage
+		want     string
+	}{
+		{name: "completed", params: json.RawMessage(`{"status":{"type":"completed"}}`), want: "completed"},
+		{name: "failed", params: json.RawMessage(`{"turn":{"status":"failed"}}`), want: "failed"},
+		{name: "cancelled", fallback: json.RawMessage(`{"type":"interrupted"}`), want: "cancelled"},
+		{name: "unknown", params: json.RawMessage(`{"status":"inProgress"}`), want: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := completionTurnStatus(test.params, test.fallback); got != test.want {
+				t.Fatalf("status = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSnapshotForRouteUsesFrozenCompletionWithoutAppServer(t *testing.T) {
+	dir := t.TempDir()
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenJSON := json.RawMessage(`{"schemaVersion":2,"completionId":"completion-1","summary":"frozen"}`)
+	record, _, err := terminals.Freeze(completion.TerminalRunRecord{
+		RunID: "run-1", Status: "COMPLETED", CompletionJSON: frozenJSON, CompletedAt: 1234,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceDir := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "mutated-after-completion.txt"), []byte("later"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{terminals: terminals}
+	snapshot, err := b.snapshotForRoute(context.Background(), runstate.Route{
+		RunID: "run-1", ThreadID: "thread-1", TurnID: "turn-1",
+		BaselineJSON: string(mustJSON(runstate.WorkspaceBaseline{CWD: workspaceDir})),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "COMPLETED" || string(snapshot.CompletionJSON) != string(frozenJSON) || snapshot.CompletedAt != record.CompletedAt {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestRecoverTerminalRunsBackfillsMissingJournalEvent(t *testing.T) {
+	dir := t.TempDir()
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := terminals.Freeze(completion.TerminalRunRecord{
+		RunID: "run-1", Status: "COMPLETED", CompletionJSON: json.RawMessage(`{"schemaVersion":2,"summary":"frozen"}`), CompletedAt: 1234,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{RunID: "run-1", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1"}); err != nil {
+		t.Fatal(err)
+	}
+	b := bridgeForTerminalTest(t, nil, terminals)
+	b.routes = routes
+	if err := b.recoverTerminalRuns(context.Background(), "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	pending := b.journal.Pending("host-1", "phone-1")
+	if len(pending) != 1 || pending[0].Type != "run.completed" || pending[0].RunID != "run-1" {
+		t.Fatalf("journal backfill=%#v", pending)
+	}
+	if len(terminals.PendingJournalRecords()) != 0 {
+		t.Fatalf("journaled terminal remained pending")
+	}
+}
+
+func TestRecoverTerminalRunsRetriesPersistentObservation(t *testing.T) {
+	dir := t.TempDir()
+	terminals, err := completion.OpenTerminalRunStore(filepath.Join(dir, "terminal-runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","status":{"type":"completed"}}`)
+	if err := terminals.Observe(completion.TerminalObservation{RunID: "run-1", Params: params, ObservedAt: 1234}); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := runstate.OpenRoutes(filepath.Join(dir, "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := runstate.Route{RunID: "run-1", HostID: "host-1", DeviceID: "phone-1", ThreadID: "thread-1", TurnID: "turn-1"}
+	if err := routes.Put(route); err != nil {
+		t.Fatal(err)
+	}
+	app := appProcessReturning(t, json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"completed"},"items":[]}]}}`))
+	b := bridgeForTerminalTest(t, app, terminals)
+	b.routes = routes
+	if err := b.recoverTerminalRuns(context.Background(), "phone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if record, ok := terminals.Lookup("run-1"); !ok || record.Status != "COMPLETED" {
+		t.Fatalf("recovered terminal=%#v ok=%v", record, ok)
+	}
+	if len(terminals.PendingObservations()) != 0 || len(terminals.PendingJournalRecords()) != 0 {
+		t.Fatalf("recovery did not drain durable reconciliation state")
+	}
+}
+
+func TestBuildCompletionEvidenceMarksWorkspaceCaptureFailureUnverified(t *testing.T) {
+	route := runstate.Route{
+		RunID: "run-1", WorkspaceID: "workspace-1",
+		BaselineJSON: string(mustJSON(runstate.WorkspaceBaseline{
+			CWD: filepath.Join(t.TempDir(), "missing"), IsGit: true, Head: "before", Branch: "main",
+		})),
+	}
+	evidence := buildCompletionEvidence(route, completedTurn{})
+	if evidence.Git == nil || evidence.Git.State != completion.GitUnverified || evidence.Git.Reason == "" {
+		t.Fatalf("git evidence=%#v", evidence.Git)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (function writerFunc) Write(raw []byte) (int, error) { return function(raw) }
+
+type appServerTestRequest struct {
+	ID     json.RawMessage
+	Method string
+	Params map[string]any
+}
+
+func appProcessScripted(
+	t *testing.T,
+	respond func(appServerTestRequest) (json.RawMessage, json.RawMessage),
+) *testBackend {
+	t.Helper()
+	reader, serverWriter := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	client := appserverrpc.NewClient(reader, writerFunc(func(requestRaw []byte) (int, error) {
+		var request appServerTestRequest
+		if err := json.Unmarshal(requestRaw, &request); err != nil {
+			return 0, err
+		}
+		result, responseError := respond(request)
+		var response string
+		if len(responseError) > 0 {
+			response = fmt.Sprintf(`{"id":%s,"error":%s}`+"\n", request.ID, responseError)
+		} else {
+			response = fmt.Sprintf(`{"id":%s,"result":%s}`+"\n", request.ID, result)
+		}
+		if _, err := serverWriter.Write([]byte(response)); err != nil {
+			return 0, err
+		}
+		return len(requestRaw), nil
+	}), "epoch-1")
+	client.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		_ = serverWriter.Close()
+		_ = reader.Close()
+	})
+	return newTestBackend(client)
+}
+
+func appProcessReturning(t *testing.T, result json.RawMessage) *testBackend {
+	return appProcessReturningCounted(t, result, nil)
+}
+
+func appProcessReturningCounted(t *testing.T, result json.RawMessage, calls *int) *testBackend {
+	return appProcessReturningHooked(t, result, calls, nil)
+}
+
+func appProcessReturningHooked(t *testing.T, result json.RawMessage, calls *int, beforeResponse func()) *testBackend {
+	t.Helper()
+	reader, serverWriter := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	client := appserverrpc.NewClient(reader, writerFunc(func(requestRaw []byte) (int, error) {
+		if calls != nil {
+			*calls++
+		}
+		if beforeResponse != nil {
+			beforeResponse()
+		}
+		var request struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if err := json.Unmarshal(requestRaw, &request); err != nil {
+			return 0, err
+		}
+		response := fmt.Sprintf(`{"id":%s,"result":%s}`+"\n", request.ID, result)
+		if _, err := serverWriter.Write([]byte(response)); err != nil {
+			return 0, err
+		}
+		return len(requestRaw), nil
+	}), "epoch-1")
+	client.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		_ = serverWriter.Close()
+		_ = reader.Close()
+	})
+	return newTestBackend(client)
+}
+
+func bridgeForTerminalTest(t *testing.T, app *testBackend, terminals *completion.TerminalRunStore) *bridge {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := journal.Open(filepath.Join(dir, "logical-events.log"), bytes.Repeat([]byte{0x41}, 32), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &bridge{
+		backends: map[string]backend.Backend{"codex": app}, backendOrder: []string{"codex"},
+		terminals: terminals, journal: store, path: filepath.Join(dir, "state.json"),
+		state: bridgeState{
+			HostID: "host-1", DeviceSecrets: map[string]string{}, Sequences: map[string]uint64{},
+			PendingOutbound: map[string]map[string]string{},
+		},
+	}
+}
+
+// testBackend adapts a scripted appserverrpc.Client to the backend.Backend
+// interface used by the bridge, keeping existing scripted-response tests
+// intact after the M4 backend abstraction.
+type testBackend struct {
+	client   *appserverrpc.Client
+	messages chan backend.Message
+}
+
+func newTestBackend(client *appserverrpc.Client) *testBackend {
+	b := &testBackend{client: client, messages: make(chan backend.Message, 64)}
+	client.SetNotificationHandler(func(message appserverrpc.Message) {
+		b.messages <- backend.Message{BackendID: "codex", ID: message.ID, Method: message.Method, Params: message.Params}
+	})
+	return b
+}
+
+func (b *testBackend) ID() string             { return "codex" }
+func (b *testBackend) Name() string           { return "Codex" }
+func (b *testBackend) Capabilities() []string { return backend.CodexCapabilities() }
+func (b *testBackend) ProcessEpoch() string   { return b.client.ProcessEpoch() }
+
+func (b *testBackend) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return b.client.Call(ctx, method, params)
+}
+
+func (b *testBackend) Notify(ctx context.Context, method string, params any) error {
+	return b.client.Notify(method, params)
+}
+
+func (b *testBackend) Respond(ctx context.Context, ref backend.ServerRequestRef, result any) error {
+	return b.client.Respond(appserverrpc.ServerRequestRef{
+		ID: ref.ID, Method: ref.Method, Params: ref.Params, ProcessEpoch: ref.ProcessEpoch,
+	}, result)
+}
+
+func (b *testBackend) Start(ctx context.Context)        {}
+func (b *testBackend) Messages() <-chan backend.Message { return b.messages }
+func (b *testBackend) Done() <-chan error               { return b.client.Done() }
+func (b *testBackend) Close() error                     { return nil }
+
+func TestExecuteCommandRoutesByBackendID(t *testing.T) {
+	codexCalls := make(chan string, 4)
+	dshCalls := make(chan string, 4)
+	codex := backend.NewFake("codex").OnScript("thread/list", func(method string, params any) (json.RawMessage, error) {
+		codexCalls <- method
+		return json.RawMessage(`{"data":[]}`), nil
+	})
+	dsh := backend.NewFake("dsh").OnScript("thread/list", func(method string, params any) (json.RawMessage, error) {
+		dshCalls <- method
+		return json.RawMessage(`{"data":[]}`), nil
+	})
+	b := &bridge{
+		backends:     map[string]backend.Backend{"codex": codex, "dsh": dsh},
+		backendOrder: []string{"codex", "dsh"},
+		state: bridgeState{
+			Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{},
+		},
+	}
+	// A dsh command must reach only the dsh backend.
+	if err := b.executeCommand(context.Background(), "phone-1", protocol.Command{
+		Type: "thread.list", RequestID: "r-dsh", BackendID: "dsh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case method := <-dshCalls:
+		if method != "thread/list" {
+			t.Fatalf("dsh method = %s", method)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dsh backend was not called")
+	}
+	select {
+	case <-codexCalls:
+		t.Fatal("codex backend was called for a dsh command")
+	default:
+	}
+	// An empty backend id defaults to codex.
+	if err := b.executeCommand(context.Background(), "phone-1", protocol.Command{
+		Type: "thread.list", RequestID: "r-codex",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case method := <-codexCalls:
+		if method != "thread/list" {
+			t.Fatalf("codex method = %s", method)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("codex backend was not called")
+	}
+}
+
+func TestExecuteCommandUnknownBackendIsRejectedWithoutCallingOthers(t *testing.T) {
+	called := make(chan struct{}, 1)
+	codex := backend.NewFake("codex").OnScript("thread.list", func(method string, params any) (json.RawMessage, error) {
+		called <- struct{}{}
+		return json.RawMessage(`{"data":[]}`), nil
+	})
+	b := &bridge{
+		backends: map[string]backend.Backend{"codex": codex},
+		state: bridgeState{
+			Sequences: map[string]uint64{}, PendingOutbound: map[string]map[string]string{},
+		},
+	}
+	err := b.executeCommand(context.Background(), "phone-1", protocol.Command{
+		Type: "thread.list", RequestID: "r-aux", BackendID: "aux",
+	})
+	if err == nil {
+		t.Fatal("unknown backend command must fail")
+	}
+	select {
+	case <-called:
+		t.Fatal("a registered backend was called for an unknown backend id")
+	default:
+	}
+}
+
+func TestRouteForParamsScopesEventsToOwningBackend(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-codex", HostID: "host-a", DeviceID: "phone-a", ThreadID: "thread-codex", BackendID: "codex",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := routes.Put(runstate.Route{
+		RunID: "run-dsh", HostID: "host-a", DeviceID: "phone-b", ThreadID: "thread-dsh", BackendID: "dsh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes}
+
+	route, ok := b.routeForParams("dsh", json.RawMessage(`{"threadId":"thread-dsh"}`))
+	if !ok || route.RunID != "run-dsh" {
+		t.Fatalf("dsh route = %#v ok=%v", route, ok)
+	}
+	// A dsh event for a codex-owned thread must not route anywhere.
+	if _, ok := b.routeForParams("dsh", json.RawMessage(`{"threadId":"thread-codex"}`)); ok {
+		t.Fatal("dsh event reached a codex-owned thread")
+	}
+	if _, ok := b.routeForParams("codex", json.RawMessage(`{"threadId":"thread-dsh"}`)); ok {
+		t.Fatal("codex event reached a dsh-owned thread")
+	}
+}
+
+func TestSuperviseBackendRestartsCrashedBackendAndLeavesOthersAlive(t *testing.T) {
+	routes, err := runstate.OpenRoutes(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &bridge{routes: routes, backendBackoff: 30 * time.Millisecond}
+	var mu sync.Mutex
+	var codexInstances []*backend.Fake
+	dsh := backend.NewFake("dsh")
+	factory := func(spec backend.Spec) (backend.Backend, error) {
+		f := backend.NewFake(spec.ID)
+		mu.Lock()
+		codexInstances = append(codexInstances, f)
+		mu.Unlock()
+		return f, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan backend.Backend, 2)
+	go b.superviseBackend(ctx, backend.Spec{ID: "codex"}, ready, factory)
+	go b.superviseBackend(ctx, backend.Spec{ID: "dsh"}, ready, func(spec backend.Spec) (backend.Backend, error) {
+		return dsh, nil
+	})
+	firstArrival := <-ready
+	secondArrival := <-ready
+	var codexFirst backend.Backend
+	if firstArrival.ID() == "codex" {
+		codexFirst = firstArrival
+	} else {
+		codexFirst = secondArrival
+	}
+
+	// Crash the codex backend; the dsh backend must keep serving and codex
+	// must be restarted and re-registered.
+	codexFirst.(*backend.Fake).Crash(errors.New("boom"))
+	deadline := time.After(5 * time.Second)
+	for {
+		mu.Lock()
+		count := len(codexInstances)
+		mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("codex backend was not restarted (instances=%d)", count)
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if got := b.backendFor("codex"); got == nil || got == codexFirst {
+		t.Fatal("restarted codex backend is not the active one")
+	}
+	if got := b.backendFor("dsh"); got != dsh {
+		t.Fatal("dsh backend was disturbed by the codex crash")
+	}
+	// The restarted backend can serve a command.
+	if _, err := b.backendFor("codex").Call(context.Background(), "thread/list", map[string]any{}); err != nil {
+		t.Fatalf("restarted backend call failed: %v", err)
+	}
+}
+
+func TestParseBackendSpecsKnownDSH(t *testing.T) {
+	specs, err := parseBackendSpecs([]string{"codex", "dsh"}, "codex-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("specs = %#v", specs)
+	}
+	codex := specs[0]
+	if codex.ID != "codex" || codex.Exec != "codex-exec" || codex.Name != "Codex" {
+		t.Fatalf("codex spec = %#v", codex)
+	}
+	dsh := specs[1]
+	if dsh.ID != "dsh" || dsh.Name != "DeepSeek Harness" || dsh.Exec != "dsh" {
+		t.Fatalf("dsh spec = %#v", dsh)
+	}
+	if len(dsh.Args) != 4 || dsh.Args[0] != "--profile" || dsh.Args[1] != "appserver" ||
+		dsh.Args[2] != "--listen" || dsh.Args[3] != "stdio://" {
+		t.Fatalf("dsh args = %#v", dsh.Args)
+	}
+	hasApprovals := false
+	for _, capability := range dsh.Capabilities {
+		if capability == "approvals.v1" || capability == "user-input.v1" {
+			hasApprovals = true
+		}
+	}
+	if hasApprovals {
+		t.Fatalf("dsh must not advertise approval capabilities: %#v", dsh.Capabilities)
+	}
+	if len(codex.Capabilities) != len(dsh.Capabilities)+2 {
+		t.Fatalf("codex caps = %d, dsh caps = %d", len(codex.Capabilities), len(dsh.Capabilities))
+	}
+}
+
+func TestParseBackendSpecsCustomExecutableAndDefaults(t *testing.T) {
+	specs, err := parseBackendSpecs(nil, "codex-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0].ID != "codex" || specs[0].Exec != "codex-exec" {
+		t.Fatalf("default specs = %#v", specs)
+	}
+	specs, err = parseBackendSpecs([]string{"aux=/opt/tools/appserver"}, "codex-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0].ID != "aux" || specs[0].Exec != "/opt/tools/appserver" {
+		t.Fatalf("custom specs = %#v", specs)
+	}
+	if _, err := parseBackendSpecs([]string{"nope"}, "codex-exec"); err == nil {
+		t.Fatal("unknown bare backend id must be rejected")
+	}
+	if _, err := parseBackendSpecs([]string{"codex", "codex"}, "codex-exec"); err == nil {
+		t.Fatal("duplicate backend ids must be rejected")
+	}
+}
+
+func TestRunSnapshotPayloadCarriesBackendIDPerRunAndApproval(t *testing.T) {
+	payload := runSnapshotPayload(
+		"host-1", "device-1", 7, "epoch-1",
+		[]runSnapshot{
+			{RunID: "run-codex", BackendID: "codex", Status: "RUNNING", LatestLine: "正在运行"},
+			{RunID: "run-dsh", BackendID: "dsh", Status: "RUNNING", LatestLine: "正在运行"},
+		},
+		[]map[string]any{
+			{"approvalId": "approval-1", "runId": "run-codex", "backendId": "codex", "status": "PENDING"},
+		},
+	)
+	var decoded struct {
+		Runs []struct {
+			RunID     string `json:"runId"`
+			BackendID string `json:"backendId"`
+		} `json:"runs"`
+		Approvals []struct {
+			BackendID string `json:"backendId"`
+		} `json:"approvals"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Runs) != 2 || decoded.Runs[0].BackendID != "codex" || decoded.Runs[1].BackendID != "dsh" {
+		t.Fatalf("runs = %#v", decoded.Runs)
+	}
+	if len(decoded.Approvals) != 1 || decoded.Approvals[0].BackendID != "codex" {
+		t.Fatalf("approvals = %#v", decoded.Approvals)
+	}
+}
+
+func TestSnapshotForRouteReconcilesWhenBackendUnavailable(t *testing.T) {
+	codex := backend.NewFake("codex").OnScript("thread/read", func(method string, params any) (json.RawMessage, error) {
+		return json.RawMessage(`{"thread":{"turns":[{"id":"turn-1","status":{"type":"inProgress"}}]}}`), nil
+	})
+	b := &bridge{backends: map[string]backend.Backend{"codex": codex}}
+	// The dsh backend crashed: its run must reconcile instead of erroring out.
+	snapshot, err := b.snapshotForRoute(context.Background(), runstate.Route{
+		RunID: "run-dsh", BackendID: "dsh", ThreadID: "thread-dsh", TurnID: "turn-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "RECONCILING" || snapshot.LatestLine != "正在与 Mac 对账" {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if snapshot.BackendID != "dsh" {
+		t.Fatalf("snapshot backendId = %q", snapshot.BackendID)
+	}
+	// The codex backend still answers: its run stays live.
+	snapshot, err = b.snapshotForRoute(context.Background(), runstate.Route{
+		RunID: "run-codex", BackendID: "codex", ThreadID: "thread-codex", TurnID: "turn-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "RUNNING" || snapshot.LatestLine != "任务正在 Mac 上运行" {
+		t.Fatalf("codex snapshot = %#v", snapshot)
+	}
+}
+
+func TestRunSnapshotPayloadLegacyBackendDefaults(t *testing.T) {
+	payload := runSnapshotPayload("host-1", "device-1", 0, "", nil, nil)
+	if !bytes.Contains(payload, []byte(`"runs":null`)) && !bytes.Contains(payload, []byte(`"runs":[]`)) {
+		t.Fatalf("empty runs payload = %s", payload)
 	}
 }

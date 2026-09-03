@@ -8,6 +8,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.ConversationEntity
+import com.harnessapk.storage.LocalSearchDocumentEntity
 import com.harnessapk.storage.MessageEntity
 import com.harnessapk.storage.MessageWikiCitationEntity
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +21,131 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class LocalSearchRepositoryInstrumentedTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
+
+    @Test
+    fun globalSearchIgnoresProjectMemoryDocumentsFromFtsAndContains() = runBlocking {
+        val db = database()
+        try {
+            val dao = db.localSearchDao()
+            val repository = LocalSearchRepository(dao, AppDispatchers(io = Dispatchers.IO))
+            dao.replaceDocument(
+                searchDocument(
+                    id = "project:project-a",
+                    type = LocalSearchDocumentType.PROJECT_NAME.name,
+                    title = "globalftsonlytoken globalcontainsonlytoken",
+                    body = "globalftsonlytoken globalcontainsonlytoken",
+                ),
+                LocalSearchTokenizer.indexedText("globalftsonlytoken", "globalcontainsonlytoken"),
+            )
+            dao.replaceDocument(
+                searchDocument(
+                    id = "project:project-a:context",
+                    type = "CONTEXT",
+                    title = "context.md",
+                    body = "unrelated context body",
+                ),
+                LocalSearchTokenizer.indexedText("", "globalftsonlytoken"),
+            )
+            dao.replaceDocument(
+                searchDocument(
+                    id = "project:project-a:markdown",
+                    type = "MARKDOWN",
+                    title = "notes.md",
+                    body = "globalcontainsonlytoken",
+                ),
+                LocalSearchTokenizer.indexedText("", "unrelated markdown index"),
+            )
+            dao.replaceDocument(
+                searchDocument(
+                    id = "project:project-a:run",
+                    type = "RUN_EVIDENCE",
+                    title = "完成任务",
+                    body = "globalcontainsonlytoken",
+                ),
+                LocalSearchTokenizer.indexedText("", "globalftsonlytoken"),
+            )
+
+            val projectFts = db.projectSearchDao().searchProjectFts(
+                "project-a",
+                LocalSearchTokenizer.matchExpression("globalftsonlytoken"),
+                30,
+            )
+            assertTrue(projectFts.map { it.type }.containsAll(listOf("CONTEXT", "RUN_EVIDENCE")))
+            assertTrue(
+                dao.listDocuments()
+                    .filter { it.body.contains("globalcontainsonlytoken") }
+                    .map { it.type }
+                    .containsAll(listOf("MARKDOWN", "RUN_EVIDENCE")),
+            )
+
+            val ftsResult = repository.search("globalftsonlytoken")
+            val containsResult = repository.search("globalcontainsonlytoken")
+
+            assertEquals(listOf(LocalSearchDocumentType.PROJECT_NAME), ftsResult.map { it.type })
+            assertEquals("project:project-a", ftsResult.single().id)
+            assertEquals(listOf(LocalSearchDocumentType.PROJECT_NAME), containsResult.map { it.type })
+            assertEquals("project:project-a", containsResult.single().id)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun tokenizedQueryUsesFtsAsAuthoritativeIndexInsteadOfScanningUnindexedDocuments() = runBlocking {
+        val db = database()
+        try {
+            val dao = db.localSearchDao()
+            val repository = LocalSearchRepository(dao, AppDispatchers(io = Dispatchers.IO))
+            dao.replaceDocument(
+                searchDocument(
+                    id = "message:fts-indexed",
+                    type = LocalSearchDocumentType.MESSAGE.name,
+                    title = "索引消息",
+                    body = "ftsauthoritativetoken",
+                ),
+                LocalSearchTokenizer.indexedText("索引消息", "ftsauthoritativetoken"),
+            )
+            dao.upsertDocument(
+                searchDocument(
+                    id = "message:unindexed",
+                    type = LocalSearchDocumentType.MESSAGE.name,
+                    title = "未建立索引的消息",
+                    body = "ftsauthoritativetoken",
+                ),
+            )
+
+            assertEquals(
+                listOf("message:fts-indexed"),
+                repository.search("ftsauthoritativetoken").map { it.id },
+            )
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun queryWithoutFtsTokensFallsBackToLiteralContainsSearch() = runBlocking {
+        val db = database()
+        try {
+            val dao = db.localSearchDao()
+            val repository = LocalSearchRepository(dao, AppDispatchers(io = Dispatchers.IO))
+            dao.upsertDocument(
+                searchDocument(
+                    id = "message:literal-only",
+                    type = LocalSearchDocumentType.MESSAGE.name,
+                    title = "符号消息",
+                    body = "处理标记 ###",
+                ),
+            )
+
+            assertEquals(
+                listOf("message:literal-only"),
+                repository.search("###").map { it.id },
+            )
+        } finally {
+            db.close()
+        }
+    }
 
     @Test
     fun triggersIndexChineseMessagesAndSourcesAndDeleteWithPrimaryData() = runBlocking {
@@ -70,8 +196,10 @@ class LocalSearchRepositoryInstrumentedTest {
             val documents = sqlite.compileStatement(
                 """
                 INSERT INTO local_search_documents
-                    (id,type,title,body,conversationId,messageId,projectId,updatedAt)
-                VALUES (?,?,?,?,?,?,?,?)
+                    (id,type,title,body,conversationId,messageId,projectId,updatedAt,
+                     sourceType,authority,sourceKey,headingPath,ordinal,searchableText,
+                     sourceSha256,sourceUpdatedAt,indexedAt,dirty)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """.trimIndent(),
             )
             val fts = sqlite.compileStatement(
@@ -89,6 +217,16 @@ class LocalSearchRepositoryInstrumentedTest {
                 documents.bindString(6, "benchmark-$index")
                 documents.bindNull(7)
                 documents.bindLong(8, index.toLong())
+                documents.bindString(9, "PROJECT_MESSAGE")
+                documents.bindString(10, "USER_STATED")
+                documents.bindString(11, id)
+                documents.bindString(12, "")
+                documents.bindLong(13, 0L)
+                documents.bindString(14, body)
+                documents.bindString(15, "")
+                documents.bindLong(16, index.toLong())
+                documents.bindLong(17, index.toLong())
+                documents.bindLong(18, 0L)
                 documents.executeInsert()
                 fts.clearBindings()
                 fts.bindString(1, id)
@@ -117,6 +255,29 @@ class LocalSearchRepositoryInstrumentedTest {
     private fun database(): AppDatabase = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
         .addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK)
         .build()
+
+    private fun searchDocument(
+        id: String,
+        type: String,
+        title: String,
+        body: String,
+    ) = LocalSearchDocumentEntity(
+        id = id,
+        type = type,
+        title = title,
+        body = body,
+        conversationId = null,
+        messageId = null,
+        projectId = "project-a",
+        updatedAt = 10L,
+        sourceType = type,
+        authority = "REVIEWED_ARTIFACT",
+        sourceKey = id,
+        searchableText = body,
+        sourceSha256 = "a".repeat(64),
+        sourceUpdatedAt = 10L,
+        indexedAt = 10L,
+    )
 
     private fun conversation(id: String, title: String) = ConversationEntity(
         id = id,

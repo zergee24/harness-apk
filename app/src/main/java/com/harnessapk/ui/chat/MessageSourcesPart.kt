@@ -1,6 +1,7 @@
 package com.harnessapk.ui.chat
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,19 +17,26 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.harnessapk.chat.UiMessagePartDraft
 import com.harnessapk.chat.UiMessagePartType
 import com.harnessapk.wiki.MessageWikiCitation
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 
 internal data class MessageWikiSourceGroup(
     val wikiTitle: String,
@@ -38,9 +46,13 @@ internal data class MessageWikiSourceGroup(
 internal data class MessageSourcesUiState(
     val wikiGroups: List<MessageWikiSourceGroup>,
     val agentSources: List<String>,
+    val projectSources: List<String> = emptyList(),
+    val projectEvidenceIds: List<String> = emptyList(),
+    val projectTokens: List<String> = emptyList(),
     private val pendingWikiSummary: String? = null,
 ) {
     val collapsedSummary: String = buildList {
+        if (projectSources.isNotEmpty()) add("项目依据 ${projectSources.size}")
         if (wikiGroups.isNotEmpty()) {
             val wikiSummary = (
                 listOf("引用 ${wikiGroups.sumOf { it.citations.size }}") +
@@ -59,6 +71,30 @@ internal fun messageSourcesUiState(
     citations: List<MessageWikiCitation>,
 ): MessageSourcesUiState? {
     val wikiParts = parts.filter { it.type == UiMessagePartType.WIKI_SOURCES }
+    val projectSources = parts
+        .filter { it.type == UiMessagePartType.PROJECT_SOURCES }
+        .flatMap { part -> part.content.lineSequence().map(String::trim).filter(String::isNotBlank).toList() }
+        .distinct()
+    val projectEvidenceIds = parts
+        .filter { it.type == UiMessagePartType.PROJECT_SOURCES }
+        .flatMap { part ->
+            part.metadata["evidenceIds"]?.let { raw ->
+                runCatching {
+                    Json.parseToJsonElement(raw).jsonArray.map { it.jsonPrimitive.content }
+                }.getOrDefault(emptyList())
+            }.orEmpty()
+        }
+        .distinct()
+    val projectTokens = parts
+        .filter { it.type == UiMessagePartType.PROJECT_SOURCES }
+        .flatMap { part ->
+            part.metadata["tokens"]?.let { raw ->
+                runCatching {
+                    Json.parseToJsonElement(raw).jsonArray.map { it.jsonPrimitive.content }
+                }.getOrDefault(emptyList())
+            }.orEmpty()
+        }
+        .distinct()
     val agentSources = parts
         .filter { it.type == UiMessagePartType.AGENT_SOURCES }
         .flatMap { part -> part.content.lineSequence().map(String::trim).filter(String::isNotBlank).toList() }
@@ -70,18 +106,40 @@ internal fun messageSourcesUiState(
         .map { (wikiTitle, groupedCitations) ->
             MessageWikiSourceGroup(wikiTitle = wikiTitle, citations = groupedCitations)
         }
-    if (wikiParts.isEmpty() && wikiGroups.isEmpty() && agentSources.isEmpty()) return null
+    if (wikiParts.isEmpty() && wikiGroups.isEmpty() && agentSources.isEmpty() && projectSources.isEmpty()) return null
     return MessageSourcesUiState(
         wikiGroups = wikiGroups,
         agentSources = agentSources,
+        projectSources = projectSources,
+        projectEvidenceIds = projectEvidenceIds,
+        projectTokens = projectTokens,
         pendingWikiSummary = wikiParts.firstOrNull()?.content,
     )
+}
+
+private val PROJECT_CITATION_TOKEN = Regex("⟦P[1-9][0-9]*⟧")
+
+internal fun linkProjectCitationTokens(
+    markdown: String,
+    state: MessageSourcesUiState?,
+): String {
+    val evidenceByToken = state?.projectTokens.orEmpty()
+        .zip(state?.projectEvidenceIds.orEmpty())
+        .toMap()
+    if (evidenceByToken.isEmpty()) return markdown
+    return PROJECT_CITATION_TOKEN.replace(markdown) { match ->
+        evidenceByToken[match.value]
+            ?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,128}")) }
+            ?.let { evidenceId -> "[${match.value}](harness-project://evidence/$evidenceId)" }
+            ?: match.value
+    }
 }
 
 @Composable
 internal fun MessageSourcesPart(
     state: MessageSourcesUiState,
     onOpenWikiCitation: (String) -> Unit,
+    onOpenProjectSource: (String) -> Unit = {},
     embedded: Boolean = false,
     expandedOverride: Boolean? = null,
 ) {
@@ -116,7 +174,47 @@ internal fun MessageSourcesPart(
                     }
                 }
             }
+            if (state.projectTokens.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    state.projectTokens.take(6).forEachIndexed { index, token ->
+                        TextButton(
+                            onClick = {
+                                state.projectEvidenceIds.getOrNull(index)?.let(onOpenProjectSource)
+                            },
+                            modifier = Modifier.semantics {
+                                contentDescription = "打开项目来源 $token"
+                            },
+                        ) { Text(token) }
+                    }
+                }
+            }
             if (effectiveExpanded) {
+                if (state.projectSources.isNotEmpty()) {
+                    Text(
+                        text = "项目依据 · ${state.projectSources.size} 条",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    state.projectSources.forEachIndexed { index, source ->
+                        Text(
+                            text = source,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    state.projectEvidenceIds.getOrNull(index)?.let(onOpenProjectSource)
+                                }
+                                .semantics { contentDescription = "项目来源 ${index + 1}，$source" }
+                                .padding(vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (state.wikiGroups.isNotEmpty() || state.agentSources.isNotEmpty()) HorizontalDivider()
+                }
                 state.wikiGroups.forEachIndexed { groupIndex, group ->
                     if (groupIndex > 0) HorizontalDivider()
                     Text(
@@ -163,7 +261,7 @@ internal fun MessageSourcesPart(
                     )
                 }
                 if (state.agentSources.isNotEmpty()) {
-                    if (state.wikiGroups.isNotEmpty()) HorizontalDivider()
+                    if (state.wikiGroups.isNotEmpty() || state.projectSources.isNotEmpty()) HorizontalDivider()
                     Text(
                         text = "人物资料 · ${state.agentSources.size} 条",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
