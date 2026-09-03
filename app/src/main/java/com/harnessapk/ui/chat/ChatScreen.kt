@@ -291,6 +291,8 @@ fun ChatScreen(
     onStartVoiceInput: (currentDraft: String, language: String) -> Unit = { _, _ -> },
     onStopVoiceInput: () -> Unit = {},
     onVoiceInputConsumed: () -> Unit = {},
+    startWithCamera: Boolean = false,
+    startWithVoice: Boolean = false,
     contentPadding: PaddingValues,
 ) {
     val persistedMessages by remember(conversationId) {
@@ -1052,6 +1054,20 @@ fun ChatScreen(
             launchCamera()
         } else {
             errorText = "未获得相机权限，可从相册选择图片"
+        }
+    }
+
+    // 简洁模式「拍照提问」：进入会话即拉起相机（权限走标准请求流程）
+    LaunchedEffect(startWithCamera, conversationId) {
+        if (startWithCamera) {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+    // 简洁模式「语音提问」：进入会话即开始语音输入
+    LaunchedEffect(startWithVoice, conversationId) {
+        if (startWithVoice) {
+            errorText = null
+            onStartVoiceInput(text, voiceSettings.defaultTranscriptionLanguage)
         }
     }
 

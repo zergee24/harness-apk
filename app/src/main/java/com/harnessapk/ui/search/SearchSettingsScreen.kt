@@ -46,7 +46,7 @@ fun SearchSettingsScreen(
         Surface(shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp) {
             ListItem(
                 headlineContent = { Text("启用联网搜索") },
-                supportingContent = { Text("会话里仍需要手动打开“联网”开关才会搜索。") },
+                supportingContent = { Text("开启后新会话默认联网，也可在会话里手动开关。") },
                 trailingContent = {
                     Switch(
                         checked = settings.enabled,

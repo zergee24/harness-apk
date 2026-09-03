@@ -115,13 +115,15 @@ object Routes {
     const val Activity = "activity"
     const val RemoteRunPattern = "remote-run/{runId}"
     const val ChatPattern =
-        "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}"
+        "chat/{conversationId}?projectId={projectId}&focusInput={focusInput}&sourceMessageId={sourceMessageId}&openCamera={openCamera}&startVoice={startVoice}"
 
     fun chat(
         conversationId: String,
         projectId: String? = null,
         focusInput: Boolean = false,
         sourceMessageId: String? = null,
+        openCamera: Boolean = false,
+        startVoice: Boolean = false,
     ): String = buildString {
         append("chat/")
         append(Uri.encode(conversationId))
@@ -130,6 +132,8 @@ object Routes {
                 projectId = projectId,
                 focusInput = focusInput,
                 sourceMessageId = sourceMessageId,
+                openCamera = openCamera,
+                startVoice = startVoice,
                 encode = Uri::encode,
             ),
         )
@@ -152,12 +156,16 @@ internal fun chatRouteQuery(
     projectId: String?,
     focusInput: Boolean,
     sourceMessageId: String? = null,
+    openCamera: Boolean = false,
+    startVoice: Boolean = false,
     encode: (String) -> String,
 ): String {
     val query = listOfNotNull(
         projectId?.let { "projectId=${encode(it)}" },
         if (focusInput) "focusInput=true" else null,
         sourceMessageId?.let { "sourceMessageId=${encode(it)}" },
+        if (openCamera) "openCamera=true" else null,
+        if (startVoice) "startVoice=true" else null,
     )
     return if (query.isEmpty()) "" else "?${query.joinToString("&")}"
 }
@@ -366,6 +374,27 @@ fun HarnessApkApp(
             )
         }
     }
+    // 简洁模式一级入口：新建会话后直接拉起相机 / 进入语音输入
+    val onCreatePhotoConversation: () -> Unit = {
+        scope.launch {
+            navController.navigate(
+                Routes.chat(
+                    conversationId = container.newConversationUseCase.create(homeConversationRequest()),
+                    openCamera = true,
+                ),
+            )
+        }
+    }
+    val onCreateVoiceConversation: () -> Unit = {
+        scope.launch {
+            navController.navigate(
+                Routes.chat(
+                    conversationId = container.newConversationUseCase.create(homeConversationRequest()),
+                    startVoice = true,
+                ),
+            )
+        }
+    }
     fun openWorkbench(
         projectId: String,
         destination: ProjectWorkbenchDestination,
@@ -555,6 +584,8 @@ fun HarnessApkApp(
                         contentPadding = padding,
                         onOpenChat = { navController.navigate(Routes.chat(it)) },
                         onCreateConversation = onCreateConversation,
+                        onCreatePhotoConversation = onCreatePhotoConversation,
+                        onCreateVoiceConversation = onCreateVoiceConversation,
                         onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
                         onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
                         onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
@@ -647,6 +678,14 @@ fun HarnessApkApp(
                         nullable = true
                         defaultValue = null
                     },
+                    navArgument("openCamera") {
+                        type = NavType.BoolType
+                        defaultValue = false
+                    },
+                    navArgument("startVoice") {
+                        type = NavType.BoolType
+                        defaultValue = false
+                    },
                 ),
             ) { entry ->
                 val voiceInput = rememberVoiceInput(container)
@@ -655,6 +694,8 @@ fun HarnessApkApp(
                     conversationId = entry.arguments?.getString("conversationId").orEmpty(),
                     initialProjectId = entry.arguments?.getString("projectId"),
                     autoFocusInput = entry.arguments?.getBoolean("focusInput") == true,
+                    startWithCamera = entry.arguments?.getBoolean("openCamera") == true,
+                    startWithVoice = entry.arguments?.getBoolean("startVoice") == true,
                     sessionConfigRequestKey = chatSessionConfigRequestKey,
                     onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
                     wikiScopeRequestKey = chatWikiScopeRequestKey,
