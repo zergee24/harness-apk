@@ -27,6 +27,11 @@ class DashboardActivity : ComponentActivity() {
                     container = container,
                     viewedStore = viewedStore,
                     onExit = { finish() },
+                    onThreadDetail = { threadId ->
+                        val intent = android.content.Intent(this, DashboardDetailActivity::class.java)
+                        intent.putExtra(DashboardDetailActivity.EXTRA_THREAD_ID, threadId)
+                        startActivity(intent)
+                    },
                 )
             }
         }

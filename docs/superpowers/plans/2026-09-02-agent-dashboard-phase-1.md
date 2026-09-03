@@ -6,7 +6,7 @@
 >
 > **审查记录（2026-09-02 只读审查）：** P0（`open -g` 与「聚焦定位」相悖）及三处设计缺口（状态机无终态兜底、waiting 启发式误报、App 连接生命周期缺失）已并入 Task 1/3/5/7；P2 四条（WAL 只读恢复失败降级、`protocol.LogicalEvent` 类型化通道复用、viewed 本地存储、worktree 脏文件禁 `git add -A`）已并入 Task 2/4、风险与部署纪律。审查复核通过的两处事实基础与本计划一致：worktree HEAD `18ec272`（v1.1 WSS 心跳修复）仍是 bridge 正源；类型化推送通道为 `sendLogicalEvent`（worktree main.go:2215）。
 
-**Goal:** 落地一期副屏：闲置手机/平板常亮显示 Mac 上 Codex 桌面 app（`com.openai.codex`）线程的实时状态；点击卡片通过 `codex://` 深链把对应线程聚焦到 Mac 主屏。副屏只读不写、无二级界面；bridge 自养线程不上 dashboard。
+**Goal:** 落地一期副屏：闲置手机/平板常亮显示 Mac 上 Codex 桌面 app（`com.openai.codex`）线程的实时状态；点击卡片通过 `codex://` 深链把对应线程聚焦到 Mac 主屏。副屏只读不写（长按可进只读详情，Task 10）；bridge 自养线程不上 dashboard。
 
 **Spike 结论（2026-09-02 本机验证，HANDOFF 阻塞项已解除）：**
 
@@ -22,13 +22,22 @@
   - 推送：复用现有 `protocol.LogicalEvent` 类型化通道（`sendLogicalEvent`，worktree main.go:2215，连同其 event journal 幂等/重放）扩展线程状态事件，**不新造消息格式**；重连/订阅时发全量快照，之后发增量；
   - 下行：新增 `focus_thread` 指令 = `caffeinate -u -t 2` 唤屏 + `open "codex://threads/<id>"`（**不带 `-g`**：`man open` 明确 `-g` = 不置前，与「点击卡片在主屏聚焦定位」直接相悖；深链必须激活桌面 app 并把线程窗口置前）。
 - **Relay**：消息体为 opaque 密文，预期零改动；仅当路由层存在消息类型白名单时补型（Task 6 核实）。
-- **Android App**：新增副屏 Dashboard 页（独立 Activity，连接复用现有 `RemoteConnectionService` 前台服务，不另起 WSS）：线程卡片（状态色点 + 标题 + 相对时间 + cwd/git 分支），唯一交互 = 点卡片发 `focus_thread`；前台 `FLAG_KEEP_SCREEN_ON`；原生线程通知不带审批按钮的不对称在卡片文案显性化（「审批需到 Mac 处理」）。
+- **Android App**：新增副屏 Dashboard 页（独立 Activity，连接复用现有 `RemoteConnectionService` 前台服务，不另起 WSS）：线程卡片（状态色点 + 标题 + 相对时间 + cwd/git 分支），单击卡片发 `focus_thread`、长按进只读详情（Task 10）；前台 `FLAG_KEEP_SCREEN_ON`；原生线程通知不带审批按钮的不对称在卡片文案显性化（「审批需到 Mac 处理」）。
 
 **Tech Stack:** Go 1.23+（bridge）；Kotlin / Jetpack Compose（App）；Gradle 9.6.1 / JDK 17。实施修正：目录读取不走 Go 驱动（modernc 依赖树离线拉不到，见审查记录 P2-1），改为执行 macOS 自带 `/usr/bin/sqlite3 -readonly -json`，零新增依赖；构建工具链 `~/go-toolchain/go`（1.25.13，golang.google.cn 直连下载），构建与测试用 `GOPROXY=off` 走本地模块缓存。
 
 **部署纪律（沿用 v1.1 计划，违反则白改）：** bridge 改动必须在 `.worktrees/m4-multi-backend-bridge/remote` 修改构建 → 替换 `~/.local/bin/harness-bridge` → `launchctl kickstart -k gui/$(id -u)/com.harnessapk.remote-bridge` → 读 `/tmp/harness-remote-bridge.error.log` 确认新代码生效。worktree 内有历史遗留脏文件（`remote/dsh/appserver/node_modules/`、`package-lock.json` 等），提交按路径精确 add，**禁止 `git add -A`**。App 改完 `assembleDebug` 重装设备：adb 前缀 `-L tcp:5092 -s 20200611222647`。
 
-**Non-goals（一期）:** bridge 自养线程进 dashboard；副屏任何写操作（含审批）；二级界面/跳转；原生 macOS 菜单栏 app；精确 `waiting_approval`；多主机；`codex resume` 相关语义。
+**Non-goals（一期）:** bridge 自养线程进 dashboard；副屏任何写操作（含审批）；Task 10 只读详情以外的二级页面；原生 macOS 菜单栏 app；精确 `waiting_approval`；多主机；`codex resume` 相关语义；Command Keys/按钮操作面板（side-chat 评审否决：副屏操作=点卡片 focus 或本地动作，无需按钮）；`history.jsonl` prompt 历史不接入（隐私敏感）。
+
+**信息面板数据源盘点（2026-09-02 增补定稿）：** 副屏信息分两级——**全局独立卡只有两张**（账号级指标才配独立卡）：①配额卡、②今日统计卡；**其余全是线程卡片内字段**：③上下文占用 %（一期）、④子 agent 数、⑤失败/压缩标记（④⑤二期）。所有数据源均已本机实测：
+
+- `account/rateLimits/read`（+ 服务器推送 `account/rateLimits/updated`）：`rateLimits.primary{usedPercent, windowDurationMins, resetsAt}`、`planType`、`rateLimitsByLimitId`（各模型独立窗口）。实测例：codex 主限额 65%/周窗口。**credits/余额与重置券不上副屏**（2026-09-02 评审决定：配额卡只放已用 % + 重置时间）。
+- **主机资源（`dashboard.host` 帧新增字段）**：内存已用 %、磁盘已用 %、load avg。实现零新增依赖（构建 `GOPROXY=off`，不引 gopsutil）：磁盘用 `unix.Statfs` 打 `/System/Volumes/Data`（`/` 是只读系统快照卷，不代表真实占用）；内存用 sysctl `hw.memsize` + `vm.stats.vm.v_page_*`（used = 1 − (free+inactive)/total，口径近似 `top` 的 PhysMem）；load avg 用 sysctl `vm.loadavg`（精确 CPU% 需差分采样，二期）。60s 与配额同拍。今日本地活动：**今日 turn 数 = `thread_turns` 按 `started_at` 本地零点起计数**（目录轮询同连接顺路查）；patch 数实现时视 `thread_items.item_type` 取值可靠性决定，不可靠即砍，不加专用链路。
+- `account/usage/read`：`summary{lifetimeTokens, peakDailyTokens, currentStreakDays, longestStreakDays}`、`dailyUsageBuckets[{startDate, tokens}]`。**返回自 5 月起全量，bridge 必须截断只留近 14 天再下发**（relay 1 MiB 上限）。
+- rollout `token_count` 事件：`info.total_token_usage{input, cached_input, output, reasoning_output, total}`、`info.model_context_window`（实测 570000）、**内嵌 `rate_limits` 快照**——③号字段与 observer 轨道配额透传的来源，tail 解析零额外链路成本。
+- sqlite：`thread_turns{duration_ms, status, error_json}`、`thread_spawn_edges{status}`（实测 open 2252 / closed 512）——④⑤的二期数据源。
+- `account/read`、`model/list` 存在但未实测；账号级读操作不触碰线程读写分界。
 
 ---
 
@@ -57,8 +66,8 @@
 - Create: `remote/internal/observer/state.go`、`remote/internal/observer/tailer.go`
 - Test: `remote/internal/observer/state_test.go`
 
-- [ ] **Step 1: 写失败测试（table-driven）。** 喂事件序列断言状态：`task_started`→运行中；仅 `agent_reasoning` 流→`thinking`；出现 `item_completed`/`patch_apply_end`/`mcp_tool_call_end`/`sub_agent_activity`→`running`；`task_complete`→`done`；`turn_aborted`→`error`；未知事件忽略不崩。活性规则：rollout 出现任何新行（含最高频的 `token_count`）都重置静默计时。启发式：`task_started` 后静默 ≥3min 且未 complete → `running` +「长时间无输出」标记（`approx=true`，文案不叫「受阻」——构建/测试跑几分钟无事件是正常的）。终态兜底：最后事件超 30min 仍无 `task_complete`/`turn_aborted` → `done`（`approx=true`，注明「无结束事件」），防止用户关线程/app 崩溃/进程被杀导致永久 running。三个时间常量集中定义、可调。
-- [ ] **Step 2:** 实现 tailer：从文件尾增量读 JSONL，逐行解析 `type=="event_msg"`，按 `payload.type` 驱动状态机；任何成功读取的新行都更新 lastEventAt（活性信号，与事件类型无关）；解析错误丢弃该行并计数。
+- [ ] **Step 1: 写失败测试（table-driven）。** 喂事件序列断言状态：`task_started`→运行中；仅 `agent_reasoning` 流→`thinking`；出现 `item_completed`/`patch_apply_end`/`mcp_tool_call_end`/`sub_agent_activity`→`running`；`task_complete`→`done`；`turn_aborted`→`error`；未知事件忽略不崩；`token_count` 额外更新该线程上下文占用（`info.total_token_usage.total_tokens / info.model_context_window`）并缓存内嵌 `rate_limits` 快照（供 `dashboard.host` 透传，见 Task 4 Step 3）。活性规则：rollout 出现任何新行（含最高频的 `token_count`）都重置静默计时。启发式：`task_started` 后静默 ≥3min 且未 complete → `running` +「长时间无输出」标记（`approx=true`，文案不叫「受阻」——构建/测试跑几分钟无事件是正常的）。终态兜底：最后事件超 30min 仍无 `task_complete`/`turn_aborted` → `done`（`approx=true`，注明「无结束事件」），防止用户关线程/app 崩溃/进程被杀导致永久 running。三个时间常量集中定义、可调。
+- [ ] **Step 2:** 实现 tailer：从文件尾增量读 JSONL，逐行解析 `type=="event_msg"`，按 `payload.type` 驱动状态机，`token_count` 同时刷新上下文占用与配额快照缓存；任何成功读取的新行都更新 lastEventAt（活性信号，与事件类型无关）；解析错误丢弃该行并计数。
 - [ ] **Step 3:** 目录联动：仅对 top 8 活跃线程启动 tailer；`updated_at_ms` 落出窗口后退出 tail。
 - [ ] **Step 4:** 单测通过 + `go vet ./...`。
 
@@ -74,7 +83,8 @@
 
 - [ ] **Step 1: 写失败测试。** 断言：新设备接入收到全量快照；单线程状态变更只推送该线程增量；事件走 `protocol.LogicalEvent` 类型化通道扩展，复用 `sendLogicalEvent`（main.go:2215）及其 event journal 幂等/重放，不新造消息格式；事件含 `threadId / status / approx / title / updatedAtMs / cwd / gitBranch`。
 - [ ] **Step 2:** 实现并跑 `go test ./...`。
-- [ ] **Step 3:** 按「部署纪律」构建、替换、重启生产 bridge，确认 error log 无新错。
+- [ ] **Step 3: 全局卡数据源（信息面板①②）。** 复用 bridge 常驻 app-server 连接：定时（60s）发送 `account/rateLimits/read` 与 `account/usage/read`（后者只保留 `summary` + 最近 14 天 `dailyUsageBuckets`），收到推送 `account/rateLimits/updated` 即时刷新；同拍采集主机内存已用 % / 磁盘已用 % / load avg（`unix.Statfs` + sysctl，零新依赖，见盘点节）与今日 turn 数（`thread_turns` 按本地零点起计数，目录轮询同连接顺路）；一并经 `sendDashboardFrame` 以 **`dashboard.host`** 帧类型下发（与 Task 3 注记同 plain 帧机制）。测试：fake app-server 回包 → 断言 host 帧字段（配额 + 今日统计 + 内存/磁盘/load + 今日 turn 数）、14 天截断、配额推送即时刷新。
+- [ ] **Step 4:** 按「部署纪律」构建、替换、重启生产 bridge，确认 error log 无新错。
 
 ## Task 5: focus_thread 下行指令
 
@@ -99,18 +109,19 @@
 - Test: `app/src/test/java/.../dashboard/`（状态色映射与文案纯函数）
 
 - [ ] **Step 1: 写失败测试。** 状态→色/文案映射：`thinking/running/done/error`，外加 `running+approx`（副文案「长时间无输出，非精确」）与 `done+approx`（副文案「无结束事件」）；`done` + 本地未查看 → 未读标记。
-- [ ] **Step 2:** 实现 Compose 卡片列表（状态色点 + 标题 + 相对时间 + cwd/分支），复用现有 `RelativeTimeFormat`；无二级页面、无导航跳转。
+- [ ] **Step 2:** 实现 Compose 卡片列表（状态色点 + 标题 + 相对时间 + cwd/分支），复用现有 `RelativeTimeFormat`；无导航跳转（唯一例外：长按进只读详情，Task 10）。
 - [ ] **Step 3:** 点击卡片仅发送 `focus_thread`；发送失败用轻量 toast，不弹详情页。
 - [ ] **Step 4:** 连接生命周期：Dashboard 复用现有 `RemoteConnectionService` 前台服务（`app/src/main/java/com/harnessapk/remote/RemoteConnectionService.kt`）消费同一 WSS，不另起连接；夜间进程被杀 → 服务重启重新订阅 → Task 4「订阅即全量快照」自然恢复状态。
 - [ ] **Step 5:** `done + 未读` 的已查看时间戳存 App 本地（DataStore/现有偏好存储，仅本机不上传）；Dashboard 前台即视为已查看。
-- [ ] **Step 6:** `:app:testDebugUnitTest` 通过，`assembleDebug` 装机。
+- [ ] **Step 6: 信息面板渲染。** 列表顶部两张全局卡：①配额卡（主限额已用 % + 重置时间，不展示余额/credits）、②主机与今日卡（今日 tokens、连续 streak、今日 turn 数、内存已用 %、磁盘已用 %、load avg，均来自 `dashboard.host`）；线程卡片内新增「上下文 xx%」小字字段（③，数据随 `dashboard.thread` 帧下发）。④子 agent 数、⑤失败/压缩标记为二期卡内字段，本期不实现。
+- [ ] **Step 7:** `:app:testDebugUnitTest` 通过，`assembleDebug` 装机。
 
 ## Task 8: 常亮与入口
 
 **Files:** 同 Task 7 相关文件 + 入口挂载点。
 
 - [ ] **Step 1:** Dashboard 前台 `FLAG_KEEP_SCREEN_ON`（配合 USB 供电 `stayon usb` 习惯），退到后台即恢复系统熄屏策略。
-- [ ] **Step 2:** 入口：Codex Remote 节点设置页加「副屏模式」入口，进入即全屏 dashboard，系统返回退出。
+- [ ] **Step 2:** 入口双挂：Codex Remote 节点设置页「副屏模式」+ 工作页远程控制区常驻入口；进入即全屏 dashboard，系统返回退出。
 - [ ] **Step 3:** 与现有远程控制页隔离：dashboard 只消费 `thread_status`，不消费、不展示 bridge 自养线程数据流。
 
 ## Task 9: 端到端验收
@@ -121,6 +132,18 @@
 - [ ] **Step 4:** 副屏整晚 USB 供电常亮挂机——待用户把副屏手机上架后观察。
 - [x] **Step 5:** 结论已回填 HANDOFF。
 
+## Task 10: 长按只读详情（交互原则修订产物，2026-09-02 侧支增补）
+
+**Files:**
+- bridge: detail 读取（`thread_history_1.sqlite.thread_items`，零副作用源）+ 命令分发新增 `dashboard.detail`（第三条下行，风格同 `focus_thread`）
+- App: `DashboardDetailScreen.kt`（复用远程消息 item 渲染组件，含 item 类型本地化标签）
+- Test: 对应单测
+
+- [ ] **Step 0: 内容源 probe。** `thread_items.item_json` 按 item_type（reasoning / commandExecution / agentMessage / fileChange / subAgentActivity / mcpToolCall…）抽样建渲染映射表（实测基数：8 种 item_type，近 24h 112 线程有内容）；顺带验证 `thread/read` 对已加载线程 `turns[]` 是否直接含内容——含则评估优先采用，sqlite 为零副作用退路。
+- [ ] **Step 1: bridge。** 新下行命令 `dashboard.detail(threadId)`：按 `rollout_ordinal` 读最近 50 条 items，plain 帧 `dashboard.detail` 回；threadId 不在 24h 活跃目录白名单则拒绝。
+- [ ] **Step 2: App。** 长按卡片 → DashboardDetailScreen：打开拉一次 + 手动刷新，不做流式；**零按钮零输入**（只读底线）；系统返回退出。
+- [ ] **Step 3:** 单测 + 真机验收：长按 → 详情可见最近消息/命令/文件改动；返回 → 列表状态保持不闪。
+
 ---
 
 **风险与对策：**
@@ -130,4 +153,4 @@
 - **深链被 rewrite / 版本行为变化**（社区已见 scheme 相关 issue）：Task 1 探针先行，失败即回主会话，不硬编码猜测格式上线。
 - **subagent 线程噪音**：一期按 `source` 含 `parent_thread_id` 过滤；二期考虑折叠展示。
 
-**来源：** [Codex Micro（Axios）](https://www.axios.com/2026/07/15/openai-keyboard-codex-agents) · [codex:// 深链（官方 Commands 文档）](https://learn.chatgpt.com/docs/reference/commands) · [issue: 线程自识别深链](https://github.com/openai/codex/issues/16239) · 本机 spike（rollout 全量扫描 / state_5.sqlite schema / ChatGPT.app Info.plist 与 app.asar 资源探测，2026-09-02）
+**来源：** [Codex Micro（Axios）](https://www.axios.com/2026/07/15/openai-keyboard-codex-agents) · [codex:// 深链（官方 Commands 文档）](https://learn.chatgpt.com/docs/reference/commands) · [issue: 线程自识别深链](https://github.com/openai/codex/issues/16239) · 本机 spike（rollout 全量扫描 / state_5.sqlite schema / ChatGPT.app Info.plist 与 app.asar 资源探测 / app-server `account/rateLimits/read` + `account/usage/read` 实测，2026-09-02）

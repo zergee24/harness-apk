@@ -7,12 +7,12 @@
 参照 OpenAI **Codex Micro**（2026-07 与 Work Louder 合作的桌面小键盘：6 颗 RGB Agent Key 实时映射 Codex 线程状态，单击在后台聚焦该 agent，双击把 Codex 界面置前；仅配合 ChatGPT 桌面 app 工作）。我们做同构能力的软件版：
 
 - **形态**：闲置手机/平板插电立在桌面，常亮跑 Harness 的 dashboard 页 = 只读的 agent 状态副屏。
-- **交互原则（已定）**：副屏**只读不写**，**无二级界面、无跳转**。每张卡片的唯一动作 = 点击后聚焦到 Mac 主屏原生 app 里的对应线程。
+- **交互原则（2026-09-02 侧支修订）**：副屏**只读不写**。单击卡片 = 聚焦到 Mac 主屏原生 app 对应线程；**长按卡片 = 只读详情二级页**（零按钮：无审批、无输入框；打开拉一次 + 手动刷新，不做流式）。入口双挂：Codex 远程节点设置页「副屏模式」+ 工作页远程控制区。
 - **状态机（目标）**：`thinking / running / waiting_approval / done / error`（可选 `unread`）。
 
 ## 核心架构决策：按"线程住在哪"划分读写
 
-背景事实（讨论中确认）：Codex 活线程是 app-server **进程私有**的；跨进程只有 resume 一条路，而 resume 是 **fork**（新 session id，旧 id 从此无事件）。因此谁创建谁拥有，磁盘 sessions 只是交换格式。
+背景事实（讨论中确认）：Codex 活线程是 app-server **进程私有**的；跨进程只有 resume 一条路，而 resume 是 **fork**（新 session id，旧 id 从此无事件）。因此谁创建谁拥有，磁盘 sessions 只是交换格式。（**2026-09-02 修正：此结论绝对化——app-server 有跨进程 `thread/read`（实测可用），返回含 `status`/`canAcceptDirectInput` 协调字段；桌面 app 前端同时使用 resume/read/fork 跨 surface 续聊。详见下节「写通道再评估」。一期只读决策不变，但"给原生线程发消息永不可行"不成立。**）
 
 | 线程归属 | 读 | 写 | 副屏可见性 |
 |---|---|---|---|
@@ -20,6 +20,13 @@
 | bridge 自养（现有 remote control） | 现有链路不动 | 现有链路不动（发消息/批审批） | ❌ 一期不上 dashboard（无法深链，会引入 fork/跳转） |
 
 两条轨道只在基础设施上交汇（同一 relay / bridge 进程 / App），线程语义零交集。dashboard 只读 ⇒ 永无 fork、无双进程驱动、无状态打架。
+
+## 写通道再评估（2026-09-02 侧支实验）
+
+- 实测：全新 app-server 进程 `thread/read` 可读任意线程元数据+状态（归档老线程验证通过），字段含 `status`（notLoaded/…）与 **`canAcceptDirectInput`**——协议层为"此线程能否接受输入"预留了协调信号。
+- 桌面 app.asar 证据：前端同时调用 `thread/list`(20 处)/`thread/resume`(13)/`thread/read`(11)/`thread/fork`(11)——**跨 surface 打开并续聊原生线程是产品既有能力**（vscode 创建的线程出现在桌面 app 侧栏并被续聊，即此机制）。
+- 修正后判断：**空闲线程**跨进程接管续话大概率可行（协调靠"同时只有一人驱动"的使用纪律，桌面 app 即此用法）；**活线程**双进程驱动冲突风险仍在，`canAcceptDirectInput` 是否足以安全判定未验证。原"resume 必 fork"系 CLI `codex resume` 的文档结论，不能外推到 app-server `thread/resume`。
+- 决策：一期维持只读不变；**二期 spike**——挑已完成线程，bridge `thread/resume` + `turn/start` 发一条消息，观察 `forkedFromId`、桌面 app 事件流与原进程行为，再决定是否开"空闲线程回复"能力。
 
 ## 关键机制
 
