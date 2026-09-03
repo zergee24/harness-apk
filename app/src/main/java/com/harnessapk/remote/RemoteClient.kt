@@ -517,7 +517,6 @@ class RemoteRepository(
             }
             "dashboard.threads" -> {
                 val parsed = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs }
-                android.util.Log.e("DashboardDbg", "snapshot n=${parsed.size} first=${parsed.firstOrNull()?.let { "${it.threadId}|${it.title}|${it.status}|${it.updatedAtMs}" }}")
                 _dashboard.value = DashboardState(
                     threads = parsed,
                     quota = parseDashboardQuota(event.payload?.jsonObject?.get("quota")),
