@@ -6,19 +6,25 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
@@ -65,6 +71,8 @@ fun ConversationListScreen(
     contentPadding: PaddingValues,
     onOpenChat: (String) -> Unit,
     onCreateConversation: () -> Unit,
+    onCreatePhotoConversation: () -> Unit = {},
+    onCreateVoiceConversation: () -> Unit = {},
     onOpenAgentPackages: () -> Unit = {},
     onOpenWikiLibrary: () -> Unit = {},
     onOpenGlobalSearch: () -> Unit = {},
@@ -136,8 +144,29 @@ fun ConversationListScreen(
             if (simpleMode) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    Button(
+                        onClick = onCreatePhotoConversation,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(64.dp),
+                    ) {
+                        Icon(Icons.Outlined.PhotoCamera, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("拍照提问", maxLines = 1)
+                    }
+                    Button(
+                        onClick = onCreateVoiceConversation,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(64.dp),
+                    ) {
+                        Icon(Icons.Outlined.Mic, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("语音提问", maxLines = 1)
+                    }
                     FilledIconButton(
                         modifier = Modifier.size(56.dp),
                         onClick = onCreateConversation,
