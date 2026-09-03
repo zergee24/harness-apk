@@ -22,6 +22,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,6 +62,21 @@ fun ConfigPackageImportScreen(
     var passphrase by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    // 微信「用其他应用打开」等 VIEW/SEND 路由带来的 uri：进入页面即自动加载
+    LaunchedEffect(packageUri) {
+        val uri = packageUri?.takeIf(String::isNotBlank) ?: return@LaunchedEffect
+        val result = withContext(Dispatchers.IO) { loadEnvelope(context, Uri.parse(uri)) }
+        result.fold(
+            onSuccess = { loaded ->
+                envelope = loaded
+                passphrase = ""
+            },
+            onFailure = { error ->
+                errorMessage = error.userMessage()
+            },
+        )
+    }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {

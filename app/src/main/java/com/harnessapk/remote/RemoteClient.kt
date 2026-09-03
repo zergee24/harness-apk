@@ -68,8 +68,6 @@ class RemoteRepository(
     val dashboard: StateFlow<DashboardState> = _dashboard.asStateFlow()
     private val _focusResults = MutableSharedFlow<DashboardFocusResult>(extraBufferCapacity = 4)
     val focusResults: SharedFlow<DashboardFocusResult> = _focusResults.asSharedFlow()
-    private val _dashboardDetail = MutableStateFlow(DashboardDetailState())
-    val dashboardDetail: StateFlow<DashboardDetailState> = _dashboardDetail.asStateFlow()
     private val outgoingSequence = AtomicLong(0)
     private val seenMessages = LinkedHashSet<String>()
     private var socket: WebSocket? = null
@@ -138,10 +136,6 @@ class RemoteRepository(
     }
 
     /** 副屏：请求当前整帧线程快照（bridge 以 dashboard.threads plain 帧应答）。 */
-    fun requestDashboardDetail(threadId: String) {
-        send(RemoteCommand(type = "dashboard.detail", requestId = requestId("dashboard.detail"), threadId = threadId))
-    }
-
     fun requestDashboardSnapshot() {
         send(RemoteCommand(type = "dashboard.snapshot", requestId = requestId("dashboard.snapshot")))
     }
@@ -515,11 +509,14 @@ class RemoteRepository(
             "codex.event" -> {
                 if (matchesSelectedBackend(event)) handleCodexEvent(event)
             }
-            "dashboard.threads" -> _dashboard.value = DashboardState(
-                threads = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs },
-                quota = parseDashboardQuota(event.payload?.jsonObject?.get("quota")),
-                host = parseDashboardHost(event.payload),
-            )
+            "dashboard.threads" -> {
+                val parsed = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs }
+                _dashboard.value = DashboardState(
+                    threads = parsed,
+                    quota = parseDashboardQuota(event.payload?.jsonObject?.get("quota")),
+                    host = parseDashboardHost(event.payload),
+                )
+            }
             "dashboard.host" -> parseDashboardHost(event.payload)?.let { host ->
                 _dashboard.value = _dashboard.value.copy(quota = host.quota ?: _dashboard.value.quota, host = host)
             }
@@ -530,11 +527,6 @@ class RemoteRepository(
             }
             "dashboard.quota" -> parseDashboardQuota(event.payload)?.let { quota ->
                 _dashboard.value = _dashboard.value.copy(quota = quota)
-            }
-            "dashboard.detail" -> {
-                val items = parseDashboardDetailItems(event.payload)
-                val threadId = event.payload?.jsonObject?.string("threadId").orEmpty()
-                _dashboardDetail.value = DashboardDetailState(threadId = threadId, items = items)
             }
             "dashboard.focus" -> {
                 val payload = event.payload as? JsonObject ?: return

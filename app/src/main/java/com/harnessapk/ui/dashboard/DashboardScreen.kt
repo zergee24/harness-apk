@@ -4,7 +4,10 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -18,10 +21,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
@@ -65,7 +64,6 @@ fun DashboardScreen(
     container: AppContainer,
     viewedStore: DashboardViewedStore,
     onExit: () -> Unit,
-    onThreadDetail: (String) -> Unit = {},
 ) {
     val dashboard by container.remoteRepository.dashboard.collectAsState()
     val connection by container.remoteRepository.state.collectAsState()
@@ -127,7 +125,6 @@ fun DashboardScreen(
             ThreadPagingGrid(
                 threads = threads,
                 onTap = { container.remoteRepository.focusThread(it.threadId) },
-                onThreadDetail = onThreadDetail,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             )
             Row(
@@ -146,48 +143,57 @@ fun DashboardScreen(
     }
 }
 
-// 两行横滑网格 + 底部页码点：固定两行高度，超出部分左右翻页。
+// 两行横滑线程区（非 Lazy：墨水屏上 Lazy 网格的文本层不触发面板刷新）。
+// 线程按 3 列一页切分，左右滑动翻页，底部页码点指示。
 @Composable
 private fun ThreadPagingGrid(
     threads: List<DashboardThread>,
     onTap: (DashboardThread) -> Unit,
-    onThreadDetail: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    BoxWithConstraints(modifier = modifier) {
-        val gridState = rememberLazyGridState()
-        val columns = (maxWidth / (ThreadTileWidth + 8.dp)).toInt().coerceAtLeast(1)
-        val pageSize = (columns * 2).coerceAtLeast(1)
-        val pages = ceil(threads.size.toDouble() / pageSize).toInt().coerceAtLeast(1)
-        val page = (gridState.firstVisibleItemIndex / pageSize).coerceIn(0, pages - 1)
+    val pageCount = ((threads.size + 5) / 6).coerceAtLeast(1)
+    val state = rememberScrollState()
 
-        LazyHorizontalGrid(
-            rows = GridCells.Fixed(2),
-            state = gridState,
-            modifier = Modifier.fillMaxSize(),
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .horizontalScroll(state),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(threads, key = { it.threadId }) { thread ->
-                ConsoleTile(
-                    thread = thread,
-                    unread = false,
-                    onClick = { onTap(thread) },
-                    onLongClick = { onThreadDetail(thread.threadId) },
-                )
+            val pageChunks = threads.chunked(6)
+            repeat(pageCount) { pageIndex ->
+                val pageThreads = pageChunks.getOrNull(pageIndex) ?: threads.chunked(6).getOrNull(0) ?: emptyList()
+                Column(
+                    modifier = Modifier.fillMaxHeight(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    val colThreads = pageThreads.chunked(3)
+                    colThreads.forEach { col ->
+                        col.forEach { thread ->
+                            ConsoleTile(
+                                thread = thread,
+                                unread = false,
+                                onClick = { onTap(thread) },
+                            )
+                        }
+                    }
+                }
             }
         }
-        if (pages > 1) {
+        if (pageCount > 1) {
             Row(
-                modifier = Modifier.align(Alignment.BottomCenter).padding(2.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                repeat(pages) { index ->
+                repeat(pageCount) { index ->
+                    val currentPage = (state.value / 820).toInt().coerceIn(0, pageCount - 1)
                     Box(
                         modifier = Modifier
-                            .size(if (index == page) 7.dp else 5.dp)
+                            .size(if (index == currentPage) 7.dp else 5.dp)
                             .clip(CircleShape)
-                            .background(if (index == page) Color(0xFF4C8DFF) else Color(0xFF5A5A5E)),
+                            .background(if (index == currentPage) Color(0xFF4C8DFF) else Color(0xFF5A5A5E)),
                     )
                 }
             }
@@ -195,11 +201,10 @@ private fun ThreadPagingGrid(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit) {
     val accent = Color(dashboardToneArgb(dashboardTone(thread.status)))
-    Card(modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)) {
+    Card(modifier = Modifier.width(ThreadTileWidth).combinedClickable(onClick = onClick)) {
         Row(modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp)) {
             Box(modifier = Modifier.width(14.dp).fillMaxHeight().background(accent))
             Column(
