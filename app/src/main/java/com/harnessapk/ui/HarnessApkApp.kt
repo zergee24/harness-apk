@@ -317,7 +317,8 @@ fun HarnessApkApp(
         Routes.ConfigPackageExport -> "配置包"
         Routes.ConfigPackageImportPattern -> "导入配置包"
         Routes.RemoteSettings -> "Codex 远程节点"
-        Routes.RemoteControl -> "远程控制"
+        Routes.RemoteControl -> remoteUiState.threads
+            .firstOrNull { it.id == remoteUiState.selectedThreadId }?.title ?: "远程控制"
         Routes.Activity -> "任务动态"
         Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
@@ -478,6 +479,12 @@ fun HarnessApkApp(
                                         }
                                         Routes.WikiLibrary -> {
                                             dispatchWikiPackageImport(WikiPackageImportEvent.ImportCancelled)
+                                        }
+                                        Routes.RemoteControl -> {
+                                            if (remoteUiState.selectedThreadId != null) {
+                                                container.remoteRepository.clearSelection()
+                                                return@IconButton
+                                            }
                                         }
                                     }
                                     navController.popBackStack()

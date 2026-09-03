@@ -25,6 +25,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 internal fun remoteRpcErrorMessage(payload: JsonElement?): String {
@@ -55,6 +56,9 @@ class RemoteRepository(
     private val profileStore: RemoteProfileProvider,
     private val httpClient: OkHttpClient,
     private val scope: CoroutineScope,
+    private val commandTimeoutMillis: Long = 30_000L,
+    private val turnCommandTimeoutMillis: Long = 130_000L,
+    private val listCommandTimeoutMillis: Long = 35_000L,
 ) : RemoteCommandSender, RemoteSyncSender {
     private val _state = MutableStateFlow(RemoteUiState())
     val state: StateFlow<RemoteUiState> = _state.asStateFlow()
@@ -75,6 +79,8 @@ class RemoteRepository(
     private val pendingCommands = mutableMapOf<String, PendingRemoteCommand>()
     private val requestedThreadSummaries = mutableSetOf<String>()
     private var selectionGeneration = 0L
+    // 看门狗：命令超时只标记并解除卡死的加载态，不消费 pending，迟到响应仍按正常路径处理
+    private val timedOut = ConcurrentHashMap.newKeySet<String>()
     @Volatile
     private var syncCoordinator: RemoteSyncCoordinator? = null
     @Volatile
@@ -106,6 +112,7 @@ class RemoteRepository(
         socket?.close(1000, "user disconnected")
         socket = null
         pendingCommands.clear()
+        timedOut.clear()
         requestedThreadSummaries.clear()
         selectionGeneration += 1
         _state.value = _state.value.copy(
@@ -262,7 +269,9 @@ class RemoteRepository(
         }
 
     private fun send(command: RemoteCommand): Boolean {
-        return sendPayload(command.requestId, command.toJson())
+        val sent = sendPayload(command.requestId, command.toJson())
+        if (sent) armCommandTimeout(command.requestId, command.type)
+        return sent
     }
 
     override fun send(command: RebuiltRemoteCommand): Boolean =
@@ -297,6 +306,32 @@ class RemoteRepository(
             return false
         }
         return true
+    }
+
+    // 看门狗：超时只标记（timedOut）并解除卡死的加载态，不消费 pendingCommands，迟到响应仍走正常处理
+    internal fun armCommandTimeout(requestId: String, kind: String) {
+        val timeoutMillis = watchdogBudgetFor(kind) ?: return
+        scope.launch {
+            delay(timeoutMillis)
+            if (pendingCommands.containsKey(requestId) && timedOut.add(requestId)) {
+                _state.value = _state.value.copy(
+                    errorMessage = "命令 $kind 超时，Mac 未响应（迟到响应仍会生效）",
+                    isWorking = if (kind == "turn.start") false else _state.value.isWorking,
+                    isThreadListLoading = if (kind == "thread.list") false else _state.value.isThreadListLoading,
+                    isTimelineLoading = if (kind == "thread.read") false else _state.value.isTimelineLoading,
+                    isOlderTimelineLoading = if (kind == "thread.read.older") false else _state.value.isOlderTimelineLoading,
+                    isCreatingThread = if (kind == "thread.start") false else _state.value.isCreatingThread,
+                )
+                _notifications.tryEmit(RemoteNotification("Codex 无响应", "命令 $kind 超时，请检查 Mac bridge 是否在线"))
+            }
+        }
+    }
+
+    internal fun watchdogBudgetFor(type: String): Long? = when (type) {
+        "host.status", "approval.respond" -> null // bridge 以事件应答或不回包，看门狗必然误报
+        "turn.start" -> turnCommandTimeoutMillis
+        "thread.list", "thread.read", "thread.read.older" -> listCommandTimeoutMillis
+        else -> commandTimeoutMillis
     }
 
     private fun sendAck(messageId: String) {
@@ -550,6 +585,7 @@ class RemoteRepository(
                 it in setOf("thread.list", "thread.summary", "thread.start", "thread.read", "thread.read.older", "turn.start")
             }?.let(::PendingRemoteCommand)
         val kind = pending?.kind
+        event.requestId?.let(timedOut::remove)
         val pendingThreadId = pending?.threadId
         val pendingSelectionGeneration = pending?.selectionGeneration
         if (kind == "thread.read" || kind == "thread.read.older") {
@@ -635,9 +671,16 @@ class RemoteRepository(
                         thread
                     }
                 }
-                requestedThreadSummaries.retainAll(refreshed.mapTo(mutableSetOf(), RemoteThread::id))
+                // 远端清单可能不含当前选中线程（分页/过滤），保留旧条目避免选中项从列表消失
+                val selectedThreadId = _state.value.selectedThreadId
+                val retainedSelected = selectedThreadId
+                    ?.takeIf { id -> refreshed.none { it.id == id } }
+                    ?.let { id -> previousById[id] }
+                    ?.let(::listOf)
+                    .orEmpty()
+                requestedThreadSummaries.retainAll((refreshed + retainedSelected).mapTo(mutableSetOf(), RemoteThread::id))
                 _state.value = _state.value.copy(
-                    threads = refreshed,
+                    threads = refreshed + retainedSelected,
                     isThreadListLoading = false,
                 )
             }

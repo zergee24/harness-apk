@@ -1023,10 +1023,90 @@ class RemoteRepositoryTest {
         assertFalse(repository.state.value.timeline.any { it.text.startsWith("[") || it.text.startsWith("{") })
     }
 
-    private fun repository(remoteProfile: RemoteProfile = profile): RemoteRepository = RemoteRepository(
+    @Test
+    fun commandTimeoutSurfacesErrorWhenNoResponse() {
+        val repository = repository(timeoutMillis = 60L)
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pendingCommands = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pendingCommands["thread.start:test"] = PendingRemoteCommand("thread.start")
+        repository.armCommandTimeout("thread.start:test", "thread.start")
+        Thread.sleep(200)
+        assertTrue(repository.state.value.errorMessage?.contains("超时") == true)
+    }
+
+    @Test
+    fun answeredCommandDoesNotSurfaceTimeoutError() {
+        val repository = repository(timeoutMillis = 60L, listCommandTimeoutMillis = 60L)
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pendingCommands = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pendingCommands["thread.list:answered"] = PendingRemoteCommand("thread.list")
+        repository.armCommandTimeout("thread.list:answered", "thread.list")
+        pendingCommands.remove("thread.list:answered")
+        Thread.sleep(200)
+        assertEquals(null, repository.state.value.errorMessage)
+    }
+
+    @Test
+    fun turnStartTimeoutUsesTheExtendedTurnBudget() {
+        val repository = repository(timeoutMillis = 15_000L, turnCommandTimeoutMillis = 60L)
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pendingCommands = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pendingCommands["turn.start:slow"] = PendingRemoteCommand("turn.start", threadId = "thread-a")
+        repository.armCommandTimeout("turn.start:slow", "turn.start")
+        Thread.sleep(200)
+        assertTrue(repository.state.value.errorMessage?.contains("超时") == true)
+    }
+
+    @Test
+    fun watchdogBudgetExemptsEventAnsweredCommandsAndExtendsTurnStart() {
+        val repository = repository(timeoutMillis = 60L, turnCommandTimeoutMillis = 1_000L, listCommandTimeoutMillis = 2_000L)
+
+        assertEquals(null, repository.watchdogBudgetFor("host.status"))
+        assertEquals(null, repository.watchdogBudgetFor("approval.respond"))
+        assertEquals(1_000L, repository.watchdogBudgetFor("turn.start"))
+        assertEquals(2_000L, repository.watchdogBudgetFor("thread.list"))
+        assertEquals(2_000L, repository.watchdogBudgetFor("thread.read"))
+        assertEquals(2_000L, repository.watchdogBudgetFor("thread.read.older"))
+        assertEquals(60L, repository.watchdogBudgetFor("turn.steer"))
+    }
+
+    @Test
+    fun commandTimeoutSurfacesErrorWithoutConsumingResponse() {
+        val repository = repository(timeoutMillis = 60L)
+        val pendingField = RemoteRepository::class.java.getDeclaredField("pendingCommands").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val pendingCommands = pendingField.get(repository) as MutableMap<String, PendingRemoteCommand>
+        pendingCommands["thread.start:late"] = PendingRemoteCommand("thread.start")
+        repository.armCommandTimeout("thread.start:late", "thread.start")
+        Thread.sleep(200)
+        assertTrue(repository.state.value.errorMessage?.contains("超时") == true)
+
+        repository.handleEvent(
+            RemoteEvent(
+                type = "rpc.response",
+                requestId = "thread.start:late",
+                payload = Json.parseToJsonElement("""{"result":{"thread":{"id":"t-late"}}}"""),
+            ),
+        )
+
+        assertEquals("t-late", repository.state.value.selectedThreadId)
+    }
+
+    private fun repository(
+        remoteProfile: RemoteProfile = profile,
+        timeoutMillis: Long = 30_000L,
+        turnCommandTimeoutMillis: Long = 130_000L,
+        listCommandTimeoutMillis: Long = 35_000L,
+    ): RemoteRepository = RemoteRepository(
         profileStore = FakeRemoteProfileProvider(remoteProfile),
         httpClient = OkHttpClient(),
         scope = CoroutineScope(SupervisorJob()),
+        commandTimeoutMillis = timeoutMillis,
+        turnCommandTimeoutMillis = turnCommandTimeoutMillis,
+        listCommandTimeoutMillis = listCommandTimeoutMillis,
     )
 }
 

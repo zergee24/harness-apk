@@ -429,6 +429,20 @@ internal fun parseRemoteEvent(raw: String): RemoteEvent {
     )
 }
 
+private val threadMarkerPrefixes = listOf(
+    "<codex_delegation>", "</codex_delegation>", "<source_thread_id>", "</input>",
+    "# Files mentioned by the user:", "## My request:",
+)
+
+internal fun sanitizeThreadText(raw: String): String = raw
+    .replace("\r\n", "\n")
+    .split("\n")
+    .map(String::trim)
+    .map { it.removePrefix("<input>").trim() }
+    .filterNot { it.isBlank() || threadMarkerPrefixes.any(it::startsWith) }
+    .joinToString(" ")
+    .take(240)
+
 internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
     val response = event.payload?.jsonObject ?: return emptyList()
     val data = response["result"]?.jsonObject?.get("data") as? JsonArray ?: return emptyList()
@@ -439,9 +453,8 @@ internal fun parseThreads(event: RemoteEvent): List<RemoteThread> {
         RemoteThread(
             id = id,
             title = item.string("name")?.take(60)
-                ?: item.string("preview")?.lineSequence()?.firstOrNull()?.take(60)
-                ?: "未命名线程",
-            preview = item.string("preview").orEmpty().take(240), cwd = item.string("cwd"),
+                ?: sanitizeThreadText(item.string("preview").orEmpty()).take(60).ifBlank { "未命名线程" },
+            preview = sanitizeThreadText(item.string("preview").orEmpty()).take(240), cwd = item.string("cwd"),
             updatedAt = (item.long("updatedAt") ?: 0L) * 1000L,
             status = rawStatus?.string("type").orEmpty(),
             latestUserMessage = item.string("latestUserMessage")?.take(240),

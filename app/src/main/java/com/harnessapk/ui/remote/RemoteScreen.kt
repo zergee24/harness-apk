@@ -1,5 +1,6 @@
 package com.harnessapk.ui.remote
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -486,6 +487,14 @@ internal fun RemoteThreadErrorBanner(message: String) {
         }
     }
 }
+
+private val timelineKindLabels = mapOf(
+    "userMessage" to "用户",
+    "agentMessage" to "助手",
+    "reasoning" to "思考",
+    "commandExecution" to "命令",
+    "fileChange" to "文件变更",
+)
 
 @Composable
 internal fun RemoteThreadDetailStatus(
