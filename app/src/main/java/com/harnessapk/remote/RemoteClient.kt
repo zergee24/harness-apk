@@ -515,11 +515,15 @@ class RemoteRepository(
             "codex.event" -> {
                 if (matchesSelectedBackend(event)) handleCodexEvent(event)
             }
-            "dashboard.threads" -> _dashboard.value = DashboardState(
-                threads = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs },
-                quota = parseDashboardQuota(event.payload?.jsonObject?.get("quota")),
-                host = parseDashboardHost(event.payload),
-            )
+            "dashboard.threads" -> {
+                val parsed = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs }
+                android.util.Log.e("DashboardDbg", "snapshot n=${parsed.size} first=${parsed.firstOrNull()?.let { "${it.threadId}|${it.title}|${it.status}|${it.updatedAtMs}" }}")
+                _dashboard.value = DashboardState(
+                    threads = parsed,
+                    quota = parseDashboardQuota(event.payload?.jsonObject?.get("quota")),
+                    host = parseDashboardHost(event.payload),
+                )
+            }
             "dashboard.host" -> parseDashboardHost(event.payload)?.let { host ->
                 _dashboard.value = _dashboard.value.copy(quota = host.quota ?: _dashboard.value.quota, host = host)
             }
