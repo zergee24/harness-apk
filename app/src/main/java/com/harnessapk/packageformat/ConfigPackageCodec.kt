@@ -150,6 +150,7 @@ object ConfigPackageCodec {
         payload.siliconFlowVoiceApiKey?.let { put("siliconFlowVoiceApiKey", it) }
         if (payload.webSearchEnabled) put("webSearchEnabled", true)
         if (payload.simpleMode) put("simpleMode", true)
+        if (payload.ttsAutoRead) put("ttsAutoRead", true)
         if (payload.generatedFrom.isNotBlank()) put("generatedFrom", payload.generatedFrom)
     }.toString().encodeToByteArray()
 
@@ -186,6 +187,7 @@ object ConfigPackageCodec {
             siliconFlowVoiceApiKey = root.stringField("siliconFlowVoiceApiKey"),
             webSearchEnabled = root.booleanField("webSearchEnabled") ?: false,
             simpleMode = root.booleanField("simpleMode") ?: false,
+            ttsAutoRead = root.booleanField("ttsAutoRead") ?: false,
             generatedFrom = root.stringField("generatedFrom") ?: "",
         )
     }

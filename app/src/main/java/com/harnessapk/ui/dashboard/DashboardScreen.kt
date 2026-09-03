@@ -72,6 +72,8 @@ fun DashboardScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(Unit) {
+        // 副屏可能脱离远程页直接进入（进程被杀后冷启），先确保 WSS 连接。
+        container.remoteRepository.connect()
         container.remoteRepository.requestDashboardSnapshot()
         container.remoteRepository.focusResults.collect { result ->
             snackbarHostState.showSnackbar(

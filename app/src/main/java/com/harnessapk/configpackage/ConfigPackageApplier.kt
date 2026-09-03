@@ -65,6 +65,7 @@ class ConfigPackageApplier(
         }
 
         settingsStore.setWebSearchEnabled(payload.webSearchEnabled)
+        settingsStore.setTtsAutoRead(payload.ttsAutoRead)
         settingsStore.setSimpleMode(payload.simpleMode)
 
         return AppliedSummary(

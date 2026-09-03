@@ -47,6 +47,7 @@ data class ConfigPackagePayload(
     val siliconFlowVoiceApiKey: String? = null,
     val webSearchEnabled: Boolean = false,
     val simpleMode: Boolean = false,
+    val ttsAutoRead: Boolean = false,
     val generatedFrom: String = "",
 )
 

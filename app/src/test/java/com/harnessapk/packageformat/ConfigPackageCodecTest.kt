@@ -24,6 +24,7 @@ class ConfigPackageCodecTest {
         aliyunVoiceApiKey = "aliyun-key",
         webSearchEnabled = true,
         simpleMode = true,
+        ttsAutoRead = true,
         generatedFrom = "0.2.5",
     )
 
