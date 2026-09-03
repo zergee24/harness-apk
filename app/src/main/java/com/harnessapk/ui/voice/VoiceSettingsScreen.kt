@@ -282,6 +282,12 @@ fun VoiceSettingsScreen(
                 checked = settings.ttsEnabled,
                 onCheckedChange = { scope.launch { container.settingsStore.setTtsEnabled(it) } },
             )
+            SettingSwitchRow(
+                title = "自动朗读回复",
+                description = "回复生成完成后自动朗读，默认关闭。",
+                checked = settings.ttsAutoRead,
+                onCheckedChange = { scope.launch { container.settingsStore.setTtsAutoRead(it) } },
+            )
             Text("语速：${"%.1f".format(settings.ttsSpeechRate)}x")
             Slider(
                 value = settings.ttsSpeechRate,

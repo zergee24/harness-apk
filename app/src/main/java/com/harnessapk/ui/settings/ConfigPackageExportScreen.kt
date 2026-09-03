@@ -69,6 +69,7 @@ fun ConfigPackageExportScreen(
 
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var includeWebSearch by remember { mutableStateOf(true) }
+    var includeTtsAutoRead by remember { mutableStateOf(false) }
     var includeSimpleMode by remember { mutableStateOf(true) }
     var validityHours by remember { mutableStateOf(12) }
     var passphrase by remember { mutableStateOf("") }
@@ -158,6 +159,13 @@ fun ConfigPackageExportScreen(
                 onCheckedChange = { includeWebSearch = it },
             )
             SettingToggleRow(
+                title = "开启自动朗读回复",
+                description = "对方不便看屏幕时由系统 TTS 读出回复，默认关闭",
+                enabled = true,
+                checked = includeTtsAutoRead,
+                onCheckedChange = { includeTtsAutoRead = it },
+            )
+            SettingToggleRow(
                 title = "开启生活简洁模式",
                 description = "对方导入后生活页只保留新建对话和最近会话",
                 enabled = true,
@@ -229,6 +237,7 @@ fun ConfigPackageExportScreen(
                             container = container,
                             providerIds = selectedIds,
                             includeWebSearch = includeWebSearch,
+                            includeTtsAutoRead = includeTtsAutoRead,
                             includeSimpleMode = includeSimpleMode,
                             validityHours = validityHours,
                             passphrase = passphrase,
@@ -277,6 +286,7 @@ private suspend fun exportConfigPackage(
     container: AppContainer,
     providerIds: Set<String>,
     includeWebSearch: Boolean,
+    includeTtsAutoRead: Boolean,
     includeSimpleMode: Boolean,
     validityHours: Int,
     passphrase: String,
@@ -307,6 +317,7 @@ private suspend fun exportConfigPackage(
         siliconFlowVoiceApiKey = container.voiceCredentialStore.siliconFlowApiKey(),
         webSearchEnabled = includeWebSearch,
         simpleMode = includeSimpleMode,
+        ttsAutoRead = includeTtsAutoRead,
         generatedFrom = com.harnessapk.BuildConfig.VERSION_NAME,
     )
     val bytes = ConfigPackageCodec.exportPackage(

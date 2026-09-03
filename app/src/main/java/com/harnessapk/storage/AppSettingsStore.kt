@@ -81,6 +81,7 @@ class AppSettingsStore(private val context: Context) {
             autoSendAfterTranscription = it[VOICE_AUTO_SEND_AFTER_TRANSCRIPTION] ?: false,
             saveOriginalAudio = it[VOICE_SAVE_ORIGINAL_AUDIO] ?: false,
             ttsEnabled = it[VOICE_TTS_ENABLED] ?: false,
+            ttsAutoRead = it[VOICE_TTS_AUTO_READ] ?: false,
             ttsSpeechRate = (it[VOICE_TTS_SPEECH_RATE] ?: 1.0f).coerceIn(0.6f, 1.4f),
         )
     }
@@ -198,6 +199,10 @@ class AppSettingsStore(private val context: Context) {
         context.appSettingsDataStore.edit { it[VOICE_TTS_ENABLED] = value }
     }
 
+    suspend fun setTtsAutoRead(value: Boolean) {
+        context.appSettingsDataStore.edit { it[VOICE_TTS_AUTO_READ] = value }
+    }
+
     suspend fun setTtsSpeechRate(value: Float) {
         context.appSettingsDataStore.edit { it[VOICE_TTS_SPEECH_RATE] = value.coerceIn(0.6f, 1.4f) }
     }
@@ -241,6 +246,7 @@ class AppSettingsStore(private val context: Context) {
         private val VOICE_AUTO_SEND_AFTER_TRANSCRIPTION = booleanPreferencesKey("voice_auto_send_after_transcription")
         private val VOICE_SAVE_ORIGINAL_AUDIO = booleanPreferencesKey("voice_save_original_audio")
         private val VOICE_TTS_ENABLED = booleanPreferencesKey("voice_tts_enabled")
+        private val VOICE_TTS_AUTO_READ = booleanPreferencesKey("voice_tts_auto_read")
         private val VOICE_TTS_SPEECH_RATE = floatPreferencesKey("voice_tts_speech_rate")
         private val PROVIDER_CATALOG_RAW_JSON = stringPreferencesKey("provider_catalog_raw_json")
         private val PROVIDER_CATALOG_VERSION = stringPreferencesKey("provider_catalog_version")

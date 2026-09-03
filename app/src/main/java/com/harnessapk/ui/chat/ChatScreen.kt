@@ -1278,11 +1278,7 @@ fun ChatScreen(
         container.chatExecutionCoordinator.cancelActive(conversationId)
     }
 
-    fun speakAssistantMessage(message: ChatMessage) {
-        if (!voiceSettings.ttsEnabled) {
-            errorText = "请先在设置 -> 语音能力启用回复朗读"
-            return
-        }
+    fun speakAssistantMessageNow(message: ChatMessage) {
         val engine = textToSpeech
         if (!textToSpeechReady || engine == null) {
             errorText = "系统 TTS 还未准备好，请稍后再试"
@@ -1300,6 +1296,29 @@ fun ChatScreen(
         engine.setSpeechRate(voiceSettings.ttsSpeechRate)
         speakingMessageId = message.id
         engine.speak(content.take(MAX_TTS_TEXT_LENGTH), TextToSpeech.QUEUE_FLUSH, null, message.id)
+    }
+
+    fun speakAssistantMessage(message: ChatMessage) {
+        if (!voiceSettings.ttsEnabled) {
+            errorText = "请先在设置 -> 语音能力启用回复朗读"
+            return
+        }
+        speakAssistantMessageNow(message)
+    }
+
+    // 自动朗读回复：默认关闭（voiceSettings.ttsAutoRead），开启时助手回复生成完成即朗读
+    var lastAutoReadMessageId by rememberSaveable(conversationId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(messages, voiceSettings.ttsAutoRead) {
+        if (!voiceSettings.ttsAutoRead) return@LaunchedEffect
+        val lastAssistant = messages.lastOrNull { it.role == MessageRole.ASSISTANT } ?: return@LaunchedEffect
+        if (
+            lastAssistant.status == MessageStatus.SUCCEEDED &&
+            lastAssistant.id != lastAutoReadMessageId &&
+            lastAssistant.content.isNotBlank()
+        ) {
+            lastAutoReadMessageId = lastAssistant.id
+            speakAssistantMessageNow(lastAssistant)
+        }
     }
 
     fun compressContextNow() {

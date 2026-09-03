@@ -18,6 +18,7 @@ class VoiceSettingsTest {
         assertFalse(settings.autoSendAfterTranscription)
         assertFalse(settings.saveOriginalAudio)
         assertFalse(settings.ttsEnabled)
+        assertFalse(settings.ttsAutoRead)
         assertEquals(VoiceProviderType.ANDROID_SYSTEM, settings.defaultTtsProvider)
         assertEquals(1.0f, settings.ttsSpeechRate)
     }

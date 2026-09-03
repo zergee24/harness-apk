@@ -206,6 +206,9 @@ fun ConfigPackageImportScreen(
                 if (decrypted.simpleMode) {
                     Text("将开启生活简洁模式", style = MaterialTheme.typography.bodyMedium)
                 }
+                if (decrypted.ttsAutoRead) {
+                    Text("将开启自动朗读回复", style = MaterialTheme.typography.bodyMedium)
+                }
                 Button(
                     enabled = decrypted.providers.isNotEmpty() && !busy,
                     onClick = {

@@ -22,6 +22,7 @@ data class VoiceSettings(
     val autoSendAfterTranscription: Boolean = false,
     val saveOriginalAudio: Boolean = false,
     val ttsEnabled: Boolean = false,
+    val ttsAutoRead: Boolean = false,
     val defaultTtsProvider: VoiceProviderType = VoiceProviderType.ANDROID_SYSTEM,
     val ttsSpeechRate: Float = 1.0f,
 )
