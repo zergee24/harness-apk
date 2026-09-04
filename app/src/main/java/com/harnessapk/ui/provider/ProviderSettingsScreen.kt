@@ -16,6 +16,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.AlertDialog
@@ -108,6 +110,7 @@ fun ProviderSettingsScreen(
     var apiProtocol by remember { mutableStateOf(defaultTemplate.apiProtocol) }
     var formBusyAction by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
+    var activeSection by remember { mutableStateOf(ProviderSection.FORM) }
     var editingProviderId by remember { mutableStateOf<String?>(null) }
     var providerToDelete by remember { mutableStateOf<ProviderProfile?>(null) }
 
@@ -151,6 +154,7 @@ fun ProviderSettingsScreen(
         nativeWebSearchMode = provider.nativeWebSearchMode
         apiProtocol = provider.apiProtocol
         formBusyAction = null
+        activeSection = ProviderSection.FORM
         status = "正在编辑 ${provider.name}，API Key 留空会沿用原 Key。"
     }
 
@@ -283,7 +287,16 @@ fun ProviderSettingsScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            DefaultModelCard(
+            ProviderSectionTabs(
+                active = activeSection,
+                savedCount = providers.size,
+                onSelect = { activeSection = it },
+            )
+        }
+
+        when (activeSection) {
+            ProviderSection.DEFAULTS -> item {
+                DefaultModelCard(
                 providers = providers,
                 selectedProviderId = defaultProviderId,
                 selectedModel = defaultModelName,
@@ -340,9 +353,8 @@ fun ProviderSettingsScreen(
                     }
                 },
             )
-        }
-
-        item {
+            }
+            ProviderSection.FORM -> item {
             ProviderFormCard(
                 editing = editingProviderId != null,
                 name = name,
@@ -397,55 +409,59 @@ fun ProviderSettingsScreen(
                                 container.providerRepository.updateProvider(providerId, draft)
                             }
                         }.onSuccess {
-                            status = if (editingProviderId == null) {
-                                "已保存，Key 已加密保存在本机"
-                            } else {
-                                "已保存修改"
-                            }
-                            resetForm()
-                        }.onFailure {
-                            status = it.message
+                        status = if (editingProviderId == null) {
+                            "已保存，Key 已加密保存在本机"
+                        } else {
+                            "已保存修改"
                         }
+                        resetForm()
+                        activeSection = ProviderSection.LIST
+                    }.onFailure {
+                        status = it.message
                     }
-                },
-                onCancelEdit = {
-                    resetForm()
-                    status = null
-                },
-            )
+                }
+            },
+            onCancelEdit = {
+                resetForm()
+                status = null
+            },
+        )
         }
-
-        item {
-            Text(
-                text = "已保存供应商",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-
-        if (providers.isEmpty()) {
-            item {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-                ) {
+        ProviderSection.LIST -> {
+            if (status != null) {
+                item {
                     Text(
-                        modifier = Modifier.padding(16.dp),
-                        text = "还没有保存的模型供应商。先选择模板，填入 Key 后保存。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = status.orEmpty(),
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodyMedium,
                     )
                 }
             }
-        } else {
-            items(providers, key = { it.id }) { provider ->
-                ProviderRow(
-                    provider = provider,
-                    capabilities = capabilityResolver.selectableModels(provider),
-                    onEdit = { editProvider(provider) },
-                    onDelete = { providerToDelete = provider },
-                )
+            if (providers.isEmpty()) {
+                item {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    ) {
+                        Text(
+                            modifier = Modifier.padding(16.dp),
+                            text = "还没有保存的模型供应商。切到「录入」选择模板，填入 Key 后保存。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            } else {
+                items(providers, key = { it.id }) { provider ->
+                    ProviderRow(
+                        provider = provider,
+                        capabilities = capabilityResolver.selectableModels(provider),
+                        onEdit = { editProvider(provider) },
+                        onDelete = { providerToDelete = provider },
+                    )
+                }
             }
+        }
         }
     }
 }
@@ -859,6 +875,7 @@ private fun ModelConfigEditorRow(
     onChange: (ModelConfig) -> Unit,
     onDelete: () -> Unit,
 ) {
+    var advancedExpanded by remember { mutableStateOf(false) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -882,6 +899,16 @@ private fun ModelConfigEditorRow(
                     label = { Text("模型") },
                     singleLine = true,
                 )
+                IconButton(onClick = { advancedExpanded = !advancedExpanded }) {
+                    Icon(
+                        if (advancedExpanded) {
+                            Icons.Outlined.KeyboardArrowUp
+                        } else {
+                            Icons.Outlined.KeyboardArrowDown
+                        },
+                        contentDescription = if (advancedExpanded) "收起高级设置" else "展开高级设置",
+                    )
+                }
                 IconButton(
                     enabled = canDelete,
                     onClick = onDelete,
@@ -889,7 +916,15 @@ private fun ModelConfigEditorRow(
                     Icon(Icons.Outlined.Delete, contentDescription = "删除模型")
                 }
             }
-            ModelConfigDataBar(
+            Text(
+                text = modelConfigSummaryLine(config),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (advancedExpanded) {
+                ModelConfigDataBar(
                 label = "上下文",
                 valueText = config.contextWindowTokens.toCompactTokenText(),
                 progress = modelConfigDataBarProgress(config.contextWindowTokens, MAX_CONTEXT_WINDOW_TOKENS),
@@ -967,6 +1002,7 @@ private fun ModelConfigEditorRow(
                 },
                 valueRange = MIN_READ_TIMEOUT_SECONDS.toFloat()..MAX_READ_TIMEOUT_SECONDS.toFloat(),
             )
+            }
         }
     }
 }
@@ -1097,6 +1133,23 @@ internal fun modelConfigDataBarProgress(value: Int, maxValue: Int): Float {
     return (value.toFloat() / maxValue.toFloat()).coerceIn(0f, 1f)
 }
 
+/** 折叠态摘要：上下文 / 压缩 / 超时 + 能力标签，展开高级设置前一眼可见。 */
+internal fun modelConfigSummaryLine(config: ModelConfig): String {
+    val capabilities = buildList {
+        if (config.inputModalities.orEmpty().contains("image")) add("图片")
+        if (config.inputModalities.orEmpty().contains("audio")) add("音频")
+        if (!config.reasoningEffortOptions.isNullOrEmpty()) add("推理")
+        if (config.webSearchMode != null && config.webSearchMode != NativeWebSearchMode.DISABLED) add("搜索")
+        if (config.supportsToolCalling == true) add("工具")
+    }
+    val basics = listOf(
+        "上下文 ${config.contextWindowTokens.toCompactTokenText()}",
+        "压缩 ${config.compressionThresholdPercent.coerceIn(1, 95)}%",
+        "超时 ${((config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) / 1000L).toInt()}秒",
+    ).joinToString(" · ")
+    return if (capabilities.isEmpty()) basics else "$basics · ${capabilities.joinToString("/")}"
+}
+
 internal fun updateModelConfigAt(
     configs: List<ModelConfig>,
     index: Int,
@@ -1165,6 +1218,43 @@ internal fun updateReadTimeoutSeconds(config: ModelConfig, seconds: Int): ModelC
 
 internal fun isNativeWebSearchEnabled(mode: NativeWebSearchMode): Boolean =
     mode != NativeWebSearchMode.DISABLED
+
+private enum class ProviderSection(val label: String) {
+    FORM("录入供应商"),
+    DEFAULTS("默认模型"),
+    LIST("已保存"),
+}
+
+@Composable
+private fun ProviderSectionTabs(
+    active: ProviderSection,
+    savedCount: Int,
+    onSelect: (ProviderSection) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 2.dp,
+        shadowElevation = 1.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ProviderSection.entries.forEach { section ->
+                FilterChip(
+                    selected = active == section,
+                    onClick = { onSelect(section) },
+                    label = {
+                        val badge = if (section == ProviderSection.LIST && savedCount > 0) " $savedCount" else ""
+                        Text(section.label + badge)
+                    },
+                )
+            }
+        }
+    }
+}
 
 internal fun apiProtocolDisplayName(protocol: ProviderApiProtocol): String = when (protocol) {
     ProviderApiProtocol.OPENAI_COMPATIBLE -> "OpenAI 兼容"
