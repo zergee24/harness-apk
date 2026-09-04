@@ -1,6 +1,7 @@
 package com.harnessapk.network
 
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.ProviderApiProtocol
 
 data class ChatRequest(
     val baseUrl: String,
@@ -13,6 +14,8 @@ data class ChatRequest(
     val readTimeoutMillis: Long? = null,
     val customHeaders: Map<String, String> = emptyMap(),
     val customBodyJson: String = "",
+    val apiProtocol: ProviderApiProtocol = ProviderApiProtocol.OPENAI_COMPATIBLE,
+    val maxOutputTokens: Int? = null,
 )
 
 data class OutgoingChatMessage(

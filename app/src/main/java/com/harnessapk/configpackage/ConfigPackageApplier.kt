@@ -3,6 +3,7 @@ package com.harnessapk.configpackage
 import com.harnessapk.packageformat.ConfigPackagePayload
 import com.harnessapk.packageformat.ConfigPackageProvider
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.ProviderApiProtocol
 import com.harnessapk.provider.ProviderDraft
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.storage.AppSettingsStore
@@ -88,6 +89,9 @@ class ConfigPackageApplier(
         nativeWebSearchMode = nativeWebSearchMode?.let { mode ->
             runCatching { NativeWebSearchMode.valueOf(mode) }.getOrNull()
         } ?: NativeWebSearchMode.DISABLED,
+        apiProtocol = apiProtocol?.let { protocol ->
+            runCatching { ProviderApiProtocol.valueOf(protocol) }.getOrNull()
+        } ?: ProviderApiProtocol.OPENAI_COMPATIBLE,
         availableModels = availableModels,
         customHeaders = customHeaders,
         customBodyJson = customBodyJson,

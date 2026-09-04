@@ -31,14 +31,14 @@ import java.util.concurrent.TimeUnit
 class OpenAiCompatibleClient(
     private val okHttpClient: OkHttpClient,
     private val json: Json,
-) {
-    fun streamChat(request: ChatRequest): Flow<ChatDelta> = flow {
+) : ChatStreamClient {
+    override fun streamChat(request: ChatRequest): Flow<ChatDelta> = flow {
         streamChatEvents(request).collect { event ->
             if (event is StreamEvent.TextDelta) emit(ChatDelta(event.text))
         }
     }
 
-    fun streamChatEvents(request: ChatRequest): Flow<StreamEvent> = flow {
+    override fun streamChatEvents(request: ChatRequest): Flow<StreamEvent> = flow {
         val httpRequestBuilder = Request.Builder()
             .url(chatCompletionsUrl(request.baseUrl))
             .addHeader("Authorization", "Bearer ${request.apiKey}")

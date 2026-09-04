@@ -158,6 +158,40 @@ class ConfigPackageCodecTest {
         }
     }
 
+    @Test
+    fun providerApiProtocolRoundTripsAndLegacyPackagesDefaultToNull() {
+        val anthropicPayload = payload.copy(
+            providers = payload.providers.map { it.copy(apiProtocol = "ANTHROPIC_MESSAGES") },
+        )
+        val anthropicBytes = ConfigPackageCodec.exportPackage(
+            payload = anthropicPayload,
+            passphrase = "ab234567",
+            issuedAtMillis = 1_000_000L,
+            expiresAtMillis = 1_000_000L + VALIDITY_MILLIS,
+        )
+        val decryptedAnthropic = ConfigPackageCodec.decryptPayload(
+            envelope = ConfigPackageCodec.parseEnvelope(anthropicBytes),
+            passphrase = "ab234567",
+            nowMillis = 1_000_000L,
+        )
+        assertEquals("ANTHROPIC_MESSAGES", decryptedAnthropic.providers.single().apiProtocol)
+
+        val legacyBytes = ConfigPackageCodec.exportPackage(
+            payload = payload.copy(
+                providers = payload.providers.map { it.copy(apiProtocol = null) },
+            ),
+            passphrase = "ab234567",
+            issuedAtMillis = 1_000_000L,
+            expiresAtMillis = 1_000_000L + VALIDITY_MILLIS,
+        )
+        val decryptedLegacy = ConfigPackageCodec.decryptPayload(
+            envelope = ConfigPackageCodec.parseEnvelope(legacyBytes),
+            passphrase = "ab234567",
+            nowMillis = 1_000_000L,
+        )
+        assertEquals(null, decryptedLegacy.providers.single().apiProtocol)
+    }
+
     private fun decryptError(bytes: ByteArray, passphrase: String, nowMillis: Long): ConfigPackageException {
         val envelope = ConfigPackageCodec.parseEnvelope(bytes)
         return runCatching {

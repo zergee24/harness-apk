@@ -53,6 +53,33 @@ object ProviderTemplates {
             supportsVision = true,
             nativeWebSearchMode = NativeWebSearchMode.GLM_WEB_SEARCH_TOOL,
         ),
+        ProviderTemplate(
+            name = "Claude",
+            baseUrl = "https://api.anthropic.com",
+            defaultModel = "claude-sonnet-4-5",
+            modelConfigs = listOf(
+                anthropicModelConfig("claude-sonnet-4-5", contextWindowTokens = 200_000),
+                anthropicModelConfig("claude-opus-4-1", contextWindowTokens = 200_000),
+                anthropicModelConfig("claude-haiku-4-5", contextWindowTokens = 200_000),
+            ),
+            defaultVisionModel = "claude-sonnet-4-5",
+            supportsVision = true,
+            nativeWebSearchMode = NativeWebSearchMode.DISABLED,
+            apiProtocol = ProviderApiProtocol.ANTHROPIC_MESSAGES,
+        ),
+        ProviderTemplate(
+            name = "GLM·ClaudeCode",
+            baseUrl = "https://open.bigmodel.cn/api/anthropic",
+            defaultModel = "glm-5.2",
+            modelConfigs = listOf(
+                anthropicModelConfig("glm-5.2", contextWindowTokens = 1_000_000),
+                anthropicModelConfig("glm-5-turbo", contextWindowTokens = 200_000),
+            ),
+            defaultVisionModel = null,
+            supportsVision = false,
+            nativeWebSearchMode = NativeWebSearchMode.DISABLED,
+            apiProtocol = ProviderApiProtocol.ANTHROPIC_MESSAGES,
+        ),
     )
 
     val default: ProviderTemplate = defaults.first()
@@ -66,9 +93,19 @@ data class ProviderTemplate(
     val defaultVisionModel: String?,
     val supportsVision: Boolean,
     val nativeWebSearchMode: NativeWebSearchMode,
+    val apiProtocol: ProviderApiProtocol = ProviderApiProtocol.OPENAI_COMPATIBLE,
 ) {
     val availableModels: List<String> = modelConfigs.map { it.id }
 }
+
+private fun anthropicModelConfig(id: String, contextWindowTokens: Int): ModelConfig = ModelConfig(
+    id = id,
+    contextWindowTokens = contextWindowTokens,
+    maxOutputTokens = 32_000,
+    inputModalities = listOf("text", "image"),
+    outputModalities = listOf("text"),
+    readTimeoutMillis = 180_000L,
+)
 
 private fun openAiModelConfig(id: String): ModelConfig = ModelConfig(
     id = id,

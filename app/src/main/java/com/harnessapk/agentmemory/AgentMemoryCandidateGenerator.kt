@@ -1,6 +1,7 @@
 package com.harnessapk.agentmemory
 
 import com.harnessapk.network.ChatRequest
+import com.harnessapk.provider.ProviderApiProtocol
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
@@ -26,6 +27,7 @@ data class AgentMemoryResolvedProvider(
     val model: String,
     val customHeaders: Map<String, String> = emptyMap(),
     val readTimeoutMillis: Long? = null,
+    val apiProtocol: ProviderApiProtocol = ProviderApiProtocol.OPENAI_COMPATIBLE,
 )
 
 fun interface AgentMemoryCompletionGateway {

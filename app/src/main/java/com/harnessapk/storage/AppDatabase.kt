@@ -61,7 +61,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         BriefRevisionEntity::class,
         WorkJournalEntity::class,
     ],
-    version = 25,
+    version = 26,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -1384,6 +1384,16 @@ abstract class AppDatabase : RoomDatabase() {
                     CREATE UNIQUE INDEX IF NOT EXISTS index_project_remote_bindings_projectId_backendId
                     ON project_remote_bindings(projectId, backendId)
                     """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_25_26: Migration = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 供应商 API 协议（OpenAI 兼容 / Anthropic Messages），存量行默认 OpenAI 兼容。
+                // 注：24→25 已被简报 P1 schema 占用，本分支 rebase 后顺延为 25→26。
+                db.execSQL(
+                    "ALTER TABLE provider_profiles ADD COLUMN apiProtocol TEXT NOT NULL DEFAULT 'OPENAI_COMPATIBLE'",
                 )
             }
         }

@@ -54,6 +54,8 @@ class ModelAwareRequestBuilder {
                 readTimeoutMillis = capability.readTimeoutMillis,
                 customHeaders = provider.customHeaders,
                 customBodyJson = provider.customBodyJson,
+                apiProtocol = provider.apiProtocol,
+                maxOutputTokens = capability.maxOutputTokens,
             ),
             diagnostics = ModelAwareRequestDiagnostics(
                 capabilitySource = capability.source,

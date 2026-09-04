@@ -36,6 +36,7 @@ data class ConfigPackageProvider(
     val defaultVisionModel: String? = null,
     val supportsVision: Boolean = false,
     val nativeWebSearchMode: String? = null,
+    val apiProtocol: String? = null,
     val availableModels: List<String> = emptyList(),
     val customHeaders: Map<String, String> = emptyMap(),
     val customBodyJson: String = "",

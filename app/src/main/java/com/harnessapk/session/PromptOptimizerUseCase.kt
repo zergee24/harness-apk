@@ -6,14 +6,14 @@ import com.harnessapk.chat.reasoningEffortForRequest
 import com.harnessapk.chat.temperatureForModel
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.network.ChatRequest
-import com.harnessapk.network.OpenAiCompatibleClient
+import com.harnessapk.network.ChatStreamClient
 import com.harnessapk.provider.ProviderRepository
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 
 class PromptOptimizerUseCase(
     private val providerRepository: ProviderRepository,
-    private val client: OpenAiCompatibleClient,
+    private val client: ChatStreamClient,
     private val dispatchers: AppDispatchers,
 ) {
     suspend fun optimize(
@@ -39,6 +39,7 @@ class PromptOptimizerUseCase(
                 messages = buildPromptOptimizationMessages(prompt, projectContext, deliverableMarkdown),
                 temperature = temperatureForModel(requestModel),
                 reasoningEffort = reasoningEffortForRequest(provider.profile, requestModel, defaultReasoningEffort()),
+                apiProtocol = provider.profile.apiProtocol,
             ),
         ).collect {
             output.append(it.text)

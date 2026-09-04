@@ -2,7 +2,7 @@ package com.harnessapk.agentmemory
 
 import com.harnessapk.chat.modelForRequest
 import com.harnessapk.network.ChatRequest
-import com.harnessapk.network.OpenAiCompatibleClient
+import com.harnessapk.network.ChatStreamClient
 import com.harnessapk.network.OutgoingChatMessage
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderWithKey
@@ -43,6 +43,7 @@ class LlmAgentMemoryCandidateGenerator(
             readTimeoutMillis = provider.readTimeoutMillis,
             customHeaders = provider.customHeaders,
             customBodyJson = "",
+            apiProtocol = provider.apiProtocol,
         )
         val output = StringBuilder()
         var outputBytes = 0
@@ -108,7 +109,7 @@ class RepositoryAgentMemoryGenerationProviderResolver(
     }
 }
 
-fun openAiAgentMemoryCompletionGateway(client: OpenAiCompatibleClient) =
+fun agentMemoryCompletionGateway(client: ChatStreamClient) =
     AgentMemoryCompletionGateway { request ->
         client.streamChat(request).map { it.text }
     }
@@ -131,6 +132,7 @@ private fun ProviderWithKey.toMemoryProvider(selectedModel: String): AgentMemory
         model = requestModel,
         customHeaders = profile.customHeaders,
         readTimeoutMillis = readTimeout,
+        apiProtocol = profile.apiProtocol,
     )
 }
 

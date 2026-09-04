@@ -629,7 +629,7 @@ fun ChatScreen(
     val markdownUpdatePlanner = remember(container) {
         MarkdownUpdatePlannerUseCase(
             providerRepository = container.providerRepository,
-            client = container.openAiClient,
+            client = container.chatClient,
             dispatchers = container.dispatchers,
         )
     }
