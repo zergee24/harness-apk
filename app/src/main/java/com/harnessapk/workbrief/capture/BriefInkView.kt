@@ -23,6 +23,9 @@ class BriefInkView(
 
     var fingerMode = false
 
+    /** 封存/回放模式下关闭触摸输入。 */
+    var inputEnabled = true
+
     private val policy = SpikeInputPolicy()
     private var stylusLastSeenAtMs: Long? = null
     private var activeTool = ""
@@ -35,6 +38,7 @@ class BriefInkView(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!inputEnabled) return true
         val controller = controllerProvider() ?: return true
         val tool = toolName(event)
         if (tool == PageInk.TOOL_STYLUS || tool == PageInk.TOOL_ERASER) {

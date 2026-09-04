@@ -45,6 +45,10 @@ class BriefCaptureController(
     var journal: StrokeJournal? = null
         private set
 
+    /** journal 全量记录（顺序即事实顺序），供回放页使用。 */
+    var replayRecords: List<StrokeJournal.Record> = emptyList()
+        private set
+
     /** 墨迹脏区回调：View 层据此做局部失效（e-ink 局部快刷）。 */
     var onInkChanged: (dirtyLeft: Int, dirtyTop: Int, dirtyRight: Int, dirtyBottom: Int) -> Unit =
         { _, _, _, _ -> }
@@ -68,6 +72,7 @@ class BriefCaptureController(
         android.util.Log.w("BriefCapture", "prepare: briefId=$briefId session=${session.id} status=${session.status}")
         val (journal, replayResult) = StrokeJournal.open(File(journalDir, "${session.id}.journal"))
         this.journal = journal
+        replayRecords = replayResult.records
         replayResult.records.forEach { record -> applyRecord(record.type, String(record.payload, Charsets.UTF_8)) }
         if (replayResult.truncated) {
             // §17.2 可见恢复警告：P1 以日志承载，Task 9 真机走查人工确认。
@@ -230,6 +235,31 @@ class BriefCaptureController(
     }
 
     fun offsetMs(): Long = System.currentTimeMillis() - sessionOriginWallClock
+
+    /** 回放前清空所有页墨迹（不影响 journal 与 Room 数据）。 */
+    fun resetInkForReplay() {
+        pages.values.forEach { page ->
+            page.ink.resetInk()
+        }
+    }
+
+    /** 回放驱动：在指定页按采样点追加分段墨迹（记录顺序即绘制顺序）。 */
+    fun replayAppend(pageId: String, tool: String, x: Double, y: Double, t: Long, pressure: Float) {
+        val ink = inkFor(pageId)
+        val previous = ink.lastPoint()
+        ink.appendPoint(tool, x, y, t, pressure)
+        if (previous == null) {
+            // 新一笔首点：轻提脏区即可
+        }
+    }
+
+    fun replayErase(pageId: String, x: Double, y: Double) {
+        inkFor(pageId).eraseAt(x, y)
+    }
+
+    fun replaySwitchPage(pageId: String) {
+        if (pages.containsKey(pageId)) currentPageId = pageId
+    }
 
     companion object {
         const val CANVAS_WIDTH = 1680

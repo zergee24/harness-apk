@@ -186,6 +186,14 @@ class PageInk(
         }
     }
 
+    fun lastPoint(): InkPoint? = strokes.lastOrNull()?.points?.lastOrNull()
+
+    /** 清空墨迹（回放重置用）：笔迹列表清空 + 位图透明化。 */
+    fun resetInk() {
+        strokes.clear()
+        bitmap?.eraseColor(android.graphics.Color.TRANSPARENT)
+    }
+
     fun drawAllOnto(canvas: Canvas) {
         ensureBitmap()
         bitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }

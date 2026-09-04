@@ -34,6 +34,8 @@ import com.harnessapk.workbrief.UserMarkerType
 import com.harnessapk.workbrief.WorkBriefRepository
 import com.harnessapk.workbrief.capture.BriefCaptureController
 import com.harnessapk.workbrief.capture.BriefInkView
+import com.harnessapk.workbrief.journal.StrokeJournal
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** 简报记录页（P1）：有限画布 + 4 型标记 + 多页 + 暂停/恢复/结束。 */
@@ -56,6 +58,8 @@ fun WorkBriefCaptureScreen(
     var eraserMode by remember { mutableStateOf(false) }
     var fingerMode by remember { mutableStateOf(false) }
     var inkView by remember { mutableStateOf<BriefInkView?>(null) }
+    var sealed by remember { mutableStateOf(false) }
+    var replaying by remember { mutableStateOf(false) }
 
     fun refreshPages() {
         controller?.let { c ->
@@ -102,18 +106,71 @@ fun WorkBriefCaptureScreen(
                     controller?.pause { paused = true; statusText = "已暂停" }
                 },
             ) { Text("暂停") }
-            OutlinedButton(
-                enabled = controller != null && paused,
-                onClick = {
-                    controller?.resume { paused = false; statusText = "记录中" }
-                },
-            ) { Text("继续") }
+            if (sealed) {
+                OutlinedButton(
+                    enabled = !replaying,
+                    onClick = {
+                        val c = controller ?: return@OutlinedButton
+                        replaying = true
+                        scope.launch {
+                            runCatching {
+                                c.resetInkForReplay()
+                                statusText = "回放中"
+                                for (record in c.replayRecords) {
+                                    val obj = org.json.JSONObject(String(record.payload, Charsets.UTF_8))
+                                    val pageId = obj.optString("pageId")
+                                    when (record.type) {
+                                        StrokeJournal.TYPE_PAGE_ADDED -> {
+                                            c.replaySwitchPage(pageId)
+                                            delay(150)
+                                        }
+                                        StrokeJournal.TYPE_ERASE_POINT -> {
+                                            c.replayErase(pageId, obj.optDouble("x"), obj.optDouble("y"))
+                                            delay(120)
+                                        }
+                                        StrokeJournal.TYPE_STROKE_COMMITTED -> {
+                                            c.replaySwitchPage(pageId)
+                                            val pts = obj.optJSONArray("pts") ?: continue
+                                            var prevT = 0L
+                                            val tool = obj.optString("tool", "stylus")
+                                            for (i in 0 until pts.length()) {
+                                                val arr = pts.optJSONArray(i) ?: continue
+                                                val t = arr.optLong(2)
+                                                val gap = (t - prevT).coerceIn(8L, 300L).toInt()
+                                                c.replayAppend(
+                                                    pageId, tool,
+                                                    arr.optDouble(0), arr.optDouble(1),
+                                                    t, arr.optDouble(3).toFloat(),
+                                                )
+                                                prevT = t
+                                                delay(gap.toLong())
+                                            }
+                                        }
+                                    }
+                                    delay(200)
+                                }
+                            }
+                            statusText = "回放结束"
+                            replaying = false
+                        }
+                    },
+                ) { Text(if (statusText == "回放结束") "重播" else "回放") }
+            } else {
+                OutlinedButton(
+                    enabled = controller != null && paused,
+                    onClick = {
+                        controller?.resume { paused = false; statusText = "记录中" }
+                    },
+                ) { Text("继续") }
+            }
             Button(
                 enabled = controller != null,
                 onClick = {
                     controller?.stop {
-                        statusText = "已封存"
-                        onClose()
+                        paused = false
+                        sealed = true
+                        inkView?.inputEnabled = false
+                        statusText = "已封存 · 可回放"
                     }
                 },
             ) { Text("结束") }
@@ -133,7 +190,7 @@ fun WorkBriefCaptureScreen(
             )
         }
 
-        Row(
+        if (!sealed) Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
