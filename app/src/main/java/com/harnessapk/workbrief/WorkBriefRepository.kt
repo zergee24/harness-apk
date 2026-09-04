@@ -244,7 +244,7 @@ class WorkBriefRepository(private val db: AppDatabase, private val clock: () -> 
     }
 
     suspend fun appendTimeline(sessionId: String, type: String, pageId: String?, atOffsetMs: Long, now: Long = clock()): Long {
-        val session = requireSession(sessionId)
+        // 注意：sessionId 不是 briefId，这里不能走 requireSession（按 briefId 查会永远查不到）。
         val sequence = captureDao.timelineBySession(sessionId).maxOfOrNull { it.sequence }?.plus(1) ?: 1
         captureDao.insertTimelineEvent(
             TimelineEventEntity(

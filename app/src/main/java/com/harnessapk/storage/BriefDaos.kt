@@ -41,6 +41,12 @@ interface WorkBriefDao {
     @Query("SELECT * FROM brief_capture_sessions WHERE id = :id")
     suspend fun sessionById(id: String): CaptureSessionEntity?
 
+    @Query("SELECT * FROM brief_capture_sessions")
+    suspend fun allSessionsDebug(): List<CaptureSessionEntity>
+
+    @Query("SELECT * FROM work_briefs")
+    suspend fun allBriefsDebug(): List<WorkBriefEntity>
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertRevision(revision: BriefRevisionEntity)
 
