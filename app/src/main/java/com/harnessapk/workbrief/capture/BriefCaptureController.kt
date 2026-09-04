@@ -3,6 +3,7 @@ package com.harnessapk.workbrief.capture
 import android.content.Context
 import com.harnessapk.storage.AppDatabase
 import com.harnessapk.storage.CanvasPageEntity
+import com.harnessapk.workbrief.CaptureSessionStatus
 import com.harnessapk.workbrief.UserMarkerType
 import com.harnessapk.workbrief.WorkBriefRepository
 import com.harnessapk.workbrief.journal.StrokeJournal
@@ -58,11 +59,16 @@ class BriefCaptureController(
 
     private var sessionOriginWallClock = 0L
 
+    /** 场次状态（prepare 后可读）：SEALED 时记录页进入回放模式。 */
+    var sessionStatus: String = CaptureSessionStatus.PREPARING.name
+        private set
+
     val currentPage: PageUi? get() = currentPageId?.let { pages[it] }
 
     suspend fun prepare() {
         val session = db.workBriefDao().sessionForBrief(briefId) ?: error("简报 $briefId 无场次")
         sessionOriginWallClock = session.wallClockStartedAt
+        sessionStatus = session.status
         db.briefCaptureDao().pagesBySession(session.id).forEach { page ->
             pages[page.id] = PageUi(page.id, page.pageIndex, PageInk(page.id, CANVAS_WIDTH, CANVAS_HEIGHT) { l, t, r, b ->
                 onInkChanged(l, t, r, b)

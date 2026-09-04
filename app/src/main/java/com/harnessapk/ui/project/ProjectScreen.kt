@@ -64,6 +64,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -92,6 +93,7 @@ import com.harnessapk.project.Project
 import com.harnessapk.project.ProjectDeliverable
 import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.remoteFeatureAvailability
+import com.harnessapk.storage.WorkBriefEntity
 import com.harnessapk.storage.ProjectRemoteBindingEntity
 import com.harnessapk.storage.RemoteRunEntity
 import com.harnessapk.ui.activity.remoteRunStatusLabel
@@ -270,6 +272,7 @@ internal fun ProjectScreen(
     onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
     onNewWorkBrief: (Project) -> Unit = {},
+    onOpenWorkBrief: (briefId: String) -> Unit = {},
     onOpenSession: (String) -> Unit,
     onStartRemoteRun: (Project) -> Unit = {},
     onOpenRemoteRun: (String) -> Unit = {},
@@ -295,6 +298,17 @@ internal fun ProjectScreen(
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedDeliverableId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(defaultProjectWorkbenchTab()) }
+    val projectBriefs by produceState(
+        initialValue = emptyList<WorkBriefEntity>(),
+        selectedProjectId,
+    ) {
+        val projectId = selectedProjectId
+        if (projectId != null) {
+            container.database.workBriefDao().observeByProject(projectId).collect { value = it }
+        } else {
+            value = emptyList()
+        }
+    }
     var gitSectionExpanded by rememberSaveable { mutableStateOf(false) }
     var fileHistoryVisible by rememberSaveable { mutableStateOf(false) }
     var fileHistory by remember { mutableStateOf<List<GitCommitSummary>>(emptyList()) }
@@ -1196,6 +1210,49 @@ internal fun ProjectScreen(
                             onClick = { onNewWorkBrief(selectedProject) },
                         ) {
                             Text("新建工作简报")
+                        }
+                    }
+
+                    if (projectBriefs.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "简报",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
+                        }
+                        items(projectBriefs, key = { it.id }) { brief ->
+                            val statusLabel = when (brief.status) {
+                                "DRAFT", "CAPTURING" -> "记录中"
+                                "PROCESSING" -> "整理中"
+                                "READY" -> "已封存"
+                                else -> brief.status
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = HarnessSpacing.minimumTouchTarget)
+                                    .clickable { onOpenWorkBrief(brief.id) }
+                                    .padding(horizontal = 4.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = brief.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = statusLabel,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                         }
                     }
 

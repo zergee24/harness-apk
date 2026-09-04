@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.harnessapk.common.AppContainer
+import com.harnessapk.workbrief.CaptureSessionStatus
 import com.harnessapk.workbrief.UserMarkerType
 import com.harnessapk.workbrief.WorkBriefRepository
 import com.harnessapk.workbrief.capture.BriefCaptureController
@@ -81,7 +82,13 @@ fun WorkBriefCaptureScreen(
         instance.prepare()
         controller = instance
         refreshPages()
-        statusText = "记录中"
+        if (instance.sessionStatus == CaptureSessionStatus.SEALED.name) {
+            sealed = true
+            inkView?.inputEnabled = false
+            statusText = "已封存 · 可回放"
+        } else {
+            statusText = "记录中"
+        }
     }
 
     Column(

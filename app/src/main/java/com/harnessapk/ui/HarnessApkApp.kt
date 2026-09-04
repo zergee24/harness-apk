@@ -602,6 +602,9 @@ fun HarnessApkApp(
                                 end = padding.calculateEndPadding(LocalLayoutDirection.current),
                                 bottom = padding.calculateBottomPadding(),
                             ),
+                            onOpenWorkBrief = { briefId ->
+                                navController.navigate("workbrief-capture/$briefId")
+                            },
                             onNewWorkBrief = { project ->
                                 scope.launch {
                                     val briefId = WorkBriefRepository(container.database).createBrief(
