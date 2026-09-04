@@ -409,7 +409,8 @@ private class SpikeCanvasView(context: Context) : View(context) {
         }
         val point = SpikePoint(x.toDouble(), y.toDouble(), t, pressure)
         val canvas = committedCanvas
-        if (canvas != null) {
+        // 橡皮点不落墨——它的职责是触发 applyEraseAt 的位图修复。
+        if (canvas != null && stroke.tool != SpikeInputPolicy.TOOL_ERASER) {
             val previous = stroke.points.lastOrNull()
             if (previous == null) {
                 dotPaint.strokeWidth = strokeWidthFor(pressure)
@@ -428,26 +429,70 @@ private class SpikeCanvasView(context: Context) : View(context) {
         return point
     }
 
-    /** 点级擦除：只删橡皮半径内的采样点，笔画被分成多段，其余墨迹保留。 */
+    /** 点级擦除：只删橡皮半径内的采样点，笔画被分成多段；受影响区域在位图上局部重绘。 */
     private fun applyEraseAt(x: Float, y: Float) {
+        val bitmap = committed ?: return
+        val canvas = committedCanvas ?: return
         var index = 0
         while (index < strokes.size) {
             val stroke = strokes[index]
-            val survivors = stroke.points.filter { p ->
-                hypot((p.x - x).toFloat(), (p.y - y).toFloat()) > ERASE_RADIUS_PX
-            }
-            if (survivors.size == stroke.points.size) {
+            if (stroke.points.none { p ->
+                    hypot((p.x - x).toFloat(), (p.y - y).toFloat()) <= ERASE_RADIUS_PX
+                }
+            ) {
                 index++
                 continue
             }
-            val fragments = splitRuns(survivors, stroke.tool)
-            strokes.removeAt(index)
-            fragments.forEach { fragment ->
-                strokes.add(index, fragment)
-                index++
+            val bbox = strokeBBox(stroke)
+            // 清掉该笔画包围盒内的旧墨，再把穿过这个区域的所有笔画（含本笔画的幸存段）补画回来
+            canvas.save()
+            canvas.clipRect(bbox)
+            canvas.drawRect(bbox, clearPaint)
+            strokes.forEach { other ->
+                if (other !== stroke && bboxesIntersect(strokeBBox(other), bbox)) {
+                    drawStrokeInto(canvas, other)
+                }
             }
+            canvas.restore()
+
+            val survivors = stroke.points.filter { p ->
+                hypot((p.x - x).toFloat(), (p.y - y).toFloat()) > ERASE_RADIUS_PX
+            }
+            val fragments = splitRuns(survivors, stroke.tool)
+            canvas.save()
+            canvas.clipRect(bbox)
+            fragments.forEach { drawStrokeInto(canvas, it) }
+            canvas.restore()
+
+            strokes.removeAt(index)
+            fragments.forEachIndexed { i, fragment ->
+                strokes.add(index + i, fragment)
+            }
+            index += fragments.size
+            invalidate(
+                (bbox.left - 2).toInt().coerceAtLeast(0),
+                (bbox.top - 2).toInt().coerceAtLeast(0),
+                (bbox.right + 2).toInt().coerceAtMost(width),
+                (bbox.bottom + 2).toInt().coerceAtMost(height),
+            )
         }
     }
+
+    private fun strokeBBox(stroke: SpikeStroke): android.graphics.RectF {
+        val pad = MAX_STROKE_WIDTH_PX + 4f
+        var left = Float.MAX_VALUE
+        var top = Float.MAX_VALUE
+        var right = -Float.MAX_VALUE
+        var bottom = -Float.MAX_VALUE
+        stroke.points.forEach { p ->
+            left = min(left, p.x.toFloat()); right = max(right, p.x.toFloat())
+            top = min(top, p.y.toFloat()); bottom = max(bottom, p.y.toFloat())
+        }
+        return android.graphics.RectF(left - pad, top - pad, right + pad, bottom + pad)
+    }
+
+    private fun bboxesIntersect(a: android.graphics.RectF, b: android.graphics.RectF): Boolean =
+        a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top
 
     private fun splitRuns(points: List<SpikePoint>, tool: String): List<SpikeStroke> {
         if (points.isEmpty()) return emptyList()
