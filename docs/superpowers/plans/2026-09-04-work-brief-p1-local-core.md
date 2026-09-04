@@ -64,6 +64,6 @@
 - Task 2 完成：StrokeJournal（CRC32/单调序列/2s·64KiB 自动 checkpoint/尾部损坏截断），6 项 JVM 测试全过。修复过程中发现并修正两处自伤：写入与重放的 CRC 位置顺序不一致、只读阶段截断依赖未创建的输出通道。
 - Task 3 完成：BriefStateMachine（§8.1/8.2 转移表）+ WorkBriefRepository（创建/开始/暂停/恢复/结束/标记/文件锚点）；6 项 JVM 测试全过。
 - Task 4 部分：PageInk/Spike 渲染核心迁移为正式版 BriefInkView + BriefCaptureController；真机验证创建→画布墨迹→journal 落盘全通。
-- **未决 bug（P1-1）**：「添加标记」时 `WorkBriefRepository.addMarker` 收到的 briefId 与控制器传入值不一致（入口日志与 requireSession 参数对照确证），抛"没有记录场次"。已在控制器协程层加固（runCatching + 错误上屏），App 不再崩溃。根因待查（怀疑安装包类文件陈旧或并发会话编辑干扰，clean build 后仍复现，需 APK 反编译比对）。
+- **P1-1 已修复（2026-09-04 晚）**：「添加标记」抛"没有记录场次"的根因是 `appendTimeline(sessionId, ...)` 内部误调 `requireSession(sessionId)`——把场次 id 当简报 id 查询（`WHERE briefId = 场次id`）永远查不到。诊断靠 requireSession 失败路径 dump 全表：失败的 brief 值恰好等于本轮 session id，规律锁定。修复：appendTimeline 不再查场次，序列按场次内 timeline 自算；WorkBriefDao 增加 `sessionById`。真机复测标记添加成功（状态条"已添加标记：决策"），WorkBriefRepo 错误 0。协程层 runCatching 加固保留（错误上屏不崩）。
 - 另发现：本 ROM 的 `install -r` 偶发清空应用数据（本轮复现一次），测试 fixture 需每次重建。
 - 遗留：Task 4 收尾（暂停态 UI 细节）、Task 5-9。
