@@ -63,6 +63,13 @@ data class GitDiffStat(
     val deleted: Int,
 )
 
+data class GitCommitSummary(
+    val shortId: String,
+    val message: String,
+    val authorName: String,
+    val timeMillis: Long,
+)
+
 data class GitPullResult(
     val fastForward: Boolean,
     val message: String,

@@ -217,6 +217,23 @@ class JGitEngine {
         }.sortedBy { it.path }
     }
 
+    fun fileLog(directory: File, relativePath: String, limit: Int = 20): List<GitCommitSummary> =
+        withGit(directory, "读取文件历史失败") { git ->
+            require(relativePath.isNotBlank()) { "文件路径不能为空" }
+            git.log()
+                .addPath(relativePath)
+                .setMaxCount(limit)
+                .call()
+                .map { commit ->
+                    GitCommitSummary(
+                        shortId = commit.abbreviate(8).name(),
+                        message = commit.shortMessage,
+                        authorName = commit.authorIdent.name,
+                        timeMillis = commit.commitTime * 1000L,
+                    )
+                }
+        }
+
     fun push(directory: File, credentials: GitCredentials?) {
         withGit(directory, "推送失败") { git ->
             val branch = git.repository.branch

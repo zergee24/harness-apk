@@ -35,6 +35,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
@@ -82,6 +83,7 @@ import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.git.GitBranchSummary
 import com.harnessapk.git.GitCloneRequest
+import com.harnessapk.git.GitCommitSummary
 import com.harnessapk.git.GitDiffStat
 import com.harnessapk.git.GitStatusSummary
 import com.harnessapk.markdownpdf.AndroidMarkdownPdfWriter
@@ -103,6 +105,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -292,6 +295,9 @@ internal fun ProjectScreen(
     var selectedDeliverableId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(defaultProjectWorkbenchTab()) }
     var gitSectionExpanded by rememberSaveable { mutableStateOf(false) }
+    var fileHistoryVisible by rememberSaveable { mutableStateOf(false) }
+    var fileHistory by remember { mutableStateOf<List<GitCommitSummary>>(emptyList()) }
+    var fileHistoryLoading by remember { mutableStateOf(false) }
     var artifactText by rememberSaveable { mutableStateOf("") }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var artifactFilter by rememberSaveable { mutableStateOf(defaultProjectArtifactFilter()) }
@@ -571,6 +577,33 @@ internal fun ProjectScreen(
             } catch (error: Throwable) {
                 if (!gitRefreshController.canPublish(refresh, selectedProjectId)) return@launch
                 statusText = error.toUserMessage()
+            }
+        }
+    }
+
+    fun loadFileHistory(project: Project?, relativePath: String?) {
+        if (project == null || relativePath.isNullOrBlank()) {
+            fileHistory = emptyList()
+            return
+        }
+        fileHistoryLoading = true
+        scope.launch {
+            try {
+                val commits = withContext(container.dispatchers.io) {
+                    if (!container.gitEngine.isRepository(project.rootDirectory)) {
+                        emptyList<GitCommitSummary>()
+                    } else {
+                        container.gitEngine.fileLog(project.rootDirectory, relativePath)
+                    }
+                }
+                fileHistory = commits
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                fileHistory = emptyList()
+                statusText = error.toUserMessage()
+            } finally {
+                fileHistoryLoading = false
             }
         }
     }
@@ -866,6 +899,12 @@ internal fun ProjectScreen(
             selectedDeliverableId = visibleDeliverables.firstOrNull()?.id
         }
         loadSelectedArtifactText()
+    }
+
+    LaunchedEffect(selectedDeliverable?.relativePath, fileHistoryVisible) {
+        if (fileHistoryVisible) {
+            loadFileHistory(selectedProject, selectedDeliverable?.relativePath)
+        }
     }
 
     if (showNewProjectDialog) {
@@ -1206,6 +1245,15 @@ internal fun ProjectScreen(
                             deliverable = selectedDeliverable,
                             artifactText = artifactText,
                             previewMode = previewMode,
+                            historyVisible = fileHistoryVisible,
+                            history = fileHistory,
+                            historyLoading = fileHistoryLoading,
+                            onToggleHistory = {
+                                fileHistoryVisible = !fileHistoryVisible
+                                if (fileHistoryVisible) {
+                                    loadFileHistory(selectedProject, selectedDeliverable?.relativePath)
+                                }
+                            },
                             onArtifactTextChange = { artifactText = it },
                             onTogglePreview = { previewMode = !previewMode },
                             onExportPdf = {
@@ -1679,6 +1727,10 @@ private fun ArtifactPreviewPanel(
     deliverable: ProjectDeliverable?,
     artifactText: String,
     previewMode: Boolean,
+    historyVisible: Boolean,
+    history: List<GitCommitSummary>,
+    historyLoading: Boolean,
+    onToggleHistory: () -> Unit,
     onArtifactTextChange: (String) -> Unit,
     onTogglePreview: () -> Unit,
     onExportPdf: () -> Unit,
@@ -1723,6 +1775,9 @@ private fun ArtifactPreviewPanel(
                 IconButton(enabled = rendersAsMarkdown, onClick = onExportPdf) {
                     Icon(Icons.Outlined.PictureAsPdf, contentDescription = "导出 PDF")
                 }
+                IconButton(enabled = deliverable != null, onClick = onToggleHistory) {
+                    Icon(Icons.Outlined.History, contentDescription = if (historyVisible) "隐藏历史" else "历史")
+                }
                 IconButton(enabled = isTextPreviewable, onClick = onShareText) {
                     Icon(Icons.Outlined.IosShare, contentDescription = "分享")
                 }
@@ -1734,6 +1789,10 @@ private fun ArtifactPreviewPanel(
                 }
             }
             HorizontalDivider()
+            if (historyVisible && deliverable != null) {
+                ProjectFileHistorySection(history = history, loading = historyLoading)
+                HorizontalDivider()
+            }
             if (deliverable == null) {
                 Text(
                     text = "选择已有交付物，或从项目会话生成新的文件沉淀。",
@@ -1764,6 +1823,59 @@ private fun ArtifactPreviewPanel(
         }
     }
 }
+
+@Composable
+private fun ProjectFileHistorySection(
+    history: List<GitCommitSummary>,
+    loading: Boolean,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("历史", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        if (loading) {
+            Text(
+                text = "正在读取提交历史…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (history.isEmpty()) {
+            Text(
+                text = "该文件暂无提交历史",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            history.forEach { commit ->
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AssistChip(onClick = {}, label = { Text(commit.shortId) })
+                        Text(
+                            text = "${commit.authorName} · ${formatCommitTime(commit.timeMillis)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        text = commit.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatCommitTime(millis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).apply {
+        timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+    }.format(Date(millis))
 
 @Composable
 private fun BinaryArtifactPreview(
