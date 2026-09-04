@@ -288,6 +288,42 @@ func TestRefreshDashboardHostPublishesQuota(t *testing.T) {
 	}
 }
 
+// 回归：tailer 缓存（dashboardQuota 残留旧值）非空时，轮询结果必须胜出——
+// 线程空闲后缓存冻结，副屏余额环曾因此停在旧百分比。
+func TestRefreshDashboardHostPrefersPollOverStaleCache(t *testing.T) {
+	frames := &[]recordedFrame{}
+	fake := backend.NewFake("codex").OnScript("account/rateLimits/read", func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"rateLimits":{"primary":{"usedPercent":8,"resetsAt":1788927739},"planType":"pro"}}`), nil
+	})
+	stale := observer.QuotaSnapshot{UsedPercent: 4, RemainingPercent: 96, PlanType: "pro"}
+	b := &bridge{
+		state: bridgeState{
+			HostID:        "host-1",
+			DeviceSecrets: map[string]string{"device-1": "bogus-secret"},
+		},
+		backends:        map[string]backend.Backend{"codex": fake},
+		dashboardQuota:  &stale,
+		dashboardSender: func(_ context.Context, deviceID string, event protocol.Event) error {
+			*frames = append(*frames, recordedFrame{deviceID: deviceID, event: event})
+			return nil
+		},
+	}
+	b.refreshDashboardHost(context.Background())
+	events := framesByType(t, frames, "device-1", "dashboard.host")
+	if len(events) != 1 {
+		t.Fatalf("期望 1 条 dashboard.host，得到 %d", len(events))
+	}
+	var hostFrame struct {
+		Quota observer.QuotaSnapshot `json:"quota"`
+	}
+	if err := json.Unmarshal(events[0].Payload, &hostFrame); err != nil {
+		t.Fatal(err)
+	}
+	if hostFrame.Quota.UsedPercent != 8 || hostFrame.Quota.RemainingPercent != 92 {
+		t.Fatalf("轮询值应胜出，quota = %#v", hostFrame.Quota)
+	}
+}
+
 func TestDashboardDetailWhitelistAndItems(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "thread_history_1.sqlite")

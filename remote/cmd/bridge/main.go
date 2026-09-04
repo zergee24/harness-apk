@@ -829,6 +829,13 @@ func (b *bridge) sendDashboardSnapshot(ctx context.Context, deviceID string) {
 	}
 	quota := b.dashboardQuotaCopy()
 	payload := map[string]any{"threads": snaps, "quota": quota}
+	log.Printf("dashboard snapshot DEBUG: %d threads, first=%s", len(snaps), func() string {
+		if len(snaps) > 0 {
+			b, _ := json.Marshal(snaps[0])
+			return string(b)
+		}
+		return "-"
+	}())
 	if err := b.sendDashboardFrame(ctx, deviceID, "dashboard.threads", mustJSON(payload)); err != nil && ctx.Err() == nil {
 		log.Printf("send dashboard snapshot to device %s: %v", deviceID, err)
 	}
@@ -845,33 +852,17 @@ func (b *bridge) sendDashboardSnapshot(ctx context.Context, deviceID string) {
 }
 
 // refreshDashboardHost 采集全局卡数据并按需广播 dashboard.host 帧：
-// 配额（优先 tailer 内嵌缓存，回退 account/rateLimits/read 轮询）+
+// 配额以 account/rateLimits/read 轮询为准（账号级全局状态；tailer 内嵌缓存只反映
+// 被 tail 线程最后一次 token_count 时的快照，线程空闲后会停在旧值，仅在轮询失败时兜底）+
 // account/usage/read 摘要（今日 tokens、连续 streak）+ 今日 turn 数 +
 // 主机内存/磁盘/load。全部来源原生通道，不依赖外部配额软件。
 func (b *bridge) refreshDashboardHost(ctx context.Context) {
-	quota := b.dashboardCachedQuota()
+	quota := b.pollDashboardQuota(ctx)
 	if quota == nil {
-		bd := b.backendFor("")
-		if bd == nil {
-			log.Printf("dashboard host: default backend not registered yet")
-			return
-		}
-		cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		defer cancel()
-		raw, err := bd.Call(cctx, "account/rateLimits/read", map[string]any{})
-		if err != nil {
-			log.Printf("dashboard host: rateLimits read failed: %v", err)
-			return
-		}
-		parsed, ok := observer.ParseQuota(raw)
-		if !ok {
-			log.Printf("dashboard host: unparseable rateLimits payload %.200s", raw)
-			return
-		}
-		quota = &parsed
-		b.dashboardMu.Lock()
-		b.dashboardQuota = &parsed
-		b.dashboardMu.Unlock()
+		quota = b.dashboardCachedQuota()
+	}
+	if quota == nil {
+		return
 	}
 
 	usage, usageOK := b.fetchUsageSummary(ctx)
@@ -913,6 +904,31 @@ func (b *bridge) refreshDashboardHost(ctx context.Context) {
 			log.Printf("publish dashboard host to device %s: %v", deviceID, err)
 		}
 	}
+}
+
+// pollDashboardQuota 主动向 codex 查询账号级配额，成功时同步进 dashboardQuota 缓存。
+func (b *bridge) pollDashboardQuota(ctx context.Context) *observer.QuotaSnapshot {
+	bd := b.backendFor("")
+	if bd == nil {
+		log.Printf("dashboard host: default backend not registered yet")
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	raw, err := bd.Call(cctx, "account/rateLimits/read", map[string]any{})
+	if err != nil {
+		log.Printf("dashboard host: rateLimits read failed: %v", err)
+		return nil
+	}
+	parsed, ok := observer.ParseQuota(raw)
+	if !ok {
+		log.Printf("dashboard host: unparseable rateLimits payload %.200s", raw)
+		return nil
+	}
+	b.dashboardMu.Lock()
+	b.dashboardQuota = &parsed
+	b.dashboardMu.Unlock()
+	return &parsed
 }
 
 // sendDashboardDetail 应答 dashboard.detail：按 24h 活跃白名单校验后回
