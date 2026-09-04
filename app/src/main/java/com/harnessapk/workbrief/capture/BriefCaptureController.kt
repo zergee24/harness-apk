@@ -63,9 +63,15 @@ class BriefCaptureController(
     var sessionStatus: String = CaptureSessionStatus.PREPARING.name
         private set
 
+    /** 简报归属项目（prepare 后可读），文件锚点用。 */
+    var projectId: String? = null
+        private set
+
     val currentPage: PageUi? get() = currentPageId?.let { pages[it] }
 
     suspend fun prepare() {
+        val brief = db.workBriefDao().getById(briefId) ?: error("简报 $briefId 不存在")
+        projectId = brief.projectId
         val session = db.workBriefDao().sessionForBrief(briefId) ?: error("简报 $briefId 无场次")
         sessionOriginWallClock = session.wallClockStartedAt
         sessionStatus = session.status
@@ -241,6 +247,10 @@ class BriefCaptureController(
     }
 
     fun offsetMs(): Long = System.currentTimeMillis() - sessionOriginWallClock
+
+    /** 添加文件级代码锚点（P1 最小：PROJECT_FILE + 内容哈希 + 手工标签）。 */
+    suspend fun addFileAnchor(relativePath: String, contentHash: String, manualLabel: String?): String =
+        repository.addFileAnchor(briefId, "PROJECT_FILE", relativePath, null, null, contentHash, manualLabel)
 
     /** 回放前清空所有页墨迹（不影响 journal 与 Room 数据）。 */
     fun resetInkForReplay() {

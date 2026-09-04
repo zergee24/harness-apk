@@ -3,6 +3,8 @@ package com.harnessapk.ui.workbrief
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.harnessapk.common.AppContainer
+import com.harnessapk.project.ProjectDeliverable
 import com.harnessapk.workbrief.CaptureSessionStatus
 import com.harnessapk.workbrief.UserMarkerType
 import com.harnessapk.workbrief.WorkBriefRepository
@@ -37,7 +40,9 @@ import com.harnessapk.workbrief.capture.BriefCaptureController
 import com.harnessapk.workbrief.capture.BriefInkView
 import com.harnessapk.workbrief.journal.StrokeJournal
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 简报记录页（P1）：有限画布 + 4 型标记 + 多页 + 暂停/恢复/结束。 */
 @Composable
@@ -59,6 +64,8 @@ fun WorkBriefCaptureScreen(
     var eraserMode by remember { mutableStateOf(false) }
     var fingerMode by remember { mutableStateOf(false) }
     var inkView by remember { mutableStateOf<BriefInkView?>(null) }
+    var anchorDialog by remember { mutableStateOf(false) }
+    var deliverables by remember { mutableStateOf<List<ProjectDeliverable>>(emptyList()) }
     var sealed by remember { mutableStateOf(false) }
     var replaying by remember { mutableStateOf(false) }
 
@@ -235,6 +242,18 @@ fun WorkBriefCaptureScreen(
                     inkView?.fingerMode = fingerMode
                 },
             ) { Text(if (fingerMode) "手指：开" else "手指：关") }
+            OutlinedButton(
+                enabled = controller != null,
+                onClick = {
+                    scope.launch {
+                        val projectId = controller?.projectId ?: return@launch
+                        deliverables = withContext(Dispatchers.IO) {
+                            container.projectRepository.listDeliverables(projectId)
+                        }
+                        anchorDialog = true
+                    }
+                },
+            ) { Text("锚点") }
         }
 
         Row(
@@ -293,6 +312,48 @@ fun WorkBriefCaptureScreen(
             },
         )
     }
+
+    if (anchorDialog) {
+        AlertDialog(
+            onDismissRequest = { anchorDialog = false },
+            title = { Text("添加文件锚点") },
+            text = {
+                if (deliverables.isEmpty()) {
+                    Text("项目中暂无文件")
+                } else {
+                    androidx.compose.foundation.lazy.LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp),
+                    ) {
+                        items(deliverables, key = { it.id }) { deliverable ->
+                            androidx.compose.material3.ListItem(
+                                headlineContent = { Text(deliverable.title) },
+                                supportingContent = { Text(deliverable.relativePath) },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                OutlinedButton(onClick = { anchorDialog = false }) { Text("关闭") }
+            },
+        )
+    }
+}
+
+/** 计算交付物文件 SHA-256（文件锚点内容哈希）。 */
+private suspend fun hashDeliverableFile(
+    container: AppContainer,
+    projectId: String,
+    deliverableId: String,
+): String = withContext(Dispatchers.IO) {
+    val file = container.projectRepository.resolveDeliverableFile(projectId, deliverableId)
+    java.security.MessageDigest.getInstance("SHA-256")
+        .digest(file.readBytes())
+        .joinToString("") { "%02x".format(it) }
 }
 
 private fun UserMarkerType.label(): String = when (this) {
