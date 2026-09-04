@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import java.io.File
 import com.harnessapk.common.AppContainer
 import com.harnessapk.project.ProjectDeliverable
 import com.harnessapk.workbrief.CaptureSessionStatus
@@ -182,9 +183,37 @@ fun WorkBriefCaptureScreen(
                 onClick = {
                     controller?.stop {
                         paused = false
-                        sealed = true
-                        inkView?.inputEnabled = false
-                        statusText = "已封存 · 可回放"
+                        statusText = "整理中…"
+                        val c = controller ?: return@stop
+                        val projectId = c.projectId
+                        if (projectId == null) {
+                            sealed = true
+                            inkView?.inputEnabled = false
+                            statusText = "已封存 · 可回放"
+                            return@stop
+                        }
+                        scope.launch {
+                            runCatching {
+                                val projectDir = container.projectRepository.projectDirectoryFor(projectId)
+                                val exporter = com.harnessapk.workbrief.export.BriefBundleExporter(
+                                    context, container.database, c.journalDirectory,
+                                )
+                                val result = exporter.export(briefId, File(projectDir, "briefs"))
+                                WorkBriefRepository(container.database).markReady(
+                                    briefId,
+                                    "briefs/${result.file.name}",
+                                    result.sha256,
+                                )
+                            }.onSuccess {
+                                sealed = true
+                                inkView?.inputEnabled = false
+                                statusText = "已封存 · 可回放"
+                            }.onFailure {
+                                sealed = true
+                                inkView?.inputEnabled = false
+                                statusText = "封存异常：${it.message}"
+                            }
+                        }
                     }
                 },
             ) { Text("结束") }

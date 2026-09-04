@@ -35,6 +35,10 @@ class BriefCaptureController(
         "work-brief-journals",
     ),
 ) {
+    /** journal 目录（导出器读取用）。 */
+    val journalDirectory: File
+        get() = journalDir
+
     data class PageUi(val pageId: String, val pageIndex: Int, val ink: PageInk)
 
     val pages = linkedMapOf<String, PageUi>()
