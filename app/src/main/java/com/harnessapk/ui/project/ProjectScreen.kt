@@ -35,6 +35,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
@@ -82,6 +83,7 @@ import com.harnessapk.common.AppContainer
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.git.GitBranchSummary
 import com.harnessapk.git.GitCloneRequest
+import com.harnessapk.git.GitCommitSummary
 import com.harnessapk.git.GitDiffStat
 import com.harnessapk.git.GitStatusSummary
 import com.harnessapk.markdownpdf.AndroidMarkdownPdfWriter
@@ -103,6 +105,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -214,10 +217,9 @@ internal fun selectedDeliverableIdForRefresh(
 }
 
 internal fun shouldRefreshGitOnTabSelection(tab: ProjectWorkbenchTab): Boolean =
-    tab == ProjectWorkbenchTab.GIT
+    tab == ProjectWorkbenchTab.FOLDER
 
-internal fun shouldRefreshGitForProjectSelection(tab: ProjectWorkbenchTab, projectId: String?): Boolean =
-    shouldRefreshGitOnTabSelection(tab) && projectId != null
+internal fun shouldRefreshGitForProjectSelection(projectId: String?): Boolean = projectId != null
 
 internal fun shouldShowProjectWorkbenchTabGuidance(
     tab: ProjectWorkbenchTab,
@@ -292,6 +294,10 @@ internal fun ProjectScreen(
     var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedDeliverableId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(defaultProjectWorkbenchTab()) }
+    var gitSectionExpanded by rememberSaveable { mutableStateOf(false) }
+    var fileHistoryVisible by rememberSaveable { mutableStateOf(false) }
+    var fileHistory by remember { mutableStateOf<List<GitCommitSummary>>(emptyList()) }
+    var fileHistoryLoading by remember { mutableStateOf(false) }
     var artifactText by rememberSaveable { mutableStateOf("") }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var artifactFilter by rememberSaveable { mutableStateOf(defaultProjectArtifactFilter()) }
@@ -575,6 +581,33 @@ internal fun ProjectScreen(
         }
     }
 
+    fun loadFileHistory(project: Project?, relativePath: String?) {
+        if (project == null || relativePath.isNullOrBlank()) {
+            fileHistory = emptyList()
+            return
+        }
+        fileHistoryLoading = true
+        scope.launch {
+            try {
+                val commits = withContext(container.dispatchers.io) {
+                    if (!container.gitEngine.isRepository(project.rootDirectory)) {
+                        emptyList<GitCommitSummary>()
+                    } else {
+                        container.gitEngine.fileLog(project.rootDirectory, relativePath)
+                    }
+                }
+                fileHistory = commits
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                fileHistory = emptyList()
+                statusText = error.toUserMessage()
+            } finally {
+                fileHistoryLoading = false
+            }
+        }
+    }
+
     fun cloneRepositoryAsProject(name: String, remoteUrl: String, branch: String) {
         scope.launch {
             runCatching {
@@ -594,7 +627,8 @@ internal fun ProjectScreen(
             }.onSuccess { project ->
                 selectProject(project.id)
                 searchQuery = ""
-                selectedTab = ProjectWorkbenchTab.GIT
+                selectedTab = ProjectWorkbenchTab.FOLDER
+                gitSectionExpanded = true
                 showCloneRepositoryDialog = false
                 statusText = "已克隆仓库：${project.name}"
                 refreshProjects()
@@ -794,16 +828,19 @@ internal fun ProjectScreen(
         }
 
         val targetTab = projectWorkbenchTab(target.destination)
-        val refreshAlreadySelectedGit = shouldRefreshGitForProjectSelection(targetTab, project.id) &&
-            selectedProjectId == project.id && selectedTab == ProjectWorkbenchTab.GIT
+        val refreshGitForTarget = shouldRefreshGitForProjectSelection(project.id) &&
+            selectedProjectId == project.id && selectedTab == targetTab
         selectProject(project.id, invalidateDeliverableRefresh = false)
         selectedTab = targetTab
         searchQuery = ""
         artifactFilter = ProjectArtifactFilter.ALL
         collapsedDirectoryPaths = emptySet()
+        if (target.destination == ProjectWorkbenchDestination.GIT) {
+            gitSectionExpanded = true
+        }
         if (target.destination == ProjectWorkbenchDestination.FILES) {
             publishDeliverableRefresh(checkNotNull(targetedFilesRefresh))
-        } else if (refreshAlreadySelectedGit) {
+        } else if (refreshGitForTarget) {
             refreshGitState(project)
         }
         onWorkbenchTargetConsumed(target.requestKey)
@@ -836,11 +873,15 @@ internal fun ProjectScreen(
         }
     }
 
-    LaunchedEffect(selectedProject, selectedTab) {
-        if (shouldRefreshGitForProjectSelection(selectedTab, selectedProject?.id)) {
+    LaunchedEffect(selectedProject) {
+        if (shouldRefreshGitForProjectSelection(selectedProject?.id)) {
             refreshGitState(selectedProject)
-        } else if (selectedTab == ProjectWorkbenchTab.GIT) {
-            refreshGitState(null)
+        }
+    }
+
+    LaunchedEffect(selectedTab) {
+        if (shouldRefreshGitOnTabSelection(selectedTab)) {
+            refreshGitState(selectedProject)
         }
     }
 
@@ -858,6 +899,12 @@ internal fun ProjectScreen(
             selectedDeliverableId = visibleDeliverables.firstOrNull()?.id
         }
         loadSelectedArtifactText()
+    }
+
+    LaunchedEffect(selectedDeliverable?.relativePath, fileHistoryVisible) {
+        if (fileHistoryVisible) {
+            loadFileHistory(selectedProject, selectedDeliverable?.relativePath)
+        }
     }
 
     if (showNewProjectDialog) {
@@ -1067,9 +1114,9 @@ internal fun ProjectScreen(
                 ProjectWorkbenchTabs(
                     selectedTab = selectedTab,
                     onSelectTab = { tab ->
-                        val refreshAlreadySelectedGit = shouldRefreshGitOnTabSelection(tab) && tab == selectedTab
+                        val refreshAlreadySelectedFolder = shouldRefreshGitOnTabSelection(tab) && tab == selectedTab
                         selectedTab = tab
-                        if (refreshAlreadySelectedGit) refreshGitState()
+                        if (refreshAlreadySelectedFolder) refreshGitState()
                     },
                 )
             }
@@ -1109,7 +1156,37 @@ internal fun ProjectScreen(
                         }
                     }
                 }
-                ProjectWorkbenchTab.FOLDER -> {
+                ProjectWorkbenchTab.FOLDER, ProjectWorkbenchTab.GIT -> {
+                    item {
+                        ProjectGitBar(
+                            status = gitStatus,
+                            expanded = gitSectionExpanded,
+                            onToggleExpanded = { gitSectionExpanded = !gitSectionExpanded },
+                            onInitRepository = { initGitRepository(selectedProject) },
+                            onCloneRepository = { showCloneRepositoryDialog = true },
+                        )
+                    }
+
+                    if (gitSectionExpanded && gitStatus != null) {
+                        item {
+                            ProjectGitPanel(
+                                status = gitStatus,
+                                branches = gitBranches,
+                                pendingCommitCount = pendingCommitPaths.size,
+                                onOpenPendingCommit = { openPendingCommit(selectedProject) },
+                                onInitRepository = { initGitRepository(selectedProject) },
+                                onCloneRepository = { showCloneRepositoryDialog = true },
+                                onRefresh = { refreshGitState() },
+                                onCommit = { showCommitDialog = true },
+                                onPush = { pushCurrentBranch(selectedProject) },
+                                onFetch = { fetchRemote(selectedProject) },
+                                onPull = { pullFastForward(selectedProject) },
+                                onCreateBranch = { showBranchDialog = true },
+                                onCheckoutBranch = { checkoutBranch(selectedProject, it) },
+                            )
+                        }
+                    }
+
                     item {
                         OutlinedTextField(
                             modifier = Modifier.fillMaxWidth(),
@@ -1168,6 +1245,15 @@ internal fun ProjectScreen(
                             deliverable = selectedDeliverable,
                             artifactText = artifactText,
                             previewMode = previewMode,
+                            historyVisible = fileHistoryVisible,
+                            history = fileHistory,
+                            historyLoading = fileHistoryLoading,
+                            onToggleHistory = {
+                                fileHistoryVisible = !fileHistoryVisible
+                                if (fileHistoryVisible) {
+                                    loadFileHistory(selectedProject, selectedDeliverable?.relativePath)
+                                }
+                            },
                             onArtifactTextChange = { artifactText = it },
                             onTogglePreview = { previewMode = !previewMode },
                             onExportPdf = {
@@ -1227,25 +1313,6 @@ internal fun ProjectScreen(
                         )
                     }
                 }
-                ProjectWorkbenchTab.GIT -> {
-                    item {
-                        ProjectGitPanel(
-                            status = gitStatus,
-                            branches = gitBranches,
-                            pendingCommitCount = pendingCommitPaths.size,
-                            onOpenPendingCommit = { openPendingCommit(selectedProject) },
-                            onInitRepository = { initGitRepository(selectedProject) },
-                            onCloneRepository = { showCloneRepositoryDialog = true },
-                            onRefresh = { refreshGitState() },
-                            onCommit = { showCommitDialog = true },
-                            onPush = { pushCurrentBranch(selectedProject) },
-                            onFetch = { fetchRemote(selectedProject) },
-                            onPull = { pullFastForward(selectedProject) },
-                            onCreateBranch = { showBranchDialog = true },
-                            onCheckoutBranch = { checkoutBranch(selectedProject, it) },
-                        )
-                    }
-                }
             }
         }
     }
@@ -1260,7 +1327,7 @@ private fun ProjectWorkbenchTabs(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        ProjectWorkbenchTab.entries.forEach { tab ->
+        visibleWorkbenchTabs().forEach { tab ->
             FilterChip(
                 modifier = Modifier
                     .weight(1f)
@@ -1660,6 +1727,10 @@ private fun ArtifactPreviewPanel(
     deliverable: ProjectDeliverable?,
     artifactText: String,
     previewMode: Boolean,
+    historyVisible: Boolean,
+    history: List<GitCommitSummary>,
+    historyLoading: Boolean,
+    onToggleHistory: () -> Unit,
     onArtifactTextChange: (String) -> Unit,
     onTogglePreview: () -> Unit,
     onExportPdf: () -> Unit,
@@ -1704,6 +1775,9 @@ private fun ArtifactPreviewPanel(
                 IconButton(enabled = rendersAsMarkdown, onClick = onExportPdf) {
                     Icon(Icons.Outlined.PictureAsPdf, contentDescription = "导出 PDF")
                 }
+                IconButton(enabled = deliverable != null, onClick = onToggleHistory) {
+                    Icon(Icons.Outlined.History, contentDescription = if (historyVisible) "隐藏历史" else "历史")
+                }
                 IconButton(enabled = isTextPreviewable, onClick = onShareText) {
                     Icon(Icons.Outlined.IosShare, contentDescription = "分享")
                 }
@@ -1715,6 +1789,10 @@ private fun ArtifactPreviewPanel(
                 }
             }
             HorizontalDivider()
+            if (historyVisible && deliverable != null) {
+                ProjectFileHistorySection(history = history, loading = historyLoading)
+                HorizontalDivider()
+            }
             if (deliverable == null) {
                 Text(
                     text = "选择已有交付物，或从项目会话生成新的文件沉淀。",
@@ -1745,6 +1823,59 @@ private fun ArtifactPreviewPanel(
         }
     }
 }
+
+@Composable
+private fun ProjectFileHistorySection(
+    history: List<GitCommitSummary>,
+    loading: Boolean,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("历史", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        if (loading) {
+            Text(
+                text = "正在读取提交历史…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (history.isEmpty()) {
+            Text(
+                text = "该文件暂无提交历史",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            history.forEach { commit ->
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AssistChip(onClick = {}, label = { Text(commit.shortId) })
+                        Text(
+                            text = "${commit.authorName} · ${formatCommitTime(commit.timeMillis)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        text = commit.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatCommitTime(millis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).apply {
+        timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+    }.format(Date(millis))
 
 @Composable
 private fun BinaryArtifactPreview(

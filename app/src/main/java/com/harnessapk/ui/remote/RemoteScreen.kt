@@ -99,6 +99,7 @@ fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
 private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padding: PaddingValues) {
     var showCreate by remember { mutableStateOf(false) }
     val profile by container.remoteProfileStore.profile.collectAsState()
+    val context = LocalContext.current
     val featureAvailability = remoteFeatureAvailability(state.capabilities)
     Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
         RemoteThreadListHeader(
@@ -110,6 +111,7 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
                 showCreate = true
                 container.remoteRepository.requestWorkspaceCandidates()
             },
+            onOpenDashboard = { context.startActivity(android.content.Intent(context, com.harnessapk.ui.dashboard.DashboardActivity::class.java)) },
         )
         if (state.backends.size > 1) {
             BackendSwitcher(
@@ -186,6 +188,7 @@ internal fun RemoteThreadListHeader(
     creating: Boolean,
     onRefresh: () -> Unit,
     onCreate: () -> Unit,
+    onOpenDashboard: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -209,6 +212,9 @@ internal fun RemoteThreadListHeader(
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
+        }
+        TextButton(onClick = onOpenDashboard) {
+            Text("副屏")
         }
         IconButton(onClick = onRefresh) {
             Icon(Icons.Outlined.Refresh, contentDescription = "刷新远程会话")

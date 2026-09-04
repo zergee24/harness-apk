@@ -105,6 +105,7 @@ Harness 当前已经具备项目会话、项目文件、Markdown 变更提案、
 ### 4.1 首发用户
 
 - 在联想 Y900 上使用手写笔进行产品、架构、调试或代码审核记录的个人开发者；
+- **2026-09-04 修订：首发设备扩展为"Y900 或电纸书手写设备（HiBreak，自带手写笔）"——以用户每日真实携带的设备为准，Spike-画布先在 HiBreak 上采集能力矩阵与延迟数据；**
 - 在 Mac 上运行 Codex 或其他 Agent，同时用 Y900 作为第二工作面板；
 - 之后需要让自己或同一项目 Agent 快速恢复上下文的人。
 
@@ -703,6 +704,7 @@ transcript/segments.jsonl
 markers/markers.jsonl
 anchors/anchors.jsonl
 preview/cover.webp
+preview/pages/<pageId>.webp         # 每页渲染快照（AI/检索消费层；2026-09-04 Spike 验证：raw 笔迹对 AI 不可读，渲染图可读）
 assets/backgrounds/<sha256>.<ext>
 audio/index.json                    # 记录可用性、哈希和策略
 audio/<segmentId>.m4a               # 只有显式“包含原音频”导出时存在
@@ -1072,7 +1074,12 @@ globalAudioOffset = segmentBaseOffset +
 
 ## 25. 分阶段交付与范围熔断
 
-### P0-A：Y900 Stylus / Canvas 可行性试点
+### Spike-画布：手写笔 / 画布可行性试点（原 P0-A）
+
+> **2026-09-04 修订：**
+> **2026-09-04 结果：HiBreak 电纸书档 PASS**——压感/tilt 硬件上报确认，管道延迟 p50 12~21ms / p95 22~27ms，点级擦除与强杀恢复真机验证通过，报告见 [2026-09-04-spike-canvas-hibreak-report.md](2026-09-04-spike-canvas-hibreak-report.md)。**P1（本地简报核心）解锁。**
+
+只做独立 debug prototype，不进入正式信息架构： ①试点更名——本文档 P0-A/P0-B 与《交付物层与入口收敛设计》已完成并上线的 P0-A/P0-B 重名，为消歧改为 Spike-画布 / Spike-录音（下同）。②首发设备扩展为 HiBreak 电纸书（自带手写笔）。③门禁分设备记账：输入预览 p95 < 50ms 对 Y900 保留为一票否决；HiBreak（e-ink）单独记录实测延迟分布，不套用 50ms 一票否决，由数据决定电纸书画布策略（快速局部刷新层 / 笔迹预测 / 接受更高延迟 / 降级截图批注）。其余退出条件不变。
 
 只做独立 debug prototype，不进入正式信息架构：
 
@@ -1081,9 +1088,9 @@ globalAudioOffset = segmentBaseOffset +
 - 验证 30 分钟书写、事件排序、追加日志、checkpoint 和强杀恢复；
 - 生成包含型号、Android 版本、App commit、输入设备描述、日志与录屏的报告。
 
-退出条件：输入预览 p95 < 50ms；掌触不产生笔迹；pressure/tilt/eraser/button 只按实际上报记录；横屏逻辑坐标与页面坐标一致；无手写笔时手指书写、只标记和退出均可完成；30 分钟内不静默丢失已完成笔画；强杀后恢复结果唯一且可解释。上述每项均需 PASS，P0-A 才能记为 `PASS`；它是 P1 的硬门禁。
+退出条件：输入预览延迟分设备记账（Y900 p95 < 50ms 一票否决；HiBreak 记录实测分布并出具电纸书画布策略建议）；掌触不产生笔迹；pressure/tilt/eraser/button 只按实际上报记录；横屏逻辑坐标与页面坐标一致；无手写笔时手指书写、只标记和退出均可完成；30 分钟内不静默丢失已完成笔画；强杀后恢复结果唯一且可解释。上述每项均需 PASS，P0-A 才能记为 `PASS`；它是 P1 的硬门禁。
 
-### P0-B：Audio / Clock / Background 可行性试点
+### Spike-录音：Audio / Clock / Background 可行性试点（原 P0-B）
 
 同样只做独立 debug prototype，不接入正式 `.hbrief`、AI、Markdown 或 Git：
 

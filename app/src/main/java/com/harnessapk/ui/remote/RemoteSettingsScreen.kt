@@ -38,7 +38,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
@@ -162,22 +164,46 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
 
 private fun decodeQr(bitmap: Bitmap): Result<String> = runCatching { decodeQrText(bitmap) }
 
-private suspend fun decodeQrImage(context: android.content.Context, uri: Uri): String =
+internal suspend fun decodeQrImage(context: android.content.Context, uri: Uri): String =
     withContext(Dispatchers.IO) {
+        // 相册选择器返回的 URI 可能是一次性授权，流只能读一次：先把字节读进内存，
+        // 边界与完整解码都从字节数组进行。
+        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: error("无法读取图片")
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        val boundsStream = context.contentResolver.openInputStream(uri) ?: error("无法读取图片")
-        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = qrDecodeSampleSize(bounds.outWidth, bounds.outHeight)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) error("无法读取图片")
+
+        val sampleSizes = buildList {
+            add(qrDecodeSampleSize(bounds.outWidth, bounds.outHeight))
+            add(1)
+            add(2)
+        }.distinct()
+
+        var lastFailure: Throwable? = null
+        sampleSizes.forEach { sample ->
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return@forEach
+            // ZXing 的 getPixels 只能读软件位图，部分 ROM/图片格式可能给出其他配置。
+            val software = if (decoded.config == Bitmap.Config.ARGB_8888) {
+                decoded
+            } else {
+                val copy = decoded.copy(Bitmap.Config.ARGB_8888, false)
+                decoded.recycle()
+                copy ?: return@forEach
+            }
+            try {
+                return@withContext decodeQrText(software)
+            } catch (throwable: Throwable) {
+                lastFailure = throwable
+            } finally {
+                software.recycle()
+            }
         }
-        val bitmap = context.contentResolver.openInputStream(uri)?.use {
-            BitmapFactory.decodeStream(it, null, options)
-        } ?: error("无法读取图片")
-        try {
-            decodeQrText(bitmap)
-        } finally {
-            bitmap.recycle()
-        }
+        throw IllegalStateException("无法读取图片中的二维码", lastFailure)
     }
 
 internal fun qrDecodeSampleSize(width: Int, height: Int, maxDimension: Int = 2048): Int {
@@ -190,5 +216,9 @@ private fun decodeQrText(bitmap: Bitmap): String {
     val pixels = IntArray(bitmap.width * bitmap.height)
     bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
     val source = RGBLuminanceSource(bitmap.width, bitmap.height, pixels)
-    return MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source))).text
+    val hints = mapOf(
+        DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+        DecodeHintType.TRY_HARDER to true,
+    )
+    return MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)), hints).text
 }

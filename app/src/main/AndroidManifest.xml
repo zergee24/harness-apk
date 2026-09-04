@@ -117,5 +117,13 @@
             android:exported="false"
             android:label="Agent 副屏" />
 
+        <!-- Spike-画布 可行性试点：仅 debug 构建可用（onCreate 里非 debug 直接 finish） -->
+        <activity
+            android:name=".spike.canvas.SpikeCanvasActivity"
+            android:exported="true"
+            android:label="Spike 画布"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
     </application>
 </manifest>

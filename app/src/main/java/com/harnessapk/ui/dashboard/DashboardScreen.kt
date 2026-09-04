@@ -4,10 +4,12 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -153,49 +155,39 @@ private fun ThreadPagingGrid(
     onTap: (DashboardThread) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val pageCount = ((threads.size + 5) / 6).coerceAtLeast(1)
-    val state = rememberScrollState()
+    BoxWithConstraints(modifier = modifier) {
+        val gridState = rememberLazyGridState()
+        val columns = (maxWidth / (ThreadTileWidth + 8.dp)).toInt().coerceAtLeast(1)
+        val pageSize = (columns * 2).coerceAtLeast(1)
+        val pages = ceil(threads.size.toDouble() / pageSize).toInt().coerceAtLeast(1)
+        val page = (gridState.firstVisibleItemIndex / pageSize).coerceIn(0, pages - 1)
 
-    Column(modifier = modifier) {
-        Row(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .horizontalScroll(state),
+        LazyHorizontalGrid(
+            rows = GridCells.Fixed(2),
+            state = gridState,
+            modifier = Modifier.fillMaxSize(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val pageChunks = threads.chunked(6)
-            repeat(pageCount) { pageIndex ->
-                val pageThreads = pageChunks.getOrNull(pageIndex) ?: threads.chunked(6).getOrNull(0) ?: emptyList()
-                Column(
-                    modifier = Modifier.fillMaxHeight(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    val colThreads = pageThreads.chunked(3)
-                    colThreads.forEach { col ->
-                        col.forEach { thread ->
-                            ConsoleTile(
-                                thread = thread,
-                                unread = false,
-                                onClick = { onTap(thread) },
-                            )
-                        }
-                    }
-                }
+            items(threads, key = { it.threadId }) { thread ->
+                ConsoleTile(
+                    thread = thread,
+                    unread = false,
+                    onClick = { onTap(thread) },
+                )
             }
         }
-        if (pageCount > 1) {
+        if (pages > 1) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                repeat(pageCount) { index ->
-                    val currentPage = (state.value / 820).toInt().coerceIn(0, pageCount - 1)
+                repeat(pages) { index ->
                     Box(
                         modifier = Modifier
-                            .size(if (index == currentPage) 7.dp else 5.dp)
+                            .size(if (index == page) 7.dp else 5.dp)
                             .clip(CircleShape)
-                            .background(if (index == currentPage) Color(0xFF4C8DFF) else Color(0xFF5A5A5E)),
+                            .background(if (index == page) Color(0xFF4C8DFF) else Color(0xFF5A5A5E)),
                     )
                 }
             }
@@ -207,7 +199,7 @@ private fun ThreadPagingGrid(
 private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit) {
     val accent = Color(dashboardToneArgb(dashboardTone(thread.status)))
     Card(modifier = Modifier.width(ThreadTileWidth).combinedClickable(onClick = onClick)) {
-        Row(modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp)) {
+        Row(modifier = Modifier.fillMaxWidth().fillMaxHeight().heightIn(min = 96.dp)) {
             Box(modifier = Modifier.width(14.dp).fillMaxHeight().background(accent))
             Column(
                 modifier = Modifier
@@ -274,6 +266,7 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                         ?: "等待 agent 输出…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface,
+                    // 网格两行定高、卡片等高：weight 填充剩余空间，放不下自动省略。
                     modifier = Modifier.weight(1f),
                     overflow = TextOverflow.Ellipsis,
                 )

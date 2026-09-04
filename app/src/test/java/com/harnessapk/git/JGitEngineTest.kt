@@ -187,6 +187,32 @@ class JGitEngineTest {
         assertEquals(0, appendedPlanStat.deleted)
     }
 
+    @Test
+    fun fileLogReturnsOnlyCommitsTouchingPathNewestFirstWithLimit() {
+        val remote = createBareRemote()
+        val worktree = temporaryFolder.newFolder("worktree")
+        val engine = JGitEngine()
+        engine.cloneRepository(GitCloneRequest(remote.toURI().toString(), "main", worktree))
+        val author = GitCommitAuthor(name = "Harness", email = "harness@example.com")
+
+        worktree.resolve("docs/a.md").writeProjectText("# A1\n")
+        engine.stageAllAndCommit(worktree, "change a v1", author)
+        worktree.resolve("docs/b.md").writeProjectText("# B\n")
+        engine.stageAllAndCommit(worktree, "add b", author)
+        worktree.resolve("docs/a.md").writeProjectText("# A2\n")
+        engine.stageAllAndCommit(worktree, "change a v2", author)
+
+        val log = engine.fileLog(worktree, "docs/a.md")
+        assertEquals(listOf("change a v2", "change a v1"), log.map { it.message })
+        assertEquals("Harness", log[0].authorName)
+        assertTrue(log[0].timeMillis >= log[1].timeMillis)
+        assertEquals(8, log[0].shortId.length)
+
+        assertEquals("add b", engine.fileLog(worktree, "docs/b.md").single().message)
+        assertEquals("change a v2", engine.fileLog(worktree, "docs/a.md", limit = 1).single().message)
+        assertTrue(engine.fileLog(worktree, "docs/missing.md").isEmpty())
+    }
+
     private fun createBareRemote(): File {
         val seed = temporaryFolder.newFolder("seed")
         val remote = temporaryFolder.newFolder("remote.git")

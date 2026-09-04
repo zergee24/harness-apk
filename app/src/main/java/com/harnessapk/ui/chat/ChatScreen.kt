@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -50,6 +51,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.outlined.Assignment
+import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Stop
@@ -134,6 +136,8 @@ import androidx.core.content.ContextCompat
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.ConversationDraft
+import com.harnessapk.chat.DocumentTextExtractor
+import com.harnessapk.chat.ExtractedDocument
 import com.harnessapk.chat.ChatExecutionEntry
 import com.harnessapk.chat.ChatExecutionPhase
 import com.harnessapk.chat.ChatExecutionRequestContext
@@ -344,6 +348,34 @@ fun ChatScreen(
     var persistentDraftLoaded by remember(conversationId) { mutableStateOf(false) }
     var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    // 文档附件（pdf/xlsx/docx/csv/txt）：文本抽取后并入发送文本；仅在当前会话内存中保留
+    var pendingDocuments by remember { mutableStateOf<List<ExtractedDocument>>(emptyList()) }
+    var documentExtracting by remember { mutableStateOf(false) }
+    val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        if (pendingDocuments.size >= DocumentTextExtractor.MAX_DOCUMENTS_PER_MESSAGE) {
+            errorText = "每条消息最多添加 ${DocumentTextExtractor.MAX_DOCUMENTS_PER_MESSAGE} 个文件"
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            documentExtracting = true
+            errorText = null
+            val result = runCatching {
+                withContext(container.dispatchers.io) { DocumentTextExtractor.extract(context, uri) }
+            }
+            documentExtracting = false
+            result.fold(
+                onSuccess = { document ->
+                    if (pendingDocuments.any { it.fileName == document.fileName }) {
+                        errorText = "已添加同名文件：${document.fileName}"
+                    } else {
+                        pendingDocuments = pendingDocuments + document
+                    }
+                },
+                onFailure = { error -> errorText = error.message ?: "文件读取失败" },
+            )
+        }
+    }
     var selectedProjectEvidence by remember(conversationId) {
         mutableStateOf<ProjectEvidenceSnapshotEntity?>(null)
     }
@@ -1122,8 +1154,9 @@ fun ChatScreen(
     }
 
     fun sendNow() {
-        val submittedText = text
-        val body = submittedText.trim()
+        // 文档附件文本并入消息正文（随消息持久化，经上下文压缩后仍在）
+        val submittedText = DocumentTextExtractor.withDocumentBlocks(text, pendingDocuments)
+        val body = submittedText
         if (body.isEmpty() && selectedImages.isEmpty()) return
         if (
             firstMessagePending ||
@@ -1152,6 +1185,7 @@ fun ChatScreen(
             markdowns = deliverables,
         )
         val draftAttachments = selectedImages
+        pendingDocuments = emptyList()
         val requestId = UUID.randomUUID().toString()
         val requestState = ChatSendRequestState(
             requestId = requestId,
@@ -2747,6 +2781,12 @@ fun ChatScreen(
                     text = it
                 },
                 selectedImages = selectedImages,
+                pendingDocuments = pendingDocuments,
+                documentExtracting = documentExtracting,
+                onPickDocument = { documentPicker.launch(DocumentTextExtractor.SUPPORTED_MIME_TYPES) },
+                onRemoveDocument = { document ->
+                    pendingDocuments = pendingDocuments.filterNot { it.uri == document.uri }
+                },
                 onTakePhoto = {
                     when (cameraAction(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)) {
                         ChatImageSourceAction.REQUEST_CAMERA_PERMISSION -> cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
@@ -4967,6 +5007,10 @@ private fun ChatInputBar(
     onTakePhoto: () -> Unit,
     onPickFromAlbum: () -> Unit,
     onRemoveImage: (Uri) -> Unit,
+    pendingDocuments: List<ExtractedDocument>,
+    documentExtracting: Boolean,
+    onPickDocument: () -> Unit,
+    onRemoveDocument: (ExtractedDocument) -> Unit,
     onStartVoiceTranscription: () -> Unit,
     isVoiceInputActive: Boolean,
     onStopVoiceTranscription: () -> Unit,
@@ -5001,12 +5045,20 @@ private fun ChatInputBar(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            if (pendingDocuments.isNotEmpty() || documentExtracting) {
+                PendingDocumentsRow(
+                    documents = pendingDocuments,
+                    extracting = documentExtracting,
+                    onRemove = onRemoveDocument,
+                )
+            }
             if (selectedImages.isNotEmpty()) {
                 SelectedImagesPreview(
                     images = selectedImages,
                     onRemove = onRemoveImage,
                     onTakePhoto = onTakePhoto,
                     onPickFromAlbum = onPickFromAlbum,
+                    onPickDocument = onPickDocument,
                 )
             }
             ConversationContextBar(summary = contextSummary, onClick = onOpenContext)
@@ -5085,6 +5137,10 @@ private fun ChatInputBar(
                     onPickFromAlbum = {
                         showImageSourceSheet = false
                         onPickFromAlbum()
+                    },
+                    onPickDocument = {
+                        showImageSourceSheet = false
+                        onPickDocument()
                     },
                 )
             }
@@ -5184,6 +5240,7 @@ internal fun shouldAutoExpandReasoningPart(
 internal fun ChatImageSourceEntryMenu(
     onTakePhoto: () -> Unit,
     onPickFromAlbum: () -> Unit,
+    onPickDocument: () -> Unit,
 ) {
     var showImageSourceSheet by remember { mutableStateOf(false) }
 
@@ -5204,6 +5261,10 @@ internal fun ChatImageSourceEntryMenu(
             onPickFromAlbum = {
                 showImageSourceSheet = false
                 onPickFromAlbum()
+            },
+            onPickDocument = {
+                showImageSourceSheet = false
+                onPickDocument()
             },
         )
     }
@@ -5268,6 +5329,7 @@ private fun ChatImageSourceSheet(
     onDismiss: () -> Unit,
     onTakePhoto: () -> Unit,
     onPickFromAlbum: () -> Unit,
+    onPickDocument: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -5290,6 +5352,14 @@ private fun ChatImageSourceSheet(
                 onClick = onPickFromAlbum,
             ) {
                 Text("从相册选择")
+            }
+            TextButton(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 56.dp),
+                onClick = onPickDocument,
+            ) {
+                Text("选择文件（PDF / Word / Excel / TXT）")
             }
         }
     }
@@ -5433,6 +5503,7 @@ private fun SelectedImagesPreview(
     onRemove: (Uri) -> Unit,
     onTakePhoto: () -> Unit,
     onPickFromAlbum: () -> Unit,
+    onPickDocument: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -5450,7 +5521,56 @@ private fun SelectedImagesPreview(
             )
         }
         if (images.size < MAX_CHAT_IMAGE_ATTACHMENTS) {
-            ChatImageSourceEntryMenu(onTakePhoto = onTakePhoto, onPickFromAlbum = onPickFromAlbum)
+            ChatImageSourceEntryMenu(
+                onTakePhoto = onTakePhoto,
+                onPickFromAlbum = onPickFromAlbum,
+                onPickDocument = onPickDocument,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PendingDocumentsRow(
+    documents: List<ExtractedDocument>,
+    extracting: Boolean,
+    onRemove: (ExtractedDocument) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (extracting) {
+            LinearProgressIndicator(Modifier.width(120.dp))
+        }
+        documents.forEach { document ->
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                tonalElevation = 2.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        document.fileName,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                    )
+                    IconButton(onClick = { onRemove(document) }, modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Outlined.Close, contentDescription = "移除文件", modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
         }
     }
 }

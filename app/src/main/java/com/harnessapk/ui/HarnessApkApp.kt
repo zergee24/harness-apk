@@ -217,9 +217,6 @@ fun HarnessApkApp(
     var remoteRunStartError by remember { mutableStateOf<String?>(null) }
     val isHomeRoute = route == Routes.Conversations || route == null
     val context = LocalContext.current
-    val dashboardLaunch = {
-        context.startActivity(android.content.Intent(context, com.harnessapk.ui.dashboard.DashboardActivity::class.java))
-    }
     val container = (context.applicationContext as HarnessApkApplication).container
     val homeModeStore = container.homeModeStore
     var mainMode by rememberSaveable { mutableStateOf(homeModeStore.mode.value) }
@@ -464,9 +461,6 @@ fun HarnessApkApp(
                                 Icon(Icons.Outlined.Dns, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text("远程")
-                            }
-                            TextButton(onClick = dashboardLaunch) {
-                                Text("副屏")
                             }
                         }
                         if (mainMode == MainMode.LIFE || mainMode == MainMode.WORK) {
