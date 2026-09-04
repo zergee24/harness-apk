@@ -136,6 +136,7 @@ import androidx.core.content.ContextCompat
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.Conversation
 import com.harnessapk.chat.ConversationDraft
+import com.harnessapk.chat.DocumentExtractionResult
 import com.harnessapk.chat.DocumentTextExtractor
 import com.harnessapk.chat.ExtractedDocument
 import com.harnessapk.chat.ChatExecutionEntry
@@ -360,20 +361,60 @@ fun ChatScreen(
         scope.launch {
             documentExtracting = true
             errorText = null
-            val result = runCatching {
+            val extraction = runCatching {
                 withContext(container.dispatchers.io) { DocumentTextExtractor.extract(context, uri) }
             }
-            documentExtracting = false
-            result.fold(
-                onSuccess = { document ->
-                    if (pendingDocuments.any { it.fileName == document.fileName }) {
-                        errorText = "已添加同名文件：${document.fileName}"
-                    } else {
-                        pendingDocuments = pendingDocuments + document
+            extraction.fold(
+                onSuccess = { result ->
+                    when (result) {
+                        is DocumentExtractionResult.TextDocument -> {
+                            val document = result.document
+                            if (pendingDocuments.any { it.fileName == document.fileName }) {
+                                errorText = "已添加同名文件：${document.fileName}"
+                            } else {
+                                pendingDocuments = pendingDocuments + document
+                            }
+                        }
+                        is DocumentExtractionResult.ScannedPdf -> {
+                            // 扫描版 PDF：逐页转图，走视觉模型管道（等价每页拍照提问）
+                            val remaining = MAX_CHAT_IMAGE_ATTACHMENTS - selectedImages.size
+                            if (remaining <= 0) {
+                                errorText = "图片附件已达上限（$MAX_CHAT_IMAGE_ATTACHMENTS 张）"
+                            } else {
+                                val render = runCatching {
+                                    withContext(container.dispatchers.io) {
+                                        DocumentTextExtractor.renderScannedPdfPages(
+                                            context = context,
+                                            uri = uri,
+                                            maxPages = remaining,
+                                            writePage = { _, jpegBytes ->
+                                                val target = container.chatImageStore.createCameraUri()
+                                                context.contentResolver.openOutputStream(target)?.use { output ->
+                                                    output.write(jpegBytes)
+                                                }
+                                                target
+                                            },
+                                        )
+                                    }
+                                }
+                                render.fold(
+                                    onSuccess = { scanned ->
+                                        selectedImages = selectedImages + scanned.uris.map {
+                                            PendingImageAttachment(it, "image/jpeg")
+                                        }
+                                        errorText = "扫描版 PDF（共 ${scanned.totalPages} 页）已转为 ${scanned.renderedPages} 页图片，可直接发送"
+                                    },
+                                    onFailure = { error ->
+                                        errorText = error.message ?: "扫描版 PDF 转换失败"
+                                    },
+                                )
+                            }
+                        }
                     }
                 },
                 onFailure = { error -> errorText = error.message ?: "文件读取失败" },
             )
+            documentExtracting = false
         }
     }
     var selectedProjectEvidence by remember(conversationId) {

@@ -175,6 +175,7 @@ class AppContainer(
         AppDatabase.MIGRATION_21_22,
         AppDatabase.MIGRATION_22_23,
         AppDatabase.MIGRATION_23_24,
+        AppDatabase.MIGRATION_24_25,
     ).addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK).build()
     // 卓易通等容器可能没有可用的 AndroidKeyStore；三个密钥库统一走 Keystore 优先 + 软件回退
     val apiKeyCipher = ResilientStringCipher(appContext, "harness_apk_provider_keys")
