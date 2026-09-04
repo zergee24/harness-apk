@@ -288,6 +288,67 @@ func TestRefreshDashboardHostPublishesQuota(t *testing.T) {
 	}
 }
 
+// 回归：account/usage/read 失败时回退上一份成功摘要，host 帧不得丢 usage 字段。
+func TestRefreshDashboardHostKeepsLastGoodUsageOnFailure(t *testing.T) {
+	frames := &[]recordedFrame{}
+	usageOK := true
+	fake := backend.NewFake("codex").
+		OnScript("account/rateLimits/read", func(string, any) (json.RawMessage, error) {
+			return json.RawMessage(`{"rateLimits":{"primary":{"usedPercent":8,"resetsAt":1788927739},"planType":"pro"}}`), nil
+		}).
+		OnScript("account/usage/read", func(string, any) (json.RawMessage, error) {
+			if usageOK {
+				return json.RawMessage(`{"summary":{"currentStreakDays":24},"dailyUsageBuckets":[{"startDate":"2026-09-04","tokens":700},{"startDate":"2026-09-03","tokens":500}]}`), nil
+			}
+			return nil, context.DeadlineExceeded
+		})
+	b := &bridge{
+		state: bridgeState{
+			HostID:        "host-1",
+			DeviceSecrets: map[string]string{"device-1": "bogus-secret"},
+		},
+		backends:        map[string]backend.Backend{"codex": fake},
+		dashboardSender: func(_ context.Context, deviceID string, event protocol.Event) error {
+			*frames = append(*frames, recordedFrame{deviceID: deviceID, event: event})
+			return nil
+		},
+	}
+	weekTokens := func(payload json.RawMessage) (int64, bool) {
+		var hostFrame struct {
+			WeekTokens int64 `json:"weekTokens"`
+		}
+		if err := json.Unmarshal(payload, &hostFrame); err != nil {
+			t.Fatal(err)
+		}
+		return hostFrame.WeekTokens, true
+	}
+
+	b.refreshDashboardHost(context.Background())
+	first := framesByType(t, frames, "device-1", "dashboard.host")
+	if len(first) != 1 {
+		t.Fatalf("期望 1 条 dashboard.host，得到 %d", len(first))
+	}
+	got, ok := weekTokens(first[0].Payload)
+	if !ok || got != 1200 {
+		t.Fatalf("首轮 weekTokens = %d, %v", got, ok)
+	}
+
+	// usage/read 转为超时失败，quota 变化触发新帧；帧仍应携带上一份 usage。
+	usageOK = false
+	fake.OnScript("account/rateLimits/read", func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"rateLimits":{"primary":{"usedPercent":9,"resetsAt":1788927739},"planType":"pro"}}`), nil
+	})
+	b.refreshDashboardHost(context.Background())
+	second := framesByType(t, frames, "device-1", "dashboard.host")
+	if len(second) != 2 {
+		t.Fatalf("期望 2 条 dashboard.host，得到 %d", len(second))
+	}
+	got2, ok2 := weekTokens(second[1].Payload)
+	if !ok2 || got2 != 1200 {
+		t.Fatalf("失败后应回退上一份 usage，weekTokens = %d, %v", got2, ok2)
+	}
+}
+
 // 回归：tailer 缓存（dashboardQuota 残留旧值）非空时，轮询结果必须胜出——
 // 线程空闲后缓存冻结，副屏余额环曾因此停在旧百分比。
 func TestRefreshDashboardHostPrefersPollOverStaleCache(t *testing.T) {

@@ -81,6 +81,7 @@ type bridge struct {
 	dashboardMu           sync.Mutex
 	dashboardLastSent     map[string]string
 	dashboardQuota        *observer.QuotaSnapshot
+	dashboardUsageLast    *observer.UsageSummary
 	dashboardQuotaSent    string
 	dashboardHostSent     string
 	hostStatsReader       func(ctx context.Context) (observer.HostStats, error)
@@ -985,19 +986,39 @@ func (b *bridge) dashboardCachedQuota() *observer.QuotaSnapshot {
 	return b.dashboardQuota
 }
 
+// fetchUsageSummary 拉取 account/usage/read 摘要。该调用聚合 7 天日桶，数据量大时
+// 明显偏慢，预算放宽到 20s；失败/不可解析时回退上一份成功摘要，避免 host 帧丢字段
+// （副屏"今日 tokens/连续 streak"从此闪缺）。
 func (b *bridge) fetchUsageSummary(ctx context.Context) (observer.UsageSummary, bool) {
 	bd := b.backendFor("")
 	if bd == nil {
 		return observer.UsageSummary{}, false
 	}
-	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	raw, err := bd.Call(cctx, "account/usage/read", map[string]any{})
 	if err != nil {
 		log.Printf("dashboard host: usage read failed: %v", err)
+		return b.lastGoodUsage()
+	}
+	summary, ok := observer.ParseUsage(raw, b.dashboardTodayString())
+	if !ok {
+		log.Printf("dashboard host: unparseable usage payload %.200s", raw)
+		return b.lastGoodUsage()
+	}
+	b.dashboardMu.Lock()
+	b.dashboardUsageLast = &summary
+	b.dashboardMu.Unlock()
+	return summary, true
+}
+
+func (b *bridge) lastGoodUsage() (observer.UsageSummary, bool) {
+	b.dashboardMu.Lock()
+	defer b.dashboardMu.Unlock()
+	if b.dashboardUsageLast == nil {
 		return observer.UsageSummary{}, false
 	}
-	return observer.ParseUsage(raw, b.dashboardTodayString())
+	return *b.dashboardUsageLast, true
 }
 
 func (b *bridge) readHostStats(ctx context.Context) (observer.HostStats, bool) {
