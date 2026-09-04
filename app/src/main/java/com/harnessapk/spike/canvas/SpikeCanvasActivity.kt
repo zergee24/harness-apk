@@ -2,8 +2,12 @@ package com.harnessapk.spike.canvas
 
 import android.app.Activity
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -15,12 +19,15 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import com.harnessapk.BuildConfig
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
 import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -28,11 +35,15 @@ import org.json.JSONObject
  * Spike-画布 可行性试点（2026-09-04，HiBreak 电纸书首发）。
  *
  * 独立 debug prototype，不进正式信息架构；release 构建直接 finish。
- * 能力矩阵、压感变宽墨迹、橡皮真擦除（含手指橡皮模式）、JSONL 追加日志 + 强杀恢复。
+ * 能力矩阵、压感变宽墨迹、点级橡皮（擦到哪删哪）、JSONL 追加日志 + 强杀恢复。
+ *
+ * e-ink 跟笔优化：已提交笔画进离屏位图，触摸只重绘笔尖矩形（局部快速刷新）；
+ * 统计条走 TextView，不参与画布重绘。
  */
 class SpikeCanvasActivity : Activity() {
 
     private lateinit var canvasView: SpikeCanvasView
+    private lateinit var statsText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,6 +55,15 @@ class SpikeCanvasActivity : Activity() {
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
         canvasView = SpikeCanvasView(this)
+        statsText = TextView(this).apply {
+            setPadding(24, 20, 24, 8)
+            setTextColor(0xFF555555.toInt())
+            textSize = 14f
+        }
+        canvasView.onStats = { summary ->
+            runOnUiThread { statsText.text = summary }
+        }
+
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.BOTTOM or Gravity.END
@@ -75,6 +95,10 @@ class SpikeCanvasActivity : Activity() {
 
         val root = FrameLayout(this)
         root.addView(canvasView)
+        root.addView(statsText, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+        ))
         root.addView(
             controls,
             FrameLayout.LayoutParams(
@@ -186,6 +210,7 @@ private class SpikeCanvasView(context: Context) : View(context) {
 
     var fingerMode = false
     var eraserMode = false
+    var onStats: ((String) -> Unit)? = null
 
     private val policy = SpikeInputPolicy()
     private val stats = SpikeStats()
@@ -196,27 +221,27 @@ private class SpikeCanvasView(context: Context) : View(context) {
     private var eraserButtonDown = false
     private var deviceSummary: String = ""
 
+    // 已提交墨迹的离屏缓存：触摸只重绘笔尖矩形，e-ink 才能走局部快速刷新。
+    private var committed: Bitmap? = null
+    private var committedCanvas: Canvas? = null
+
     private val strokePaint = Paint().apply {
         isAntiAlias = true
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
-        color = 0xFF1A1A1A.toInt()
+        color = Color.BLACK
     }
     private val dotPaint = Paint().apply {
         isAntiAlias = true
         style = Paint.Style.FILL
-        color = 0xFF1A1A1A.toInt()
+        color = Color.BLACK
     }
-    private val statsPaint = Paint().apply {
-        isAntiAlias = true
-        color = 0xFF44444488.toInt()
-        textSize = 30f
-    }
+    private val clearPaint = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR) }
 
     init {
         setBackgroundColor(0xFFF6F3EE.toInt())
-        log.replay(onStroke = strokes::add, onErase = ::eraseAt, onClear = { strokes.clear() })
+        log.replay(onStroke = strokes::add, onErase = ::applyEraseAt, onClear = { strokes.clear() })
         deviceSummary = describeInputDevices()
         setOnTouchListener { _, event ->
             onTouchEvent(event)
@@ -224,8 +249,18 @@ private class SpikeCanvasView(context: Context) : View(context) {
         }
     }
 
+    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight)
+        if (width <= 0 || height <= 0) return
+        committed = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        committedCanvas = Canvas(committed!!)
+        strokes.forEach { drawStrokeInto(committedCanvas!!, it) }
+        invalidate()
+    }
+
     fun clearAll() {
         strokes.clear()
+        committed?.eraseColor(Color.TRANSPARENT)
         log.resetFile()
         log.appendMarker("cleared")
         invalidate()
@@ -282,6 +317,18 @@ private class SpikeCanvasView(context: Context) : View(context) {
         stats.addLatency(maxOf(0, SystemClock.uptimeMillis() - event.eventTime))
         val tilt = event.getAxisValue(MotionEvent.AXIS_TILT) != 0f
 
+        var dirtyLeft = -1
+        var dirtyTop = -1
+        var dirtyRight = -1
+        var dirtyBottom = -1
+        fun markDirty(x: Float, y: Float) {
+            val pad = MAX_STROKE_WIDTH_PX + 8f
+            dirtyLeft = if (dirtyLeft < 0) (x - pad).toInt() else min(dirtyLeft, (x - pad).toInt())
+            dirtyTop = if (dirtyTop < 0) (y - pad).toInt() else min(dirtyTop, (y - pad).toInt())
+            dirtyRight = max(dirtyRight, (x + pad).toInt())
+            dirtyBottom = max(dirtyBottom, (y + pad).toInt())
+        }
+
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val verdict = policy.decide(
@@ -291,18 +338,20 @@ private class SpikeCanvasView(context: Context) : View(context) {
                 when (verdict) {
                     SpikeInputVerdict.DRAW -> {
                         current = SpikeStroke(tool)
-                        appendPoint(event, -1)
+                        appendPoint(event, -1)?.let { p -> markDirty(p.x.toFloat(), p.y.toFloat()) }
                     }
                     SpikeInputVerdict.ERASE -> {
                         current = SpikeStroke(SpikeInputPolicy.TOOL_ERASER)
-                        appendPoint(event, -1)
+                        appendPoint(event, -1)?.let { p -> markDirty(p.x.toFloat(), p.y.toFloat()) }
                     }
                     SpikeInputVerdict.REJECT_PALM -> stats.addPalmRejected()
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                for (h in 0 until event.historySize) appendPoint(event, h)
-                appendPoint(event, -1)
+                for (h in 0 until event.historySize) {
+                    appendPoint(event, h)?.let { p -> markDirty(p.x.toFloat(), p.y.toFloat()) }
+                }
+                appendPoint(event, -1)?.let { p -> markDirty(p.x.toFloat(), p.y.toFloat()) }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 current?.let { stroke ->
@@ -315,15 +364,34 @@ private class SpikeCanvasView(context: Context) : View(context) {
                 current = null
             }
         }
-        invalidate()
+
+        if (dirtyLeft >= 0) {
+            invalidate(
+                max(0, dirtyLeft), max(0, dirtyTop),
+                min(width, dirtyRight), min(height, dirtyBottom),
+            )
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - lastStatsRefreshAtMs > 500) {
+            lastStatsRefreshAtMs = now
+            onStats?.invoke(summaryText())
+        }
         return true
     }
 
-    private fun appendPoint(event: MotionEvent, historyIndex: Int) {
-        val stroke = current ?: return
+    private var lastStatsRefreshAtMs = 0L
+
+    private fun summaryText(): String =
+        "p50=${stats.percentile(0.5)}ms p95=${stats.percentile(0.95)}ms " +
+            "笔${stats.strokes} 点${stats.points} 拒掌${stats.palmRejected} " +
+            "压感${stats.pressureRangeText()} tilt=${if (stats.tiltSeen) "有" else "无"}"
+
+    /** 采一个点：追进当前笔画；压感画进位图；橡皮点同时做点级擦除。返回该点。 */
+    private fun appendPoint(event: MotionEvent, historyIndex: Int): SpikePoint? {
+        val stroke = current ?: return null
         // historyIndex = -1 表示当前采样；>=0 时必须落在 historySize 内，否则 MotionEvent 会抛
         // IllegalArgumentException（DOWN 事件没有任何历史点）。
-        if (historyIndex >= event.historySize) return
+        if (historyIndex >= event.historySize) return null
         val x: Float
         val y: Float
         val t: Long
@@ -339,39 +407,72 @@ private class SpikeCanvasView(context: Context) : View(context) {
             t = event.eventTime
             pressure = event.pressure
         }
-        stroke.points.add(SpikePoint(x.toDouble(), y.toDouble(), t, pressure))
+        val point = SpikePoint(x.toDouble(), y.toDouble(), t, pressure)
+        val canvas = committedCanvas
+        if (canvas != null) {
+            val previous = stroke.points.lastOrNull()
+            if (previous == null) {
+                dotPaint.strokeWidth = strokeWidthFor(pressure)
+                canvas.drawPoint(x, y, dotPaint)
+            } else {
+                strokePaint.strokeWidth = strokeWidthFor((previous.pressure + pressure) / 2f)
+                canvas.drawLine(previous.x.toFloat(), previous.y.toFloat(), x, y, strokePaint)
+            }
+        }
+        stroke.points.add(point)
         stats.addPoint(pressure, event.getAxisValue(MotionEvent.AXIS_TILT) != 0f, stroke.tool)
         if (stroke.tool == SpikeInputPolicy.TOOL_ERASER) {
-            eraseAt(x, y)
+            applyEraseAt(x, y)
             log.appendErase(x, y)
         }
+        return point
     }
 
-    private fun eraseAt(x: Float, y: Float) {
-        strokes.removeAll { stroke ->
-            stroke.points.any { p -> hypot((p.x - x).toFloat(), (p.y - y).toFloat()) <= ERASE_RADIUS_PX }
-        }
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        strokes.forEach { stroke -> drawStroke(canvas, stroke) }
-        current?.let { stroke ->
-            if (stroke.tool != SpikeInputPolicy.TOOL_ERASER) drawStroke(canvas, stroke)
-        }
-        val summary = "p50=${stats.percentile(0.5)}ms p95=${stats.percentile(0.95)}ms " +
-            "笔${stats.strokes} 点${stats.points} 拒掌${stats.palmRejected} " +
-            "压感${stats.pressureRangeText()} tilt=${if (stats.tiltSeen) "有" else "无"}"
-        canvas.drawText(summary, 24f, 56f, statsPaint)
-    }
-
-    /** 压感变宽：逐段按两端点平均压感映射线宽（约 2~10px）。 */
-    private fun drawStroke(canvas: Canvas, stroke: SpikeStroke) {
-        if (stroke.points.size < 2) {
-            stroke.points.firstOrNull()?.let { p ->
-                dotPaint.alpha = 255
-                canvas.drawCircle(p.x.toFloat(), p.y.toFloat(), strokeWidthFor(p.pressure) / 2f, dotPaint)
+    /** 点级擦除：只删橡皮半径内的采样点，笔画被分成多段，其余墨迹保留。 */
+    private fun applyEraseAt(x: Float, y: Float) {
+        var index = 0
+        while (index < strokes.size) {
+            val stroke = strokes[index]
+            val survivors = stroke.points.filter { p ->
+                hypot((p.x - x).toFloat(), (p.y - y).toFloat()) > ERASE_RADIUS_PX
             }
+            if (survivors.size == stroke.points.size) {
+                index++
+                continue
+            }
+            val fragments = splitRuns(survivors, stroke.tool)
+            strokes.removeAt(index)
+            fragments.forEach { fragment ->
+                strokes.add(index, fragment)
+                index++
+            }
+        }
+    }
+
+    private fun splitRuns(points: List<SpikePoint>, tool: String): List<SpikeStroke> {
+        if (points.isEmpty()) return emptyList()
+        val fragments = mutableListOf<SpikeStroke>()
+        var run = mutableListOf(points.first())
+        points.drop(1).forEach { p ->
+            val previous = run.last()
+            // 被擦掉的缺口不连线：相邻幸存点距离超过阈值即另起一段。
+            if (hypot((p.x - previous.x).toFloat(), (p.y - previous.y).toFloat()) > ERASE_RUN_GAP_PX) {
+                fragments.add(SpikeStroke(tool).also { it.points.addAll(run) })
+                run = mutableListOf()
+            }
+            run.add(p)
+        }
+        fragments.add(SpikeStroke(tool).also { it.points.addAll(run) })
+        return fragments
+    }
+
+    /** 把整条笔画画进位图（恢复/重建时用；触摸路径是逐段增量画）。 */
+    private fun drawStrokeInto(canvas: Canvas, stroke: SpikeStroke) {
+        if (stroke.points.isEmpty()) return
+        if (stroke.points.size < 2) {
+            val p = stroke.points[0]
+            dotPaint.strokeWidth = strokeWidthFor(p.pressure)
+            canvas.drawPoint(p.x.toFloat(), p.y.toFloat(), dotPaint)
             return
         }
         for (i in 1 until stroke.points.size) {
@@ -380,6 +481,11 @@ private class SpikeCanvasView(context: Context) : View(context) {
             strokePaint.strokeWidth = strokeWidthFor((a.pressure + b.pressure) / 2f)
             canvas.drawLine(a.x.toFloat(), a.y.toFloat(), b.x.toFloat(), b.y.toFloat(), strokePaint)
         }
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        committed?.let { canvas.drawBitmap(it, 0f, 0f, null) }
     }
 
     private fun strokeWidthFor(pressure: Float): Float {
@@ -399,5 +505,7 @@ private class SpikeCanvasView(context: Context) : View(context) {
 
     companion object {
         private const val ERASE_RADIUS_PX = 24f
+        private const val ERASE_RUN_GAP_PX = 60f
+        private const val MAX_STROKE_WIDTH_PX = 12f
     }
 }
