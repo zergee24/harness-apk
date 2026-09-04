@@ -5,6 +5,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
@@ -168,7 +169,10 @@ private fun ThreadPagingGrid(
             repeat(pageCount) { pageIndex ->
                 val pageThreads = pageChunks.getOrNull(pageIndex) ?: threads.chunked(6).getOrNull(0) ?: emptyList()
                 Column(
-                    modifier = Modifier.fillMaxHeight(),
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        // 摘要加长后单页卡片可能超出列高：允许纵向滚动而不是把末尾的卡裁掉。
+                        .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     val colThreads = pageThreads.chunked(3)
@@ -274,7 +278,9 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                         ?: "等待 agent 输出…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.weight(1f),
+                    // 页列已改为纵向滚动（无界高度），这里不能用 weight 填充——
+                    // 无界约束下 weight 子项会被量成零高度；直接随内容撑开。
+                    modifier = Modifier,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
