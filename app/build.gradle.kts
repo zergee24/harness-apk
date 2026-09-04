@@ -353,6 +353,12 @@ dependencies {
     implementation("com.aliyun.ams:alicloud-android-push:4.0.0")
     implementation("org.eclipse.jgit:org.eclipse.jgit:7.7.0.202606012155-r")
     implementation("org.slf4j:slf4j-nop:2.0.17")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0") {
+        // pdfbox 传递的 bouncycastle 1.72 家族与全局 bcprov-jdk18on:1.84 冲突
+        // （checkDebugDuplicateClasses），统一排除后由 1.84 家族供给。
+        exclude(group = "org.bouncycastle")
+    }
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.84")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
