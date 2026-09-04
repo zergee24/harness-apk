@@ -269,6 +269,7 @@ internal fun ProjectScreen(
     workbenchTarget: ProjectWorkbenchTarget? = null,
     onWorkbenchTargetConsumed: (requestKey: Int) -> Unit = {},
     onCreateSession: (Project) -> Unit,
+    onNewWorkBrief: (Project) -> Unit = {},
     onOpenSession: (String) -> Unit,
     onStartRemoteRun: (Project) -> Unit = {},
     onOpenRemoteRun: (String) -> Unit = {},
@@ -1184,6 +1185,17 @@ internal fun ProjectScreen(
                                 onCreateBranch = { showBranchDialog = true },
                                 onCheckoutBranch = { checkoutBranch(selectedProject, it) },
                             )
+                        }
+                    }
+
+                    item {
+                        Button(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = HarnessSpacing.minimumTouchTarget),
+                            onClick = { onNewWorkBrief(selectedProject) },
+                        ) {
+                            Text("新建工作简报")
                         }
                     }
 

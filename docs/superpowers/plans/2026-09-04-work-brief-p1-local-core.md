@@ -58,4 +58,12 @@
 
 **验收（spec §25 P1 退出条件）：** 五个真实 AI coding 场景次日 90 秒内可恢复标记/判断/问题/下一步/可回跳位置——验收期另约；工程门槛：全量单测绿 + 真机走查清单全过。
 
-**实施记录：** （进行中）
+**实施记录（2026-09-04，进行中）：**
+
+- Task 1 完成：Room v25（MIGRATION_24_25），8 实体 + 2 DAO；androidTest（HiBreak）DAO 往返/唯一索引/FK 级联 5 项全过。
+- Task 2 完成：StrokeJournal（CRC32/单调序列/2s·64KiB 自动 checkpoint/尾部损坏截断），6 项 JVM 测试全过。修复过程中发现并修正两处自伤：写入与重放的 CRC 位置顺序不一致、只读阶段截断依赖未创建的输出通道。
+- Task 3 完成：BriefStateMachine（§8.1/8.2 转移表）+ WorkBriefRepository（创建/开始/暂停/恢复/结束/标记/文件锚点）；6 项 JVM 测试全过。
+- Task 4 部分：PageInk/Spike 渲染核心迁移为正式版 BriefInkView + BriefCaptureController；真机验证创建→画布墨迹→journal 落盘全通。
+- **未决 bug（P1-1）**：「添加标记」时 `WorkBriefRepository.addMarker` 收到的 briefId 与控制器传入值不一致（入口日志与 requireSession 参数对照确证），抛"没有记录场次"。已在控制器协程层加固（runCatching + 错误上屏），App 不再崩溃。根因待查（怀疑安装包类文件陈旧或并发会话编辑干扰，clean build 后仍复现，需 APK 反编译比对）。
+- 另发现：本 ROM 的 `install -r` 偶发清空应用数据（本轮复现一次），测试 fixture 需每次重建。
+- 遗留：Task 4 收尾（暂停态 UI 细节）、Task 5-9。

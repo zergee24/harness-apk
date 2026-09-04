@@ -193,6 +193,7 @@ class WorkBriefRepository(private val db: AppDatabase, private val clock: () -> 
     }
 
     suspend fun addMarker(briefId: String, type: UserMarkerType, pageId: String, atOffsetMs: Long, note: String): String {
+        android.util.Log.w("BriefRepoEntry", "addMarker entry briefId=$briefId pageId=$pageId")
         val now = clock()
         val session = requireSession(briefId)
         val id = UUID.randomUUID().toString()
@@ -264,5 +265,15 @@ class WorkBriefRepository(private val db: AppDatabase, private val clock: () -> 
         workBriefDao.getById(briefId) ?: error("简报不存在：$briefId")
 
     private suspend fun requireSession(briefId: String): CaptureSessionEntity =
-        workBriefDao.sessionForBrief(briefId) ?: error("简报 $briefId 没有记录场次")
+        workBriefDao.sessionForBrief(briefId) ?: run {
+            val all = workBriefDao.allSessionsDebug()
+            val briefs = workBriefDao.allBriefsDebug()
+            android.util.Log.e(
+                "WorkBriefRepo",
+                "session missing for brief=$briefId dbPath=${db.openHelper.writableDatabase.path}; sessions=" +
+                    all.joinToString { "${it.id}(brief=${it.briefId})" } +
+                    "; briefs=" + briefs.joinToString { "${it.id}(${it.status})" },
+            )
+            error("简报 $briefId 没有记录场次")
+        }
 }
