@@ -18,10 +18,12 @@ class SpikeInputPolicy(
         nowMs: Long,
         fingerMode: Boolean,
         eraserActive: Boolean,
+        eraserMode: Boolean = false,
     ): SpikeInputVerdict {
         val stylusRecent = stylusLastSeenAtMs != null && nowMs - stylusLastSeenAtMs <= stylusRecentMs
         return when {
             tool == TOOL_ERASER || eraserActive -> SpikeInputVerdict.ERASE
+            tool == TOOL_FINGER && eraserMode -> SpikeInputVerdict.ERASE
             tool == TOOL_STYLUS -> SpikeInputVerdict.DRAW
             tool == TOOL_FINGER && fingerMode -> SpikeInputVerdict.DRAW
             tool == TOOL_FINGER && !stylusRecent -> SpikeInputVerdict.DRAW

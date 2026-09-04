@@ -34,6 +34,14 @@ class SpikeCanvasLogicTest {
     }
 
     @Test
+    fun fingerWithEraserModeEntersEraseEvenWithStylusRecent() {
+        assertEquals(
+            SpikeInputVerdict.ERASE,
+            SpikeInputPolicy().decide(SpikeInputPolicy.TOOL_FINGER, now - 1_000, now, fingerMode = false, eraserActive = false, eraserMode = true),
+        )
+    }
+
+    @Test
     fun fingerIsPalmRejectedWhileStylusRecentlySeen() {
         assertEquals(
             SpikeInputVerdict.REJECT_PALM,

@@ -2,6 +2,8 @@ package com.harnessapk.spike.canvas
 
 import android.app.Activity
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -15,25 +17,22 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.Toast
 import com.harnessapk.BuildConfig
-import java.io.BufferedReader
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
+import kotlin.math.hypot
 import org.json.JSONArray
 import org.json.JSONObject
-import kotlin.math.max
 
 /**
  * Spike-画布 可行性试点（2026-09-04，HiBreak 电纸书首发）。
  *
  * 独立 debug prototype，不进正式信息架构；release 构建直接 finish。
- * 四件事：①手写笔/手指能力矩阵；②墨水预览 + 事件→绘制延迟统计；
- * ③掌触裁决（见过手写笔后手指默认拒绝）；④JSONL 追加日志 + 强杀恢复。
+ * 能力矩阵、压感变宽墨迹、橡皮真擦除（含手指橡皮模式）、JSONL 追加日志 + 强杀恢复。
  */
 class SpikeCanvasActivity : Activity() {
 
     private lateinit var canvasView: SpikeCanvasView
-    private var fingerModeButton: Button? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,13 +48,6 @@ class SpikeCanvasActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.BOTTOM or Gravity.END
         }
-        fingerModeButton = Button(this).apply {
-            text = "手指模式：关"
-            setOnClickListener {
-                canvasView.fingerMode = !canvasView.fingerMode
-                text = "手指模式：${if (canvasView.fingerMode) "开" else "关"}"
-            }
-        }
         controls.addView(Button(this).apply {
             text = "清除"
             setOnClickListener { canvasView.clearAll() }
@@ -63,10 +55,23 @@ class SpikeCanvasActivity : Activity() {
         controls.addView(Button(this).apply {
             text = "能力矩阵"
             setOnClickListener {
-                Toast.makeText(context, canvasView.capabilityReport(), Toast.LENGTH_LONG).show()
+                Toast.makeText(this@SpikeCanvasActivity, canvasView.capabilityReport(), Toast.LENGTH_LONG).show()
             }
         })
-        controls.addView(fingerModeButton)
+        controls.addView(Button(this).apply {
+            text = "橡皮：关"
+            setOnClickListener {
+                canvasView.eraserMode = !canvasView.eraserMode
+                text = "橡皮：${if (canvasView.eraserMode) "开" else "关"}"
+            }
+        })
+        controls.addView(Button(this).apply {
+            text = "手指模式：关"
+            setOnClickListener {
+                canvasView.fingerMode = !canvasView.fingerMode
+                text = "手指模式：${if (canvasView.fingerMode) "开" else "关"}"
+            }
+        })
 
         val root = FrameLayout(this)
         root.addView(canvasView)
@@ -84,6 +89,7 @@ class SpikeCanvasActivity : Activity() {
 
 private class SpikeStroke(val tool: String) {
     val points = mutableListOf<SpikePoint>()
+
     fun toLine(): String {
         val arr = JSONArray()
         points.forEach { p ->
@@ -123,19 +129,31 @@ private class SpikeStrokeLog(context: Context) {
     private val file = File(context.getExternalFilesDir(null)?.apply { mkdirs() }, "spike_canvas/strokes.jsonl")
     private var writer: PrintWriter? = null
 
-    fun loadExisting(): List<SpikeStroke> {
-        if (!file.exists()) return emptyList()
-        val strokes = mutableListOf<SpikeStroke>()
+    /** 按日志顺序重放历史：笔画、擦除点、清屏。 */
+    fun replay(onStroke: (SpikeStroke) -> Unit, onErase: (Float, Float) -> Unit, onClear: () -> Unit) {
+        if (!file.exists()) return
         file.bufferedReader().useLines { lines ->
             lines.forEach { line ->
-                SpikeStroke.fromLine(line)?.let { strokes.add(it) }
+                val obj = runCatching { JSONObject(line) }.getOrNull() ?: return@forEach
+                when (obj.optString("kind")) {
+                    "stroke" -> SpikeStroke.fromLine(line)?.let(onStroke)
+                    "erase" -> onErase(
+                        obj.optDouble("x", 0.0).toFloat(),
+                        obj.optDouble("y", 0.0).toFloat(),
+                    )
+                    "cleared" -> onClear()
+                }
             }
         }
-        return strokes
     }
 
     fun appendStroke(stroke: SpikeStroke) {
         writer().println(stroke.toLine())
+        writer()?.flush()
+    }
+
+    fun appendErase(x: Float, y: Float) {
+        writer().println(JSONObject().put("kind", "erase").put("x", x.toDouble()).put("y", y.toDouble()).toString())
         writer()?.flush()
     }
 
@@ -167,6 +185,7 @@ private class SpikeStrokeLog(context: Context) {
 private class SpikeCanvasView(context: Context) : View(context) {
 
     var fingerMode = false
+    var eraserMode = false
 
     private val policy = SpikeInputPolicy()
     private val stats = SpikeStats()
@@ -175,35 +194,29 @@ private class SpikeCanvasView(context: Context) : View(context) {
     private var current: SpikeStroke? = null
     private var stylusLastSeenAtMs: Long? = null
     private var eraserButtonDown = false
-    private var lastStatsRefreshAtMs = 0L
     private var deviceSummary: String = ""
 
-    private val strokePaint = android.graphics.Paint().apply {
+    private val strokePaint = Paint().apply {
         isAntiAlias = true
-        style = android.graphics.Paint.Style.STROKE
-        strokeCap = android.graphics.Paint.Cap.ROUND
-        strokeJoin = android.graphics.Paint.Join.ROUND
-        strokeWidth = 2.5f
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
         color = 0xFF1A1A1A.toInt()
     }
-    private val eraserPaint = android.graphics.Paint(strokePaint).apply {
-        color = 0xFFC2483C.toInt()
-        strokeWidth = 8f
+    private val dotPaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.FILL
+        color = 0xFF1A1A1A.toInt()
     }
-    private val rejectedPaint = android.graphics.Paint(strokePaint).apply {
-        color = 0xFF9A9AA0.toInt()
-        strokeWidth = 1.5f
-    }
-    private val statsPaint = android.graphics.Paint().apply {
+    private val statsPaint = Paint().apply {
         isAntiAlias = true
         color = 0xFF44444488.toInt()
         textSize = 30f
     }
-    private val rejectedStrokes = mutableListOf<SpikeStroke>()
 
     init {
         setBackgroundColor(0xFFF6F3EE.toInt())
-        strokes.addAll(log.loadExisting())
+        log.replay(onStroke = strokes::add, onErase = ::eraseAt, onClear = { strokes.clear() })
         deviceSummary = describeInputDevices()
         setOnTouchListener { _, event ->
             onTouchEvent(event)
@@ -213,7 +226,6 @@ private class SpikeCanvasView(context: Context) : View(context) {
 
     fun clearAll() {
         strokes.clear()
-        rejectedStrokes.clear()
         log.resetFile()
         log.appendMarker("cleared")
         invalidate()
@@ -221,7 +233,7 @@ private class SpikeCanvasView(context: Context) : View(context) {
 
     fun capabilityReport(): String {
         val line1 = "型号 ${Build.MODEL} · Android ${Build.VERSION.RELEASE}"
-        val line2 = "压感 ${stats.pressureRangeText()} · tilt=${stats.tiltSeen} · 工具=$stats.toolsSeen"
+        val line2 = "压感 ${stats.pressureRangeText()} · tilt=${stats.tiltSeen} · 工具=${stats.toolsSeen}"
         val line3 = "延迟 p50=${stats.percentile(0.5)}ms p95=${stats.percentile(0.95)}ms"
         val line4 = "笔画 ${stats.strokes} · 点 ${stats.points} · 掌触拒绝 ${stats.palmRejected}"
         return listOf(line1, line2, line3, line4, deviceSummary).joinToString("\n")
@@ -267,33 +279,34 @@ private class SpikeCanvasView(context: Context) : View(context) {
         eraserButtonDown = event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY != 0 ||
             event.buttonState and MotionEvent.BUTTON_SECONDARY != 0
 
-        stats.addLatency(max(0, SystemClock.uptimeMillis() - event.eventTime))
+        stats.addLatency(maxOf(0, SystemClock.uptimeMillis() - event.eventTime))
         val tilt = event.getAxisValue(MotionEvent.AXIS_TILT) != 0f
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                val verdict = policy.decide(tool, stylusLastSeenAtMs, SystemClock.uptimeMillis(), fingerMode, eraserButtonDown)
+                val verdict = policy.decide(
+                    tool, stylusLastSeenAtMs, SystemClock.uptimeMillis(),
+                    fingerMode, eraserButtonDown, eraserMode,
+                )
                 when (verdict) {
                     SpikeInputVerdict.DRAW -> {
                         current = SpikeStroke(tool)
                         appendPoint(event, -1)
                     }
-                    SpikeInputVerdict.ERASE -> current = SpikeStroke(SpikeInputPolicy.TOOL_ERASER)
+                    SpikeInputVerdict.ERASE -> {
+                        current = SpikeStroke(SpikeInputPolicy.TOOL_ERASER)
+                        appendPoint(event, -1)
+                    }
                     SpikeInputVerdict.REJECT_PALM -> stats.addPalmRejected()
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                val stroke = current
-                if (stroke != null && stroke.tool != SpikeInputPolicy.TOOL_ERASER) {
-                    for (h in 0 until event.historySize) {
-                        appendPoint(event, h)
-                    }
-                    appendPoint(event, -1)
-                }
+                for (h in 0 until event.historySize) appendPoint(event, h)
+                appendPoint(event, -1)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 current?.let { stroke ->
-                    if (stroke.points.size >= 2) {
+                    if (stroke.tool != SpikeInputPolicy.TOOL_ERASER && stroke.points.size >= 2) {
                         strokes.add(stroke)
                         stats.addStroke()
                         log.appendStroke(stroke)
@@ -302,7 +315,6 @@ private class SpikeCanvasView(context: Context) : View(context) {
                 current = null
             }
         }
-        refreshStatsThrottled()
         invalidate()
         return true
     }
@@ -329,39 +341,50 @@ private class SpikeCanvasView(context: Context) : View(context) {
         }
         stroke.points.add(SpikePoint(x.toDouble(), y.toDouble(), t, pressure))
         stats.addPoint(pressure, event.getAxisValue(MotionEvent.AXIS_TILT) != 0f, stroke.tool)
-    }
-
-    private fun refreshStatsThrottled() {
-        val now = SystemClock.uptimeMillis()
-        if (now - lastStatsRefreshAtMs > 500) {
-            lastStatsRefreshAtMs = now
+        if (stroke.tool == SpikeInputPolicy.TOOL_ERASER) {
+            eraseAt(x, y)
+            log.appendErase(x, y)
         }
     }
 
-    override fun onDraw(canvas: android.graphics.Canvas) {
+    private fun eraseAt(x: Float, y: Float) {
+        strokes.removeAll { stroke ->
+            stroke.points.any { p -> hypot((p.x - x).toFloat(), (p.y - y).toFloat()) <= ERASE_RADIUS_PX }
+        }
+    }
+
+    override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        (strokes + rejectedStrokes).forEach { stroke ->
-            if (stroke.points.size < 2) return@forEach
-            val path = android.graphics.Path()
-            path.moveTo(stroke.points[0].x.toFloat(), stroke.points[0].y.toFloat())
-            stroke.points.drop(1).forEach { p -> path.lineTo(p.x.toFloat(), p.y.toFloat()) }
-            canvas.drawPath(path, strokePaint)
-        }
+        strokes.forEach { stroke -> drawStroke(canvas, stroke) }
         current?.let { stroke ->
-            if (stroke.points.size >= 2) {
-                val path = android.graphics.Path()
-                path.moveTo(stroke.points[0].x.toFloat(), stroke.points[0].y.toFloat())
-                stroke.points.drop(1).forEach { p -> path.lineTo(p.x.toFloat(), p.y.toFloat()) }
-                canvas.drawPath(
-                    path,
-                    if (stroke.tool == SpikeInputPolicy.TOOL_ERASER) eraserPaint else strokePaint,
-                )
-            }
+            if (stroke.tool != SpikeInputPolicy.TOOL_ERASER) drawStroke(canvas, stroke)
         }
         val summary = "p50=${stats.percentile(0.5)}ms p95=${stats.percentile(0.95)}ms " +
             "笔${stats.strokes} 点${stats.points} 拒掌${stats.palmRejected} " +
             "压感${stats.pressureRangeText()} tilt=${if (stats.tiltSeen) "有" else "无"}"
         canvas.drawText(summary, 24f, 56f, statsPaint)
+    }
+
+    /** 压感变宽：逐段按两端点平均压感映射线宽（约 2~10px）。 */
+    private fun drawStroke(canvas: Canvas, stroke: SpikeStroke) {
+        if (stroke.points.size < 2) {
+            stroke.points.firstOrNull()?.let { p ->
+                dotPaint.alpha = 255
+                canvas.drawCircle(p.x.toFloat(), p.y.toFloat(), strokeWidthFor(p.pressure) / 2f, dotPaint)
+            }
+            return
+        }
+        for (i in 1 until stroke.points.size) {
+            val a = stroke.points[i - 1]
+            val b = stroke.points[i]
+            strokePaint.strokeWidth = strokeWidthFor((a.pressure + b.pressure) / 2f)
+            canvas.drawLine(a.x.toFloat(), a.y.toFloat(), b.x.toFloat(), b.y.toFloat(), strokePaint)
+        }
+    }
+
+    private fun strokeWidthFor(pressure: Float): Float {
+        val density = resources.displayMetrics.density
+        return (1.2f + 4.8f * pressure.coerceIn(0f, 1f)) * density
     }
 
     override fun performClick(): Boolean {
@@ -372,5 +395,9 @@ private class SpikeCanvasView(context: Context) : View(context) {
     override fun onDetachedFromWindow() {
         log.close()
         super.onDetachedFromWindow()
+    }
+
+    companion object {
+        private const val ERASE_RADIUS_PX = 24f
     }
 }
