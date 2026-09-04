@@ -704,6 +704,7 @@ transcript/segments.jsonl
 markers/markers.jsonl
 anchors/anchors.jsonl
 preview/cover.webp
+preview/pages/<pageId>.webp         # 每页渲染快照（AI/检索消费层；2026-09-04 Spike 验证：raw 笔迹对 AI 不可读，渲染图可读）
 assets/backgrounds/<sha256>.<ext>
 audio/index.json                    # 记录可用性、哈希和策略
 audio/<segmentId>.m4a               # 只有显式“包含原音频”导出时存在
