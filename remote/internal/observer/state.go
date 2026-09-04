@@ -250,9 +250,9 @@ func (m *Machine) setActivity(text string) {
 	m.lastActivity = ActivitySnippet(text)
 }
 
-// ActivitySnippet 把消息文本压成单行摘要（去换行、截 120 字符）。
+// ActivitySnippet 把消息文本压成单行摘要（去换行、截 240 字符——副屏单卡可完整显示，按真机 260dp 卡宽 ~18 字/行校准）。
 func ActivitySnippet(text string) string {
-	out := make([]rune, 0, 120)
+	out := make([]rune, 0, 240)
 	for _, r := range text {
 		switch r {
 		case '\n', '\r':
@@ -260,7 +260,7 @@ func ActivitySnippet(text string) string {
 		default:
 			out = append(out, r)
 		}
-		if len(out) >= 120 {
+		if len(out) >= 240 {
 			break
 		}
 	}
