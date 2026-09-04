@@ -67,3 +67,11 @@
 - **P1-1 已修复（2026-09-04 晚）**：「添加标记」抛"没有记录场次"的根因是 `appendTimeline(sessionId, ...)` 内部误调 `requireSession(sessionId)`——把场次 id 当简报 id 查询（`WHERE briefId = 场次id`）永远查不到。诊断靠 requireSession 失败路径 dump 全表：失败的 brief 值恰好等于本轮 session id，规律锁定。修复：appendTimeline 不再查场次，序列按场次内 timeline 自算；WorkBriefDao 增加 `sessionById`。真机复测标记添加成功（状态条"已添加标记：决策"），WorkBriefRepo 错误 0。协程层 runCatching 加固保留（错误上屏不崩）。
 - 另发现：本 ROM 的 `install -r` 偶发清空应用数据（本轮复现一次），测试 fixture 需每次重建。
 - 遗留：Task 4 收尾（暂停态 UI 细节）、Task 5-9。
+
+**实施记录续（2026-09-05 凌晨批次）：**
+
+- Task 6 完成：文件夹「简报」列表行（标题 + 状态标签）+ 点击重开（封存场次自动进回放模式，控制器暴露 sessionStatus）。列表渲染真机已验证；重开点击验证待设备回归。
+- Task 7 完成：记录页「锚点」按钮 → 项目文件选择对话框 → SHA-256 内容哈希 → `CodeAnchorEntity`（PROJECT_FILE）→ `toEvidenceAnchor(projectId)` 桥接锚点协议（3 项 JVM 测试）。行区间（FILE_RANGE）模型已支持、UI 待 P1 后补。
+- Task 8 完成：`BriefBundleExporter`——manifest/timeline/canvas(pages+strokes.jsonl)/markers/anchors/preview(每页 PNG，含点级擦除后的最终墨迹) + 全条目 SHA-256 + manifest 校验；输出 `<项目目录>/briefs/<briefId>.hbrief`；结束时自动导出并 `markReady`（PROCESSING→READY、场次 SEALED、revision+1）。
+- Task 9 部分：全量 JVM 1240 用例绿。**真机走查未完成——HiBreak USB 断连（凌晨 2:40 左右脱离 adb，仅剩 offline 幽灵条目），预计设备被移走或重启。** 待设备回归后补验清单：①新建简报→画→结束→回放（Task 5 补验）②文件夹简报行点击重开（Task 6 补验）③锚点添加 ④封存后 bundle 文件存在且可解析。
+- 顺带修复：ChatScreen 的 androidTest 缺 `onPickDocument` 参数（另一会话重构遗漏）已补，否则 androidTest 编译失败。
