@@ -51,8 +51,17 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MarkdownDraftOriginEntity::class,
         ContextFactDedupeEntity::class,
         RemoteRunCompletionEntity::class,
+        WorkBriefEntity::class,
+        CaptureSessionEntity::class,
+        CaptureSegmentEntity::class,
+        CanvasPageEntity::class,
+        TimelineEventEntity::class,
+        UserMarkerEntity::class,
+        CodeAnchorEntity::class,
+        BriefRevisionEntity::class,
+        WorkJournalEntity::class,
     ],
-    version = 24,
+    version = 25,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -72,6 +81,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun localSearchDao(): LocalSearchDao
     abstract fun remoteDao(): RemoteDao
     abstract fun projectSearchDao(): ProjectSearchDao
+    abstract fun workBriefDao(): WorkBriefDao
+    abstract fun briefCaptureDao(): BriefCaptureDao
 
     companion object {
         val MIGRATION_1_2: Migration = object : Migration(1, 2) {
@@ -1188,6 +1199,177 @@ abstract class AppDatabase : RoomDatabase() {
                 db.query("PRAGMA foreign_key_check").use { cursor ->
                     if (cursor.moveToFirst()) error("foreign_key_check failed after M3 migration")
                 }
+            }
+        }
+
+        val MIGRATION_24_25: Migration = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 工作简报 P1 本地核心（可回放工作简报设计 §16）。
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `work_briefs` (
+                        `id` TEXT NOT NULL, `projectId` TEXT NOT NULL, `title` TEXT NOT NULL,
+                        `status` TEXT NOT NULL, `revision` INTEGER NOT NULL,
+                        `bundleRelativePath` TEXT, `bundleSha256` TEXT,
+                        `totalDurationMs` INTEGER NOT NULL, `activeDurationMs` INTEGER NOT NULL,
+                        `audioAvailability` TEXT NOT NULL,
+                        `sourceBriefId` TEXT, `sourceRevision` INTEGER, `continuationOfBriefId` TEXT,
+                        `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL,
+                        `lastOpenedAt` INTEGER NOT NULL, `errorMessage` TEXT,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_work_briefs_projectId ON work_briefs(projectId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_work_briefs_status ON work_briefs(status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_work_briefs_updatedAt ON work_briefs(updatedAt)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `brief_capture_sessions` (
+                        `id` TEXT NOT NULL, `briefId` TEXT NOT NULL, `status` TEXT NOT NULL,
+                        `wallClockStartedAt` INTEGER NOT NULL, `durationMs` INTEGER NOT NULL,
+                        `activeDurationMs` INTEGER NOT NULL,
+                        `audioPolicy` TEXT NOT NULL DEFAULT 'none',
+                        `transcriptionProvider` TEXT, `consentAt` INTEGER, `uploadScope` TEXT,
+                        `retentionResult` TEXT,
+                        `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `errorMessage` TEXT,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`briefId`) REFERENCES `work_briefs`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_brief_capture_sessions_briefId " +
+                        "ON brief_capture_sessions(briefId)",
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `brief_capture_segments` (
+                        `id` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `segmentIndex` INTEGER NOT NULL,
+                        `baseOffsetMs` INTEGER NOT NULL, `durationMs` INTEGER NOT NULL,
+                        `wallClockStartedAt` INTEGER NOT NULL,
+                        `segmentOriginElapsedRealtimeNanos` INTEGER NOT NULL,
+                        `timebase` TEXT NOT NULL, `timingQuality` TEXT NOT NULL,
+                        `journalPath` TEXT NOT NULL,
+                        `audioPath` TEXT, `audioSha256` TEXT, `audioState` TEXT, `sampleRate` INTEGER,
+                        `firstFramePosition` INTEGER, `audioTimestampNs` INTEGER,
+                        `audioClockDomain` TEXT, `driftEstimateMs` INTEGER,
+                        `state` TEXT NOT NULL,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`sessionId`) REFERENCES `brief_capture_sessions`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_brief_capture_segments_sessionId_segmentIndex " +
+                        "ON brief_capture_segments(sessionId, segmentIndex)",
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `brief_canvas_pages` (
+                        `id` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `pageIndex` INTEGER NOT NULL,
+                        `logicalWidth` INTEGER NOT NULL, `logicalHeight` INTEGER NOT NULL,
+                        `backgroundType` TEXT NOT NULL DEFAULT 'blank',
+                        `backgroundRef` TEXT, `backgroundSha256` TEXT, `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`sessionId`) REFERENCES `brief_capture_sessions`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_brief_canvas_pages_sessionId_pageIndex " +
+                        "ON brief_canvas_pages(sessionId, pageIndex)",
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `brief_timeline_events` (
+                        `eventId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `sequence` INTEGER NOT NULL,
+                        `type` TEXT NOT NULL, `pageId` TEXT, `atOffsetMs` INTEGER NOT NULL,
+                        `payloadJson` TEXT, `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`eventId`),
+                        FOREIGN KEY(`sessionId`) REFERENCES `brief_capture_sessions`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_brief_timeline_events_sessionId_sequence " +
+                        "ON brief_timeline_events(sessionId, sequence)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_brief_timeline_events_sessionId " +
+                        "ON brief_timeline_events(sessionId)",
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `brief_user_markers` (
+                        `id` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `eventId` TEXT,
+                        `type` TEXT NOT NULL, `pageId` TEXT, `atOffsetMs` INTEGER NOT NULL,
+                        `note` TEXT NOT NULL, `resolvedAt` INTEGER, `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`sessionId`) REFERENCES `brief_capture_sessions`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_brief_user_markers_sessionId ON brief_user_markers(sessionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_brief_user_markers_type ON brief_user_markers(type)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `brief_code_anchors` (
+                        `id` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `type` TEXT NOT NULL,
+                        `relativePath` TEXT NOT NULL, `startLine` INTEGER, `endLine` INTEGER,
+                        `contentHash` TEXT NOT NULL, `manualLabel` TEXT, `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`sessionId`) REFERENCES `brief_capture_sessions`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_brief_code_anchors_sessionId ON brief_code_anchors(sessionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_brief_code_anchors_relativePath ON brief_code_anchors(relativePath)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `brief_revisions` (
+                        `id` TEXT NOT NULL, `briefId` TEXT NOT NULL, `revision` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL, `bundleRelativePath` TEXT NOT NULL,
+                        `bundleSha256` TEXT NOT NULL, `manifestSha256` TEXT,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`briefId`) REFERENCES `work_briefs`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_brief_revisions_briefId_revision " +
+                        "ON brief_revisions(briefId, revision)",
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `brief_work_journals` (
+                        `id` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `pageId` TEXT NOT NULL,
+                        `journalPath` TEXT NOT NULL, `state` TEXT NOT NULL,
+                        `lastSequence` INTEGER NOT NULL, `byteSize` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`sessionId`) REFERENCES `brief_capture_sessions`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_brief_work_journals_sessionId ON brief_work_journals(sessionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_brief_work_journals_state ON brief_work_journals(state)")
             }
         }
 
