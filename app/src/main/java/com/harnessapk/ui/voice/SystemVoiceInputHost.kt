@@ -10,7 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +43,7 @@ import com.harnessapk.voice.reduceVoiceInputState
 import com.harnessapk.voice.aliyunRealtimeTranscriptionError
 import com.harnessapk.voice.siliconFlowTranscriptionError
 import com.harnessapk.voice.systemSpeechRecognitionIntent
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -59,7 +60,14 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
-    val settings by container.settingsStore.voiceSettings.collectAsState(initial = VoiceSettings())
+    // null = 设置尚未从 DataStore 加载；启动语音前必须等待真实值，
+    // 否则会用默认的 ANDROID_SYSTEM 路由（「语音提问」冷启动必现系统识别）
+    var settings by remember { mutableStateOf<VoiceSettings?>(null) }
+    LaunchedEffect(container) {
+        container.settingsStore.voiceSettings.collect { settings = it }
+    }
+    suspend fun currentSettings(): VoiceSettings =
+        settings ?: container.settingsStore.voiceSettings.first().also { settings = it }
     var state by remember { mutableStateOf(VoiceInputState()) }
     var pendingLanguage by remember { mutableStateOf("system") }
     var embeddedRecognizerActive by remember { mutableStateOf(false) }
@@ -165,6 +173,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
 
     fun beginAliyunRecognition() {
         scope.launch {
+            val resolvedSettings = currentSettings()
             val apiKey = runCatching {
                 withContext(container.dispatchers.io) {
                     container.voiceCredentialStore.aliyunApiKey()
@@ -182,9 +191,9 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
                 aliyunTranscriptionClient.start(
                     request = AliyunRealtimeRequest(
                         apiKey = apiKey,
-                        model = settings.aliyunSpeechModel,
+                        model = resolvedSettings.aliyunSpeechModel,
                         language = pendingLanguage,
-                        autoPunctuation = settings.autoPunctuation,
+                        autoPunctuation = resolvedSettings.autoPunctuation,
                     ),
                     listener = object : AliyunRealtimeTranscriptionListener {
                         override fun onReady() {
@@ -262,10 +271,14 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
     }
 
     fun beginRecognition() {
-        when (settings.defaultSpeechProvider) {
-            VoiceProviderType.ANDROID_SYSTEM -> beginSystemRecognition()
-            VoiceProviderType.SILICON_FLOW -> beginSiliconFlowRecognition()
-            VoiceProviderType.ALIYUN -> beginAliyunRecognition()
+        scope.launch {
+            // 先等待真实设置加载完成再路由，避免冷启动竞态走系统识别
+            val resolvedSettings = currentSettings()
+            when (resolvedSettings.defaultSpeechProvider) {
+                VoiceProviderType.ANDROID_SYSTEM -> beginSystemRecognition()
+                VoiceProviderType.SILICON_FLOW -> beginSiliconFlowRecognition()
+                VoiceProviderType.ALIYUN -> beginAliyunRecognition()
+            }
         }
     }
 
@@ -355,7 +368,7 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
                                 request = CloudTranscriptionRequest(
                                     baseUrl = SILICON_FLOW_BASE_URL,
                                     apiKey = resolvedApiKey,
-                                    model = settings.siliconFlowSpeechModel,
+                                    model = currentSettings().siliconFlowSpeechModel,
                                     language = "system",
                                 ),
                                 audioFile = audioFile,
@@ -398,7 +411,6 @@ fun rememberVoiceInput(container: AppContainer): SystemVoiceInputBinding {
         consume = { dispatch(VoiceInputEvent.Consumed) },
     )
 }
-
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()

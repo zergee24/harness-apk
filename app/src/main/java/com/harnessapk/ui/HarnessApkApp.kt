@@ -234,6 +234,13 @@ fun HarnessApkApp(
     }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val simpleMode by container.settingsStore.simpleMode.collectAsState(initial = false)
+    // 简洁模式下工作入口整体隐藏，若当前正处在 WORK 页则退回生活页
+    LaunchedEffect(simpleMode) {
+        if (simpleMode && mainMode == MainMode.WORK) {
+            themeSourceMode = nextThemeSource(themeSourceMode, MainMode.LIFE)
+            mainMode = MainMode.LIFE
+        }
+    }
     val captureDraft by container.captureDraftRepository.activeDraft.collectAsState()
     val captureTransferState by container.captureImportCoordinator.transferState.collectAsState()
     var captureProjects by remember { mutableStateOf<List<Project>>(emptyList()) }
@@ -555,7 +562,12 @@ fun HarnessApkApp(
         bottomBar = {
             if (isHomeRoute) {
                 NavigationBar {
-                    MainMode.entries.forEach { mode ->
+                    val visibleModes = if (simpleMode) {
+                        MainMode.entries.filter { it != MainMode.WORK }
+                    } else {
+                        MainMode.entries.toList()
+                    }
+                    visibleModes.forEach { mode ->
                         NavigationBarItem(
                             selected = mainMode == mode,
                             onClick = {
