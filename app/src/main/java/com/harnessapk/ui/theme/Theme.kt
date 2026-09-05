@@ -30,8 +30,8 @@ import com.harnessapk.ui.MainMode
 import com.harnessapk.ui.normalizeThemeSource
 
 internal fun warmLightColorScheme() = lightColorScheme(
-    primary = Color(0xFFD98278),
-    onPrimary = Color(0xFF5F1410),
+    primary = Color(0xFF8E3F36),
+    onPrimary = Color(0xFFFFFFFF),
     primaryContainer = Color(0xFFFFDAD5),
     onPrimaryContainer = Color(0xFF3F0805),
     secondary = Color(0xFF6E5E5A),

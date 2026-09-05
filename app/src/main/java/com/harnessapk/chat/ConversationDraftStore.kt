@@ -122,6 +122,15 @@ class ConversationDraftStore(
     }
 
     /**
+     * Validates a draft assembled by recovery before it is handed to the UI
+     * or persisted. This deliberately has no storage or timestamp side effect.
+     */
+    fun validateSnapshot(conversationId: String, draft: ConversationDraft): ConversationDraft =
+        synchronized(lock) {
+            normalizeLoaded(draft, conversationId)
+        }
+
+    /**
      * Commits a whole draft snapshot.  A malformed or future-version snapshot
      * is never replaced by a new value because the old raw value may be the
      * only recoverable copy.
@@ -506,7 +515,7 @@ class ConversationDraftStore(
                     rootError = rootError ?: DraftStoreError(DraftStoreErrorCode.ATTACHMENT_MISSING, message)
                     image.copy(state = DraftAttachmentState.MISSING, errorMessage = message)
                 }
-                image.state == DraftAttachmentState.READY && !attachmentFiles.isReadableOwnedUri(image.localUri) -> {
+                image.state == DraftAttachmentState.READY && image.privateCopyMissing() -> {
                     val message = "附件副本不存在：${image.displayName}"
                     rootError = rootError ?: DraftStoreError(DraftStoreErrorCode.ATTACHMENT_MISSING, message)
                     image.copy(state = DraftAttachmentState.MISSING, errorMessage = message)
@@ -526,7 +535,7 @@ class ConversationDraftStore(
                     rootError = rootError ?: DraftStoreError(DraftStoreErrorCode.ATTACHMENT_MISSING, message)
                     document.copy(state = DraftAttachmentState.MISSING, errorMessage = message)
                 }
-                document.state == DraftAttachmentState.READY && !attachmentFiles.isReadableOwnedUri(document.localUri) -> {
+                document.state == DraftAttachmentState.READY && document.privateCopyMissing() -> {
                     val message = "附件副本不存在：${document.displayName}"
                     rootError = rootError ?: DraftStoreError(DraftStoreErrorCode.ATTACHMENT_MISSING, message)
                     document.copy(state = DraftAttachmentState.MISSING, errorMessage = message)
@@ -555,6 +564,17 @@ class ConversationDraftStore(
             attachments = projectedAttachments,
             error = rootError,
         )
+    }
+
+    /**
+     * New imports carry their picker URI as sourceUri and must resolve to an
+     * app-owned copy. Records reconstructed from legacy/recovery snapshots
+     * have no sourceUri and remain compatible with their external URI.
+     */
+    private fun DraftAttachmentRecord.privateCopyMissing(): Boolean {
+        if (localUri.isBlank()) return true
+        if (!sourceUri.isNullOrBlank() && !attachmentFiles.isOwnedUri(localUri)) return true
+        return attachmentFiles.isOwnedUri(localUri) && !attachmentFiles.isReadableOwnedUri(localUri)
     }
 
     private fun persistFailedRecord(

@@ -15,6 +15,7 @@ import com.harnessapk.storage.AgentVersionEntity
 import com.harnessapk.storage.AgentVersionSourceCrossRef
 import com.harnessapk.storage.ConversationDao
 import com.harnessapk.storage.ConversationEntity
+import com.harnessapk.storage.LifeConversationRoomRow
 import com.harnessapk.storage.MessageDao
 import com.harnessapk.storage.MessageEntity
 import kotlinx.coroutines.flow.Flow
@@ -197,6 +198,8 @@ private class FakeConversationDao : ConversationDao {
     var atomicIdentityUpdateCalls = 0
 
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(rows)
+    override fun observeLifeOverviewRows(includeArchived: Boolean): Flow<List<LifeConversationRoomRow>> =
+        error("life overview is not part of this fake")
     override suspend fun findById(id: String): ConversationEntity? = rows.firstOrNull { it.id == id }
     override suspend fun findLatestActive(): ConversationEntity? =
         rows.filter { !it.isArchived }.maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
@@ -225,6 +228,10 @@ private class FakeConversationDao : ConversationDao {
         }
     }
     override suspend fun archive(id: String, updatedAt: Long) = Unit
+    override suspend fun archiveLifeConversationIfIdle(id: String): Int =
+        error("life archive is not part of this fake")
+    override suspend fun restoreLifeConversation(id: String): Int =
+        error("life restore is not part of this fake")
     override suspend fun countByAgentVersion(agentId: String, version: Int) =
         rows.count { it.agentId == agentId && it.agentVersion == version }
     override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int {

@@ -100,7 +100,7 @@ private fun SimpleModeRow(
                 Icon(Icons.Outlined.CancelPresentation, contentDescription = null)
             },
             headlineContent = { Text("生活简洁模式") },
-            supportingContent = { Text("生活页只保留新建对话和最近会话，适合家人使用。") },
+            supportingContent = { Text("快速打字、拍照或说话，继续最近的问题。") },
             trailingContent = {
                 Switch(checked = checked, onCheckedChange = onCheckedChange)
             },

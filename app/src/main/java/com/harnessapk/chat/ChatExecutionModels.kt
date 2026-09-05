@@ -50,6 +50,8 @@ data class ChatExecutionRequestContext(
     val webSearchSettings: WebSearchSettings = WebSearchSettings(),
     val wikiScopeSnapshot: List<WikiRef>? = null,
     val contextSnapshot: ContextSnapshotV2? = null,
+    val userInputText: String? = null,
+    val documents: List<ChatDocumentPresentation> = emptyList(),
 )
 
 data class AttachmentSnapshot(
@@ -175,6 +177,21 @@ internal fun recoveredExecutionStatus(status: ChatExecutionStatus): ChatExecutio
     if (status == ChatExecutionStatus.RUNNING) ChatExecutionStatus.QUEUED else status
 
 internal fun encodeExecutionRequestContext(context: ChatExecutionRequestContext): String = buildJsonObject {
+    context.userInputText?.let { put("userInputText", JsonPrimitive(it)) }
+    if (context.documents.isNotEmpty()) put("documents", buildJsonArray {
+        context.documents.forEach { document ->
+            add(buildJsonObject {
+                put("id", JsonPrimitive(document.id))
+                put("uri", JsonPrimitive(document.uri))
+                put("fileName", JsonPrimitive(document.fileName))
+                put("mimeType", JsonPrimitive(document.mimeType))
+                put("sizeBytes", JsonPrimitive(document.sizeBytes))
+                put("sha256", JsonPrimitive(document.sha256))
+                put("extractedText", JsonPrimitive(document.extractedText))
+                put("truncated", JsonPrimitive(document.truncated))
+            })
+        }
+    })
     put("webSearchEnabled", JsonPrimitive(context.webSearchEnabled))
     put("webSearchMaxResults", JsonPrimitive(context.webSearchSettings.maxResults))
     context.wikiScopeSnapshot?.let { scope ->
@@ -272,6 +289,22 @@ internal fun decodeExecutionRequestContext(raw: String): ChatExecutionRequestCon
         ),
         wikiScopeSnapshot = wikiScopeSnapshot,
         contextSnapshot = contextSnapshot,
+        userInputText = root.string("userInputText"),
+        documents = root["documents"]?.jsonArray.orEmpty().mapNotNull { element ->
+            runCatching {
+                val document = element.jsonObject
+                ChatDocumentPresentation(
+                    id = requireNotNull(document.string("id")),
+                    uri = document.string("uri").orEmpty(),
+                    fileName = requireNotNull(document.string("fileName")),
+                    mimeType = document.string("mimeType").orEmpty(),
+                    sizeBytes = document.string("sizeBytes")?.toLongOrNull() ?: 0L,
+                    sha256 = document.string("sha256").orEmpty(),
+                    extractedText = document.string("extractedText").orEmpty(),
+                    truncated = document.string("truncated")?.toBoolean() ?: false,
+                )
+            }.getOrNull()
+        },
     )
 }
 

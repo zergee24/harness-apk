@@ -126,18 +126,23 @@ class ConversationDraftStoreInstrumentedTest {
     @Test
     fun missingPrivateAttachmentRemainsVisibleAsMissing() {
         val conversationId = "missing-${UUID.randomUUID()}"
+        val privateFiles = DraftAttachmentFiles(context)
+        val privateCopy = privateFiles.createTemporary(conversationId, UUID.randomUUID().toString()).apply {
+            file.writeBytes("private-copy".encodeToByteArray())
+        }
         val missing = DraftImageAttachment(
             id = "missing-image",
             sourceUri = "content://source/image",
-            localUri = "content://com.harnessapk.fileprovider/chat_images/drafts/missing.jpg",
+            localUri = privateCopy.uri.toString(),
             displayName = "missing.jpg",
             mimeType = "image/jpeg",
-            sizeBytes = 12L,
+            sizeBytes = privateCopy.file.length(),
             sha256 = "c".repeat(64),
             state = DraftAttachmentState.READY,
         )
         try {
-            ConversationDraftStore(context).save(
+            val store = ConversationDraftStore(context)
+            store.save(
                 conversationId,
                 ConversationDraft(
                     text = "原文字",
@@ -145,14 +150,54 @@ class ConversationDraftStoreInstrumentedTest {
                     imageMetadata = listOf(missing),
                 ),
             )
+            assertTrue(privateCopy.file.delete())
 
-            val restored = ConversationDraftStore(context).load(conversationId)
+            val restored = store.load(conversationId)
 
             assertEquals(DraftAttachmentState.MISSING, restored.imageMetadata.single().state)
             assertTrue(restored.error?.message?.contains("missing.jpg") == true)
             assertEquals("原文字", restored.text)
         } finally {
             ConversationDraftStore(context).clear(conversationId)
+            privateCopy.file.delete()
+        }
+    }
+
+    @Test
+    fun validateSnapshotMarksMissingRecoveryAttachmentAndKeepsDraftText() {
+        val conversationId = "recovery-missing-${UUID.randomUUID()}"
+        val privateCopy = DraftAttachmentFiles(context)
+            .createTemporary(conversationId, UUID.randomUUID().toString())
+            .apply { file.writeBytes("recovery-private-copy".encodeToByteArray()) }
+        val snapshot = ConversationDraft(
+            text = "恢复原文",
+            attachments = listOf(
+                PendingImageAttachment(Uri.parse(privateCopy.uri.toString()), "image/jpeg"),
+            ),
+            imageMetadata = listOf(
+                DraftImageAttachment(
+                    id = "recovery-image",
+                    sourceUri = null,
+                    localUri = privateCopy.uri.toString(),
+                    displayName = "恢复图片.jpg",
+                    mimeType = "image/jpeg",
+                    sizeBytes = privateCopy.file.length(),
+                    sha256 = "d".repeat(64),
+                ),
+            ),
+            updatedAt = 1234L,
+        )
+        try {
+            assertTrue(privateCopy.file.delete())
+
+            val validated = ConversationDraftStore(context).validateSnapshot(conversationId, snapshot)
+
+            assertEquals(DraftAttachmentState.MISSING, validated.imageMetadata.single().state)
+            assertTrue(validated.attachments.isEmpty())
+            assertEquals("恢复原文", validated.text)
+            assertEquals(1234L, validated.updatedAt)
+        } finally {
+            privateCopy.file.delete()
         }
     }
 

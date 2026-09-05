@@ -808,14 +808,6 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun chatInputKeepsVoiceInsideTheTextField() {
-        val source = java.io.File("src/main/java/com/harnessapk/ui/chat/ChatScreen.kt").readText()
-
-        assertTrue(source.contains("trailingIcon ="))
-        assertTrue(source.contains("ChatInputVoiceAction("))
-    }
-
-    @Test
     fun chatCapabilityButtonsAreHiddenWhenGlobalCapabilitiesAreDisabled() {
         assertFalse(shouldShowWebSearchButton(WebSearchSettings(enabled = false)))
     }

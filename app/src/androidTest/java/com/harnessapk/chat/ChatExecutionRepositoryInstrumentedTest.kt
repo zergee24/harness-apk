@@ -70,6 +70,19 @@ class ChatExecutionRepositoryInstrumentedTest {
     }
 
     @Test
+    fun archivedConversationRejectsNewEnqueueWithoutCreatingUserMessage() = runBlocking {
+        val conversationId = chatRepository.createConversation()
+        assertEquals(1, database.conversationDao().archiveLifeConversationIfIdle(conversationId))
+
+        val failure = runCatching { repository.enqueue(request(conversationId)) }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals("该问题已归档，请先恢复后再发送", failure?.message)
+        assertEquals(0, database.messageDao().countUserMessages(conversationId))
+        assertEquals(0, database.chatExecutionEntryDao().listForConversation(conversationId).size)
+    }
+
+    @Test
     fun enqueuePinsLatestIdentityAndInsertsFirstUserMessage() = runBlocking {
         database.agentDao().upsertAgent(readyAgent(id = "a1", activeVersion = 4))
         database.agentDao().insertVersion(
