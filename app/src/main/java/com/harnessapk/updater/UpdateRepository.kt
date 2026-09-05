@@ -12,13 +12,24 @@ import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicLongArray
 
 fun interface UpdateArtifactDownloader {
-    fun downloadApk(manifest: UpdateManifest): ApkDownloadResult
+    fun downloadApk(
+        manifest: UpdateManifest,
+        onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
+    ): ApkDownloadResult
 }
 
 class UpdateRepository(
@@ -29,6 +40,7 @@ class UpdateRepository(
     private val cacheDir: File,
     private val maxAttempts: Int = 3,
     private val retryDelay: (Long) -> Unit = { Thread.sleep(it) },
+    private val downloadConcurrency: Int = DEFAULT_DOWNLOAD_CONCURRENCY,
 ) : UpdateArtifactDownloader {
     fun checkManifest(manifest: UpdateManifest): UpdateCheckResult {
         manifest.downloadUrls().forEach { requireHttps(it) }
@@ -51,7 +63,13 @@ class UpdateRepository(
         return checkManifest(parseManifest(body))
     }
 
-    override fun downloadApk(manifest: UpdateManifest): ApkDownloadResult {
+    fun downloadApk(manifest: UpdateManifest): ApkDownloadResult =
+        downloadApk(manifest) { _, _ -> }
+
+    override fun downloadApk(
+        manifest: UpdateManifest,
+        onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
+    ): ApkDownloadResult {
         val downloadUrls = manifest.downloadUrls()
         downloadUrls.forEach { requireHttps(it) }
         val updatesDir = File(cacheDir, "updates").apply { mkdirs() }
@@ -65,26 +83,10 @@ class UpdateRepository(
         val temporary = File(updatesDir, "${output.name}.part")
         temporary.delete()
         try {
-            FileOutputStream(temporary).use { fileOut ->
-                downloadUrls.forEachIndexed { index, url ->
-                    val label = if (downloadUrls.size == 1) {
-                        "安装包下载"
-                    } else {
-                        "安装包分片 ${index + 1}/${downloadUrls.size} 下载"
-                    }
-                    val request = Request.Builder().url(url).get().build()
-                    val startOffset = fileOut.channel.position()
-                    retrying(label) {
-                        fileOut.channel.truncate(startOffset)
-                        fileOut.channel.position(startOffset)
-                        okHttpClient.newCall(request).execute().use { response ->
-                            response.requireSuccessful(label)
-                            response.body.byteStream().use { input ->
-                                input.copyTo(fileOut)
-                            }
-                        }
-                    }
-                }
+            if (downloadUrls.size == 1) {
+                downloadWholeFile(downloadUrls.single(), temporary, onProgress)
+            } else {
+                downloadChunksConcurrently(downloadUrls, updatesDir, temporary, onProgress)
             }
         } catch (error: Throwable) {
             temporary.delete()
@@ -97,6 +99,97 @@ class UpdateRepository(
         }
         moveReplacing(temporary, output)
         return ApkDownloadResult(file = output, sha256 = actual)
+    }
+
+    /** 整包单请求：直接写入目标文件，进度按响应 Content-Length 汇报。 */
+    private fun downloadWholeFile(
+        url: String,
+        output: File,
+        onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
+    ) {
+        val progress = DownloadProgress(chunkCount = 1, onProgress)
+        val request = Request.Builder().url(url).get().build()
+        retrying("安装包下载") {
+            progress.resetChunk(0)
+            FileOutputStream(output).use { fileOut ->
+                okHttpClient.newCall(request).execute().use { response ->
+                    response.requireSuccessful("安装包下载")
+                    progress.onChunkTotal(0, response.body.contentLength())
+                    response.body.byteStream().use { input ->
+                        input.copyTo(fileOut) { bytes -> progress.onChunkRead(0, bytes) }
+                    }
+                }
+            }
+        }
+        progress.finish()
+    }
+
+    /**
+     * 分片并发下载：每个分片独立临时文件 + 独立重试，失败只补下该片；
+     * 全部就绪后按顺序拼接为整包。分片间并行（默认 6 路），总进度跨片聚合。
+     */
+    private fun downloadChunksConcurrently(
+        urls: List<String>,
+        updatesDir: File,
+        concatTarget: File,
+        onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
+    ) {
+        val chunkFiles = urls.mapIndexed { index, _ ->
+            File(updatesDir, "${concatTarget.name}.chunk-$index")
+        }
+        // 清掉上次中断的残留，避免旧尺寸污染拼接结果
+        chunkFiles.forEach(File::delete)
+        val progress = DownloadProgress(chunkCount = urls.size, onProgress)
+        val pool = Executors.newFixedThreadPool(minOf(downloadConcurrency, urls.size))
+        try {
+            val futures = urls.mapIndexed { index, url ->
+                pool.submit(
+                    Callable {
+                        val request = Request.Builder().url(url).get().build()
+                        retrying("安装包分片 ${index + 1}/${urls.size} 下载") {
+                            progress.resetChunk(index)
+                            FileOutputStream(chunkFiles[index]).use { fileOut ->
+                                okHttpClient.newCall(request).execute().use { response ->
+                                    response.requireSuccessful("安装包分片 ${index + 1}/${urls.size} 下载")
+                                    progress.onChunkTotal(index, response.body.contentLength())
+                                    response.body.byteStream().use { input ->
+                                        input.copyTo(fileOut) { bytes -> progress.onChunkRead(index, bytes) }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                )
+            }
+            var failure: Throwable? = null
+            futures.forEachIndexed { index, future ->
+                try {
+                    future.get()
+                } catch (cancelled: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    if (failure == null) failure = IOException("下载被中断", cancelled)
+                } catch (error: ExecutionException) {
+                    if (failure == null) failure = error.cause ?: error
+                }
+                if (failure != null && index < futures.lastIndex) {
+                    pool.shutdownNow()
+                    pool.awaitTermination(10, TimeUnit.SECONDS)
+                }
+            }
+            failure?.let {
+                chunkFiles.forEach(File::delete)
+                throw it
+            }
+        } finally {
+            pool.shutdown()
+        }
+        progress.finish()
+        FileOutputStream(concatTarget).use { merged ->
+            chunkFiles.forEach { chunk ->
+                chunk.inputStream().use { it.copyTo(merged) }
+            }
+        }
+        chunkFiles.forEach(File::delete)
     }
 
     fun sha256(file: File): String {
@@ -158,29 +251,104 @@ class UpdateRepository(
         }
     }
 
-    private fun UpdateManifest.downloadUrls(): List<String> {
-        val urls = apkChunks.ifEmpty { listOfNotNull(apkUrl) }
-        require(urls.isNotEmpty()) { "更新清单缺少 APK 下载地址" }
-        return urls
+    /** 跨分片聚合的字节进度；totalBytes 在全部分片 Content-Length 就绪后才有值。 */
+    private class DownloadProgress(
+        chunkCount: Int,
+        val onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
+    ) {
+        private val chunkBytes = AtomicLongArray(chunkCount)
+        private val chunkTotals = AtomicLongArray(chunkCount).also { array ->
+            for (index in 0 until array.length()) array.set(index, -1L)
+        }
+        private val finished = AtomicBoolean(false)
+        private val lastEmitted = AtomicLong(-1L)
+
+        fun resetChunk(index: Int) {
+            chunkBytes.set(index, 0L)
+            emit()
+        }
+
+        fun onChunkRead(index: Int, bytes: Int) {
+            if (bytes <= 0) return
+            chunkBytes.addAndGet(index, bytes.toLong())
+            emit()
+        }
+
+        fun onChunkTotal(index: Int, total: Long) {
+            chunkTotals.set(index, if (total > 0) total else -1L)
+            emit()
+        }
+
+        fun finish() {
+            finished.set(true)
+            emit()
+        }
+
+        private fun emit() {
+            val downloaded = sumOf(chunkBytes)
+            if (!finished.get() && downloaded - lastEmitted.get() < PROGRESS_EMIT_DELTA_BYTES) return
+            lastEmitted.set(downloaded)
+            onProgress(downloaded, totalIfKnown())
+        }
+
+        private fun totalIfKnown(): Long? {
+            var total = 0L
+            for (index in 0 until chunkTotals.length()) {
+                val chunkTotal = chunkTotals.get(index)
+                if (chunkTotal < 0) return null
+                total += chunkTotal
+            }
+            return total.takeIf { it > 0 }
+        }
+
+        private fun sumOf(array: AtomicLongArray): Long {
+            var sum = 0L
+            for (index in 0 until array.length()) sum += array.get(index)
+            return sum
+        }
     }
 
-    private fun parseManifest(body: String): UpdateManifest {
-        val root = json.parseToJsonElement(body).jsonObject
-        return UpdateManifest(
-            versionCode = root.getValue("versionCode").jsonPrimitive.int,
-            versionName = root.getValue("versionName").jsonPrimitive.content,
-            minSupportedVersionCode = root.getValue("minSupportedVersionCode").jsonPrimitive.int,
-            apkUrl = root["apkUrl"]?.jsonPrimitive?.contentOrNull,
-            apkChunks = root["apkChunks"]?.jsonArray?.mapNotNull {
-                it.jsonPrimitive.contentOrNull
-            } ?: emptyList(),
-            sha256 = root.getValue("sha256").jsonPrimitive.content,
-            releaseNotes = root["releaseNotes"]?.jsonArray?.mapNotNull {
-                it.jsonPrimitive.contentOrNull
-            } ?: emptyList(),
-            publishedAt = root.getValue("publishedAt").jsonPrimitive.content,
-        )
+    private fun InputStream.copyTo(out: java.io.OutputStream, onRead: (Int) -> Unit): Long {
+        var copied = 0L
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val read = read(buffer)
+            if (read <= 0) break
+            out.write(buffer, 0, read)
+            onRead(read)
+            copied += read
+        }
+        return copied
+    }
+
+    private companion object {
+        private const val DEFAULT_DOWNLOAD_CONCURRENCY = 6
+        private const val PROGRESS_EMIT_DELTA_BYTES = 128L * 1024
     }
 }
 
 private class RetryableUpdateException(message: String) : IOException(message)
+
+private fun UpdateManifest.downloadUrls(): List<String> {
+    val urls = apkChunks.ifEmpty { listOfNotNull(apkUrl) }
+    require(urls.isNotEmpty()) { "更新清单缺少 APK 下载地址" }
+    return urls
+}
+
+private fun parseManifest(body: String): UpdateManifest {
+    val root = Json { ignoreUnknownKeys = true }.parseToJsonElement(body).jsonObject
+    return UpdateManifest(
+        versionCode = root.getValue("versionCode").jsonPrimitive.int,
+        versionName = root.getValue("versionName").jsonPrimitive.content,
+        minSupportedVersionCode = root.getValue("minSupportedVersionCode").jsonPrimitive.int,
+        apkUrl = root["apkUrl"]?.jsonPrimitive?.contentOrNull,
+        apkChunks = root["apkChunks"]?.jsonArray?.mapNotNull {
+            it.jsonPrimitive.contentOrNull
+        } ?: emptyList(),
+        sha256 = root.getValue("sha256").jsonPrimitive.content,
+        releaseNotes = root["releaseNotes"]?.jsonArray?.mapNotNull {
+            it.jsonPrimitive.contentOrNull
+        } ?: emptyList(),
+        publishedAt = root.getValue("publishedAt").jsonPrimitive.content,
+    )
+}

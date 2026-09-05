@@ -31,7 +31,7 @@ class UpdateDownloadCoordinatorTest {
         val dispatcher = Executors.newFixedThreadPool(2).asCoroutineDispatcher()
         try {
             val coordinator = UpdateDownloadCoordinator(
-                downloader = UpdateArtifactDownloader {
+                downloader = UpdateArtifactDownloader { _, _ ->
                     calls.incrementAndGet()
                     started.countDown()
                     check(gate.await(5, TimeUnit.SECONDS))
@@ -56,13 +56,13 @@ class UpdateDownloadCoordinatorTest {
     fun failedDownloadCanRetryAndBecomeReady() = runTest {
         val calls = AtomicInteger()
         val file = temp.newFile("retry.apk")
-        val coordinator = UpdateDownloadCoordinator(
-            downloader = UpdateArtifactDownloader {
-                if (calls.incrementAndGet() == 1) error("首次网络失败")
-                ApkDownloadResult(file, "sha")
-            },
-            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
-        )
+            val coordinator = UpdateDownloadCoordinator(
+                downloader = UpdateArtifactDownloader { _, _ ->
+                    if (calls.incrementAndGet() == 1) error("首次网络失败")
+                    ApkDownloadResult(file, "sha")
+                },
+                ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+            )
 
         val error = runCatching { coordinator.download(manifest()) }.exceptionOrNull()
 
@@ -78,7 +78,7 @@ class UpdateDownloadCoordinatorTest {
         val calls = AtomicInteger()
         val file = temp.newFile("ready.apk")
         val coordinator = UpdateDownloadCoordinator(
-            downloader = UpdateArtifactDownloader {
+            downloader = UpdateArtifactDownloader { _, _ ->
                 calls.incrementAndGet()
                 ApkDownloadResult(file, "sha")
             },

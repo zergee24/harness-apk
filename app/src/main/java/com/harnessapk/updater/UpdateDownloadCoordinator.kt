@@ -14,7 +14,11 @@ import kotlinx.coroutines.withContext
 
 sealed interface UpdateDownloadState {
     data object Idle : UpdateDownloadState
-    data class Downloading(val versionCode: Int) : UpdateDownloadState
+    data class Downloading(
+        val versionCode: Int,
+        val downloadedBytes: Long = 0L,
+        val totalBytes: Long? = null,
+    ) : UpdateDownloadState
     data class Ready(val versionCode: Int, val result: ApkDownloadResult) : UpdateDownloadState
     data class Failed(val versionCode: Int, val message: String) : UpdateDownloadState
 }
@@ -47,7 +51,13 @@ class UpdateDownloadCoordinator(
         mutableState.value = UpdateDownloadState.Downloading(manifest.versionCode)
         try {
             withContext(ioDispatcher) {
-                downloader.downloadApk(manifest)
+                downloader.downloadApk(manifest) { downloadedBytes, totalBytes ->
+                    mutableState.value = UpdateDownloadState.Downloading(
+                        versionCode = manifest.versionCode,
+                        downloadedBytes = downloadedBytes,
+                        totalBytes = totalBytes,
+                    )
+                }
             }.also { result ->
                 mutableState.value = UpdateDownloadState.Ready(manifest.versionCode, result)
             }

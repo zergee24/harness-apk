@@ -35,9 +35,29 @@ internal fun shouldStartUpdateDownload(
 
 internal fun updateDownloadStatusText(state: UpdateDownloadState): String? = when (state) {
     UpdateDownloadState.Idle -> null
-    is UpdateDownloadState.Downloading -> "正在后台下载更新..."
+    is UpdateDownloadState.Downloading -> {
+        val total = state.totalBytes
+        val base = if (total != null && total > 0) {
+            val percent = ((state.downloadedBytes * 100) / total).coerceIn(0, 100)
+            "正在后台下载更新… $percent%"
+        } else {
+            "正在后台下载更新…"
+        }
+        "$base（${formatMegabytes(state.downloadedBytes)}" +
+            (total?.let { "/${formatMegabytes(it)}" } ?: "") +
+            "）"
+    }
     is UpdateDownloadState.Ready -> "下载完成，正在打开系统安装器..."
     is UpdateDownloadState.Failed -> state.message
+}
+
+internal fun formatMegabytes(bytes: Long): String {
+    val megabytes = bytes / (1024.0 * 1024.0)
+    return if (megabytes >= 100 || megabytes == 0.0) {
+        "${megabytes.toInt()}MB"
+    } else {
+        String.format(java.util.Locale.ROOT, "%.1fMB", megabytes)
+    }
 }
 
 internal fun canRetryUpdateDownload(state: UpdateDownloadState): Boolean =

@@ -186,7 +186,20 @@ fun UpdateSettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (showingProgress) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    val downloading = downloadState as? UpdateDownloadState.Downloading
+                    val downloadTotal = downloading?.totalBytes
+                    if (showingProgress) {
+                        if (downloading != null && downloadTotal != null && downloadTotal > 0) {
+                            LinearProgressIndicator(
+                                progress = {
+                                    (downloading.downloadedBytes.toFloat() / downloadTotal).coerceIn(0f, 1f)
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else {
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
+                        }
+                    }
                 }
             }
         }
