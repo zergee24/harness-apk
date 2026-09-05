@@ -30,12 +30,13 @@ object ProviderTemplates {
         ProviderTemplate(
             name = "OpenAI",
             baseUrl = "https://happycode.vip/v1",
-            defaultModel = "gpt-5.6-terra",
+            defaultModel = "gpt-6-astra",
             modelConfigs = listOf(
+                openAiModelConfig("gpt-6-astra", contextWindowTokens = 1_050_000, maxOutputTokens = 128_000),
                 openAiModelConfig("gpt-5.6-terra"),
                 openAiModelConfig("gpt-5.6-sol"),
             ),
-            defaultVisionModel = "gpt-5.6-terra",
+            defaultVisionModel = "gpt-6-astra",
             supportsVision = true,
             nativeWebSearchMode = NativeWebSearchMode.OPENAI_WEB_SEARCH_OPTIONS,
         ),
@@ -107,10 +108,14 @@ private fun anthropicModelConfig(id: String, contextWindowTokens: Int): ModelCon
     readTimeoutMillis = 180_000L,
 )
 
-private fun openAiModelConfig(id: String): ModelConfig = ModelConfig(
+private fun openAiModelConfig(
+    id: String,
+    contextWindowTokens: Int = 200_000,
+    maxOutputTokens: Int = 32_000,
+): ModelConfig = ModelConfig(
     id = id,
-    contextWindowTokens = 200_000,
-    maxOutputTokens = 32_000,
+    contextWindowTokens = contextWindowTokens,
+    maxOutputTokens = maxOutputTokens,
     inputModalities = listOf("text", "image"),
     outputModalities = listOf("text"),
     reasoningEffortOptions = OPEN_AI_REASONING_EFFORT_OPTIONS,
