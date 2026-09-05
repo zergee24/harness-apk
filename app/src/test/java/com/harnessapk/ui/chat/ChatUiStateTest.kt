@@ -5,6 +5,8 @@ import androidx.compose.ui.input.key.KeyEventType
 import com.harnessapk.chat.ChatMessage
 import com.harnessapk.chat.AttachmentSnapshot
 import com.harnessapk.chat.ContextSnapshotV2
+import com.harnessapk.chat.DocumentTextExtractor
+import com.harnessapk.chat.ExtractedDocument
 import com.harnessapk.chat.MessageRole
 import com.harnessapk.chat.MessageStatus
 import com.harnessapk.chat.ReasoningEffort
@@ -558,22 +560,75 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun chatInputUsesOneTrailingPrimaryAction() {
-        assertTrue(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = false))
-        assertTrue(shouldShowCollapsedAttachmentEntry(text = "   ", hasSelectedImage = false))
+    fun chatInputPrimaryActionOnlyTracksBusyState() {
+        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(isBusy = false))
+        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(isBusy = true))
+    }
 
-        assertTrue(shouldShowCollapsedAttachmentEntry(text = "你好", hasSelectedImage = false))
-        assertFalse(shouldShowCollapsedAttachmentEntry(text = "", hasSelectedImage = true))
-
-        assertEquals(ChatInputTrailingAction.ATTACH, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = false))
-        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "你好", hasSelectedImage = false, isBusy = false))
-        assertEquals(ChatInputTrailingAction.SEND, chatInputTrailingAction(text = "", hasSelectedImage = true, isBusy = false))
-        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "", hasSelectedImage = false, isBusy = true))
-        assertEquals(ChatInputTrailingAction.STOP, chatInputTrailingAction(text = "下一轮", hasSelectedImage = false, isBusy = true))
-
+    @Test
+    fun runningExecutionIsDistinctFromQueuedOrSucceeded() {
         assertFalse(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.QUEUED))))
         assertFalse(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.SUCCEEDED))))
         assertTrue(hasRunningChatExecution(listOf(chatExecutionEntry(status = com.harnessapk.chat.ChatExecutionStatus.RUNNING))))
+    }
+
+    @Test
+    fun chatInputPayloadIncludesTextImagesAndDocuments() {
+        assertFalse(hasChatInputPayload(text = "", hasSelectedImage = false, hasPendingDocuments = false))
+        assertFalse(hasChatInputPayload(text = "   ", hasSelectedImage = false, hasPendingDocuments = false))
+        assertTrue(hasChatInputPayload(text = "你好", hasSelectedImage = false, hasPendingDocuments = false))
+        assertTrue(hasChatInputPayload(text = "", hasSelectedImage = true, hasPendingDocuments = false))
+        assertTrue(hasChatInputPayload(text = "", hasSelectedImage = false, hasPendingDocuments = true))
+    }
+
+    @Test
+    fun pendingDocumentsKeepAttachmentsAddedDuringSendPreparation() {
+        val submitted = extractedDocument(uri = "content://submitted", fileName = "submitted.txt")
+        val addedDuringPreparation = extractedDocument(uri = "content://added", fileName = "added.txt")
+
+        assertEquals(
+            listOf(addedDuringPreparation),
+            retainUnsubmittedDocuments(
+                currentDocuments = listOf(submitted, addedDuringPreparation),
+                submittedDocuments = listOf(submitted),
+            ),
+        )
+        assertEquals(
+            listOf(submitted, addedDuringPreparation),
+            retainUnsubmittedDocuments(
+                currentDocuments = listOf(submitted, addedDuringPreparation),
+                submittedDocuments = emptyList(),
+            ),
+        )
+    }
+
+    @Test
+    fun documentTextSnapshotClearsAfterLandingAndSurvivesFailureRecovery() {
+        val submittedText = DocumentTextExtractor.withDocumentBlocks(
+            userText = "请总结这份文件",
+            documents = listOf(extractedDocument(uri = "content://report", fileName = "report.txt")),
+        )
+
+        assertEquals(
+            "",
+            reduceTerminalDraft<String>(
+                phase = com.harnessapk.chat.ChatSendRequestPhase.LANDED,
+                submittedText = submittedText,
+                submittedAttachments = emptyList(),
+                currentText = submittedText,
+                currentAttachments = emptyList(),
+            ).text,
+        )
+        assertEquals(
+            submittedText,
+            reduceTerminalDraft<String>(
+                phase = com.harnessapk.chat.ChatSendRequestPhase.NOT_LANDED,
+                submittedText = submittedText,
+                submittedAttachments = emptyList(),
+                currentText = submittedText,
+                currentAttachments = emptyList(),
+            ).text,
+        )
     }
 
     @Test
@@ -1167,6 +1222,15 @@ class ChatUiStateTest {
         errorMessage = null,
         createdAt = 1L,
         updatedAt = 1L,
+    )
+
+    private fun extractedDocument(uri: String, fileName: String) = ExtractedDocument(
+        uri = uri,
+        fileName = fileName,
+        mimeType = "text/plain",
+        text = "文档内容",
+        truncated = false,
+        originalCharCount = 4,
     )
 
     private fun providerProfile(

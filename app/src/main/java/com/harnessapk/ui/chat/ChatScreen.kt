@@ -352,6 +352,49 @@ fun ChatScreen(
     // 文档附件（pdf/xlsx/docx/csv/txt）：文本抽取后并入发送文本；仅在当前会话内存中保留
     var pendingDocuments by remember { mutableStateOf<List<ExtractedDocument>>(emptyList()) }
     var documentExtracting by remember { mutableStateOf(false) }
+
+    fun updateActiveDraftSnapshot(nextText: String, nextAttachments: List<PendingImageAttachment>) {
+        val request = container.chatSendRecoveryStore.current(conversationId) ?: return
+        container.chatSendRecoveryStore.updateCurrentDraft(
+            conversationId = conversationId,
+            expectedRequestId = request.requestId,
+            text = nextText,
+            attachments = nextAttachments,
+        )
+    }
+
+    fun syncActiveDraftSnapshot() = updateActiveDraftSnapshot(text, selectedImages)
+
+    fun syncAcceptedSendAttachments() {
+        val request = container.chatSendRecoveryStore.current(conversationId) ?: return
+        // The recovery state already starts with submittedText (which may include
+        // document blocks). Only reconcile attachments that may have arrived
+        // through an activity result while the request was being accepted.
+        container.chatSendRecoveryStore.updateCurrentDraft(
+            conversationId = conversationId,
+            expectedRequestId = request.requestId,
+            text = request.currentDraftText,
+            attachments = selectedImages,
+        )
+    }
+
+    fun appendSelectedImages(images: List<PendingImageAttachment>) {
+        val withinLimit = images.filter { image ->
+            val size = chatImageSizeBytes(context, image.uri)
+            size == null || size <= MAX_CHAT_IMAGE_BYTES
+        }
+        if (withinLimit.size < images.size) errorText = "图片超过 8 MB，请选择更小的截图或图片"
+        val distinct = withinLimit.filterNot { candidate -> selectedImages.any { it.uri == candidate.uri } }
+        val available = (MAX_CHAT_IMAGE_ATTACHMENTS - selectedImages.size).coerceAtLeast(0)
+        val accepted = distinct.take(available)
+        if (accepted.size < distinct.size) errorText = "每条消息最多添加 $MAX_CHAT_IMAGE_ATTACHMENTS 张图片"
+        if (accepted.isNotEmpty()) {
+            val next = selectedImages + accepted
+            updateActiveDraftSnapshot(text, next)
+            selectedImages = next
+        }
+    }
+
     val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         if (pendingDocuments.size >= DocumentTextExtractor.MAX_DOCUMENTS_PER_MESSAGE) {
@@ -399,9 +442,9 @@ fun ChatScreen(
                                 }
                                 render.fold(
                                     onSuccess = { scanned ->
-                                        selectedImages = selectedImages + scanned.uris.map {
+                                        appendSelectedImages(scanned.uris.map {
                                             PendingImageAttachment(it, "image/jpeg")
-                                        }
+                                        })
                                         errorText = "扫描版 PDF（共 ${scanned.totalPages} 页）已转为 ${scanned.renderedPages} 页图片，可直接发送"
                                     },
                                     onFailure = { error ->
@@ -1053,39 +1096,11 @@ fun ChatScreen(
         }
     }
 
-    fun updateActiveDraftSnapshot(nextText: String, nextAttachments: List<PendingImageAttachment>) {
-        val request = container.chatSendRecoveryStore.current(conversationId) ?: return
-        container.chatSendRecoveryStore.updateCurrentDraft(
-            conversationId = conversationId,
-            expectedRequestId = request.requestId,
-            text = nextText,
-            attachments = nextAttachments,
-        )
-    }
-
-    fun syncActiveDraftSnapshot() = updateActiveDraftSnapshot(text, selectedImages)
-
     fun deleteReplacedImageIfNoLongerSubmitted(uri: Uri) {
         if (container.chatSendRecoveryStore.current(conversationId)?.submittedAttachments?.any { it.uri == uri } == true) return
         scope.launch {
             container.chatImageStore.deleteIfManaged(uri)
         }
-    }
-
-    fun appendSelectedImages(images: List<PendingImageAttachment>) {
-        val withinLimit = images.filter { image ->
-            val size = chatImageSizeBytes(context, image.uri)
-            size == null || size <= MAX_CHAT_IMAGE_BYTES
-        }
-        if (withinLimit.size < images.size) errorText = "图片超过 8 MB，请选择更小的截图或图片"
-        val distinct = withinLimit.filterNot { candidate -> selectedImages.any { it.uri == candidate.uri } }
-        val available = (MAX_CHAT_IMAGE_ATTACHMENTS - selectedImages.size).coerceAtLeast(0)
-        val accepted = distinct.take(available)
-        if (accepted.size < distinct.size) errorText = "每条消息最多添加 $MAX_CHAT_IMAGE_ATTACHMENTS 张图片"
-        if (accepted.isEmpty()) return
-        val next = selectedImages + accepted
-        updateActiveDraftSnapshot(text, next)
-        selectedImages = next
     }
 
     fun removeSelectedImage(uri: Uri) {
@@ -1196,9 +1211,10 @@ fun ChatScreen(
 
     fun sendNow() {
         // 文档附件文本并入消息正文（随消息持久化，经上下文压缩后仍在）
+        val submittedDocuments = pendingDocuments
         val submittedText = DocumentTextExtractor.withDocumentBlocks(text, pendingDocuments)
         val body = submittedText
-        if (body.isEmpty() && selectedImages.isEmpty()) return
+        if (!hasChatInputPayload(text, selectedImages.isNotEmpty(), pendingDocuments.isNotEmpty())) return
         if (
             firstMessagePending ||
             sendSnapshotInFlight ||
@@ -1226,7 +1242,6 @@ fun ChatScreen(
             markdowns = deliverables,
         )
         val draftAttachments = selectedImages
-        pendingDocuments = emptyList()
         val requestId = UUID.randomUUID().toString()
         val requestState = ChatSendRequestState(
             requestId = requestId,
@@ -1278,6 +1293,11 @@ fun ChatScreen(
                 sendSnapshotInFlight = false
                 return@launch
             }
+            pendingDocuments = retainUnsubmittedDocuments(
+                currentDocuments = pendingDocuments,
+                submittedDocuments = submittedDocuments,
+            )
+            syncAcceptedSendAttachments()
             firstMessagePending = reduceFirstMessagePending(
                 pending = firstMessagePending,
                 isFirstUserMessage = isFirstUserMessage,
@@ -2818,29 +2838,45 @@ fun ChatScreen(
             ChatInputBar(
                 text = text,
                 onTextChange = {
-                    updateActiveDraftSnapshot(it, selectedImages)
-                    text = it
+                    if (!sendSnapshotInFlight) {
+                        updateActiveDraftSnapshot(it, selectedImages)
+                        text = it
+                    }
                 },
                 selectedImages = selectedImages,
                 pendingDocuments = pendingDocuments,
                 documentExtracting = documentExtracting,
-                onPickDocument = { documentPicker.launch(DocumentTextExtractor.SUPPORTED_MIME_TYPES) },
+                onPickDocument = {
+                    if (!sendSnapshotInFlight) {
+                        documentPicker.launch(DocumentTextExtractor.SUPPORTED_MIME_TYPES)
+                    }
+                },
                 onRemoveDocument = { document ->
-                    pendingDocuments = pendingDocuments.filterNot { it.uri == document.uri }
+                    if (!sendSnapshotInFlight) {
+                        pendingDocuments = pendingDocuments.filterNot { it.uri == document.uri }
+                    }
                 },
                 onTakePhoto = {
-                    when (cameraAction(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)) {
-                        ChatImageSourceAction.REQUEST_CAMERA_PERMISSION -> cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                        ChatImageSourceAction.LAUNCH_CAMERA -> launchCamera()
+                    if (!sendSnapshotInFlight) {
+                        when (cameraAction(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)) {
+                            ChatImageSourceAction.REQUEST_CAMERA_PERMISSION -> cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            ChatImageSourceAction.LAUNCH_CAMERA -> launchCamera()
+                        }
                     }
                 },
                 onPickFromAlbum = {
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    if (!sendSnapshotInFlight) {
+                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }
                 },
-                onRemoveImage = ::removeSelectedImage,
+                onRemoveImage = { uri ->
+                    if (!sendSnapshotInFlight) removeSelectedImage(uri)
+                },
                 onStartVoiceTranscription = {
-                    errorText = null
-                    onStartVoiceInput(text, voiceSettings.defaultTranscriptionLanguage)
+                    if (!sendSnapshotInFlight) {
+                        errorText = null
+                        onStartVoiceInput(text, voiceSettings.defaultTranscriptionLanguage)
+                    }
                 },
                 isVoiceInputActive = voiceInputState.active,
                 onStopVoiceTranscription = onStopVoiceInput,
@@ -2865,8 +2901,9 @@ fun ChatScreen(
                         identityMessageStateKnown,
                         container.chatSendRecoveryStore.current(conversationId),
                     ) &&
-                    (text.isNotBlank() || selectedImages.isNotEmpty()),
+                    hasChatInputPayload(text, selectedImages.isNotEmpty(), pendingDocuments.isNotEmpty()),
                 isBusy = isAssistantBusy,
+                isPreparingSend = sendSnapshotInFlight,
                 onSend = {
                     handleSendIntent(
                         hasSelectedImage = selectedImages.isNotEmpty(),
@@ -3170,26 +3207,28 @@ internal fun sendButtonContentDescription(isBusy: Boolean): String =
     if (isBusy) "暂停生成" else "发送"
 
 internal enum class ChatInputTrailingAction {
-    ATTACH,
     SEND,
     STOP,
 }
 
-internal fun shouldShowCollapsedAttachmentEntry(
-    text: String,
-    hasSelectedImage: Boolean,
-): Boolean = !hasSelectedImage
-
 internal fun chatInputTrailingAction(
-    text: String,
-    hasSelectedImage: Boolean,
     isBusy: Boolean,
 ): ChatInputTrailingAction =
-    when {
-        isBusy -> ChatInputTrailingAction.STOP
-        text.isNotBlank() || hasSelectedImage -> ChatInputTrailingAction.SEND
-        else -> ChatInputTrailingAction.ATTACH
-    }
+    if (isBusy) ChatInputTrailingAction.STOP else ChatInputTrailingAction.SEND
+
+internal fun hasChatInputPayload(
+    text: String,
+    hasSelectedImage: Boolean,
+    hasPendingDocuments: Boolean,
+): Boolean = text.isNotBlank() || hasSelectedImage || hasPendingDocuments
+
+internal fun retainUnsubmittedDocuments(
+    currentDocuments: List<ExtractedDocument>,
+    submittedDocuments: List<ExtractedDocument>,
+): List<ExtractedDocument> {
+    val submittedUris = submittedDocuments.mapTo(hashSetOf()) { it.uri }
+    return currentDocuments.filterNot { it.uri in submittedUris }
+}
 
 internal fun executionStatusLabel(status: ChatExecutionStatus): String? = when (status) {
     ChatExecutionStatus.QUEUED -> "等待处理"
@@ -5060,17 +5099,14 @@ private fun ChatInputBar(
     inputFocusRequester: FocusRequester,
     canSend: Boolean,
     isBusy: Boolean,
+    isPreparingSend: Boolean,
     onSend: () -> Unit,
     onStop: () -> Unit,
     showFileChangeSuggestion: Boolean,
     canSendFileChange: Boolean,
     onSendFileChange: () -> Unit,
 ) {
-    val trailingAction = chatInputTrailingAction(
-        text = text,
-        hasSelectedImage = selectedImages.isNotEmpty(),
-        isBusy = isBusy,
-    )
+    val trailingAction = chatInputTrailingAction(isBusy = isBusy)
     var showImageSourceSheet by remember { mutableStateOf(false) }
 
     Surface(
@@ -5091,6 +5127,7 @@ private fun ChatInputBar(
                     documents = pendingDocuments,
                     extracting = documentExtracting,
                     onRemove = onRemoveDocument,
+                    enabled = !isPreparingSend,
                 )
             }
             if (selectedImages.isNotEmpty()) {
@@ -5100,6 +5137,7 @@ private fun ChatInputBar(
                     onTakePhoto = onTakePhoto,
                     onPickFromAlbum = onPickFromAlbum,
                     onPickDocument = onPickDocument,
+                    enabled = !isPreparingSend,
                 )
             }
             ConversationContextBar(summary = contextSummary, onClick = onOpenContext)
@@ -5120,6 +5158,7 @@ private fun ChatInputBar(
                 OutlinedTextField(
                     modifier = Modifier
                         .weight(1f)
+                        .widthIn(min = 0.dp)
                         .heightIn(min = 56.dp)
                         .focusRequester(inputFocusRequester)
                         .onPreviewKeyEvent { event ->
@@ -5137,6 +5176,7 @@ private fun ChatInputBar(
                                 false
                             }
                         },
+                    readOnly = isPreparingSend,
                     value = text,
                     onValueChange = onTextChange,
                     placeholder = { Text("发消息") },
@@ -5153,17 +5193,20 @@ private fun ChatInputBar(
                     trailingIcon = {
                         ChatInputVoiceAction(
                             voiceActive = isVoiceInputActive,
-                            enabled = !isBusy,
+                            enabled = !isBusy && !isPreparingSend,
                             onStart = onStartVoiceTranscription,
                             onStop = onStopVoiceTranscription,
                         )
                     },
                 )
+                ChatInputAttachmentAction(
+                    enabled = !isVoiceInputActive && !isPreparingSend,
+                    onAttach = { showImageSourceSheet = true },
+                )
                 ChatInputPrimaryAction(
                     action = trailingAction,
                     canSend = canSend,
                     voiceActive = isVoiceInputActive,
-                    onAttach = { showImageSourceSheet = true },
                     onSend = onSend,
                     onStopGeneration = onStop,
                 )
@@ -5190,11 +5233,27 @@ private fun ChatInputBar(
 }
 
 @Composable
+internal fun ChatInputAttachmentAction(
+    enabled: Boolean,
+    onAttach: () -> Unit,
+) {
+    IconButton(
+        modifier = Modifier.size(48.dp),
+        enabled = enabled,
+        onClick = onAttach,
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Add,
+            contentDescription = "添加附件",
+        )
+    }
+}
+
+@Composable
 internal fun ChatInputPrimaryAction(
     action: ChatInputTrailingAction,
     canSend: Boolean,
     voiceActive: Boolean,
-    onAttach: () -> Unit,
     onSend: () -> Unit,
     onStopGeneration: () -> Unit,
 ) {
@@ -5202,16 +5261,11 @@ internal fun ChatInputPrimaryAction(
         modifier = Modifier.size(48.dp),
         enabled = !voiceActive && (action != ChatInputTrailingAction.SEND || canSend),
         onClick = when (action) {
-            ChatInputTrailingAction.ATTACH -> onAttach
             ChatInputTrailingAction.SEND -> onSend
             ChatInputTrailingAction.STOP -> onStopGeneration
         },
     ) {
         when (action) {
-            ChatInputTrailingAction.ATTACH -> Icon(
-                imageVector = Icons.Outlined.Add,
-                contentDescription = "添加图片",
-            )
             ChatInputTrailingAction.SEND -> Icon(
                 imageVector = Icons.AutoMirrored.Filled.Send,
                 contentDescription = sendButtonContentDescription(isBusy = false),
@@ -5282,14 +5336,16 @@ internal fun ChatImageSourceEntryMenu(
     onTakePhoto: () -> Unit,
     onPickFromAlbum: () -> Unit,
     onPickDocument: () -> Unit,
+    enabled: Boolean = true,
 ) {
     var showImageSourceSheet by remember { mutableStateOf(false) }
 
     IconButton(
         modifier = Modifier.size(56.dp),
+        enabled = enabled,
         onClick = { showImageSourceSheet = true },
     ) {
-        Icon(Icons.Outlined.Add, contentDescription = "添加图片")
+        Icon(Icons.Outlined.Add, contentDescription = "添加附件")
     }
 
     if (showImageSourceSheet) {
@@ -5545,6 +5601,7 @@ private fun SelectedImagesPreview(
     onTakePhoto: () -> Unit,
     onPickFromAlbum: () -> Unit,
     onPickDocument: () -> Unit,
+    enabled: Boolean,
 ) {
     Row(
         modifier = Modifier
@@ -5558,11 +5615,13 @@ private fun SelectedImagesPreview(
                 uri = image.uri,
                 position = index + 1,
                 total = images.size,
-                onRemove = { onRemove(image.uri) },
+                enabled = enabled,
+                onRemove = { if (enabled) onRemove(image.uri) },
             )
         }
         if (images.size < MAX_CHAT_IMAGE_ATTACHMENTS) {
             ChatImageSourceEntryMenu(
+                enabled = enabled,
                 onTakePhoto = onTakePhoto,
                 onPickFromAlbum = onPickFromAlbum,
                 onPickDocument = onPickDocument,
@@ -5576,6 +5635,7 @@ private fun PendingDocumentsRow(
     documents: List<ExtractedDocument>,
     extracting: Boolean,
     onRemove: (ExtractedDocument) -> Unit,
+    enabled: Boolean,
 ) {
     Row(
         modifier = Modifier
@@ -5607,7 +5667,11 @@ private fun PendingDocumentsRow(
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
                     )
-                    IconButton(onClick = { onRemove(document) }, modifier = Modifier.size(24.dp)) {
+                    IconButton(
+                        onClick = { onRemove(document) },
+                        enabled = enabled,
+                        modifier = Modifier.size(24.dp),
+                    ) {
                         Icon(Icons.Outlined.Close, contentDescription = "移除文件", modifier = Modifier.size(16.dp))
                     }
                 }
@@ -5617,7 +5681,13 @@ private fun PendingDocumentsRow(
 }
 
 @Composable
-private fun SelectedImageThumbnail(uri: Uri, position: Int, total: Int, onRemove: () -> Unit) {
+private fun SelectedImageThumbnail(
+    uri: Uri,
+    position: Int,
+    total: Int,
+    enabled: Boolean,
+    onRemove: () -> Unit,
+) {
     val context = LocalContext.current
     val bitmap = remember(uri) {
         runCatching {
@@ -5656,7 +5726,7 @@ private fun SelectedImageThumbnail(uri: Uri, position: Int, total: Int, onRemove
                     Icon(Icons.Outlined.Image, contentDescription = null)
                 }
             }
-            IconButton(onClick = onRemove) {
+            IconButton(onClick = onRemove, enabled = enabled) {
                 Icon(Icons.Outlined.Close, contentDescription = "移除第 $position 张图片")
             }
         }

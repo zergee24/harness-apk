@@ -31,12 +31,12 @@ class ChatCameraEntryTest {
             }
         }
 
-        composeRule.onNodeWithContentDescription("添加图片").performClick()
+        composeRule.onNodeWithContentDescription("添加附件").performClick()
         composeRule.onNodeWithText("拍照").assertIsDisplayed().assertHasClickAction().performClick()
         assertEquals(1, cameraActions)
         assertEquals(0, albumActions)
 
-        composeRule.onNodeWithContentDescription("添加图片").performClick()
+        composeRule.onNodeWithContentDescription("添加附件").performClick()
         composeRule.onNodeWithText("从相册选择").assertIsDisplayed().assertHasClickAction().performClick()
         assertEquals(1, cameraActions)
         assertEquals(1, albumActions)
