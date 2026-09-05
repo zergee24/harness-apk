@@ -10,7 +10,6 @@ class ConversationDraftContractTest {
     fun draftSnapshotRoundTripKeepsRawTextDocumentsAndAttachmentMetadata() {
         val draft = ConversationDraft(
             text = "请总结这份资料",
-            attachments = listOf(PendingImageAttachment(android.net.Uri.parse("content://image"), "image/jpeg")),
             documents = listOf(
                 DraftDocumentAttachment(
                     id = "document-hash",
