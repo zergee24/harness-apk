@@ -24,7 +24,7 @@ import com.harnessapk.agentmemory.MarkdownAgentMemoryProjectFactSource
 import com.harnessapk.agentmemory.MAX_AGENT_MEMORY_PROJECT_CONTEXT_CHARS
 import com.harnessapk.agentmemory.RepositoryAgentMemoryExtractionSource
 import com.harnessapk.agentmemory.RepositoryAgentMemoryGenerationProviderResolver
-import com.harnessapk.agentmemory.openAiAgentMemoryCompletionGateway
+import com.harnessapk.agentmemory.agentMemoryCompletionGateway
 import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.BuildConfig
 import com.harnessapk.chat.ChatImageStore
@@ -57,6 +57,9 @@ import com.harnessapk.capture.CaptureStagingStore
 import com.harnessapk.git.GitCredentialStore
 import com.harnessapk.git.JGitEngine
 import com.harnessapk.network.OpenAiCompatibleClient
+import com.harnessapk.network.AnthropicMessagesClient
+import com.harnessapk.network.ProtocolRoutingChatClient
+import com.harnessapk.network.ProviderApiClient
 import com.harnessapk.project.FileProjectRepository
 import com.harnessapk.project.DeleteProjectUseCase
 import com.harnessapk.project.ProjectWorkspaceGatewayAdapter
@@ -176,6 +179,7 @@ class AppContainer(
         AppDatabase.MIGRATION_22_23,
         AppDatabase.MIGRATION_23_24,
         AppDatabase.MIGRATION_24_25,
+        AppDatabase.MIGRATION_25_26,
     ).addCallback(AppDatabase.LOCAL_SEARCH_CALLBACK).build()
     // 卓易通等容器可能没有可用的 AndroidKeyStore；三个密钥库统一走 Keystore 优先 + 软件回退
     val apiKeyCipher = ResilientStringCipher(appContext, "harness_apk_provider_keys")
@@ -345,6 +349,9 @@ class AppContainer(
         },
     )
     val openAiClient = OpenAiCompatibleClient(chatHttpClient, json)
+    val anthropicClient = AnthropicMessagesClient(chatHttpClient, json)
+    val chatClient = ProtocolRoutingChatClient(openAiClient, anthropicClient)
+    val providerApiClient = ProviderApiClient(chatHttpClient, json)
     val chatImageStore = ChatImageStore(appContext, chatHttpClient, dispatchers)
     val webSearchClient = JinaWebSearchClient(webSearchHttpClient)
     val queuedAttachmentStore = QueuedAttachmentStore(appContext)
@@ -391,7 +398,7 @@ class AppContainer(
         },
         generator = LlmAgentMemoryCandidateGenerator(
             providerResolver = RepositoryAgentMemoryGenerationProviderResolver(providerRepository),
-            completionGateway = openAiAgentMemoryCompletionGateway(openAiClient),
+            completionGateway = agentMemoryCompletionGateway(chatClient),
         ),
         policy = AgentMemoryCandidatePolicy(agentMemoryPolicy::evaluate),
         merger = AgentMemoryAcceptedBatchMerger(agentMemoryRepository::merge),
@@ -434,7 +441,7 @@ class AppContainer(
     )
     val promptOptimizerUseCase = PromptOptimizerUseCase(
         providerRepository = providerRepository,
-        client = openAiClient,
+        client = chatClient,
         dispatchers = dispatchers,
     )
     val manualContextCompressionUseCase = ManualContextCompressionUseCase(
@@ -445,7 +452,7 @@ class AppContainer(
         context = appContext,
         chatRepository = chatRepository,
         providerRepository = providerRepository,
-        client = openAiClient,
+        client = chatClient,
         dispatchers = dispatchers,
         remoteCapabilityCatalog = {
             settingsStore.providerCapabilityCatalogSnapshot.first().rawJson

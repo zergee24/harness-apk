@@ -41,6 +41,46 @@ class ProviderRepositoryTest {
     }
 
     @Test
+    fun saveProviderPersistsApiProtocolAndLegacyRowsDefaultToOpenAi() = runTest {
+        val dao = FakeProviderProfileDao()
+        val repository = ProviderRepository(
+            dao = dao,
+            cipher = ReversingCipher,
+            timeProvider = TimeProvider { 10L },
+        )
+
+        val anthropicId = repository.saveProvider(
+            ProviderDraft(
+                name = "Claude",
+                baseUrl = "https://api.anthropic.com",
+                apiKey = "secret-key",
+                defaultModel = "claude-sonnet-4-5",
+                defaultVisionModel = null,
+                supportsVision = true,
+                apiProtocol = ProviderApiProtocol.ANTHROPIC_MESSAGES,
+            ),
+        )
+        val openAiId = repository.saveProvider(
+            ProviderDraft(
+                name = "GLM",
+                baseUrl = "https://open.bigmodel.cn/api/paas/v4",
+                apiKey = "secret-key",
+                defaultModel = "glm-5.2",
+                defaultVisionModel = null,
+                supportsVision = false,
+            ),
+        )
+
+        assertEquals(
+            ProviderApiProtocol.ANTHROPIC_MESSAGES,
+            repository.findById(anthropicId)!!.apiProtocol,
+        )
+        assertEquals(ProviderApiProtocol.OPENAI_COMPATIBLE, repository.findById(openAiId)!!.apiProtocol)
+        assertEquals("ANTHROPIC_MESSAGES", dao.findById(anthropicId)!!.apiProtocol)
+        assertEquals("OPENAI_COMPATIBLE", dao.findById(openAiId)!!.apiProtocol)
+    }
+
+    @Test
     fun saveProviderPersistsAvailableModelsWithDefaultFirst() = runTest {
         val dao = FakeProviderProfileDao()
         val repository = ProviderRepository(

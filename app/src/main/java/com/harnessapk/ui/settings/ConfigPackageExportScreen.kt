@@ -46,6 +46,7 @@ import com.harnessapk.packageformat.ConfigPackageCodec
 import com.harnessapk.packageformat.ConfigPackagePayload
 import com.harnessapk.packageformat.ConfigPackageProvider
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.ProviderApiProtocol
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -303,6 +304,8 @@ private suspend fun exportConfigPackage(
             defaultVisionModel = withKey.profile.defaultVisionModel,
             supportsVision = withKey.profile.supportsVision,
             nativeWebSearchMode = withKey.profile.nativeWebSearchMode.takeIf { it != NativeWebSearchMode.DISABLED }?.name,
+            apiProtocol = withKey.profile.apiProtocol
+                .takeIf { it != ProviderApiProtocol.OPENAI_COMPATIBLE }?.name,
             availableModels = withKey.profile.availableModels,
             customHeaders = withKey.profile.customHeaders,
             customBodyJson = withKey.profile.customBodyJson,

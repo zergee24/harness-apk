@@ -2,6 +2,7 @@ package com.harnessapk.storage
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.harnessapk.provider.ProviderApiProtocol
 
 @Entity(tableName = "provider_profiles")
 data class ProviderProfileEntity(
@@ -16,6 +17,7 @@ data class ProviderProfileEntity(
     val defaultVisionModel: String?,
     val supportsVision: Boolean,
     val nativeWebSearchMode: String,
+    val apiProtocol: String = ProviderApiProtocol.OPENAI_COMPATIBLE.name,
     val enabled: Boolean,
     val createdAt: Long,
     val updatedAt: Long,

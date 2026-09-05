@@ -133,6 +133,7 @@ object ConfigPackageCodec {
                         provider.defaultVisionModel?.let { put("defaultVisionModel", it) }
                         put("supportsVision", provider.supportsVision)
                         provider.nativeWebSearchMode?.let { put("nativeWebSearchMode", it) }
+                        if (!provider.apiProtocol.isNullOrBlank()) put("apiProtocol", provider.apiProtocol)
                         put("availableModels", buildJsonArray {
                             provider.availableModels.forEach { model -> add(JsonPrimitive(model)) }
                         })
@@ -172,6 +173,7 @@ object ConfigPackageCodec {
                 defaultVisionModel = provider.stringField("defaultVisionModel"),
                 supportsVision = provider.booleanField("supportsVision") ?: false,
                 nativeWebSearchMode = provider.stringField("nativeWebSearchMode"),
+                apiProtocol = provider.stringField("apiProtocol"),
                 availableModels = provider.arrayField("availableModels")
                     ?.mapNotNull { it.jsonPrimitive.contentOrNull }
                     ?: emptyList(),

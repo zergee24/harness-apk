@@ -57,6 +57,7 @@ class ProviderRepository(
                 defaultVisionModel = defaultVisionModel,
                 supportsVision = draft.supportsVision,
                 nativeWebSearchMode = draft.nativeWebSearchMode.name,
+                apiProtocol = draft.apiProtocol.name,
                 enabled = true,
                 createdAt = now,
                 updatedAt = now,
@@ -95,6 +96,7 @@ class ProviderRepository(
                 defaultVisionModel = defaultVisionModel,
                 supportsVision = draft.supportsVision,
                 nativeWebSearchMode = draft.nativeWebSearchMode.name,
+                apiProtocol = draft.apiProtocol.name,
                 enabled = true,
                 updatedAt = now,
                 customHeadersJson = draft.customHeaders.encodeCustomHeadersJson(),
@@ -187,6 +189,7 @@ private fun ProviderProfileEntity.toDomain(): ProviderProfile = ProviderProfile(
     defaultVisionModel = defaultVisionModel,
     supportsVision = supportsVision,
     nativeWebSearchMode = nativeWebSearchMode.decodeNativeWebSearchMode(),
+    apiProtocol = apiProtocol.decodeProviderApiProtocol(),
     enabled = enabled,
     hasApiKey = encryptedApiKey != null && apiKeyIv != null,
     availableModels = normalizeAvailableModels(
@@ -338,6 +341,9 @@ private fun List<String>?.sanitizedReasoningOptions(): List<String>? =
 private fun String.decodeNativeWebSearchMode(): NativeWebSearchMode =
     runCatching { NativeWebSearchMode.valueOf(this) }.getOrDefault(NativeWebSearchMode.DISABLED)
 
+private fun String.decodeProviderApiProtocol(): ProviderApiProtocol =
+    runCatching { ProviderApiProtocol.valueOf(this) }.getOrDefault(ProviderApiProtocol.OPENAI_COMPATIBLE)
+
 private val PROVIDER_JSON = Json { ignoreUnknownKeys = true }
 
 private fun Map<String, String>.encodeCustomHeadersJson(): String {
@@ -396,6 +402,7 @@ fun defaultModelConfig(providerName: String, modelId: String): ModelConfig {
 
     val contextWindow = when {
         normalizedModel.startsWith("deepseek-v4") -> 1_000_000
+        normalizedModel.startsWith("gpt-6") -> 1_050_000
         normalizedModel.startsWith("glm-5-turbo") -> 200_000
         normalizedModel.startsWith("glm-5.2") -> 1_000_000
         normalizedModel.startsWith("glm-") -> 128_000

@@ -71,6 +71,8 @@ import com.harnessapk.ui.conversation.ConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
 import com.harnessapk.ui.project.ProjectWorkbenchDestination
 import com.harnessapk.ui.project.ProjectScreen
+import com.harnessapk.ui.workbrief.WorkBriefCaptureScreen
+import com.harnessapk.workbrief.WorkBriefRepository
 import com.harnessapk.ui.project.ProjectWorkbenchTarget
 import com.harnessapk.ui.provider.ProviderSettingsScreen
 import com.harnessapk.ui.search.SearchSettingsScreen
@@ -112,6 +114,7 @@ object Routes {
     const val Updates = "updates"
     const val RemoteSettings = "remote-settings"
     const val RemoteControl = "remote-control"
+    const val WorkBriefCapturePattern = "workbrief-capture/{briefId}"
     const val Activity = "activity"
     const val RemoteRunPattern = "remote-run/{runId}"
     const val ChatPattern =
@@ -322,6 +325,7 @@ fun HarnessApkApp(
         Routes.ConfigPackageExport -> "配置包"
         Routes.ConfigPackageImportPattern -> "导入配置包"
         Routes.RemoteSettings -> "Codex 远程节点"
+        Routes.WorkBriefCapturePattern -> "工作简报"
         Routes.RemoteControl -> remoteUiState.threads
             .firstOrNull { it.id == remoteUiState.selectedThreadId }?.title ?: "远程控制"
         Routes.Activity -> "任务动态"
@@ -598,6 +602,23 @@ fun HarnessApkApp(
                                 end = padding.calculateEndPadding(LocalLayoutDirection.current),
                                 bottom = padding.calculateBottomPadding(),
                             ),
+                            onOpenWorkBrief = { briefId ->
+                                navController.navigate("workbrief-capture/$briefId")
+                            },
+                            onNewWorkBrief = { project ->
+                                scope.launch {
+                                    val briefId = WorkBriefRepository(container.database).createBrief(
+                                        projectId = project.id,
+                                        title = "简报 " + java.text.SimpleDateFormat(
+                                            "MM-dd HH:mm",
+                                            java.util.Locale.CHINA,
+                                        ).format(java.util.Date()),
+                                        logicalWidth = 1680,
+                                        logicalHeight = 1264,
+                                    )
+                                    navController.navigate("workbrief-capture/$briefId")
+                                }
+                            },
                             onCurrentProjectChange = { project ->
                                 currentProjectId = project?.id
                                 currentProjectName = project?.name
@@ -914,6 +935,14 @@ fun HarnessApkApp(
                     container = container,
                     contentPadding = padding,
                     initialResult = updateCheckResult,
+                )
+            }
+            composable(Routes.WorkBriefCapturePattern) { entry ->
+                WorkBriefCaptureScreen(
+                    container = container,
+                    contentPadding = padding,
+                    briefId = entry.arguments?.getString("briefId").orEmpty(),
+                    onClose = { navController.popBackStack() },
                 )
             }
             composable(Routes.RemoteSettings) {

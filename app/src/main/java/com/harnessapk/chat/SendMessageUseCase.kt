@@ -13,7 +13,7 @@ import com.harnessapk.agent.sanitizeAgentCitationMarkers
 import com.harnessapk.common.AppDispatchers
 import com.harnessapk.common.AppError
 import com.harnessapk.common.toUserMessage
-import com.harnessapk.network.OpenAiCompatibleClient
+import com.harnessapk.network.ChatStreamClient
 import com.harnessapk.network.OutgoingChatMessage
 import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.ModelConfig
@@ -48,7 +48,7 @@ class SendMessageUseCase(
     private val context: Context,
     private val chatRepository: ChatRepository,
     private val providerRepository: ProviderRepository,
-    private val client: OpenAiCompatibleClient,
+    private val client: ChatStreamClient,
     private val dispatchers: AppDispatchers,
     private val contextCompressor: ContextCompressor = ContextCompressor(),
     private val imageCompressionPolicy: ImageCompressionPolicy = ImageCompressionPolicy(),

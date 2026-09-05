@@ -19,12 +19,14 @@ class ChatCameraEntryTest {
     fun imageSourceMenuRoutesEachActionToItsOwnCallback() {
         var cameraActions = 0
         var albumActions = 0
+        var documentActions = 0
 
         composeRule.setContent {
             HarnessApkTheme {
                 ChatImageSourceEntryMenu(
                     onTakePhoto = { cameraActions++ },
                     onPickFromAlbum = { albumActions++ },
+                    onPickDocument = { documentActions++ },
                 )
             }
         }

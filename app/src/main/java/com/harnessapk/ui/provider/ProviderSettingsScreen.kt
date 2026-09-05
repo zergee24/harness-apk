@@ -16,6 +16,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.AlertDialog
@@ -56,6 +58,7 @@ import com.harnessapk.provider.ModelConfig
 import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.NativeWebSearchMode
 import com.harnessapk.provider.OPEN_AI_REASONING_EFFORT_OPTIONS
+import com.harnessapk.provider.ProviderApiProtocol
 import com.harnessapk.provider.ProviderCapabilityCatalog
 import com.harnessapk.provider.ProviderDraft
 import com.harnessapk.provider.ProviderProfile
@@ -104,7 +107,10 @@ fun ProviderSettingsScreen(
     var visionModel by remember { mutableStateOf(defaultTemplate.defaultVisionModel.orEmpty()) }
     var supportsVision by remember { mutableStateOf(defaultTemplate.supportsVision) }
     var nativeWebSearchMode by remember { mutableStateOf(defaultTemplate.nativeWebSearchMode) }
+    var apiProtocol by remember { mutableStateOf(defaultTemplate.apiProtocol) }
+    var formBusyAction by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
+    var activeSection by remember { mutableStateOf(ProviderSection.FORM) }
     var editingProviderId by remember { mutableStateOf<String?>(null) }
     var providerToDelete by remember { mutableStateOf<ProviderProfile?>(null) }
 
@@ -117,6 +123,8 @@ fun ProviderSettingsScreen(
         visionModel = defaultTemplate.defaultVisionModel.orEmpty()
         supportsVision = defaultTemplate.supportsVision
         nativeWebSearchMode = defaultTemplate.nativeWebSearchMode
+        apiProtocol = defaultTemplate.apiProtocol
+        formBusyAction = null
         editingProviderId = null
     }
 
@@ -128,6 +136,7 @@ fun ProviderSettingsScreen(
         visionModel = template.defaultVisionModel.orEmpty()
         supportsVision = template.supportsVision
         nativeWebSearchMode = template.nativeWebSearchMode
+        apiProtocol = template.apiProtocol
         editingProviderId = null
         apiKey = ""
         status = null
@@ -143,7 +152,87 @@ fun ProviderSettingsScreen(
         visionModel = provider.defaultVisionModel.orEmpty()
         supportsVision = provider.supportsVision
         nativeWebSearchMode = provider.nativeWebSearchMode
+        apiProtocol = provider.apiProtocol
+        formBusyAction = null
+        activeSection = ProviderSection.FORM
         status = "正在编辑 ${provider.name}，API Key 留空会沿用原 Key。"
+    }
+
+    // 录入动作（拉模型/测连通）优先用刚输入的 Key；编辑态留空则回读已保存的 Key
+    suspend fun resolveFormApiKey(): String? {
+        apiKey.trim().takeIf { it.isNotBlank() }?.let { return it }
+        val providerId = editingProviderId ?: return null
+        return runCatching { container.providerRepository.getApiKey(providerId) }.getOrNull()
+    }
+
+    fun fetchAvailableModels() {
+        scope.launch {
+            formBusyAction = "fetch"
+            status = "正在获取模型列表..."
+            val key = resolveFormApiKey()
+            if (key == null) {
+                status = "请先填写 API Key，再获取模型列表"
+                formBusyAction = null
+                return@launch
+            }
+            runCatching {
+                container.providerApiClient.listModels(
+                    baseUrl = baseUrl,
+                    apiKey = key,
+                    apiProtocol = apiProtocol,
+                )
+            }.onSuccess { fetched ->
+                if (fetched.isEmpty()) {
+                    status = "API 未返回任何模型"
+                } else {
+                    val fetchedSet = fetched.toSet()
+                    val existingIds = modelConfigs.map { it.id.trim() }.toSet()
+                    val kept = modelConfigs.filter { it.id.trim() in fetchedSet }
+                    val added = fetched
+                        .filter { it !in existingIds }
+                        .map { defaultModelConfig(name, it) }
+                    modelConfigs = kept + added
+                    if (model.trim() !in fetchedSet) {
+                        model = fetched.first()
+                    }
+                    status = "已获取 ${fetched.size} 个模型" +
+                        (if (added.isNotEmpty()) "，新增 ${added.size} 个" else "")
+                }
+            }.onFailure { failure ->
+                status = failure.message ?: "获取模型列表失败"
+            }
+            formBusyAction = null
+        }
+    }
+
+    fun testProviderConnection() {
+        scope.launch {
+            val testModel = model.trim()
+            if (testModel.isEmpty()) {
+                status = "请先填写默认文本模型，再测试连通"
+                return@launch
+            }
+            val key = resolveFormApiKey()
+            if (key == null) {
+                status = "请先填写 API Key，再测试连通"
+                return@launch
+            }
+            formBusyAction = "test"
+            status = "正在测试连通..."
+            runCatching {
+                container.providerApiClient.testConnection(
+                    baseUrl = baseUrl,
+                    apiKey = key,
+                    model = testModel,
+                    apiProtocol = apiProtocol,
+                )
+            }.onSuccess { result ->
+                status = "连通正常 · $testModel · ${result.latencyMillis}ms"
+            }.onFailure { failure ->
+                status = failure.message ?: "连通测试失败"
+            }
+            formBusyAction = null
+        }
     }
 
     LaunchedEffect(providers, defaultModelPreference) {
@@ -198,7 +287,16 @@ fun ProviderSettingsScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            DefaultModelCard(
+            ProviderSectionTabs(
+                active = activeSection,
+                savedCount = providers.size,
+                onSelect = { activeSection = it },
+            )
+        }
+
+        when (activeSection) {
+            ProviderSection.DEFAULTS -> item {
+                DefaultModelCard(
                 providers = providers,
                 selectedProviderId = defaultProviderId,
                 selectedModel = defaultModelName,
@@ -255,9 +353,8 @@ fun ProviderSettingsScreen(
                     }
                 },
             )
-        }
-
-        item {
+            }
+            ProviderSection.FORM -> item {
             ProviderFormCard(
                 editing = editingProviderId != null,
                 name = name,
@@ -268,6 +365,8 @@ fun ProviderSettingsScreen(
                 visionModel = visionModel,
                 supportsVision = supportsVision,
                 nativeWebSearchMode = nativeWebSearchMode,
+                apiProtocol = apiProtocol,
+                busyAction = formBusyAction,
                 status = status,
                 onNameChange = { name = it },
                 onBaseUrlChange = { baseUrl = it },
@@ -277,6 +376,16 @@ fun ProviderSettingsScreen(
                 onVisionModelChange = { visionModel = it },
                 onSupportsVisionChange = { supportsVision = it },
                 onNativeWebSearchModeChange = { nativeWebSearchMode = it },
+                onApiProtocolChange = { protocol ->
+                    apiProtocol = protocol
+                    if (protocol == ProviderApiProtocol.ANTHROPIC_MESSAGES &&
+                        nativeWebSearchMode != NativeWebSearchMode.DISABLED
+                    ) {
+                        nativeWebSearchMode = NativeWebSearchMode.DISABLED
+                    }
+                },
+                onFetchModels = ::fetchAvailableModels,
+                onTestConnection = ::testProviderConnection,
                 onApplyTemplate = ::applyTemplate,
                 onSave = {
                     scope.launch {
@@ -288,6 +397,7 @@ fun ProviderSettingsScreen(
                             defaultVisionModel = visionModel.ifBlank { null },
                             supportsVision = supportsVision,
                             nativeWebSearchMode = nativeWebSearchMode,
+                            apiProtocol = apiProtocol,
                             availableModels = modelConfigs.map { it.id },
                             modelConfigs = modelConfigs,
                         )
@@ -299,55 +409,59 @@ fun ProviderSettingsScreen(
                                 container.providerRepository.updateProvider(providerId, draft)
                             }
                         }.onSuccess {
-                            status = if (editingProviderId == null) {
-                                "已保存，Key 已加密保存在本机"
-                            } else {
-                                "已保存修改"
-                            }
-                            resetForm()
-                        }.onFailure {
-                            status = it.message
+                        status = if (editingProviderId == null) {
+                            "已保存，Key 已加密保存在本机"
+                        } else {
+                            "已保存修改"
                         }
+                        resetForm()
+                        activeSection = ProviderSection.LIST
+                    }.onFailure {
+                        status = it.message
                     }
-                },
-                onCancelEdit = {
-                    resetForm()
-                    status = null
-                },
-            )
+                }
+            },
+            onCancelEdit = {
+                resetForm()
+                status = null
+            },
+        )
         }
-
-        item {
-            Text(
-                text = "已保存供应商",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-
-        if (providers.isEmpty()) {
-            item {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-                ) {
+        ProviderSection.LIST -> {
+            if (status != null) {
+                item {
                     Text(
-                        modifier = Modifier.padding(16.dp),
-                        text = "还没有保存的模型供应商。先选择模板，填入 Key 后保存。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = status.orEmpty(),
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodyMedium,
                     )
                 }
             }
-        } else {
-            items(providers, key = { it.id }) { provider ->
-                ProviderRow(
-                    provider = provider,
-                    capabilities = capabilityResolver.selectableModels(provider),
-                    onEdit = { editProvider(provider) },
-                    onDelete = { providerToDelete = provider },
-                )
+            if (providers.isEmpty()) {
+                item {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    ) {
+                        Text(
+                            modifier = Modifier.padding(16.dp),
+                            text = "还没有保存的模型供应商。切到「录入」选择模板，填入 Key 后保存。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            } else {
+                items(providers, key = { it.id }) { provider ->
+                    ProviderRow(
+                        provider = provider,
+                        capabilities = capabilityResolver.selectableModels(provider),
+                        onEdit = { editProvider(provider) },
+                        onDelete = { providerToDelete = provider },
+                    )
+                }
             }
+        }
         }
     }
 }
@@ -496,6 +610,8 @@ private fun ProviderFormCard(
     visionModel: String,
     supportsVision: Boolean,
     nativeWebSearchMode: NativeWebSearchMode,
+    apiProtocol: ProviderApiProtocol,
+    busyAction: String?,
     status: String?,
     onNameChange: (String) -> Unit,
     onBaseUrlChange: (String) -> Unit,
@@ -505,6 +621,9 @@ private fun ProviderFormCard(
     onVisionModelChange: (String) -> Unit,
     onSupportsVisionChange: (Boolean) -> Unit,
     onNativeWebSearchModeChange: (NativeWebSearchMode) -> Unit,
+    onApiProtocolChange: (ProviderApiProtocol) -> Unit,
+    onFetchModels: () -> Unit,
+    onTestConnection: () -> Unit,
     onApplyTemplate: (ProviderTemplate) -> Unit,
     onSave: () -> Unit,
     onCancelEdit: () -> Unit,
@@ -546,6 +665,30 @@ private fun ProviderFormCard(
                     )
                 }
             }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("API 协议", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ProviderApiProtocol.entries.forEach { protocol ->
+                        FilterChip(
+                            selected = apiProtocol == protocol,
+                            onClick = { onApiProtocolChange(protocol) },
+                            label = { Text(apiProtocolDisplayName(protocol)) },
+                        )
+                    }
+                }
+                if (apiProtocol == ProviderApiProtocol.ANTHROPIC_MESSAGES) {
+                    Text(
+                        text = "Claude / Claude Code 兼容端点（如 GLM Coding Plan 的 /api/anthropic）",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             OutlinedTextField(
                 modifier = Modifier.fillMaxWidth(),
                 value = name,
@@ -575,6 +718,35 @@ private fun ProviderFormCard(
                 label = { Text("默认文本模型") },
                 singleLine = true,
             )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    enabled = busyAction == null,
+                    onClick = onFetchModels,
+                ) {
+                    Text(
+                        when (busyAction) {
+                            "fetch" -> "获取中..."
+                            else -> "获取模型列表"
+                        },
+                    )
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    enabled = busyAction == null,
+                    onClick = onTestConnection,
+                ) {
+                    Text(
+                        when (busyAction) {
+                            "test" -> "测试中..."
+                            else -> "测试连通"
+                        },
+                    )
+                }
+            }
             ModelConfigListEditor(
                 providerName = name,
                 modelConfigs = modelConfigs,
@@ -598,30 +770,38 @@ private fun ProviderFormCard(
                 }
                 Switch(checked = supportsVision, onCheckedChange = onSupportsVisionChange)
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+            if (apiProtocol == ProviderApiProtocol.ANTHROPIC_MESSAGES) {
+                Text(
+                    text = "Claude 协议暂不支持模型内搜索开关",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("模型内搜索", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                    Text(
-                        text = "打开后会话联网优先随模型请求启用搜索",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text("模型内搜索", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                        Text(
+                            text = "打开后会话联网优先随模型请求启用搜索",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = isNativeWebSearchEnabled(nativeWebSearchMode),
+                        onCheckedChange = { enabled ->
+                            onNativeWebSearchModeChange(
+                                nativeWebSearchModeForSwitch(providerName = name, enabled = enabled),
+                            )
+                        },
                     )
                 }
-                Switch(
-                    checked = isNativeWebSearchEnabled(nativeWebSearchMode),
-                    onCheckedChange = { enabled ->
-                        onNativeWebSearchModeChange(
-                            nativeWebSearchModeForSwitch(providerName = name, enabled = enabled),
-                        )
-                    },
-                )
             }
             Button(
                 modifier = Modifier.fillMaxWidth(),
@@ -695,6 +875,7 @@ private fun ModelConfigEditorRow(
     onChange: (ModelConfig) -> Unit,
     onDelete: () -> Unit,
 ) {
+    var advancedExpanded by remember { mutableStateOf(false) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -718,6 +899,16 @@ private fun ModelConfigEditorRow(
                     label = { Text("模型") },
                     singleLine = true,
                 )
+                IconButton(onClick = { advancedExpanded = !advancedExpanded }) {
+                    Icon(
+                        if (advancedExpanded) {
+                            Icons.Outlined.KeyboardArrowUp
+                        } else {
+                            Icons.Outlined.KeyboardArrowDown
+                        },
+                        contentDescription = if (advancedExpanded) "收起高级设置" else "展开高级设置",
+                    )
+                }
                 IconButton(
                     enabled = canDelete,
                     onClick = onDelete,
@@ -725,7 +916,15 @@ private fun ModelConfigEditorRow(
                     Icon(Icons.Outlined.Delete, contentDescription = "删除模型")
                 }
             }
-            ModelConfigDataBar(
+            Text(
+                text = modelConfigSummaryLine(config),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (advancedExpanded) {
+                ModelConfigDataBar(
                 label = "上下文",
                 valueText = config.contextWindowTokens.toCompactTokenText(),
                 progress = modelConfigDataBarProgress(config.contextWindowTokens, MAX_CONTEXT_WINDOW_TOKENS),
@@ -803,6 +1002,7 @@ private fun ModelConfigEditorRow(
                 },
                 valueRange = MIN_READ_TIMEOUT_SECONDS.toFloat()..MAX_READ_TIMEOUT_SECONDS.toFloat(),
             )
+            }
         }
     }
 }
@@ -871,6 +1071,13 @@ private fun ProviderRow(
                 Text(provider.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("文本模型：${provider.defaultModel}", style = MaterialTheme.typography.bodySmall)
+                if (provider.apiProtocol != ProviderApiProtocol.OPENAI_COMPATIBLE) {
+                    Text(
+                        text = "协议：${apiProtocolDisplayName(provider.apiProtocol)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 Text(
                     text = "可选模型：${capabilities.map { it.modelId }.joinToString("、")}",
                     style = MaterialTheme.typography.bodySmall,
@@ -924,6 +1131,23 @@ private const val DEFAULT_READ_TIMEOUT_MILLIS = 180_000L
 internal fun modelConfigDataBarProgress(value: Int, maxValue: Int): Float {
     if (maxValue <= 0) return 0f
     return (value.toFloat() / maxValue.toFloat()).coerceIn(0f, 1f)
+}
+
+/** 折叠态摘要：上下文 / 压缩 / 超时 + 能力标签，展开高级设置前一眼可见。 */
+internal fun modelConfigSummaryLine(config: ModelConfig): String {
+    val capabilities = buildList {
+        if (config.inputModalities.orEmpty().contains("image")) add("图片")
+        if (config.inputModalities.orEmpty().contains("audio")) add("音频")
+        if (!config.reasoningEffortOptions.isNullOrEmpty()) add("推理")
+        if (config.webSearchMode != null && config.webSearchMode != NativeWebSearchMode.DISABLED) add("搜索")
+        if (config.supportsToolCalling == true) add("工具")
+    }
+    val basics = listOf(
+        "上下文 ${config.contextWindowTokens.toCompactTokenText()}",
+        "压缩 ${config.compressionThresholdPercent.coerceIn(1, 95)}%",
+        "超时 ${((config.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) / 1000L).toInt()}秒",
+    ).joinToString(" · ")
+    return if (capabilities.isEmpty()) basics else "$basics · ${capabilities.joinToString("/")}"
 }
 
 internal fun updateModelConfigAt(
@@ -994,6 +1218,48 @@ internal fun updateReadTimeoutSeconds(config: ModelConfig, seconds: Int): ModelC
 
 internal fun isNativeWebSearchEnabled(mode: NativeWebSearchMode): Boolean =
     mode != NativeWebSearchMode.DISABLED
+
+private enum class ProviderSection(val label: String) {
+    FORM("录入供应商"),
+    DEFAULTS("默认模型"),
+    LIST("已保存"),
+}
+
+@Composable
+private fun ProviderSectionTabs(
+    active: ProviderSection,
+    savedCount: Int,
+    onSelect: (ProviderSection) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 2.dp,
+        shadowElevation = 1.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ProviderSection.entries.forEach { section ->
+                FilterChip(
+                    selected = active == section,
+                    onClick = { onSelect(section) },
+                    label = {
+                        val badge = if (section == ProviderSection.LIST && savedCount > 0) " $savedCount" else ""
+                        Text(section.label + badge)
+                    },
+                )
+            }
+        }
+    }
+}
+
+internal fun apiProtocolDisplayName(protocol: ProviderApiProtocol): String = when (protocol) {
+    ProviderApiProtocol.OPENAI_COMPATIBLE -> "OpenAI 兼容"
+    ProviderApiProtocol.ANTHROPIC_MESSAGES -> "Claude（Anthropic）"
+}
 
 internal fun nativeWebSearchModeForSwitch(providerName: String, enabled: Boolean): NativeWebSearchMode {
     if (!enabled) return NativeWebSearchMode.DISABLED

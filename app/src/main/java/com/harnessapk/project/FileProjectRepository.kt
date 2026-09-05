@@ -220,6 +220,9 @@ class FileProjectRepository(
         return checkedProjectFile(project, deliverableId)
     }
 
+    /** 项目根目录（工作简报 bundle 等项目级产物的落点）。 */
+    fun projectDirectoryFor(projectId: String): File = projectDirectory(projectId)
+
     fun resolveProjectDirectory(projectId: String): File = projectDirectory(projectId)
 
     suspend fun projectFileRevisionIsCurrent(

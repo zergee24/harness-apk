@@ -8,6 +8,12 @@ enum class NativeWebSearchMode {
     EXTERNAL_BING,
 }
 
+/** 供应商 API 协议：OpenAI 兼容（/chat/completions）或 Anthropic Messages（/v1/messages，Claude Code 同款）。 */
+enum class ProviderApiProtocol {
+    OPENAI_COMPATIBLE,
+    ANTHROPIC_MESSAGES,
+}
+
 data class ProviderProfile(
     val id: String,
     val name: String,
@@ -16,6 +22,7 @@ data class ProviderProfile(
     val defaultVisionModel: String?,
     val supportsVision: Boolean,
     val nativeWebSearchMode: NativeWebSearchMode = NativeWebSearchMode.DISABLED,
+    val apiProtocol: ProviderApiProtocol = ProviderApiProtocol.OPENAI_COMPATIBLE,
     val enabled: Boolean,
     val hasApiKey: Boolean,
     val availableModels: List<String> = emptyList(),
@@ -32,6 +39,7 @@ data class ProviderDraft(
     val defaultVisionModel: String?,
     val supportsVision: Boolean,
     val nativeWebSearchMode: NativeWebSearchMode = NativeWebSearchMode.DISABLED,
+    val apiProtocol: ProviderApiProtocol = ProviderApiProtocol.OPENAI_COMPATIBLE,
     val availableModels: List<String> = emptyList(),
     val modelConfigs: List<ModelConfig> = emptyList(),
     val customHeaders: Map<String, String> = emptyMap(),
