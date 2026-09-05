@@ -210,6 +210,67 @@ class UpdateRepositoryTest {
         assertEquals(0, requests.get())
     }
 
+    @Test
+    fun chunkedDownloadReportsAggregatedByteProgress() {
+        val progressEvents = mutableListOf<Pair<Long, Long?>>()
+        val repository = repository(
+            okHttpClient = clientResponding { request ->
+                when (request.url.encodedPath) {
+                    "/part-0" -> response(request, 200, "a")
+                    "/part-1" -> response(request, 200, "p")
+                    "/part-2" -> response(request, 200, "k")
+                    else -> error("Unexpected URL ${request.url}")
+                }
+            },
+        )
+
+        repository.downloadApk(
+            manifest(
+                apkUrl = null,
+                apkChunks = listOf(
+                    "https://download.example.com/part-0",
+                    "https://download.example.com/part-1",
+                    "https://download.example.com/part-2",
+                ),
+                sha256 = sha256("apk"),
+            ),
+        ) { downloaded, total -> progressEvents += downloaded to total }
+
+        val last = progressEvents.last()
+        assertEquals(3L, last.first)
+        assertEquals(3L, last.second)
+    }
+
+    @Test
+    fun chunkedDownloadCleansUpChunkTempFilesOnChunkFailure() {
+        val repository = repository(
+            okHttpClient = clientResponding { request ->
+                when (request.url.encodedPath) {
+                    "/part-0" -> response(request, 200, "a")
+                    "/part-1" -> response(request, 404, "missing")
+                    else -> error("Unexpected URL ${request.url}")
+                }
+            },
+        )
+
+        runCatching {
+            repository.downloadApk(
+                manifest(
+                    apkUrl = null,
+                    apkChunks = listOf(
+                        "https://download.example.com/part-0",
+                        "https://download.example.com/part-1",
+                    ),
+                    sha256 = sha256("apk"),
+                ),
+            )
+        }
+
+        val updatesDir = File(temp.root, "updates")
+        assertTrue(updatesDir.listFiles().orEmpty().none { it.name.contains(".chunk-") })
+        assertFalse(File(updatesDir, "harness-apk-2.apk.part").exists())
+    }
+
     private fun repository(
         currentVersionCode: Int = 1,
         okHttpClient: OkHttpClient = OkHttpClient.Builder().build(),
