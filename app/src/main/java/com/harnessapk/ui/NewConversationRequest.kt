@@ -11,7 +11,9 @@ internal data class NewConversationRequest(
     val identity: InitialConversationIdentity = InitialConversationIdentity.Suggested,
 )
 
-internal fun homeConversationRequest(): NewConversationRequest = NewConversationRequest()
+internal fun homeConversationRequest(simpleMode: Boolean = false): NewConversationRequest = if (simpleMode) {
+    NewConversationRequest(title = "新问题", identity = InitialConversationIdentity.Assistant)
+} else NewConversationRequest()
 
 internal fun projectConversationRequest(
     projectId: String,

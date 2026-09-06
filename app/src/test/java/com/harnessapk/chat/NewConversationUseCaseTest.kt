@@ -21,6 +21,7 @@ import com.harnessapk.storage.ConversationDao
 import com.harnessapk.storage.ConversationEntity
 import com.harnessapk.storage.ConversationMemoryDao
 import com.harnessapk.storage.ConversationMemoryEntity
+import com.harnessapk.storage.LifeConversationRoomRow
 import com.harnessapk.storage.MessageAttachmentDao
 import com.harnessapk.storage.MessageAttachmentEntity
 import com.harnessapk.storage.MessageDao
@@ -221,6 +222,8 @@ private class NewConversationFakeConversationDao : ConversationDao {
     val count: Int get() = rows.size
 
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(rows.values.toList())
+    override fun observeLifeOverviewRows(includeArchived: Boolean): Flow<List<LifeConversationRoomRow>> =
+        error("life overview is not part of this fake")
     override suspend fun findById(id: String): ConversationEntity? = rows[id]
     override suspend fun findLatestActive(): ConversationEntity? = rows.values.filter { !it.isArchived }
         .maxWithOrNull(compareBy<ConversationEntity> { it.updatedAt }.thenBy { it.id })
@@ -245,6 +248,10 @@ private class NewConversationFakeConversationDao : ConversationDao {
         }
     }
     override suspend fun archive(id: String, updatedAt: Long) = Unit
+    override suspend fun archiveLifeConversationIfIdle(id: String): Int =
+        error("life archive is not part of this fake")
+    override suspend fun restoreLifeConversation(id: String): Int =
+        error("life restore is not part of this fake")
     override suspend fun countByAgentVersion(agentId: String, version: Int) = 0
     override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int = 0
 }

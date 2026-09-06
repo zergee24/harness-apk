@@ -19,6 +19,10 @@ import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.text.style.TextOverflow
+import kotlinx.coroutines.flow.first
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -32,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -54,9 +59,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.harnessapk.HarnessApkApplication
 import com.harnessapk.agent.InitialConversationIdentity
 import com.harnessapk.chat.Conversation
+import com.harnessapk.chat.LifeConversationOverviewState
+import com.harnessapk.storage.LifeConversationOrigin
 import com.harnessapk.project.Project
 import com.harnessapk.remote.RemoteConnectionService
 import com.harnessapk.ui.capture.CaptureDestinationSheet
@@ -68,6 +78,7 @@ import com.harnessapk.ui.activity.RunDetailScreen
 import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.chat.ConversationWikiTopBarAction
 import com.harnessapk.ui.conversation.ConversationListScreen
+import com.harnessapk.ui.conversation.ArchivedConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
 import com.harnessapk.ui.project.ProjectWorkbenchDestination
 import com.harnessapk.ui.project.ProjectScreen
@@ -103,6 +114,7 @@ import kotlinx.coroutines.withContext
 
 object Routes {
     const val Conversations = "conversations"
+    const val ArchivedConversations = "life-archives"
     const val Providers = "providers"
     const val Search = "search"
     const val GlobalSearch = "global-search"
@@ -211,6 +223,10 @@ fun HarnessApkApp(
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
     var chatWikiScopeRequestKey by remember { mutableStateOf(0) }
     var chatSearchRequestKey by remember { mutableStateOf(0) }
+    var chatMoreRequestKey by remember { mutableStateOf(0) }
+    var chatBackRequestKey by remember { mutableStateOf(0) }
+    var homeCreating by remember { mutableStateOf(false) }
+    var homeCreationError by remember { mutableStateOf<String?>(null) }
     var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
     var configImportWelcome by remember { mutableStateOf<String?>(null) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
@@ -221,6 +237,14 @@ fun HarnessApkApp(
     val isHomeRoute = route == Routes.Conversations || route == null
     val context = LocalContext.current
     val container = (context.applicationContext as HarnessApkApplication).container
+    val appLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(container, appLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) container.chatSendRecoveryManager.onForeground()
+        }
+        appLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { appLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val homeModeStore = container.homeModeStore
     var mainMode by rememberSaveable { mutableStateOf(homeModeStore.mode.value) }
     var themeSourceMode by rememberSaveable { mutableStateOf(homeModeStore.themeSourceMode.value) }
@@ -233,7 +257,10 @@ fun HarnessApkApp(
         }
     }
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
-    val simpleMode by container.settingsStore.simpleMode.collectAsState(initial = false)
+    val lifeOverview by remember(container) { container.lifeConversationOverviewRepository.observe() }
+        .collectAsState(initial = LifeConversationOverviewState.Loading)
+    val loadedSimpleMode by container.settingsStore.simpleMode.collectAsState(initial = null)
+    val simpleMode = loadedSimpleMode == true
     // 简洁模式下工作入口整体隐藏，若当前正处在 WORK 页则退回生活页
     LaunchedEffect(simpleMode) {
         if (simpleMode && mainMode == MainMode.WORK) {
@@ -317,6 +344,7 @@ fun HarnessApkApp(
 
     val title = when (route) {
         Routes.Providers -> "模型配置"
+        Routes.ArchivedConversations -> "归档列表"
         Routes.Search -> "搜索能力"
         Routes.GlobalSearch -> "全局搜索"
         Routes.Voice -> "语音能力"
@@ -336,7 +364,9 @@ fun HarnessApkApp(
         Routes.RemoteControl -> remoteUiState.threads
             .firstOrNull { it.id == remoteUiState.selectedThreadId }?.title ?: "远程控制"
         Routes.Activity -> "任务动态"
-        Routes.ChatPattern -> chatTopBarTitle(conversations, currentConversationId)
+        Routes.ChatPattern -> (lifeOverview as? LifeConversationOverviewState.Content)?.items
+            ?.firstOrNull { it.conversationId == currentConversationId }?.title
+            ?: chatTopBarTitle(conversations, currentConversationId)
         else -> topLevelTitle(mainMode, currentProjectName)
     }
     val scope = rememberCoroutineScope()
@@ -372,37 +402,45 @@ fun HarnessApkApp(
             onIncomingRemoteRunConsumed()
         }
     }
-    val onCreateConversation: () -> Unit = {
+    fun createLifeConversation(openCamera: Boolean = false, startVoice: Boolean = false) {
+        if (homeCreating) return
+        val originEntryId = navController.currentBackStackEntry?.id
+        val originMode = mainMode
+        val requestedSimpleMode = loadedSimpleMode
+        homeCreating = true
         scope.launch {
-            navController.navigate(
-                Routes.chat(
-                    conversationId = container.newConversationUseCase.create(homeConversationRequest()),
-                    focusInput = true,
-                ),
-            )
+            try {
+                // Read the real preference before creating; the initial UI value is not a default choice.
+                val useSimpleMode = requestedSimpleMode ?: container.settingsStore.simpleMode.first()
+                val id = container.newConversationUseCase.create(homeConversationRequest(useSimpleMode))
+                runCatching {
+                    container.lifeConversationOverviewRepository.recordOrigin(id, when {
+                        !useSimpleMode -> LifeConversationOrigin.STANDARD
+                        openCamera -> LifeConversationOrigin.LIFE_PHOTO
+                        startVoice -> LifeConversationOrigin.LIFE_VOICE
+                        else -> LifeConversationOrigin.LIFE_TEXT
+                    })
+                }
+                if (navController.currentBackStackEntry?.id != originEntryId || mainMode != originMode) {
+                    runCatching { container.lifeConversationOverviewRepository.markUserRetained(id) }
+                    return@launch
+                }
+                navController.navigate(Routes.chat(
+                    conversationId = id, focusInput = !openCamera && !startVoice,
+                    openCamera = openCamera, startVoice = startVoice,
+                )) { launchSingleTop = true }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                homeCreationError = "暂时无法新建问题，请重试"
+            } finally {
+                homeCreating = false
+            }
         }
     }
-    // 简洁模式一级入口：新建会话后直接拉起相机 / 进入语音输入
-    val onCreatePhotoConversation: () -> Unit = {
-        scope.launch {
-            navController.navigate(
-                Routes.chat(
-                    conversationId = container.newConversationUseCase.create(homeConversationRequest()),
-                    openCamera = true,
-                ),
-            )
-        }
-    }
-    val onCreateVoiceConversation: () -> Unit = {
-        scope.launch {
-            navController.navigate(
-                Routes.chat(
-                    conversationId = container.newConversationUseCase.create(homeConversationRequest()),
-                    startVoice = true,
-                ),
-            )
-        }
-    }
+    val onCreateConversation: () -> Unit = { createLifeConversation() }
+    val onCreatePhotoConversation: () -> Unit = { createLifeConversation(openCamera = true) }
+    val onCreateVoiceConversation: () -> Unit = { createLifeConversation(startVoice = true) }
     fun openWorkbench(
         projectId: String,
         destination: ProjectWorkbenchDestination,
@@ -460,6 +498,10 @@ fun HarnessApkApp(
     }
     val effectiveThemeMode = resolveThemeMode(mainMode, themeSourceMode)
     ModeTheme(effectiveThemeMode) {
+    homeCreationError?.let { message ->
+        AlertDialog(onDismissRequest = { homeCreationError = null }, title = { Text("新建问题未完成") },
+            text = { Text(message) }, confirmButton = { TextButton(onClick = { homeCreationError = null }) { Text("知道了") } })
+    }
     Scaffold(
         modifier = Modifier.testTag("theme-${effectiveThemeMode.name}"),
         topBar = {
@@ -496,11 +538,19 @@ fun HarnessApkApp(
                 )
             } else {
                 TopAppBar(
-                    title = { Text(title) },
+                    title = { Text(
+                        if (simpleMode && route == Routes.ChatPattern && title == "新会话") "新问题" else title,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.semantics { contentDescription = title },
+                    ) },
                     navigationIcon = {
                         if (canGoBack) {
                             IconButton(
                                 onClick = {
+                                    if (route == Routes.ChatPattern) {
+                                        chatBackRequestKey += 1
+                                        return@IconButton
+                                    }
                                     if (route == Routes.RemoteControl && remoteUiState.selectedThreadId != null) {
                                         container.remoteRepository.clearSelection()
                                         return@IconButton
@@ -530,7 +580,11 @@ fun HarnessApkApp(
                     },
                     actions = {
                         when (route) {
-                            Routes.ChatPattern -> {
+                            Routes.ChatPattern -> if (simpleMode) {
+                                IconButton(onClick = { chatMoreRequestKey += 1 }) {
+                                    Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
+                                }
+                            } else {
                                 IconButton(onClick = { chatSearchRequestKey += 1 }) {
                                     Icon(Icons.Outlined.Search, contentDescription = "查找消息")
                                 }
@@ -601,6 +655,9 @@ fun HarnessApkApp(
                         onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                         welcomeMessage = configImportWelcome,
                         onWelcomeDismissed = { configImportWelcome = null },
+                        lifeOverviewRepository = container.lifeConversationOverviewRepository,
+                        onOpenArchive = { navController.navigate(Routes.ArchivedConversations) },
+                        creationInProgress = homeCreating,
                     )
                     MainMode.WORK -> Column(
                         modifier = Modifier
@@ -719,10 +776,18 @@ fun HarnessApkApp(
                 ChatScreen(
                     container = container,
                     conversationId = entry.arguments?.getString("conversationId").orEmpty(),
+                    displayTitle = title,
                     initialProjectId = entry.arguments?.getString("projectId"),
                     autoFocusInput = entry.arguments?.getBoolean("focusInput") == true,
                     startWithCamera = entry.arguments?.getBoolean("openCamera") == true,
                     startWithVoice = entry.arguments?.getBoolean("startVoice") == true,
+                    moreRequestKey = chatMoreRequestKey,
+                    onMoreRequestConsumed = { chatMoreRequestKey = 0 },
+                    backRequestKey = chatBackRequestKey,
+                    onBackRequestConsumed = { chatBackRequestKey = 0 },
+                    onNavigateBack = { navController.popBackStack() },
+                    onOpenProviderSettings = { navController.navigate(Routes.Providers) },
+                    onOpenVoiceSettings = { navController.navigate(Routes.Voice) },
                     sessionConfigRequestKey = chatSessionConfigRequestKey,
                     onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
                     wikiScopeRequestKey = chatWikiScopeRequestKey,
@@ -761,8 +826,19 @@ fun HarnessApkApp(
                     voiceInputState = voiceInput.state,
                     onStartVoiceInput = voiceInput.start,
                     onStopVoiceInput = voiceInput.stop,
+                    onCancelVoiceInput = voiceInput.cancel,
+                    onConfirmVoiceInput = voiceInput.confirm,
+                    onEditVoiceReview = voiceInput.editReview,
+                    onRestartVoiceInput = voiceInput.restart,
                     onVoiceInputConsumed = voiceInput.consume,
                     contentPadding = padding,
+                )
+            }
+            composable(Routes.ArchivedConversations) {
+                ArchivedConversationListScreen(
+                    repository = container.lifeConversationOverviewRepository,
+                    contentPadding = padding,
+                    onOpenChat = { navController.navigate(Routes.chat(it)) },
                 )
             }
             composable(Routes.ConfigPackageExport) {

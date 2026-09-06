@@ -1,0 +1,30 @@
+{
+  "source_commit": "bc46e77b30b5e4291cffb2172901184176ed3de3",
+  "apk_sha256": "d91135b440f2162fca0918a25d2148e5a5320f4d7b4dedfa17a157c44a26e622",
+  "installed_sha256": "d91135b440f2162fca0918a25d2148e5a5320f4d7b4dedfa17a157c44a26e622",
+  "matched": true,
+  "date": "2026-09-06",
+  "unit_tests": {
+    "classes": 172,
+    "tests": 1312,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "device_tests": {
+    "tests": 39,
+    "result": "OK",
+    "duration_seconds": 16.907,
+    "classes": [
+      "com.harnessapk.chat.ChatExecutionRepositoryInstrumentedTest",
+      "com.harnessapk.chat.ChatSendRecoveryPersistenceInstrumentedTest",
+      "com.harnessapk.chat.ConversationDraftStoreInstrumentedTest",
+      "com.harnessapk.storage.LifeConversationMetadataStoreInstrumentedTest",
+      "com.harnessapk.storage.LifeConversationOverviewDaoInstrumentedTest",
+      "com.harnessapk.ui.chat.LifeChatComposerTest",
+      "com.harnessapk.ui.chat.LifeDraftPresentationInstrumentedTest",
+      "com.harnessapk.ui.conversation.LifeOverviewErrorStateTest"
+    ]
+  },
+  "artifact_kind": "Debug APK; scoped device verification, not full release certification"
+}

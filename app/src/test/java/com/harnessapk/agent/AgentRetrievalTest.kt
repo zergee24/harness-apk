@@ -18,6 +18,7 @@ import com.harnessapk.storage.AgentVersionPackageEntity
 import com.harnessapk.storage.AgentVersionSourceCrossRef
 import com.harnessapk.storage.ConversationDao
 import com.harnessapk.storage.ConversationEntity
+import com.harnessapk.storage.LifeConversationRoomRow
 import com.harnessapk.ui.agent.AgentImportPreviewViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -2699,6 +2700,8 @@ private class FakeV2PackageAccess(
 
 private class RemovalConversationDao(var referenceCount: Int, var clearCount: Int = 0) : ConversationDao {
     override fun observeActive(): Flow<List<ConversationEntity>> = MutableStateFlow(emptyList())
+    override fun observeLifeOverviewRows(includeArchived: Boolean): Flow<List<LifeConversationRoomRow>> =
+        error("life overview is not part of this fake")
     override suspend fun findById(id: String): ConversationEntity? = null
     override suspend fun findLatestActive(): ConversationEntity? = null
     override suspend fun findLatestActiveInProject(projectId: String): ConversationEntity? = null
@@ -2707,6 +2710,10 @@ private class RemovalConversationDao(var referenceCount: Int, var clearCount: In
     override suspend fun updateIdentityIfNoUserMessages(id: String, agentId: String?, agentVersion: Int?, updatedAt: Long) = 0
     override suspend fun clearProject(projectId: String) = Unit
     override suspend fun archive(id: String, updatedAt: Long) = Unit
+    override suspend fun archiveLifeConversationIfIdle(id: String): Int =
+        error("life archive is not part of this fake")
+    override suspend fun restoreLifeConversation(id: String): Int =
+        error("life restore is not part of this fake")
     override suspend fun countByAgentVersion(agentId: String, version: Int) = referenceCount
     override suspend fun clearAgentReference(agentId: String, version: Int, updatedAt: Long): Int {
         clearCount += 1

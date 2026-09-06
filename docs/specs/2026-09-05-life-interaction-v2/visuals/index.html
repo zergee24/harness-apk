@@ -1,0 +1,2998 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>生活交互体验 v2 · 离线设计查看器</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --viewer-bg: #f0e8e5;
+      --viewer-panel: #fffaf8;
+      --viewer-panel-soft: #f8f0ed;
+      --viewer-ink: #2a201e;
+      --viewer-muted: #786761;
+      --viewer-border: #dfd0cb;
+      --viewer-coral: #c96f67;
+      --viewer-coral-deep: #a9544d;
+      --viewer-coral-soft: #f3d8d3;
+      --viewer-green: #49705a;
+      --viewer-shadow: 0 20px 60px rgba(72, 46, 40, 0.14);
+      --phone-bg: #faf7f6;
+      --phone-surface: #fffdfc;
+      --phone-raised: #f5ecea;
+      --phone-text: #211a19;
+      --phone-muted: #765f5b;
+      --phone-border: #e1d4d0;
+      --phone-coral: #d98278;
+      --phone-coral-deep: #b9635a;
+      --phone-coral-soft: #fff0ed;
+      --phone-primary-text: #fffdfc;
+      --phone-success: #416d52;
+      --phone-success-soft: #e7f0e8;
+      --phone-warning: #8a5b2d;
+      --phone-warning-soft: #fff3df;
+      --phone-danger: #b54844;
+      --phone-danger-soft: #fcebe9;
+      --phone-overlay: rgba(33, 26, 25, 0.48);
+      --phone-shadow: 0 22px 48px rgba(64, 43, 39, 0.2);
+    }
+
+    body[data-theme="dark"] {
+      color-scheme: dark;
+      --viewer-bg: #191516;
+      --viewer-panel: #241d1b;
+      --viewer-panel-soft: #302624;
+      --viewer-ink: #fbf1ee;
+      --viewer-muted: #cbb8b2;
+      --viewer-border: #584641;
+      --viewer-coral: #e5a097;
+      --viewer-coral-deep: #f2b9b1;
+      --viewer-coral-soft: #543532;
+      --viewer-green: #a8d5b7;
+      --viewer-shadow: 0 20px 60px rgba(0, 0, 0, 0.42);
+      --phone-bg: #211a19;
+      --phone-surface: #2d2422;
+      --phone-raised: #382b29;
+      --phone-text: #faf7f6;
+      --phone-muted: #d3c1bc;
+      --phone-border: #5d4a45;
+      --phone-coral: #e5a097;
+      --phone-coral-deep: #f0b8b0;
+      --phone-coral-soft: #472e2b;
+      --phone-primary-text: #291411;
+      --phone-success: #a8d8b8;
+      --phone-success-soft: #294536;
+      --phone-warning: #f0c58c;
+      --phone-warning-soft: #4a3926;
+      --phone-danger: #ffb4ad;
+      --phone-danger-soft: #4b2928;
+      --phone-overlay: rgba(0, 0, 0, 0.62);
+      --phone-shadow: 0 22px 48px rgba(0, 0, 0, 0.48);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-width: 320px;
+      background: var(--viewer-bg);
+    }
+
+    body {
+      min-width: 320px;
+      min-height: 100vh;
+      margin: 0;
+      color: var(--viewer-ink);
+      background: var(--viewer-bg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Noto Sans SC", "PingFang SC", sans-serif;
+      font-size: 16px;
+      font-weight: 400;
+      line-height: 1.45;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button,
+    select {
+      color: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible {
+      outline: 3px solid var(--viewer-coral);
+      outline-offset: 2px;
+    }
+
+    .viewer-shell {
+      width: min(1320px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 44px;
+    }
+
+    .viewer-header {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 22px;
+    }
+
+    .viewer-eyebrow {
+      margin: 0;
+      color: var(--viewer-coral-deep);
+      font-size: 0.78rem;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+    }
+
+    .viewer-title {
+      max-width: 760px;
+      margin: 0;
+      font-size: clamp(1.6rem, 3vw, 2.2rem);
+      font-weight: 500;
+      line-height: 1.12;
+      letter-spacing: -0.03em;
+    }
+
+    .viewer-description {
+      max-width: 760px;
+      margin: 0;
+      color: var(--viewer-muted);
+      font-size: 0.95rem;
+    }
+
+    .viewer-badge-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 3px;
+    }
+
+    .viewer-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      color: var(--viewer-coral-deep);
+      background: var(--viewer-coral-soft);
+      border: 1px solid color-mix(in srgb, var(--viewer-coral) 32%, var(--viewer-border));
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    .viewer-badge.viewer-badge-muted {
+      color: var(--viewer-muted);
+      background: var(--viewer-panel-soft);
+      border-color: var(--viewer-border);
+    }
+
+    .viewer-controls {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 14px;
+      background: var(--viewer-panel);
+      border: 1px solid var(--viewer-border);
+      border-radius: 18px;
+      box-shadow: var(--viewer-shadow);
+    }
+
+    .viewer-control {
+      display: grid;
+      min-width: 0;
+      gap: 5px;
+    }
+
+    .viewer-control-label {
+      color: var(--viewer-muted);
+      font-size: 0.72rem;
+      font-weight: 500;
+    }
+
+    .viewer-select {
+      min-width: 230px;
+      min-height: 44px;
+      padding: 8px 11px;
+      color: var(--viewer-ink);
+      background: var(--viewer-panel);
+      border: 1px solid var(--viewer-border);
+      border-radius: 10px;
+    }
+
+    .viewer-choice-row {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+
+    .viewer-choice {
+      min-width: 50px;
+      min-height: 44px;
+      padding: 7px 10px;
+      color: var(--viewer-muted);
+      background: transparent;
+      border: 1px solid var(--viewer-border);
+      border-radius: 10px;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+
+    .viewer-choice.is-selected {
+      color: var(--viewer-coral-deep);
+      background: var(--viewer-coral-soft);
+      border-color: var(--viewer-coral);
+    }
+
+    .viewer-main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(252px, 292px);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .viewer-stage,
+    .viewer-index {
+      min-width: 0;
+      background: var(--viewer-panel);
+      border: 1px solid var(--viewer-border);
+      border-radius: 22px;
+      box-shadow: var(--viewer-shadow);
+    }
+
+    .viewer-stage {
+      display: grid;
+      gap: 16px;
+      padding: 18px;
+    }
+
+    .stage-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .stage-heading-copy {
+      min-width: 0;
+    }
+
+    .stage-id {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      margin-bottom: 5px;
+      padding: 4px 8px;
+      color: var(--viewer-coral-deep);
+      background: var(--viewer-coral-soft);
+      border-radius: 8px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+    }
+
+    .stage-title {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 500;
+      line-height: 1.2;
+    }
+
+    .stage-status {
+      margin: 4px 0 0;
+      color: var(--viewer-muted);
+      font-size: 0.82rem;
+    }
+
+    .stage-tag-list {
+      display: flex;
+      justify-content: flex-end;
+      gap: 5px;
+      flex-wrap: wrap;
+      max-width: 260px;
+    }
+
+    .stage-tag {
+      padding: 5px 8px;
+      color: var(--viewer-muted);
+      background: var(--viewer-panel-soft);
+      border: 1px solid var(--viewer-border);
+      border-radius: 8px;
+      font-size: 0.7rem;
+    }
+
+    .phone-stage {
+      display: grid;
+      place-items: start center;
+      min-width: 0;
+      padding: 24px 12px;
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--viewer-coral-soft) 58%, transparent), transparent 46%),
+        var(--viewer-panel-soft);
+      border: 1px solid var(--viewer-border);
+      border-radius: 18px;
+    }
+
+    .notes-panel {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      background: var(--viewer-panel-soft);
+      border: 1px solid var(--viewer-border);
+      border-radius: 14px;
+    }
+
+    .notes-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .notes-heading h3 {
+      margin: 0;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+
+    .notes-heading span {
+      color: var(--viewer-muted);
+      font-size: 0.72rem;
+    }
+
+    .notes-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+    }
+
+    .notes-item {
+      display: grid;
+      gap: 3px;
+    }
+
+    .notes-item dt {
+      color: var(--viewer-coral-deep);
+      font-size: 0.72rem;
+      font-weight: 500;
+    }
+
+    .notes-item dd {
+      margin: 0;
+      color: var(--viewer-ink);
+      font-size: 0.82rem;
+    }
+
+    .notes-actions {
+      display: grid;
+      gap: 7px;
+      padding-top: 11px;
+      border-top: 1px solid var(--viewer-border);
+    }
+
+    .notes-actions[hidden],
+    .notes-feedback[hidden] {
+      display: none;
+    }
+
+    .notes-actions-title {
+      color: var(--viewer-coral-deep);
+      font-size: 0.72rem;
+      font-weight: 500;
+    }
+
+    .notes-action-button {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 48px;
+      padding: 8px 10px;
+      color: var(--viewer-ink);
+      text-align: left;
+      background: var(--viewer-panel);
+      border: 1px solid var(--viewer-border);
+      border-radius: 10px;
+      font-size: 0.76rem;
+    }
+
+    .notes-action-button:hover {
+      color: var(--viewer-coral-deep);
+      background: var(--viewer-coral-soft);
+      border-color: var(--viewer-coral);
+    }
+
+    .notes-action-button small {
+      flex: 0 0 auto;
+      color: var(--viewer-muted);
+      font-size: 0.86em;
+    }
+
+    .notes-feedback {
+      margin: 0;
+      padding: 9px 10px;
+      color: var(--viewer-muted);
+      background: var(--viewer-panel-soft);
+      border-radius: 10px;
+      font-size: 0.76rem;
+    }
+
+    .viewer-index {
+      position: sticky;
+      top: 18px;
+      padding: 16px;
+    }
+
+    .viewer-index h2 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 500;
+    }
+
+    .viewer-index-lead {
+      margin: 5px 0 14px;
+      color: var(--viewer-muted);
+      font-size: 0.78rem;
+    }
+
+    .index-group {
+      display: grid;
+      gap: 5px;
+      margin-top: 15px;
+    }
+
+    .index-group-title {
+      color: var(--viewer-muted);
+      font-size: 0.7rem;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+    }
+
+    .index-button {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 7px;
+      align-items: center;
+      width: 100%;
+      min-height: 48px;
+      padding: 7px 8px;
+      color: var(--viewer-muted);
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 10px;
+    }
+
+    .index-button:hover,
+    .index-button.is-selected {
+      color: var(--viewer-coral-deep);
+      background: var(--viewer-coral-soft);
+      border-color: color-mix(in srgb, var(--viewer-coral) 35%, var(--viewer-border));
+    }
+
+    .index-button-id {
+      font-size: 0.72rem;
+      font-weight: 500;
+      letter-spacing: 0.03em;
+    }
+
+    .index-button-title {
+      overflow: hidden;
+      font-size: 0.78rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .viewer-footer {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+      color: var(--viewer-muted);
+      font-size: 0.76rem;
+    }
+
+    .viewer-footer strong {
+      color: var(--viewer-ink);
+      font-weight: 500;
+    }
+
+    /* Product surface. The viewer controls stay outside this boundary. */
+    .phone-shell {
+      --phone-width: 420px;
+      --phone-scale: 1;
+      width: min(var(--phone-width), 100%);
+      max-width: 100%;
+      overflow: hidden;
+      color: var(--phone-text);
+      background: var(--phone-bg);
+      border: 1px solid var(--phone-border);
+      border-radius: 30px;
+      box-shadow: var(--phone-shadow);
+      font-size: calc(16px * var(--phone-scale));
+      line-height: 1.4;
+    }
+
+    .phone-shell[data-width="320"] {
+      --phone-width: 320px;
+    }
+
+    .phone-shell[data-width="360"] {
+      --phone-width: 360px;
+    }
+
+    .phone-shell[data-width="420"] {
+      --phone-width: 420px;
+    }
+
+    .phone-shell[data-scale="1"] {
+      --phone-scale: 1;
+    }
+
+    .phone-shell[data-scale="1.3"] {
+      --phone-scale: 1.3;
+    }
+
+    .phone-shell[data-scale="2"] {
+      --phone-scale: 2;
+    }
+
+    .phone-systembar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 28px;
+      padding: 6px 15px 3px;
+      color: var(--phone-muted);
+      background: var(--phone-surface);
+      font-size: 0.68em;
+    }
+
+    .phone-system-icons {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      letter-spacing: 0.08em;
+    }
+
+    .phone-appbar {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 65px;
+      padding: 8px 15px;
+      background: var(--phone-surface);
+      border-bottom: 1px solid var(--phone-border);
+    }
+
+    .phone-brand-mark {
+      display: grid;
+      flex: 0 0 36px;
+      width: 36px;
+      height: 36px;
+      place-items: center;
+      color: var(--phone-coral-deep);
+      background: var(--phone-coral-soft);
+      border-radius: 12px;
+      font-size: 0.94em;
+    }
+
+    .phone-title-wrap {
+      display: grid;
+      min-width: 0;
+      flex: 1 1 auto;
+      gap: 2px;
+    }
+
+    .phone-title {
+      overflow: hidden;
+      font-size: 0.94em;
+      font-weight: 500;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .phone-subtitle {
+      overflow: hidden;
+      color: var(--phone-muted);
+      font-size: 0.68em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .phone-sample-label {
+      flex: 0 0 auto;
+      color: var(--phone-coral-deep);
+      font-size: 0.63em;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .phone-icon-button,
+    .phone-more-button {
+      display: grid;
+      flex: 0 0 48px;
+      width: 48px;
+      height: 48px;
+      place-items: center;
+      color: var(--phone-text);
+      background: transparent;
+      border: 0;
+      border-radius: 13px;
+      font-size: 1.08em;
+    }
+
+    .phone-icon-button:hover,
+    .phone-more-button:hover {
+      background: var(--phone-raised);
+    }
+
+    .phone-body {
+      min-width: 0;
+      padding: 20px 16px 24px;
+      overflow-wrap: anywhere;
+    }
+
+    .phone-bottom-nav {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 5px;
+      padding: 8px 12px 10px;
+      background: var(--phone-surface);
+      border-top: 1px solid var(--phone-border);
+    }
+
+    .phone-tab {
+      display: grid;
+      min-height: 50px;
+      place-items: center;
+      gap: 2px;
+      color: var(--phone-muted);
+      background: transparent;
+      border: 0;
+      border-radius: 12px;
+      font-size: 0.72em;
+    }
+
+    .phone-tab.is-active {
+      color: var(--phone-coral-deep);
+      background: var(--phone-coral-soft);
+      font-weight: 500;
+    }
+
+    .phone-tab-symbol {
+      font-size: 1.28em;
+      line-height: 1;
+    }
+
+    .phone-kicker {
+      margin: 0 0 7px;
+      color: var(--phone-coral-deep);
+      font-size: 0.72em;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+    }
+
+    .phone-heading {
+      margin: 0;
+      font-size: 1.36em;
+      font-weight: 500;
+      line-height: 1.16;
+      letter-spacing: -0.025em;
+    }
+
+    .phone-lead {
+      margin: 8px 0 0;
+      color: var(--phone-muted);
+      font-size: 0.82em;
+    }
+
+    .home-action-list {
+      display: grid;
+      gap: 9px;
+      margin-top: 22px;
+    }
+
+    .home-action {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr) 24px;
+      gap: 10px;
+      align-items: center;
+      width: 100%;
+      min-height: 70px;
+      padding: 11px 12px;
+      color: var(--phone-text);
+      text-align: left;
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 16px;
+    }
+
+    .home-action:hover {
+      border-color: var(--phone-coral);
+      background: var(--phone-raised);
+    }
+
+    .home-action.is-primary {
+      color: var(--phone-primary-text);
+      background: var(--phone-coral);
+      border-color: var(--phone-coral);
+    }
+
+    .home-action.is-primary:hover {
+      background: var(--phone-coral-deep);
+      border-color: var(--phone-coral-deep);
+    }
+
+    .home-action-icon {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      color: var(--phone-coral-deep);
+      background: var(--phone-coral-soft);
+      border-radius: 13px;
+      font-size: 1.12em;
+    }
+
+    .home-action.is-primary .home-action-icon {
+      color: var(--phone-text);
+      background: rgba(255, 253, 252, 0.22);
+    }
+
+    .home-action-copy {
+      display: grid;
+      min-width: 0;
+      gap: 2px;
+    }
+
+    .home-action-title {
+      font-size: 0.88em;
+      font-weight: 500;
+    }
+
+    .home-action-description {
+      color: var(--phone-muted);
+      font-size: 0.7em;
+    }
+
+    .home-action.is-primary .home-action-description {
+      color: color-mix(in srgb, var(--phone-text) 78%, transparent);
+    }
+
+    .home-action-arrow {
+      color: var(--phone-muted);
+      font-size: 1em;
+    }
+
+    .home-action.is-primary .home-action-arrow {
+      color: var(--phone-text);
+    }
+
+    .phone-section {
+      margin-top: 24px;
+    }
+
+    .phone-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .phone-section-title {
+      margin: 0;
+      font-size: 0.88em;
+      font-weight: 500;
+    }
+
+    .phone-section-link {
+      min-height: 48px;
+      padding: 8px 2px;
+      color: var(--phone-coral-deep);
+      background: transparent;
+      border: 0;
+      font-size: 0.7em;
+      font-weight: 500;
+    }
+
+    .phone-section-caption {
+      margin: 3px 0 0;
+      color: var(--phone-muted);
+      font-size: 0.67em;
+    }
+
+    .recent-group {
+      display: grid;
+      gap: 4px;
+      margin-top: 15px;
+    }
+
+    .recent-group-title {
+      margin: 0 0 1px;
+      color: var(--phone-muted);
+      font-size: 0.66em;
+      font-weight: 500;
+    }
+
+    .recent-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: center;
+      width: 100%;
+      min-height: 55px;
+      padding: 8px 0;
+      color: var(--phone-text);
+      text-align: left;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--phone-border);
+    }
+
+    .recent-row:hover .recent-title {
+      color: var(--phone-coral-deep);
+    }
+
+    .recent-copy {
+      display: grid;
+      min-width: 0;
+      gap: 2px;
+    }
+
+    .recent-title {
+      overflow: hidden;
+      font-size: 0.75em;
+      font-weight: 500;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .recent-summary {
+      overflow: hidden;
+      color: var(--phone-muted);
+      font-size: 0.62em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .recent-status {
+      flex: 0 0 auto;
+      padding: 4px 6px;
+      color: var(--phone-muted);
+      border: 1px solid var(--phone-border);
+      border-radius: 7px;
+      font-size: 0.6em;
+      white-space: nowrap;
+    }
+
+    .recent-status.is-draft {
+      color: var(--phone-coral-deep);
+      background: var(--phone-coral-soft);
+      border-color: color-mix(in srgb, var(--phone-coral) 38%, var(--phone-border));
+    }
+
+    .recent-status.is-pending {
+      color: var(--phone-warning);
+      background: var(--phone-warning-soft);
+      border-color: color-mix(in srgb, var(--phone-warning) 38%, var(--phone-border));
+    }
+
+    .empty-home {
+      display: grid;
+      gap: 9px;
+      margin-top: 24px;
+      padding: 22px 15px;
+      text-align: center;
+      background: var(--phone-surface);
+      border: 1px dashed var(--phone-border);
+      border-radius: 16px;
+    }
+
+    .empty-home-symbol {
+      color: var(--phone-coral-deep);
+      font-size: 1.35em;
+    }
+
+    .empty-home strong {
+      font-size: 0.84em;
+      font-weight: 500;
+    }
+
+    .empty-home span {
+      color: var(--phone-muted);
+      font-size: 0.7em;
+    }
+
+    .empty-home .home-action-list {
+      margin-top: 4px;
+      text-align: left;
+    }
+
+    .draft-banner {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      margin-top: 15px;
+      padding: 12px;
+      background: var(--phone-coral-soft);
+      border: 1px solid color-mix(in srgb, var(--phone-coral) 38%, var(--phone-border));
+      border-radius: 14px;
+    }
+
+    .draft-banner-copy {
+      display: grid;
+      min-width: 0;
+      gap: 3px;
+    }
+
+    .draft-banner-title {
+      font-size: 0.72em;
+      font-weight: 500;
+    }
+
+    .draft-banner-detail {
+      overflow: hidden;
+      color: var(--phone-muted);
+      font-size: 0.62em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .product-button {
+      display: inline-flex;
+      min-width: 0;
+      min-height: 48px;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 9px 12px;
+      color: var(--phone-text);
+      text-align: center;
+      background: transparent;
+      border: 1px solid var(--phone-border);
+      border-radius: 11px;
+      font-size: 0.73em;
+      font-weight: 500;
+    }
+
+    .product-button:hover {
+      border-color: var(--phone-coral);
+      background: var(--phone-raised);
+    }
+
+    .product-button.primary {
+      color: var(--phone-primary-text);
+      background: var(--phone-coral);
+      border-color: var(--phone-coral);
+    }
+
+    .product-button.primary:hover {
+      background: var(--phone-coral-deep);
+      border-color: var(--phone-coral-deep);
+    }
+
+    .product-button.ghost {
+      color: var(--phone-coral-deep);
+      border-color: transparent;
+    }
+
+    .product-button.danger {
+      color: var(--phone-danger);
+      background: var(--phone-danger-soft);
+      border-color: color-mix(in srgb, var(--phone-danger) 38%, var(--phone-border));
+    }
+
+    .chat-question-card {
+      display: grid;
+      gap: 6px;
+      padding: 12px;
+      background: var(--phone-coral-soft);
+      border-radius: 14px;
+    }
+
+    .chat-question-label {
+      color: var(--phone-coral-deep);
+      font-size: 0.66em;
+      font-weight: 500;
+    }
+
+    .chat-question-text {
+      margin: 0;
+      font-size: 0.84em;
+      white-space: pre-wrap;
+    }
+
+    .chat-state-panel {
+      display: grid;
+      gap: 8px;
+      margin-top: 22px;
+      padding: 18px 14px;
+      text-align: center;
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 16px;
+    }
+
+    .chat-state-symbol {
+      display: grid;
+      width: 50px;
+      height: 50px;
+      margin: 0 auto;
+      place-items: center;
+      color: var(--phone-coral-deep);
+      background: var(--phone-coral-soft);
+      border-radius: 50%;
+      font-size: 1.22em;
+    }
+
+    .chat-state-panel strong {
+      font-size: 0.9em;
+      font-weight: 500;
+    }
+
+    .chat-state-panel span {
+      color: var(--phone-muted);
+      font-size: 0.7em;
+    }
+
+    .chat-state-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .chat-state-actions .product-button {
+      flex: 1 1 112px;
+    }
+
+    .chat-transcript {
+      display: grid;
+      gap: 5px;
+      margin-top: 10px;
+      padding: 11px;
+      color: var(--phone-muted);
+      background: var(--phone-raised);
+      border-radius: 11px;
+      font-size: 0.71em;
+    }
+
+    .chat-transcript strong {
+      color: var(--phone-text);
+      font-size: 1.02em;
+      font-weight: 500;
+    }
+
+    .chat-answer {
+      display: grid;
+      gap: 9px;
+      margin-top: 14px;
+      padding: 13px;
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 16px;
+    }
+
+    .chat-answer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--phone-coral-deep);
+      font-size: 0.68em;
+      font-weight: 500;
+    }
+
+    .chat-answer-head span:last-child {
+      color: var(--phone-muted);
+      font-weight: 400;
+    }
+
+    .chat-answer p {
+      margin: 0;
+      font-size: 0.76em;
+    }
+
+    .chat-answer ul {
+      display: grid;
+      gap: 5px;
+      margin: 0;
+      padding: 0 0 0 1.15em;
+      font-size: 0.76em;
+    }
+
+    .chat-answer li::marker {
+      color: var(--phone-coral-deep);
+    }
+
+    .chat-answer .answer-note {
+      color: var(--phone-muted);
+      font-size: 0.67em;
+    }
+
+    .answer-actions {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+      padding-top: 3px;
+    }
+
+    .answer-actions .product-button {
+      flex: 1 1 92px;
+    }
+
+    .chat-stream-line {
+      display: inline;
+      padding-right: 4px;
+      border-right: 2px solid var(--phone-coral);
+    }
+
+    .chat-followups {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .chat-followup {
+      flex: 1 1 128px;
+      min-height: 48px;
+      padding: 8px 10px;
+      color: var(--phone-coral-deep);
+      text-align: left;
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 11px;
+      font-size: 0.68em;
+    }
+
+    .chat-followup:hover {
+      background: var(--phone-coral-soft);
+      border-color: var(--phone-coral);
+    }
+
+    .composer {
+      display: grid;
+      gap: 9px;
+      margin-top: 20px;
+      padding-top: 14px;
+      border-top: 1px solid var(--phone-border);
+    }
+
+    .composer-label {
+      color: var(--phone-muted);
+      font-size: 0.68em;
+    }
+
+    .composer-input {
+      display: block;
+      width: 100%;
+      min-height: 56px;
+      padding: 11px 12px;
+      color: var(--phone-text);
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 13px;
+      font-size: 0.78em;
+      line-height: 1.45;
+      resize: vertical;
+    }
+
+    .composer-input::placeholder {
+      color: var(--phone-muted);
+      opacity: 0.92;
+    }
+
+    .attachment-strip {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 42px;
+      flex-wrap: wrap;
+      padding: 3px 0;
+    }
+
+    .attachment-empty {
+      color: var(--phone-muted);
+      font-size: 0.68em;
+    }
+
+    .attachment-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      min-height: 48px;
+      max-width: 100%;
+      padding: 5px 8px 5px 5px;
+      color: var(--phone-text);
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 10px;
+      font-size: 0.65em;
+    }
+
+    .attachment-chip-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .attachment-chip-remove {
+      display: grid;
+      flex: 0 0 48px;
+      width: 48px;
+      min-height: 48px;
+      place-items: center;
+      margin: -5px -6px -5px 0;
+      padding: 0;
+      color: var(--phone-muted);
+      background: transparent;
+      border: 0;
+      border-radius: 9px;
+      font-size: 1.05em;
+    }
+
+    .attachment-chip-remove:hover {
+      color: var(--phone-danger);
+      background: var(--phone-danger-soft);
+    }
+
+    .photo-thumb {
+      position: relative;
+      flex: 0 0 38px;
+      width: 38px;
+      height: 38px;
+      overflow: hidden;
+      background: linear-gradient(155deg, #d8b09d 0 42%, #a9bbb0 43% 67%, #d6c19f 68%);
+      border-radius: 7px;
+    }
+
+    .photo-thumb::before {
+      position: absolute;
+      right: 7px;
+      bottom: 0;
+      width: 18px;
+      height: 25px;
+      background: #718579;
+      border-radius: 50% 50% 2px 2px;
+      content: "";
+    }
+
+    .photo-thumb::after {
+      position: absolute;
+      top: 4px;
+      left: 9px;
+      width: 4px;
+      height: 27px;
+      background: #4e5e5b;
+      border-radius: 4px;
+      box-shadow: 5px 2px 0 #b44842;
+      content: "";
+      transform: rotate(15deg);
+    }
+
+    .file-mark {
+      display: grid;
+      flex: 0 0 30px;
+      width: 30px;
+      height: 34px;
+      place-items: center;
+      color: var(--phone-coral-deep);
+      background: var(--phone-coral-soft);
+      border-radius: 7px;
+      font-size: 0.8em;
+      font-weight: 500;
+    }
+
+    .composer-actions {
+      display: flex;
+      align-items: stretch;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .composer-actions .product-button {
+      flex: 1 1 70px;
+    }
+
+    .composer-actions .composer-send {
+      flex: 1.25 1 88px;
+    }
+
+    .composer-actions .composer-send.is-stopping {
+      color: var(--phone-danger);
+      background: var(--phone-danger-soft);
+      border-color: color-mix(in srgb, var(--phone-danger) 38%, var(--phone-border));
+    }
+
+    .composer-helper {
+      color: var(--phone-muted);
+      font-size: 0.62em;
+    }
+
+    .status-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-top: 15px;
+      padding: 11px;
+      border-radius: 12px;
+    }
+
+    .status-banner.warning {
+      color: var(--phone-warning);
+      background: var(--phone-warning-soft);
+      border: 1px solid color-mix(in srgb, var(--phone-warning) 35%, var(--phone-border));
+    }
+
+    .status-banner.danger {
+      color: var(--phone-danger);
+      background: var(--phone-danger-soft);
+      border: 1px solid color-mix(in srgb, var(--phone-danger) 35%, var(--phone-border));
+    }
+
+    .status-banner.neutral {
+      color: var(--phone-muted);
+      background: var(--phone-raised);
+      border: 1px solid var(--phone-border);
+    }
+
+    .status-banner-copy {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .status-banner strong {
+      color: currentColor;
+      font-size: 0.75em;
+      font-weight: 500;
+    }
+
+    .status-banner span {
+      color: currentColor;
+      font-size: 0.66em;
+    }
+
+    .status-symbol {
+      flex: 0 0 auto;
+      font-size: 0.9em;
+    }
+
+    .chat-review {
+      display: grid;
+      gap: 9px;
+      margin-top: 15px;
+      padding: 12px;
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 14px;
+    }
+
+    .chat-review-label {
+      color: var(--phone-coral-deep);
+      font-size: 0.68em;
+      font-weight: 500;
+    }
+
+    .chat-review-input {
+      width: 100%;
+      min-height: 88px;
+      padding: 10px 11px;
+      color: var(--phone-text);
+      background: var(--phone-bg);
+      border: 1px solid var(--phone-border);
+      border-radius: 11px;
+      font-size: 0.78em;
+      line-height: 1.45;
+      resize: vertical;
+    }
+
+    .chat-review-actions {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .chat-review-actions .product-button {
+      flex: 1 1 112px;
+    }
+
+    .attachment-state-list {
+      display: grid;
+      gap: 7px;
+      margin-top: 11px;
+    }
+
+    .attachment-state-row {
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      min-height: 58px;
+      padding: 7px 8px;
+      background: var(--phone-raised);
+      border: 1px solid var(--phone-border);
+      border-radius: 11px;
+    }
+
+    .attachment-state-row.is-failed {
+      background: var(--phone-danger-soft);
+      border-color: color-mix(in srgb, var(--phone-danger) 35%, var(--phone-border));
+    }
+
+    .attachment-state-copy {
+      display: grid;
+      min-width: 0;
+      gap: 2px;
+    }
+
+    .attachment-state-name {
+      overflow: hidden;
+      font-size: 0.68em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .attachment-state-status {
+      color: var(--phone-muted);
+      font-size: 0.61em;
+    }
+
+    .attachment-state-status.is-failed {
+      color: var(--phone-danger);
+    }
+
+    .attachment-state-action {
+      min-height: 48px;
+      padding: 8px 5px;
+      color: var(--phone-coral-deep);
+      background: transparent;
+      border: 0;
+      font-size: 0.62em;
+      font-weight: 500;
+    }
+
+    .more-overlay {
+      position: relative;
+      min-height: 360px;
+      margin: -20px -16px -24px;
+      padding: 20px 16px 24px;
+      background: var(--phone-overlay);
+    }
+
+    .more-background-chat {
+      display: grid;
+      gap: 12px;
+      opacity: 0.45;
+    }
+
+    .more-background-line {
+      height: 12px;
+      background: var(--phone-surface);
+      border-radius: 5px;
+    }
+
+    .more-background-line.short {
+      width: 64%;
+    }
+
+    .more-sheet {
+      position: absolute;
+      right: 12px;
+      bottom: 14px;
+      left: 12px;
+      display: grid;
+      gap: 2px;
+      padding: 12px;
+      color: var(--phone-text);
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 18px;
+      box-shadow: var(--phone-shadow);
+    }
+
+    .more-sheet-title {
+      margin: 0 4px 6px;
+      color: var(--phone-muted);
+      font-size: 0.68em;
+    }
+
+    .more-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 48px;
+      padding: 8px 4px;
+      color: var(--phone-text);
+      text-align: left;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--phone-border);
+      font-size: 0.75em;
+    }
+
+    .more-item:last-of-type {
+      border-bottom: 0;
+    }
+
+    .more-item small {
+      color: var(--phone-muted);
+      font-size: 0.78em;
+    }
+
+    .advanced-details {
+      margin-top: 6px;
+      padding: 8px 4px 2px;
+      border-top: 1px solid var(--phone-border);
+    }
+
+    .advanced-details summary {
+      min-height: 48px;
+      padding: 11px 0;
+      color: var(--phone-muted);
+      cursor: pointer;
+      font-size: 0.7em;
+    }
+
+    .advanced-details p {
+      margin: 3px 0 0;
+      color: var(--phone-muted);
+      font-size: 0.64em;
+    }
+
+    .history-manage-list {
+      display: grid;
+      gap: 4px;
+      margin-top: 18px;
+    }
+
+    .history-manage-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: center;
+      min-height: 61px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--phone-border);
+    }
+
+    .history-manage-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .history-manage-copy strong {
+      overflow: hidden;
+      font-size: 0.75em;
+      font-weight: 500;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .history-manage-copy span {
+      color: var(--phone-muted);
+      font-size: 0.62em;
+    }
+
+    .history-archive {
+      min-height: 48px;
+      padding: 8px 8px;
+      color: var(--phone-coral-deep);
+      background: transparent;
+      border: 1px solid var(--phone-border);
+      border-radius: 9px;
+      font-size: 0.64em;
+      font-weight: 500;
+    }
+
+    .archive-recovery {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 9px;
+      margin-top: 12px;
+      padding: 10px 11px;
+      background: var(--phone-raised);
+      border: 1px solid var(--phone-border);
+      border-radius: 12px;
+    }
+
+    .archive-recovery-copy {
+      display: grid;
+      min-width: 0;
+      gap: 2px;
+    }
+
+    .archive-recovery-copy strong {
+      font-size: 0.7em;
+      font-weight: 500;
+    }
+
+    .archive-recovery-copy span {
+      color: var(--phone-muted);
+      font-size: 0.61em;
+    }
+
+    .undo-toast {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 9px;
+      margin-top: 13px;
+      padding: 10px 11px;
+      color: var(--phone-text);
+      background: var(--phone-surface);
+      border: 1px solid var(--phone-border);
+      border-radius: 12px;
+      font-size: 0.67em;
+    }
+
+    .undo-toast button {
+      min-height: 48px;
+      padding: 8px 2px 8px 8px;
+      color: var(--phone-coral-deep);
+      background: transparent;
+      border: 0;
+      font-weight: 500;
+    }
+
+    .spec-hidden {
+      display: none !important;
+    }
+
+    /* Offline contact sheets used by chat-overview.png and home-overview.png. */
+    body.sheet-mode {
+      min-width: 0;
+    }
+
+    body.sheet-mode .viewer-shell {
+      width: min(1220px, calc(100% - 36px));
+      padding-top: 30px;
+    }
+
+    body.sheet-mode .viewer-header,
+    body.sheet-mode .viewer-main,
+    body.sheet-mode .viewer-footer {
+      display: none;
+    }
+
+    .sheet-root {
+      display: grid;
+      gap: 20px;
+    }
+
+    .sheet-heading {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .sheet-kicker {
+      margin: 0 0 5px;
+      color: var(--viewer-coral-deep);
+      font-size: 0.78rem;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+    }
+
+    .sheet-heading h1 {
+      margin: 0;
+      font-size: clamp(1.5rem, 3vw, 2rem);
+      font-weight: 500;
+      line-height: 1.15;
+    }
+
+    .sheet-heading p {
+      max-width: 530px;
+      margin: 7px 0 0;
+      color: var(--viewer-muted);
+      font-size: 0.85rem;
+    }
+
+    .sheet-flag {
+      color: var(--viewer-muted);
+      font-size: 0.75rem;
+    }
+
+    .sheet-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      align-items: start;
+    }
+
+    .sheet-grid.chat-sheet {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .sheet-card {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+      padding: 12px;
+      background: var(--viewer-panel);
+      border: 1px solid var(--viewer-border);
+      border-radius: 18px;
+      box-shadow: var(--viewer-shadow);
+    }
+
+    .sheet-card-heading {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .sheet-card-heading strong {
+      color: var(--viewer-coral-deep);
+      font-size: 0.76rem;
+      font-weight: 500;
+    }
+
+    .sheet-card-heading span {
+      overflow: hidden;
+      color: var(--viewer-ink);
+      font-size: 0.75rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .sheet-phone-wrap {
+      display: grid;
+      place-items: start center;
+      min-width: 0;
+    }
+
+    .sheet-phone {
+      --phone-width: 100%;
+      width: 100%;
+      border-radius: 24px;
+      box-shadow: none;
+      font-size: 15px;
+    }
+
+    @media (max-width: 980px) {
+      .viewer-main {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .viewer-index {
+        position: static;
+      }
+
+      .index-group {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .index-group-title {
+        grid-column: 1 / -1;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .viewer-shell {
+        width: min(100% - 20px, 620px);
+        padding-top: 18px;
+      }
+
+      .viewer-controls {
+        align-items: stretch;
+      }
+
+      .viewer-control,
+      .viewer-select {
+        width: 100%;
+      }
+
+      .viewer-choice-row {
+        width: 100%;
+      }
+
+      .viewer-choice {
+        flex: 1 1 70px;
+      }
+
+      .stage-heading {
+        display: grid;
+      }
+
+      .stage-tag-list {
+        justify-content: flex-start;
+        max-width: none;
+      }
+
+      .phone-stage {
+        padding: 12px 4px;
+      }
+
+      .index-group {
+        grid-template-columns: 1fr;
+      }
+
+      .index-group-title {
+        grid-column: auto;
+      }
+
+      .sheet-grid,
+      .sheet-grid.chat-sheet {
+        grid-template-columns: 1fr;
+      }
+
+      body.sheet-mode .viewer-shell {
+        width: min(100% - 20px, 540px);
+      }
+    }
+
+    @media (max-width: 360px) {
+      .viewer-stage {
+        padding: 12px;
+      }
+
+      .phone-stage {
+        border: 0;
+        padding: 0;
+      }
+
+      .phone-shell {
+        border-radius: 22px;
+      }
+
+      .phone-body {
+        padding-right: 13px;
+        padding-left: 13px;
+      }
+
+      .phone-appbar {
+        padding-right: 11px;
+        padding-left: 11px;
+      }
+
+      .phone-sample-label {
+        display: none;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body data-theme="light">
+  <div class="viewer-shell" id="spec-viewer">
+    <header class="viewer-header">
+      <div>
+        <p class="viewer-eyebrow">生活交互体验 v2 · 设计查看器</p>
+        <h1 class="viewer-title">从一句话到下一步，状态都能找回来</h1>
+        <p class="viewer-description">离线示意只使用天气、出行和购物清单示例。选择状态、宽度、字号和主题，旁边的布局标注会同步切换。</p>
+        <div class="viewer-badge-row">
+          <span class="viewer-badge">完整 HTML · 可离线打开</span>
+          <span class="viewer-badge viewer-badge-muted">示例数据 · 不调用真实能力</span>
+        </div>
+      </div>
+
+      <section class="viewer-controls" aria-label="设计查看器控制">
+        <label class="viewer-control" for="screen-select">
+          <span class="viewer-control-label">屏幕状态</span>
+          <select class="viewer-select" id="screen-select"></select>
+        </label>
+        <div class="viewer-control">
+          <span class="viewer-control-label">画面宽度</span>
+          <div class="viewer-choice-row" role="group" aria-label="画面宽度">
+            <button class="viewer-choice" type="button" data-width-choice="320">320px</button>
+            <button class="viewer-choice" type="button" data-width-choice="360">360px</button>
+            <button class="viewer-choice" type="button" data-width-choice="420">420px</button>
+          </div>
+        </div>
+        <div class="viewer-control">
+          <span class="viewer-control-label">字号倍率</span>
+          <div class="viewer-choice-row" role="group" aria-label="字号倍率">
+            <button class="viewer-choice" type="button" data-scale-choice="1">1x</button>
+            <button class="viewer-choice" type="button" data-scale-choice="1.3">1.3x</button>
+            <button class="viewer-choice" type="button" data-scale-choice="2">2x</button>
+          </div>
+        </div>
+        <div class="viewer-control">
+          <span class="viewer-control-label">主题</span>
+          <div class="viewer-choice-row" role="group" aria-label="主题">
+            <button class="viewer-choice" type="button" data-theme-choice="light">浅色</button>
+            <button class="viewer-choice" type="button" data-theme-choice="dark">深色</button>
+          </div>
+        </div>
+      </section>
+    </header>
+
+    <main class="viewer-main">
+      <section class="viewer-stage" aria-labelledby="stage-title">
+        <div class="stage-heading">
+          <div class="stage-heading-copy">
+            <span class="stage-id" id="stage-id">H01</span>
+            <h2 class="stage-title" id="stage-title">生活首页 · 有记录</h2>
+            <p class="stage-status" id="stage-status">首屏明确三种开始方式，草稿与待确认问题可见。</p>
+          </div>
+          <div class="stage-tag-list" id="stage-tags" aria-label="当前状态标签"></div>
+        </div>
+        <div class="phone-stage">
+          <div class="phone-shell" id="phone-shell" data-width="420" data-scale="1" data-theme="light" aria-label="手机界面示意"></div>
+        </div>
+        <aside class="notes-panel" aria-labelledby="notes-title">
+          <div class="notes-heading">
+            <h3 id="notes-title">布局标注与状态规则</h3>
+            <span id="notes-id">对应 H01</span>
+          </div>
+          <dl class="notes-list" id="notes-list"></dl>
+          <div class="notes-actions" id="notes-actions" aria-label="查看器分支控制" hidden></div>
+          <p class="notes-feedback" id="notes-feedback" role="status" hidden></p>
+        </aside>
+      </section>
+
+      <aside class="viewer-index" aria-labelledby="index-title">
+        <h2 id="index-title">状态索引</h2>
+        <p class="viewer-index-lead">点击任一状态查看手机画面与实现边界。</p>
+        <div id="state-index"></div>
+      </aside>
+    </main>
+
+    <footer class="viewer-footer">
+      <strong>阅读提示</strong>
+      <span>顶部控件属于设计查看器；手机内按钮只用于切换示意状态。</span>
+      <span>高级能力始终收在“更多”，不在简洁生活首页展开。</span>
+    </footer>
+
+    <main class="sheet-root spec-hidden" id="sheet-root" aria-label="状态示意图"></main>
+  </div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const viewer = document.getElementById("spec-viewer");
+      const phone = document.getElementById("phone-shell");
+      const screenSelect = document.getElementById("screen-select");
+      const stageId = document.getElementById("stage-id");
+      const stageTitle = document.getElementById("stage-title");
+      const stageStatus = document.getElementById("stage-status");
+      const stageTags = document.getElementById("stage-tags");
+      const notesId = document.getElementById("notes-id");
+      const notesList = document.getElementById("notes-list");
+      const notesActions = document.getElementById("notes-actions");
+      const notesFeedback = document.getElementById("notes-feedback");
+      const stateIndex = document.getElementById("state-index");
+      const sheetRoot = document.getElementById("sheet-root");
+
+      const screens = [
+        {
+          id: "H01",
+          group: "首页",
+          label: "生活首页 · 有记录",
+          status: "首屏明确三种开始方式，草稿与待确认问题可见。",
+          tags: ["简洁模式", "可继续", "示例记录"],
+          notes: {
+            layout: "上方一句话标题，中段三种提问入口，下面按今天 / 昨天分组展示问题标题与摘要。",
+            rule: "草稿显示待确认状态；空壳会话不进入历史；三种入口都进入同一聊天确认链。简洁模式新建使用普通助手，已有智能体会话需在标题副文案中说明身份。",
+            id: "H01 · 生活首页有记录、草稿和待确认记录。",
+          },
+        },
+        {
+          id: "H02",
+          group: "首页",
+          label: "生活首页 · 空状态",
+          status: "没有历史时仍给出清楚的下一步，不留下大面积空白。",
+          tags: ["空态", "三种入口", "不落历史"],
+          notes: {
+            layout: "三种提问入口保留，空态只解释如何开始，不增加工作台或配置卡片。",
+            rule: "未发送前返回不会产生历史；取消入口动作只回到生活首页。",
+            id: "H02 · 生活首页无历史时的明确空态。",
+          },
+        },
+        {
+          id: "H03",
+          group: "附屏",
+          label: "整理记录 · 撤销归档",
+          status: "整理使用归档语义，短时提示提供撤销与恢复入口。",
+          tags: ["历史整理", "可撤销", "低风险"],
+          notes: {
+            layout: "保持记录标题与摘要可读，‘移到归档’放在行尾，底部提示条给出撤销，归档列表另有恢复入口。",
+            rule: "整理不做不可撤销删除；撤销或恢复都回到原记录与分组位置，草稿状态保持。",
+            id: "H03 · 历史整理与撤销示意附屏。",
+          },
+        },
+        {
+          id: "H04",
+          group: "首页",
+          label: "生活首页 · 读取失败",
+          status: "读取失败时保留缓存记录与明确重试，不把异常伪装成空首页。",
+          tags: ["H04", "读取失败", "缓存保留"],
+          notes: {
+            layout: "标题区说明暂时无法读取；下方仍保留缓存中的标题与摘要，重试按钮位于异常说明旁。",
+            rule: "读取失败不清空历史、不创建重复会话；重新加载是读取动作，缓存内容仍可被用户打开。",
+            id: "H04 · 生活历史读取失败与缓存保留。",
+          },
+        },
+        {
+          id: "C01",
+          group: "聊天",
+          label: "空聊天 · 文字输入",
+          status: "聊天只保留返回、单行标题和更多；输入框先于答案出现。",
+          tags: ["C01", "文字", "可加附件"],
+          notes: {
+            layout: "顶部返回 + 单行省略标题 + 更多；附件条在文本框上方，附件 / 说话 / 发送独立成行。",
+            rule: "文本框最小 56dp；空问题不能发送；返回时保存输入，空壳不生成历史。",
+            id: "C01 · 新聊天的文字起始态。",
+          },
+        },
+        {
+          id: "C02",
+          group: "聊天",
+          label: "文字 + 照片 + 文档确认",
+          status: "附件以缩略图和文件名呈现，用户确认后一次发送。",
+          tags: ["C02", "附件组合", "待发送"],
+          notes: {
+            layout: "问题卡在上，附件横条紧贴文本框上方；每个附件都带可触达的移除入口，附件、语音和发送仍在下方独立行。",
+            rule: "图片与文档是问题内容的一部分；发送失败时保留问题和附件；不展示内部协议块。",
+            id: "C02 · 文字问题组合照片与文档的确认态。",
+          },
+        },
+        {
+          id: "C03",
+          group: "聊天",
+          label: "语音 LISTENING",
+          status: "正在听的状态只给停止录音与取消，不把录音状态伪装成已发送。",
+          tags: ["C03", "LISTENING", "可停止 / 取消"],
+          notes: {
+            layout: "中心状态面板突出文字状态；停止与取消两个动作并列且都保留足够触控面积。",
+            rule: "停止进入 C04 整理语音；取消回到生活首页，不创建空会话。这里是演示状态，不启动麦克风。",
+            id: "C03 · 语音 LISTENING 状态。",
+          },
+        },
+        {
+          id: "C04",
+          group: "聊天",
+          label: "语音 FINALIZING",
+          status: "录音已经停止，正在整理文字；只提供取消，不显示无效的停止。",
+          tags: ["C04", "FINALIZING", "取消整理"],
+          notes: {
+            layout: "状态面板明确“录音已停止”，只显示整理中的占位，不提前展示转写文字，操作区只保留取消整理。",
+            rule: "取消回到 C01 并保留可编辑草稿；转写结束后才进入 C12 检查，不自动发送。",
+            id: "C04 · 语音 FINALIZING 状态。",
+          },
+        },
+        {
+          id: "C05",
+          group: "聊天",
+          label: "RUNNING · 正常生成",
+          status: "仅 RUNNING 显示停止生成；QUEUED 只显示等待处理并锁定主操作。",
+          tags: ["C05", "RUNNING", "可停止"],
+          notes: {
+            layout: "问题卡、单一生成状态、流式答案依次排列；停止是当前主动作。",
+            rule: "当前示意为 RUNNING，停止只结束生成且保留已显示段落；若处于 QUEUED，应显示等待处理，主操作不可重复点击，不提供排队取消。",
+            id: "C05 · RUNNING 生成中；QUEUED 规则见状态标注。",
+          },
+        },
+        {
+          id: "C06",
+          group: "聊天",
+          label: "成功答案 · 继续提问",
+          status: "完整答案保留在当前会话；本屏按朗读能力可用示例展示复制与朗读。",
+          tags: ["C06", "已完成", "继续提问"],
+          notes: {
+            layout: "回答卡优先呈现清单与下一步，下面用两个简短追问作为继续入口，输入框仍可自由编辑。",
+            rule: "本屏按朗读能力可用示例展示复制与朗读入口；查看器点击只给外部示意反馈，不声称真实复制或朗读。继续提问不会自动入队；新问题需再次确认后发送；返回可回到历史并保留草稿。",
+            id: "C06 · 成功生成后的答案与追问态。",
+          },
+        },
+        {
+          id: "C07",
+          group: "聊天",
+          label: "模型未配置",
+          status: "问题已经保留，就地解释未完成设置并提供去设置入口。",
+          tags: ["C07", "未配置", "保留问题"],
+          notes: {
+            layout: "问题卡保持在错误说明上方；主动作去设置，次动作保留返回，不把高级参数铺在当前页。",
+            rule: "未配置不是发送失败；不清空问题和附件；去设置只进入设置边界示意，不在简洁模式伪造配置表单。",
+            id: "C07 · 模型未配置的可恢复阻塞态。",
+          },
+        },
+        {
+          id: "C08",
+          group: "聊天",
+          label: "已落地生成失败",
+          status: "生成失败后问题与附件仍在原处，重新生成是明确动作。",
+          tags: ["C08", "失败", "重新生成"],
+          notes: {
+            layout: "失败条紧贴问题卡，回答区不伪造半成品；重试按钮与返回动作都清楚可见。",
+            rule: "当前示意为最新 FAILED 问题，重新生成沿用原 USER 消息；若不是最新失败，只提供查看详情或复制问题，不显示重新生成。",
+            id: "C08 · 最新已落地生成失败与问题保留。",
+          },
+        },
+        {
+          id: "C09",
+          group: "聊天",
+          label: "UNKNOWN · 状态待确认",
+          status: "未知结果只给重新确认与返回生活，绝不直接重发或声称取消成功。",
+          tags: ["C09", "UNKNOWN", "待确认"],
+          notes: {
+            layout: "中性状态条说明当前不能判断结果，两个操作分别进入重新确认或生活首页。",
+            rule: "重新确认是状态查询动作，不是重发；返回生活保留问题草稿；不能展示“已取消”结论。不同查询结果只在查看器外分支到对应示意状态。",
+            id: "C09 · 未知请求结果的保守恢复态。",
+          },
+        },
+        {
+          id: "C10",
+          group: "聊天",
+          label: "更多 · 次级设置",
+          status: "查找消息、本次提问设置和朗读设置在更多中；高级术语只在次级面板出现。",
+          tags: ["C10", "更多", "高级收起"],
+          notes: {
+            layout: "保持聊天背景，底部弹出轻量菜单；高级参数通过可展开次级面板查看。",
+            rule: "简洁模式不在聊天首屏暴露模型、知识库和推理等概念；更多菜单可关闭并返回当前回答。",
+            id: "C10 · 聊天更多菜单与高级能力边界。",
+          },
+        },
+        {
+          id: "C11",
+          group: "聊天",
+          label: "确认未落地 · 准备失败",
+          status: "确定没有发出时解锁编辑，问题与附件保留并等待明确重试。",
+          tags: ["C11", "未落地", "可编辑重试"],
+          notes: {
+            layout: "错误说明紧贴原问题卡，编辑框与附件条仍在下方；重试和返回分别表达两种路径。",
+            rule: "C11 只用于权威确认未落地或准备失败；明确重试沿用原问题快照，不与 C09 UNKNOWN 共用入口。",
+            id: "C11 · 确认未落地 / 发送准备失败。",
+          },
+        },
+        {
+          id: "C12",
+          group: "聊天",
+          label: "转写成功 · 待确认",
+          status: "识别文字可编辑，确认使用只合入当前草稿，仍需显式发送。",
+          tags: ["C12", "转写成功", "不自动发送"],
+          notes: {
+            layout: "可编辑转写文本独立成确认区，确认使用、重新说和取消均为明确动作。",
+            rule: "确认使用只把文字加入草稿并进入 C02；不自动调用模型、不自动清空原草稿或附件。",
+            id: "C12 · 语音转写成功后的待确认态。",
+          },
+        },
+        {
+          id: "C13",
+          group: "聊天",
+          label: "已停止 · 保留部分答案",
+          status: "用户停止生成后保留已出现的答案正文，状态与失败分开表达。",
+          tags: ["C13", "已停止", "答案保留"],
+          notes: {
+            layout: "停止状态条位于问题与部分答案之间；下方保留复制、继续提问和同问题重新生成。",
+            rule: "主动停止不是生成失败；已有答案保留，下一条草稿不会自动入队，重新生成沿用原问题。",
+            id: "C13 · 生成已停止且部分答案仍可读。",
+          },
+        },
+        {
+          id: "C14",
+          group: "聊天",
+          label: "附件读取中 · 读取失败",
+          status: "逐项展示附件读取状态，失败项可重选，其他草稿继续保留。",
+          tags: ["C14", "附件状态", "发送受阻"],
+          notes: {
+            layout: "附件状态条位于问题卡与输入框之间；读取中和失败各有明确文案与独立操作。",
+            rule: "读取中禁用发送；读取失败不丢掉文字或已成功附件，重选/取消后才重新判断发送门禁。",
+            id: "C14 · 附件导入中或读取失败。",
+          },
+        },
+      ];
+
+      const screenById = (id) => screens.find((screen) => screen.id === id) || screens[0];
+      const query = new URLSearchParams(window.location.search);
+      const initialScreen = query.get("screen");
+      const state = {
+        screen: screens.some((screen) => screen.id === initialScreen) ? initialScreen : "H01",
+        width: ["320", "360", "420"].includes(query.get("width")) ? query.get("width") : "420",
+        scale: ["1", "1.3", "2"].includes(query.get("scale")) ? query.get("scale") : "1",
+        theme: ["light", "dark"].includes(query.get("theme")) ? query.get("theme") : "light",
+        draft: "",
+        transcriptDraft: "下雨天带孩子出门，要准备什么？",
+        voiceMerged: false,
+      };
+      const voiceDraftBaseline = "周末去公园怎么安排比较轻松？";
+      const voiceTranscript = "下雨天带孩子出门，要准备什么？";
+
+      const icon = (symbol, label = "") => `<span aria-hidden="true">${symbol}</span>${label}`;
+
+      const escapeHtml = (value) => String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+
+      const phoneTop = (title, subtitle, options = {}) => {
+        const isHome = options.home === true;
+        const backTarget = options.backTarget || "H01";
+        const backAction = options.backAction ? ` data-action="${options.backAction}"` : "";
+        const back = isHome
+          ? `<span class="phone-brand-mark" aria-hidden="true">☼</span>`
+          : `<button class="phone-icon-button" type="button" data-goto="${backTarget}"${backAction} aria-label="返回生活首页">‹</button>`;
+        const sample = `<span class="phone-sample-label">示例内容</span>`;
+        const more = options.more === false
+          ? ""
+          : isHome
+            ? `<button class="phone-icon-button" type="button" data-goto="H03" aria-label="打开我的">◎</button>`
+            : `<button class="phone-more-button" type="button" data-goto="C10" aria-label="更多">⋯</button>`;
+        return `
+          <div class="phone-systembar" aria-hidden="true">
+            <span>9:41</span>
+            <span class="phone-system-icons">▮▮▮ ◔ ▰</span>
+          </div>
+          <div class="phone-appbar">
+            ${back}
+            <div class="phone-title-wrap">
+              <strong class="phone-title">${escapeHtml(title)}</strong>
+              <span class="phone-subtitle">${escapeHtml(subtitle)}</span>
+            </div>
+            ${sample}
+            ${more}
+          </div>`;
+      };
+
+      const phoneBottom = (active = "life") => `
+        <nav class="phone-bottom-nav" aria-label="生活与我的">
+          <button class="phone-tab${active === "life" ? " is-active" : ""}" type="button" data-goto="H01" aria-current="${active === "life" ? "page" : "false"}">
+            <span class="phone-tab-symbol" aria-hidden="true">⌂</span><span>生活</span>
+          </button>
+          <button class="phone-tab${active === "me" ? " is-active" : ""}" type="button" data-goto="H03" aria-current="${active === "me" ? "page" : "false"}">
+            <span class="phone-tab-symbol" aria-hidden="true">○</span><span>我的</span>
+          </button>
+        </nav>`;
+
+      const actionButton = (mode, title, description, symbol, target, primary = false) => `
+        <button class="home-action${primary ? " is-primary" : ""}" type="button" data-goto="${target}">
+          <span class="home-action-icon" aria-hidden="true">${symbol}</span>
+          <span class="home-action-copy">
+            <span class="home-action-title">${title}</span>
+            <span class="home-action-description">${description}</span>
+          </span>
+          <span class="home-action-arrow" aria-hidden="true">›</span>
+        </button>`;
+
+      const recentRow = (title, summary, status, target, statusClass = "") => `
+        <button class="recent-row" type="button" data-goto="${target}" aria-label="打开${title}">
+          <span class="recent-copy">
+            <span class="recent-title">${title}</span>
+            <span class="recent-summary">${summary}</span>
+          </span>
+          <span class="recent-status${statusClass ? ` ${statusClass}` : ""}">${status}</span>
+        </button>`;
+
+      const renderHome = () => `
+        ${phoneTop("生活", "从一句话开始", { home: true })}
+        <div class="phone-body">
+          <p class="phone-kicker">今天也可以先问一件小事</p>
+          <h1 class="phone-heading">想问点什么？</h1>
+          <p class="phone-lead">说清楚问题，先确认内容，再开始回答。</p>
+          <div class="home-action-list" aria-label="开始提问">
+            ${actionButton("voice", "说话提问", "先转成文字确认", "◉", "C03", true)}
+            ${actionButton("photo", "拍照提问", "附一张照片一起问", "▧", "C02")}
+            ${actionButton("typing", "打字提问", "把问题写下来再开始", "✎", "C01")}
+          </div>
+          <section class="phone-section" aria-labelledby="recent-title">
+            <div class="phone-section-header">
+              <div>
+                <h2 class="phone-section-title" id="recent-title">最近聊过</h2>
+                <p class="phone-section-caption">问题标题和摘要都能帮助找回上下文</p>
+              </div>
+              <button class="phone-section-link" type="button" data-goto="H03">整理</button>
+            </div>
+            <div class="recent-group">
+              <h3 class="recent-group-title">今天</h3>
+              ${recentRow("出门前要带什么？", "按下雨天整理了一份清单", "待确认", "C02", "is-pending")}
+              ${recentRow("晚饭想做得简单一点", "20 分钟内完成的家常菜安排", "已完成", "C06")}
+            </div>
+            <div class="recent-group">
+              <h3 class="recent-group-title">昨天</h3>
+              ${recentRow("周末去公园怎么安排？", "路线、补水和休息点的建议", "草稿", "C01", "is-draft")}
+            </div>
+          </section>
+        </div>
+        ${phoneBottom("life")}`;
+
+      const renderEmptyHome = () => `
+        ${phoneTop("生活", "从一句话开始", { home: true })}
+        <div class="phone-body">
+          <p class="phone-kicker">生活</p>
+          <h1 class="phone-heading">想问点什么？</h1>
+          <p class="phone-lead">这里会留下你确认过的问题和回答。</p>
+          <div class="empty-home" aria-label="最近没有记录">
+            <span class="empty-home-symbol" aria-hidden="true">✦</span>
+            <strong>还没有聊过的问题</strong>
+            <span>先从一句话、一个画面或一段文字开始。</span>
+            <div class="home-action-list">
+              ${actionButton("voice", "说话提问", "语音先变成可编辑文字", "◉", "C03", true)}
+              ${actionButton("photo", "拍照提问", "附上示例照片再确认", "▧", "C02")}
+              ${actionButton("typing", "打字提问", "写下你想知道的事", "✎", "C01")}
+            </div>
+          </div>
+        </div>
+        ${phoneBottom("life")}`;
+
+      const renderH04 = () => `
+        ${phoneTop("生活", "记录读取遇到问题", { home: true })}
+        <div class="phone-body">
+          <p class="phone-kicker">最近聊过</p>
+          <h1 class="phone-heading">先保留已有记录</h1>
+          <div class="status-banner danger" role="alert">
+            <span class="status-symbol" aria-hidden="true">×</span>
+            <span class="status-banner-copy"><strong>暂时没能读取记录</strong><span>已有缓存仍保留。先重新加载，避免在状态不明时创建重复会话。</span></span>
+          </div>
+          <div class="recent-group" aria-label="缓存记录">
+            <h2 class="recent-group-title">缓存中的记录 · 示例</h2>
+            ${recentRow("出门前要带什么？", "按下雨天整理了一份清单", "缓存", "C02")}
+            ${recentRow("周末去公园怎么安排？", "路线、补水和休息点的建议", "昨天", "C06")}
+          </div>
+          <div class="chat-state-actions">
+            <button class="product-button primary" type="button" data-goto="H01">重新加载</button>
+            <button class="product-button" type="button" data-goto="H01">返回生活</button>
+          </div>
+          <p class="composer-helper">演示状态 · 重新加载是读取动作，不是新建会话。</p>
+        </div>
+        ${phoneBottom("life")}`;
+
+      const attachmentStrip = (attachments = [], emptyLabel = "可添加照片或文件") => {
+        if (!attachments.length) return `<div class="attachment-strip"><span class="attachment-empty">${emptyLabel}</span></div>`;
+        return `<div class="attachment-strip" aria-label="已添加附件">${attachments.map((attachment) => attachment.type === "photo"
+          ? `<span class="attachment-chip"><span class="photo-thumb" role="img" aria-label="示例照片缩略图"></span><span class="attachment-chip-label">${escapeHtml(attachment.label)}</span><button class="attachment-chip-remove" type="button" data-demo-action="remove-attachment" aria-label="移除${escapeHtml(attachment.label)}">×</button></span>`
+          : `<span class="attachment-chip"><span class="file-mark" aria-hidden="true">文</span><span class="attachment-chip-label">${escapeHtml(attachment.label)}</span><button class="attachment-chip-remove" type="button" data-demo-action="remove-attachment" aria-label="移除${escapeHtml(attachment.label)}">×</button></span>`).join("")}</div>`;
+      };
+
+      const composer = (options = {}) => {
+        const draft = options.draft || "";
+        const sendLabel = options.sendLabel || "发送";
+        const sendClass = options.sendClass || "primary";
+        const sendTarget = options.sendTarget || "C06";
+        const attachments = options.attachments || [];
+        const helper = options.helper || "输入会保留在当前草稿中";
+        const disabled = options.disabled === true ? " disabled" : "";
+        return `
+          <section class="composer" aria-label="问题输入区域">
+            ${attachmentStrip(attachments, options.attachmentEmpty || "可添加照片或文件")}
+            <label class="composer-label" for="static-question">要发送的问题</label>
+            <textarea class="composer-input" id="static-question" data-draft-input="true" rows="2" placeholder="例如：下雨天出门要准备什么？">${escapeHtml(draft)}</textarea>
+            <div class="composer-actions">
+              <button class="product-button" type="button" data-goto="C02">附件</button>
+              <button class="product-button" type="button" data-goto="C03">说话</button>
+              <button class="product-button ${sendClass} composer-send${options.stopping ? " is-stopping" : ""}" type="button" data-goto="${sendTarget}"${disabled}>${sendLabel}</button>
+            </div>
+            <span class="composer-helper">${helper}</span>
+          </section>`;
+      };
+
+      const chatTop = (title = "今天出门要带什么？", options = {}) => phoneTop(title, "生活助手 · 示例对话", { home: false, ...options });
+
+      const renderC01 = () => `
+        ${chatTop("新问题")}
+        <div class="phone-body">
+          <div class="chat-state-panel" aria-label="空聊天">
+            <span class="chat-state-symbol" aria-hidden="true">✦</span>
+            <strong>先写下想问的事</strong>
+            <span>发送后，回答会留在这里，也可以继续追问。</span>
+          </div>
+          ${composer({
+            draft: state.draft,
+            helper: state.draft
+              ? "已恢复语音前的草稿 · 继续编辑后再确认发送"
+              : "返回生活会保存草稿，空壳不会进入历史",
+          })}
+        </div>
+        `;
+
+      const renderC02 = () => `
+        ${chatTop("下雨天要准备什么？")}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">${state.voiceMerged ? "转写已合入草稿 · 待确认" : "待确认的问题"}</span>
+            <p class="chat-question-text">${escapeHtml(state.voiceMerged ? state.draft : "下雨天带孩子出门，要准备什么？")}</p>
+          </div>
+          ${composer({
+            draft: state.voiceMerged ? state.draft : "下雨天带孩子出门，要准备什么？",
+            attachments: [{ type: "photo", label: "出门照片.jpg" }, { type: "file", label: "购物清单.pdf" }],
+            helper: state.voiceMerged
+              ? "转写内容已用一个换行加入原草稿 · 仍需显式发送"
+              : "照片和文档会随问题一起发送 · 示例内容",
+            sendLabel: "确认并发送",
+            sendTarget: "C05",
+          })}
+        </div>
+        `;
+
+      const renderC03 = () => `
+        ${chatTop("说话提问", { backTarget: "C01", backAction: "cancel-voice" })}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">语音前的草稿</span>
+            <p class="chat-question-text">${voiceDraftBaseline}</p>
+          </div>
+          <div class="chat-state-panel" aria-label="语音正在听">
+            <span class="chat-state-symbol" aria-hidden="true">◉</span>
+            <strong>正在听</strong>
+            <span>文字状态 · 等待你说完后确认</span>
+            <div class="chat-state-actions">
+              <button class="product-button primary" type="button" data-goto="C04">停止</button>
+              <button class="product-button" type="button" data-goto="C01" data-action="cancel-voice">取消并恢复草稿</button>
+            </div>
+          </div>
+          <div class="chat-transcript"><strong>语音识别文字（演示）</strong><span>录音完成后，这里会出现可编辑文字。</span></div>
+          <p class="composer-helper">演示状态 · 未启动麦克风</p>
+        </div>
+        `;
+
+      const renderC04 = () => `
+        ${chatTop("语音文字确认", { backTarget: "C01", backAction: "cancel-voice" })}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">语音前的草稿</span>
+            <p class="chat-question-text">${voiceDraftBaseline}</p>
+          </div>
+          <div class="chat-state-panel" aria-label="语音正在整理">
+            <span class="chat-state-symbol" aria-hidden="true">◷</span>
+            <strong>正在整理语音</strong>
+            <span>录音已停止，正在生成可编辑文字。</span>
+            <div class="chat-state-actions">
+              <button class="product-button" type="button" data-goto="C01" data-action="cancel-voice">取消并恢复草稿</button>
+            </div>
+          </div>
+          <div class="chat-transcript"><strong>还没有可确认的文字</strong><span>整理完成后，再检查并确认文字。</span></div>
+          <p class="composer-helper">录音已停止；取消会恢复语音前草稿，不发送。</p>
+        </div>
+        `;
+
+      const renderC05 = () => `
+        ${chatTop()}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">你的问题</span>
+            <p class="chat-question-text">下雨天带孩子出门，要准备什么？</p>
+          </div>
+          <div class="status-banner neutral" role="status">
+            <span class="status-symbol" aria-hidden="true">◌</span>
+            <span class="status-banner-copy"><strong>正在回答</strong><span>已有内容会保留在这里</span></span>
+          </div>
+          <div class="chat-answer">
+            <div class="chat-answer-head"><span>生活助手</span><span>生成中</span></div>
+            <p>出门前可以先准备：</p>
+            <p><span class="chat-stream-line">雨具、饮水和纸巾；带孩子时再加一件薄外套。</span></p>
+            <p class="answer-note">已显示内容会保留，停止后仍可继续追问。</p>
+          </div>
+          ${composer({
+            draft: "",
+            helper: "可以准备下一条问题；停止或完成后再发送",
+            sendLabel: "停止生成",
+            sendClass: "danger",
+            sendTarget: "C13",
+          })}
+        </div>
+        `;
+
+      const renderC06 = () => `
+        ${chatTop()}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">你的问题</span>
+            <p class="chat-question-text">下雨天带孩子出门，要准备什么？</p>
+          </div>
+          <div class="chat-answer">
+            <div class="chat-answer-head"><span>生活助手</span><span>示例回答</span></div>
+            <p>出门前可以带：</p>
+            <ul>
+              <li>雨具、饮水和纸巾</li>
+              <li>常用药与一套备用衣物</li>
+              <li>带孩子时，再加一件薄外套和一个小零食</li>
+            </ul>
+            <p class="answer-note">告诉我出发时长或同行人，可以继续帮你细化。</p>
+            <div class="answer-actions" aria-label="答案操作">
+              <button class="product-button" type="button" data-demo-action="copy">复制</button>
+              <button class="product-button" type="button" data-demo-action="read">朗读</button>
+            </div>
+          </div>
+          <div class="chat-followups" aria-label="继续提问">
+            <button class="chat-followup" type="button" data-goto="C01">带老人一起出门呢？</button>
+            <button class="chat-followup" type="button" data-goto="C01">按两小时来准备</button>
+          </div>
+          ${composer({ helper: "下一条问题先写好，确认后再发送", sendTarget: "C05" })}
+        </div>
+        `;
+
+      const renderC07 = () => `
+        ${chatTop()}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">问题已保留</span>
+            <p class="chat-question-text">下雨天带孩子出门，要准备什么？</p>
+          </div>
+          <div class="status-banner warning" role="alert">
+            <span class="status-symbol" aria-hidden="true">!</span>
+            <span class="status-banner-copy"><strong>还没有配置可用模型</strong><span>完成设置后再发送，当前问题和附件会保留。</span></span>
+          </div>
+          <div class="chat-state-actions">
+            <button class="product-button primary" type="button" data-goto="C07">未完成设置 · 去设置</button>
+            <button class="product-button" type="button" data-goto="H01">返回生活</button>
+          </div>
+          <p class="composer-helper">先保留问题；完成设置后再回来继续。</p>
+        </div>
+        `;
+
+      const renderC08 = () => `
+        ${chatTop()}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">问题和附件仍在</span>
+            <p class="chat-question-text">下雨天带孩子出门，要准备什么？</p>
+          </div>
+          ${attachmentStrip([{ type: "photo", label: "出门照片.jpg" }, { type: "file", label: "购物清单.pdf" }], "附件保留")}
+          <div class="status-banner danger" role="alert">
+            <span class="status-symbol" aria-hidden="true">×</span>
+            <span class="status-banner-copy"><strong>这次回答没有完成</strong><span>问题没有丢失，可以重新生成或返回生活。</span></span>
+          </div>
+          <div class="chat-state-actions">
+            <button class="product-button primary" type="button" data-goto="C05">重新生成</button>
+            <button class="product-button" type="button" data-goto="H01">返回生活</button>
+          </div>
+        </div>
+        `;
+
+      const renderC09 = () => `
+        ${chatTop()}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">问题已保留，结果未知</span>
+            <p class="chat-question-text">周末去公园，怎么安排比较轻松？</p>
+          </div>
+          <div class="status-banner neutral" role="status">
+            <span class="status-symbol" aria-hidden="true">?</span>
+            <span class="status-banner-copy"><strong>状态待确认</strong><span>暂时无法判断请求是否完成，请先重新确认状态。</span></span>
+          </div>
+          <div class="chat-state-actions">
+            <button class="product-button primary" type="button" data-goto="C09">重新确认</button>
+            <button class="product-button" type="button" data-goto="H01">返回生活</button>
+          </div>
+          <p class="composer-helper">重新确认只查看发送结果；返回生活不会清空问题。</p>
+        </div>
+        `;
+
+      const renderC10 = () => `
+        ${chatTop()}
+        <div class="phone-body">
+          <div class="more-overlay" aria-label="更多菜单示意">
+            <div class="more-background-chat" aria-hidden="true">
+              <div class="more-background-line"></div>
+              <div class="more-background-line short"></div>
+              <div class="more-background-line"></div>
+              <div class="more-background-line short"></div>
+            </div>
+            <div class="more-sheet">
+              <p class="more-sheet-title">本次聊天</p>
+              <button class="more-item" type="button" data-goto="C06"><span>查找消息</span><small>⌕</small></button>
+              <button class="more-item" type="button" data-goto="C06"><span>修改标题</span><small>✎</small></button>
+              <button class="more-item" type="button" data-goto="C02"><span>本次提问设置</span><small>›</small></button>
+              <button class="more-item" type="button" data-goto="C06"><span>提问详情</span><small>ⓘ</small></button>
+              <button class="more-item" type="button" data-goto="C06"><span>朗读设置</span><small>›</small></button>
+              <details class="advanced-details">
+                <summary>高级参数（次级查看）</summary>
+                <p>模型、知识库、推理等术语只在展开后出现，简洁模式首屏不暴露。</p>
+              </details>
+            </div>
+          </div>
+        </div>
+        `;
+
+      const renderC11 = () => `
+        ${chatTop("下雨天要准备什么？")}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">问题已保留 · 可编辑</span>
+            <p class="chat-question-text">下雨天带孩子出门，要准备什么？</p>
+          </div>
+          <div class="status-banner danger" role="alert">
+            <span class="status-symbol" aria-hidden="true">×</span>
+            <span class="status-banner-copy"><strong>没有发出 · 准备失败</strong><span>附件或身份准备没有完成，问题和附件都还在。</span></span>
+          </div>
+          ${composer({
+            draft: "下雨天带孩子出门，要准备什么？",
+            attachments: [{ type: "photo", label: "出门照片.jpg" }, { type: "file", label: "购物清单.pdf" }],
+            helper: "编辑后再试，问题和附件都会保留",
+            sendLabel: "明确重试",
+            sendTarget: "C05",
+          })}
+          <div class="chat-state-actions">
+            <button class="product-button" type="button" data-goto="H01">返回生活</button>
+          </div>
+        </div>
+        `;
+
+      const renderC12 = () => `
+        ${chatTop("语音文字确认", { backTarget: "C01", backAction: "cancel-voice" })}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">语音前的原有文字</span>
+            <p class="chat-question-text">${voiceDraftBaseline}</p>
+          </div>
+          <div class="status-banner neutral" role="status">
+            <span class="status-symbol" aria-hidden="true">✓</span>
+            <span class="status-banner-copy"><strong>识别完成 · 还没有发送</strong><span>先检查文字；确认使用只加入当前草稿。</span></span>
+          </div>
+          <section class="chat-review" aria-label="可编辑的语音转写">
+            <label class="chat-review-label" for="voice-review-question">转写文字（可编辑）</label>
+            <textarea class="chat-review-input" id="voice-review-question" data-transcript-input="true" rows="3">${escapeHtml(state.transcriptDraft)}</textarea>
+            <div class="chat-review-actions">
+              <button class="product-button primary" type="button" data-goto="C02" data-action="merge-transcript">确认使用（加入草稿）</button>
+              <button class="product-button" type="button" data-goto="C03">重新说</button>
+              <button class="product-button" type="button" data-goto="C01" data-action="cancel-voice">取消并恢复草稿</button>
+            </div>
+          </section>
+          <p class="composer-helper">演示状态 · 确认使用会追加转写内容；下一步仍需点“确认并发送”，不会自动开始回答。</p>
+        </div>
+        `;
+
+      const renderC13 = () => `
+        ${chatTop()}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">你的问题</span>
+            <p class="chat-question-text">下雨天带孩子出门，要准备什么？</p>
+          </div>
+          <div class="status-banner warning" role="status">
+            <span class="status-symbol" aria-hidden="true">Ⅱ</span>
+            <span class="status-banner-copy"><strong>已停止 · 部分回答保留</strong><span>这是主动停止，不等同于生成失败。</span></span>
+          </div>
+          <div class="chat-answer">
+            <div class="chat-answer-head"><span>生活助手</span><span>未完成回答</span></div>
+            <p>出门前可以先准备雨具、饮水和纸巾；带孩子时再加一件薄外套。</p>
+            <p class="answer-note">答案停在这里，已经出现的内容仍可阅读或复制。</p>
+          </div>
+          <div class="chat-state-actions">
+            <button class="product-button" type="button" data-demo-action="copy">复制</button>
+            <button class="product-button primary" type="button" data-goto="C01">继续提问</button>
+            <button class="product-button" type="button" data-goto="C05">重新生成</button>
+          </div>
+          ${composer({ helper: "下一条问题需要你再次点击发送", sendTarget: "C05" })}
+        </div>
+        `;
+
+      const renderC14 = () => `
+        ${chatTop("下雨天要准备什么？")}
+        <div class="phone-body">
+          <div class="chat-question-card">
+            <span class="chat-question-label">草稿仍在</span>
+            <p class="chat-question-text">下雨天带孩子出门，要准备什么？</p>
+          </div>
+          <div class="attachment-state-list" aria-label="附件读取状态">
+            <div class="attachment-state-row is-loading">
+              <span class="file-mark" aria-hidden="true">文</span>
+              <span class="attachment-state-copy"><span class="attachment-state-name">购物清单.pdf</span><span class="attachment-state-status">正在读取 · 发送暂不可用</span></span>
+              <button class="attachment-state-action" type="button" data-goto="C02">取消</button>
+            </div>
+            <div class="attachment-state-row is-failed">
+              <span class="file-mark" aria-hidden="true">图</span>
+              <span class="attachment-state-copy"><span class="attachment-state-name">出门照片.jpg</span><span class="attachment-state-status is-failed">读取失败 · 可重选</span></span>
+              <button class="attachment-state-action" type="button" data-goto="C02">重选</button>
+            </div>
+          </div>
+          ${composer({
+            draft: "下雨天带孩子出门，要准备什么？",
+            attachmentEmpty: "附件状态未完成 · 文字草稿仍保留",
+            helper: "文件读完或重新选择后，才能发送",
+            disabled: true,
+            sendTarget: "C05",
+          })}
+        </div>
+        `;
+
+      const renderH03 = () => `
+        ${phoneTop("我的", "记录整理与草稿恢复", { home: true })}
+        <div class="phone-body">
+          <p class="phone-kicker">记录整理</p>
+          <h1 class="phone-heading">最近聊过</h1>
+          <p class="phone-lead">归档只是整理入口，记录可以撤销或从归档列表恢复。</p>
+          <div class="history-manage-list" aria-label="整理记录">
+            <div class="history-manage-row">
+              <span class="history-manage-copy"><strong>周末去公园怎么安排？</strong><span>昨天 · 路线、补水和休息点的建议</span></span>
+              <button class="history-archive" type="button" data-goto="H01">移到归档</button>
+            </div>
+            <div class="history-manage-row">
+              <span class="history-manage-copy"><strong>晚饭想做得简单一点</strong><span>今天 · 20 分钟内完成的家常菜安排</span></span>
+              <button class="history-archive" type="button" data-goto="H01">移到归档</button>
+            </div>
+          </div>
+          <div class="undo-toast" role="status"><span>已移到归档 · 可撤销</span><button type="button" data-goto="H01">撤销</button></div>
+          <div class="archive-recovery">
+            <span class="archive-recovery-copy"><strong>归档列表</strong><span>原记录、草稿和身份仍可恢复</span></span>
+            <button class="history-archive" type="button" data-goto="H01">恢复</button>
+          </div>
+          <div class="draft-banner">
+            <span class="draft-banner-copy"><span class="draft-banner-title">未完成草稿仍在</span><span class="draft-banner-detail">周末出行要带什么？</span></span>
+            <button class="product-button primary" type="button" data-goto="C01">继续</button>
+          </div>
+        </div>
+        ${phoneBottom("me")}`;
+
+      const renderPhone = (id) => {
+        switch (id) {
+          case "H02": return renderEmptyHome();
+          case "H03": return renderH03();
+          case "H04": return renderH04();
+          case "C01": return renderC01();
+          case "C02": return renderC02();
+          case "C03": return renderC03();
+          case "C04": return renderC04();
+          case "C05": return renderC05();
+          case "C06": return renderC06();
+          case "C07": return renderC07();
+          case "C08": return renderC08();
+          case "C09": return renderC09();
+          case "C10": return renderC10();
+          case "C11": return renderC11();
+          case "C12": return renderC12();
+          case "C13": return renderC13();
+          case "C14": return renderC14();
+          case "H01":
+          default: return renderHome();
+        }
+      };
+
+      const renderNotes = (screen) => {
+        notesId.textContent = `对应 ${screen.id}`;
+        notesList.innerHTML = `
+          <div class="notes-item"><dt>布局标注</dt><dd>${escapeHtml(screen.notes.layout)}</dd></div>
+          <div class="notes-item"><dt>状态规则</dt><dd>${escapeHtml(screen.notes.rule)}</dd></div>
+          <div class="notes-item"><dt>对应状态 ID</dt><dd>${escapeHtml(screen.notes.id)}</dd></div>`;
+        notesActions.hidden = screen.id !== "C09";
+        notesActions.innerHTML = screen.id === "C09" ? `
+          <span class="notes-actions-title">重新确认结果 · 查看器演示控制（不属于手机）</span>
+          <button class="notes-action-button" type="button" data-goto="C05"><span>确认已落地 · 查看生成中</span><small>C05 ›</small></button>
+          <button class="notes-action-button" type="button" data-goto="C11"><span>确认未落地 · 查看可编辑重试</span><small>C11 ›</small></button>
+          <button class="notes-action-button" type="button" data-goto="C09"><span>仍无法确认 · 保持待确认</span><small>C09 ↻</small></button>` : "";
+        notesFeedback.hidden = true;
+        notesFeedback.textContent = "";
+      };
+
+      const updateUrl = () => {
+        const params = new URLSearchParams();
+        params.set("screen", state.screen);
+        params.set("width", state.width);
+        params.set("scale", state.scale);
+        params.set("theme", state.theme);
+        try {
+          window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+        } catch (error) {
+          // file:// viewers may disallow history updates; state remains usable in memory.
+        }
+      };
+
+      const renderStage = () => {
+        const screen = screenById(state.screen);
+        document.body.dataset.theme = state.theme;
+        viewer.dataset.theme = state.theme;
+        phone.dataset.theme = state.theme;
+        phone.dataset.width = state.width;
+        phone.dataset.scale = state.scale;
+        phone.innerHTML = renderPhone(screen.id);
+        stageId.textContent = screen.id;
+        stageTitle.textContent = screen.label;
+        stageStatus.textContent = screen.status;
+        stageTags.innerHTML = screen.tags.map((tag) => `<span class="stage-tag">${escapeHtml(tag)}</span>`).join("");
+        screenSelect.value = screen.id;
+        renderNotes(screen);
+        document.querySelectorAll("[data-width-choice]").forEach((button) => {
+          const selected = button.dataset.widthChoice === state.width;
+          button.classList.toggle("is-selected", selected);
+          button.setAttribute("aria-pressed", String(selected));
+        });
+        document.querySelectorAll("[data-scale-choice]").forEach((button) => {
+          const selected = button.dataset.scaleChoice === state.scale;
+          button.classList.toggle("is-selected", selected);
+          button.setAttribute("aria-pressed", String(selected));
+        });
+        document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+          const selected = button.dataset.themeChoice === state.theme;
+          button.classList.toggle("is-selected", selected);
+          button.setAttribute("aria-pressed", String(selected));
+        });
+        document.querySelectorAll("[data-index-id]").forEach((button) => {
+          const selected = button.dataset.indexId === state.screen;
+          button.classList.toggle("is-selected", selected);
+          button.setAttribute("aria-current", selected ? "page" : "false");
+        });
+      };
+
+      const renderIndex = () => {
+        const groups = ["首页", "聊天"];
+        stateIndex.innerHTML = groups.map((group) => `
+          <div class="index-group">
+            <span class="index-group-title">${group}</span>
+            ${screens.filter((screen) => screen.group === group).map((screen) => `
+              <button class="index-button" type="button" data-index-id="${screen.id}" aria-current="${screen.id === state.screen ? "page" : "false"}">
+                <span class="index-button-id">${screen.id}</span>
+                <span class="index-button-title">${escapeHtml(screen.label)}</span>
+              </button>`).join("")}
+          </div>`).join("") + `
+          <div class="index-group">
+            <span class="index-group-title">附屏</span>
+            <button class="index-button" type="button" data-index-id="H03" aria-current="${state.screen === "H03" ? "page" : "false"}">
+              <span class="index-button-id">H03</span>
+              <span class="index-button-title">整理记录 · 撤销归档</span>
+            </button>
+          </div>`;
+      };
+
+      const renderSheet = (kind) => {
+        const isChat = kind === "chat";
+        const isRecovery = kind === "recovery";
+        const ids = isRecovery
+          ? ["C04", "C08", "C09", "C11"]
+          : isChat
+            ? ["C01", "C02", "C05", "C06"]
+            : ["H01", "H02", "H03", "H04"];
+        const title = isRecovery ? "聊天恢复状态总览" : isChat ? "聊天状态总览" : "生活首页总览";
+        const description = isRecovery
+          ? "展示 FINALIZING、生成失败、UNKNOWN 与确认未落地四种恢复边界；示意分支都保留问题，不代表真实请求结果。"
+          : isChat
+            ? "从空聊天、附件确认到生成中与成功答案，展示一条可恢复的聊天主链。C03 / C04 / C07–C14 可在查看器状态索引或恢复示意图中打开。"
+            : "从有记录首页、空首页到整理撤销和读取失败，展示简洁模式的入口与找回路径。示意只用于设计评审。";
+        viewer.classList.add("sheet-mode");
+        document.body.classList.add("sheet-mode");
+        document.querySelector(".viewer-header").classList.add("spec-hidden");
+        document.querySelector(".viewer-main").classList.add("spec-hidden");
+        document.querySelector(".viewer-footer").classList.add("spec-hidden");
+        sheetRoot.classList.remove("spec-hidden");
+        sheetRoot.innerHTML = `
+          <div class="sheet-heading">
+            <div>
+              <p class="sheet-kicker">生活交互体验 v2 · 离线示意</p>
+              <h1>${title}</h1>
+              <p>${description}</p>
+            </div>
+            <span class="sheet-flag">示例数据 · 无真实请求</span>
+          </div>
+          <div class="sheet-grid${isChat || isRecovery ? " chat-sheet" : ""}">
+            ${ids.map((id) => {
+              const screen = screenById(id);
+              return `
+                <article class="sheet-card" aria-labelledby="sheet-${id}">
+                  <div class="sheet-card-heading"><strong>${id}</strong><span id="sheet-${id}">${escapeHtml(screen.label)}</span></div>
+                  <div class="sheet-phone-wrap">
+                    <div class="phone-shell sheet-phone" data-width="${isChat ? "360" : "360"}" data-scale="1" data-theme="${state.theme}">${renderPhone(id)}</div>
+                  </div>
+                </article>`;
+            }).join("")}
+          </div>`;
+      };
+
+      const initControls = () => {
+        screenSelect.innerHTML = screens.map((screen) => `<option value="${screen.id}">${screen.id} · ${escapeHtml(screen.label)}</option>`).join("");
+        screenSelect.addEventListener("change", (event) => {
+          state.screen = event.target.value;
+          updateUrl();
+          renderIndex();
+          renderStage();
+        });
+        document.addEventListener("click", (event) => {
+          const demoTarget = event.target.closest("[data-demo-action]");
+          if (demoTarget) {
+            const feedback = {
+              copy: "查看器示意：复制按钮已画出，但未访问剪贴板。",
+              read: "查看器示意：朗读按钮已画出，但未启动语音播放。",
+              "remove-attachment": "查看器示意：附件移除入口已画出，未修改真实草稿。",
+            }[demoTarget.dataset.demoAction];
+            if (feedback) {
+              notesFeedback.textContent = feedback;
+              notesFeedback.hidden = false;
+            }
+            return;
+          }
+          const target = event.target.closest("[data-goto]");
+          if (target) {
+            if (target.dataset.action === "cancel-voice") {
+              state.draft = voiceDraftBaseline;
+              state.voiceMerged = false;
+            }
+            if (target.dataset.action === "merge-transcript") {
+              state.transcriptDraft = state.transcriptDraft.trim();
+              state.draft = `${voiceDraftBaseline}\n${state.transcriptDraft || voiceTranscript}`;
+              state.voiceMerged = true;
+            }
+            const next = target.dataset.goto;
+            if (screens.some((screen) => screen.id === next)) {
+              state.screen = next;
+              updateUrl();
+              renderIndex();
+              renderStage();
+            }
+            return;
+          }
+          const indexTarget = event.target.closest("[data-index-id]");
+          if (indexTarget) {
+            state.screen = indexTarget.dataset.indexId;
+            updateUrl();
+            renderIndex();
+            renderStage();
+            return;
+          }
+          const widthTarget = event.target.closest("[data-width-choice]");
+          if (widthTarget) {
+            state.width = widthTarget.dataset.widthChoice;
+            updateUrl();
+            renderStage();
+            return;
+          }
+          const scaleTarget = event.target.closest("[data-scale-choice]");
+          if (scaleTarget) {
+            state.scale = scaleTarget.dataset.scaleChoice;
+            updateUrl();
+            renderStage();
+            return;
+          }
+          const themeTarget = event.target.closest("[data-theme-choice]");
+          if (themeTarget) {
+            state.theme = themeTarget.dataset.themeChoice;
+            updateUrl();
+            renderStage();
+          }
+        });
+        document.addEventListener("input", (event) => {
+          if (event.target.matches("[data-draft-input]")) {
+            state.draft = event.target.value;
+          }
+          if (event.target.matches("[data-transcript-input]")) {
+            state.transcriptDraft = event.target.value;
+          }
+        });
+        document.addEventListener("keydown", (event) => {
+          if (event.target.matches("input, textarea, select, [contenteditable='true']")) return;
+          if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+            event.preventDefault();
+            const current = screens.findIndex((screen) => screen.id === state.screen);
+            const nextIndex = event.key === "ArrowRight"
+              ? (current + 1) % screens.length
+              : (current - 1 + screens.length) % screens.length;
+            state.screen = screens[nextIndex].id;
+            updateUrl();
+            renderIndex();
+            renderStage();
+          }
+        });
+      };
+
+      initControls();
+      renderIndex();
+      const sheetKind = query.get("sheet");
+      if (sheetKind === "home" || sheetKind === "chat" || sheetKind === "recovery") {
+        renderSheet(sheetKind);
+      } else {
+        renderStage();
+      }
+    })();
+  </script>
+</body>
+</html>

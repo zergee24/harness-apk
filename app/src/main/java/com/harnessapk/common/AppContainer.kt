@@ -119,6 +119,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
+import com.harnessapk.chat.LifeConversationOverviewRepository
+import com.harnessapk.chat.LifeConversationDraftStore
+import com.harnessapk.chat.LifeConversationDraftEntry
+import com.harnessapk.chat.LifeConversationRecoveryStore
+import com.harnessapk.chat.LifeConversationRecoveryEntry
+import com.harnessapk.storage.LifeConversationMetadataStore
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -532,7 +539,7 @@ class AppContainer(
         lifecycleCoordinator = agentLifecycleCoordinator,
         wikiScopeSnapshotProvider = conversationWikiRepository::snapshotEnabled,
     )
-    val chatSendRecoveryStore = ChatSendRecoveryStore()
+    val chatSendRecoveryStore = ChatSendRecoveryStore(appContext)
     val chatExecutionCoordinator = ChatExecutionCoordinator(
         executionRepository = chatExecutionRepository,
         sendMessageUseCase = sendMessageUseCase,
@@ -554,6 +561,25 @@ class AppContainer(
             enqueue = chatExecutionCoordinator::enqueue,
             requestExists = { requestId -> chatExecutionRepository.entry(requestId) != null },
         ),
+    )
+    val lifeConversationMetadataStore = LifeConversationMetadataStore(appContext, json)
+    val lifeConversationOverviewRepository = LifeConversationOverviewRepository(
+        conversationDao = database.conversationDao(),
+        metadataStore = lifeConversationMetadataStore,
+        draftStore = LifeConversationDraftStore {
+            conversationDraftStore.observeAll().map { entries ->
+                entries.map { LifeConversationDraftEntry.fromConversationDraft(it.conversationId, it.draft) }
+            }
+        },
+        recoveryStore = LifeConversationRecoveryStore {
+            chatSendRecoveryStore.observeAll().map { entries ->
+                entries.mapNotNull(LifeConversationRecoveryEntry::fromRecoveryState)
+            }
+        },
+        archiveGuard = { conversationId, action ->
+            chatSendRecoveryStore.withArchiveGuard(conversationId, action)
+                ?: com.harnessapk.chat.LifeConversationArchiveResult.Blocked("问题还在提交或确认发送状态，请稍后再整理")
+        },
     )
     val markdownNotebookRepository = MarkdownNotebookRepository(
         chatRepository = chatRepository,

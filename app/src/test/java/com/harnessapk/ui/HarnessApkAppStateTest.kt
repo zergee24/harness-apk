@@ -59,6 +59,14 @@ class HarnessApkAppStateTest {
     }
 
     @Test
+    fun simpleHomeAlwaysStartsWithAssistantAndNoProject() {
+        assertEquals(
+            NewConversationRequest(title = "新问题", identity = com.harnessapk.agent.InitialConversationIdentity.Assistant),
+            homeConversationRequest(simpleMode = true),
+        )
+    }
+
+    @Test
     fun projectConversationRequestUsesProjectTitleAndProjectId() {
         assertEquals(
             NewConversationRequest(title = "移动端 Harness · 项目会话", projectId = "project-1"),

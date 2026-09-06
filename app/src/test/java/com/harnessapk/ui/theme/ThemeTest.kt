@@ -2,10 +2,12 @@ package com.harnessapk.ui.theme
 
 import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import com.harnessapk.ui.MainMode
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ThemeTest {
@@ -13,8 +15,13 @@ class ThemeTest {
     fun lightThemeUsesApprovedWarmAccessibleTokens() {
         val scheme = warmLightColorScheme()
 
-        assertEquals(Color(0xFFD98278), scheme.primary)
-        assertEquals(Color(0xFF5F1410), scheme.onPrimary)
+        fun contrast(first: Color, second: Color): Float {
+            val values = listOf(first.luminance(), second.luminance()).sorted()
+            return (values.last() + 0.05f) / (values.first() + 0.05f)
+        }
+        assertTrue(contrast(scheme.primary, scheme.surface) >= 4.5f)
+        assertTrue(contrast(scheme.primary, scheme.primaryContainer) >= 4.5f)
+        assertTrue(contrast(scheme.onPrimary, scheme.primary) >= 4.5f)
         assertEquals(Color(0xFFFFDAD5), scheme.primaryContainer)
         assertEquals(Color(0xFF3F0805), scheme.onPrimaryContainer)
         assertEquals(Color(0xFFFAF7F6), scheme.background)

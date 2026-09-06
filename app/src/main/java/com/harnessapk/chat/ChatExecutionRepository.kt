@@ -51,6 +51,9 @@ class ChatExecutionRepository(
         dao.findById(request.requestId)?.toDomain()?.let { existing ->
             return@withTransaction ChatExecutionEnqueueOutcome(existing, insertedByThisCall = false)
         }
+        check(chatRepository.conversation(request.conversationId)?.isArchived == false) {
+            "该问题已归档，请先恢复后再发送"
+        }
         identityRepository.pinForFirstMessage(request.conversationId)
         val pinnedConversation = chatRepository.conversation(request.conversationId)
         val requestContext = request.requestContext.copy(

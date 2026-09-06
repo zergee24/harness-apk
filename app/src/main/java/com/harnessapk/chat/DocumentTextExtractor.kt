@@ -6,6 +6,7 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.provider.OpenableColumns
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
@@ -55,7 +56,7 @@ object DocumentTextExtractor {
         "text/tab-separated-values",
     )
 
-    fun displayName(context: Context, uri: Uri): String =
+    fun displayName(context: Context, uri: Uri): String = runCatching {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
@@ -64,16 +65,14 @@ object DocumentTextExtractor {
             } else {
                 null
             }
-        }.takeIf { !it.isNullOrBlank() } ?: uri.lastPathSegment ?: "document"
+        }
+    }.getOrNull().takeIf { !it.isNullOrBlank() } ?: uri.lastPathSegment ?: "document"
 
     fun extract(context: Context, uri: Uri): DocumentExtractionResult {
         val fileName = displayName(context, uri)
         val mimeType = context.contentResolver.getType(uri).orEmpty()
-        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        val bytes = context.contentResolver.openInputStream(uri)?.use { readBounded(it, MAX_FILE_BYTES) }
             ?: throw IllegalArgumentException("无法读取所选文件")
-        if (bytes.size > MAX_FILE_BYTES) {
-            throw IllegalArgumentException("文件超过 10 MB，请拆分后重试")
-        }
         val extension = fileName.substringAfterLast('.', "").lowercase()
         val fullText: String = when {
             extension == "pdf" || mimeType == "application/pdf" -> extractPdf(context, bytes)
@@ -152,7 +151,7 @@ object DocumentTextExtractor {
 
     private fun pdfPageCount(context: Context, uri: Uri): Int {
         PDFBoxResourceLoader.init(context.applicationContext)
-        PDDocument.load(context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        PDDocument.load(context.contentResolver.openInputStream(uri)?.use { readBounded(it, MAX_FILE_BYTES) }
             ?: return 0).use { document -> return document.numberOfPages }
     }
 
@@ -176,4 +175,23 @@ object DocumentTextExtractor {
     }
 
     private val TEXT_EXTENSIONS = setOf("txt", "csv", "md", "markdown", "tsv", "log", "json")
+}
+
+/** Reads at most [maxBytes] and fails as soon as one byte over the limit is seen. */
+internal fun readBounded(input: InputStream, maxBytes: Long): ByteArray {
+    require(maxBytes >= 0L) { "maxBytes must be non-negative" }
+    val output = ByteArrayOutputStream(minOf(maxBytes, Int.MAX_VALUE.toLong()).toInt())
+    val buffer = ByteArray(32 * 1024)
+    var total = 0L
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        if (count == 0) continue
+        total += count.toLong()
+        if (total > maxBytes) {
+            throw IllegalArgumentException("文件超过 10 MB，请拆分后重试")
+        }
+        output.write(buffer, 0, count)
+    }
+    return output.toByteArray()
 }
