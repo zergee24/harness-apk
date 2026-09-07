@@ -51,9 +51,8 @@ func memUsedPercent() (int, error) {
 
 	free := uint64(sysctlUint32OrZero("vm.page_free_count"))
 	speculative := uint64(sysctlUint32OrZero("vm.page_speculative_count"))
-	pageable := uint64(sysctlUint32OrZero("vm.page_pageable_internal_count")) +
-		uint64(sysctlUint32OrZero("vm.page_pageable_external_count"))
-	unused := free + speculative + pageable
+	// 口径对齐 top 的 PhysMem used：文件缓存（pageable）不计入 unused。
+	unused := free + speculative
 	if unused >= totalPages {
 		return 0, nil
 	}
