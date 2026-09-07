@@ -25,7 +25,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Card
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -117,6 +121,17 @@ fun DashboardScreen(
                     style = MaterialTheme.typography.labelSmall,
                     color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
                 )
+                IconButton(
+                    onClick = { container.remoteRepository.requestDashboardSnapshot() },
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Refresh,
+                        contentDescription = "手动刷新",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 TextButton(onClick = onExit) { Text("退出") }
             }
             if (threads.isEmpty()) {
