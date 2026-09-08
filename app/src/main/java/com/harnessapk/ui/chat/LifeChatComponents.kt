@@ -1,9 +1,11 @@
 package com.harnessapk.ui.chat
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -13,8 +15,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -26,10 +33,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -130,19 +142,58 @@ internal fun LifeChatMoreSheet(
 internal fun ChatDocumentCards(documents: List<ChatDocumentPresentation>) {
     documents.forEach { document ->
         var expanded by remember(document.id) { mutableStateOf(false) }
-        Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
-            Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                Text(document.fileName, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(
-                    listOf(document.mimeType.substringAfterLast('/').uppercase(), document.sizeBytes.takeIf { it > 0 }?.let { "${(it + 1023) / 1024} KB" }).filterNotNull().joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                TextButton(onClick = { expanded = !expanded }, modifier = Modifier.heightIn(min = 48.dp)) {
-                    Text(if (expanded) "收起文件内容" else "查看文件内容")
+        Surface(
+            color = Color.Transparent,
+            shape = MaterialTheme.shapes.medium,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 64.dp)
+                        .clickable { expanded = !expanded }
+                        .semantics(mergeDescendants = true) {
+                            role = Role.Button
+                            stateDescription = if (expanded) "已展开文件内容" else "已收起文件内容"
+                        },
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.AutoMirrored.Outlined.InsertDriveFile, contentDescription = null)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            document.fileName,
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 3,
+                            overflow = TextOverflow.Clip,
+                        )
+                        Text(
+                            listOf(
+                                document.mimeType.substringAfterLast('/').uppercase(),
+                                document.sizeBytes.takeIf { it > 0 }?.let { "${(it + 1023) / 1024} KB" },
+                            ).filterNotNull().joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(
+                        imageVector = if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+                        contentDescription = null,
+                    )
                 }
                 if (document.truncated) Text("文件较长，仅发送已提取的部分", style = MaterialTheme.typography.bodyMedium)
                 if (expanded) SelectionContainer {
-                    Text(document.extractedText, fontSize = 17.sp, modifier = Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState()))
+                    Text(
+                        document.extractedText.ifBlank { "没有可显示的文件正文" },
+                        fontSize = 17.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 8.dp)
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
                 }
             }
         }

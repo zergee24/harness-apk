@@ -12,20 +12,24 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Notifications
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.flow.first
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -76,7 +80,6 @@ import com.harnessapk.ui.activity.RemoteRunObjectiveSheet
 import com.harnessapk.ui.activity.ActivityScreen
 import com.harnessapk.ui.activity.RunDetailScreen
 import com.harnessapk.ui.chat.ChatScreen
-import com.harnessapk.ui.chat.ConversationWikiTopBarAction
 import com.harnessapk.ui.conversation.ConversationListScreen
 import com.harnessapk.ui.conversation.ArchivedConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
@@ -114,6 +117,7 @@ import kotlinx.coroutines.withContext
 
 object Routes {
     const val Conversations = "conversations"
+    const val LifeHistory = "life-history"
     const val ArchivedConversations = "life-archives"
     const val Providers = "providers"
     const val Search = "search"
@@ -197,7 +201,7 @@ internal fun projectWorkbenchTarget(
     requestKey = requestKey,
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun HarnessApkApp(
     incomingAgentBundleUri: Uri? = null,
@@ -225,8 +229,13 @@ fun HarnessApkApp(
     var chatSearchRequestKey by remember { mutableStateOf(0) }
     var chatMoreRequestKey by remember { mutableStateOf(0) }
     var chatBackRequestKey by remember { mutableStateOf(0) }
+    val chatContextSummaries = remember { androidx.compose.runtime.mutableStateMapOf<String, String>() }
+    var lifeMenuExpanded by remember { mutableStateOf(false) }
     var homeCreating by remember { mutableStateOf(false) }
+    var homeConversationReadyId by remember { mutableStateOf<String?>(null) }
+    var pendingHomeNavigation by remember { mutableStateOf<(() -> Unit)?>(null) }
     var homeCreationError by remember { mutableStateOf<String?>(null) }
+    var retryHomeCreation by remember { mutableStateOf<(() -> Unit)?>(null) }
     var wikiImportPickerRequestKey by remember { mutableIntStateOf(0) }
     var configImportWelcome by remember { mutableStateOf<String?>(null) }
     var workbenchTarget by remember { mutableStateOf<ProjectWorkbenchTarget?>(null) }
@@ -344,6 +353,7 @@ fun HarnessApkApp(
 
     val title = when (route) {
         Routes.Providers -> "模型配置"
+        Routes.LifeHistory -> "历史记录"
         Routes.ArchivedConversations -> "归档列表"
         Routes.Search -> "搜索能力"
         Routes.GlobalSearch -> "全局搜索"
@@ -402,45 +412,70 @@ fun HarnessApkApp(
             onIncomingRemoteRunConsumed()
         }
     }
-    fun createLifeConversation(openCamera: Boolean = false, startVoice: Boolean = false) {
+    fun leaveHomeChat(action: () -> Unit) {
+        lifeMenuExpanded = false
+        if (isHomeRoute && mainMode == MainMode.LIFE && homeConversationReadyId != null) {
+            if (pendingHomeNavigation != null) return
+            pendingHomeNavigation = {
+                homeConversationReadyId = null
+                action()
+            }
+            chatBackRequestKey += 1
+        } else {
+            action()
+        }
+    }
+    fun prepareHomeConversation(forceNew: Boolean = false, returnHome: Boolean = false) {
         if (homeCreating) return
         val originEntryId = navController.currentBackStackEntry?.id
         val originMode = mainMode
-        val requestedSimpleMode = loadedSimpleMode
         homeCreating = true
+        if (forceNew) homeConversationReadyId = null
+        homeCreationError = null
+        retryHomeCreation = null
         scope.launch {
             try {
-                // Read the real preference before creating; the initial UI value is not a default choice.
-                val useSimpleMode = requestedSimpleMode ?: container.settingsStore.simpleMode.first()
-                val id = container.newConversationUseCase.create(homeConversationRequest(useSimpleMode))
-                runCatching {
-                    container.lifeConversationOverviewRepository.recordOrigin(id, when {
-                        !useSimpleMode -> LifeConversationOrigin.STANDARD
-                        openCamera -> LifeConversationOrigin.LIFE_PHOTO
-                        startVoice -> LifeConversationOrigin.LIFE_VOICE
-                        else -> LifeConversationOrigin.LIFE_TEXT
-                    })
+                val id = withContext(container.dispatchers.io) {
+                    val previous = homeModeStore.lifeConversationId.value
+                        ?.let { container.chatRepository.conversation(it) }
+                        ?.takeUnless { it.isArchived || it.projectId != null }
+                    if (!forceNew && previous != null) {
+                        previous.id
+                    } else {
+                        // Wait for the stored preference; the initial UI state is not a mode choice.
+                        val useSimpleMode = loadedSimpleMode ?: container.settingsStore.simpleMode.first()
+                        val created = container.newConversationUseCase.create(homeConversationRequest(useSimpleMode))
+                        container.lifeConversationOverviewRepository.recordOrigin(
+                            created,
+                            if (useSimpleMode) LifeConversationOrigin.LIFE_TEXT else LifeConversationOrigin.STANDARD,
+                        )
+                        homeModeStore.saveLifeConversation(created)
+                        created
+                    }
                 }
-                if (navController.currentBackStackEntry?.id != originEntryId || mainMode != originMode) {
-                    runCatching { container.lifeConversationOverviewRepository.markUserRetained(id) }
-                    return@launch
+                homeConversationReadyId = id
+                if (returnHome && navController.currentBackStackEntry?.id == originEntryId && mainMode == originMode) {
+                    themeSourceMode = MainMode.LIFE
+                    mainMode = MainMode.LIFE
+                    navController.popBackStack(Routes.Conversations, inclusive = false)
                 }
-                navController.navigate(Routes.chat(
-                    conversationId = id, focusInput = !openCamera && !startVoice,
-                    openCamera = openCamera, startVoice = startVoice,
-                )) { launchSingleTop = true }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                homeCreationError = "暂时无法新建问题，请重试"
+                homeCreationError = "暂时无法打开问题，请重试"
+                retryHomeCreation = { prepareHomeConversation(forceNew, returnHome) }
             } finally {
                 homeCreating = false
             }
         }
     }
-    val onCreateConversation: () -> Unit = { createLifeConversation() }
-    val onCreatePhotoConversation: () -> Unit = { createLifeConversation(openCamera = true) }
-    val onCreateVoiceConversation: () -> Unit = { createLifeConversation(startVoice = true) }
+    LaunchedEffect(isHomeRoute, mainMode) {
+        if (isHomeRoute && mainMode == MainMode.LIFE) prepareHomeConversation()
+        else homeConversationReadyId = null
+    }
+    val onCreateConversation: () -> Unit = {
+        leaveHomeChat { prepareHomeConversation(forceNew = true, returnHome = true) }
+    }
     fun openWorkbench(
         projectId: String,
         destination: ProjectWorkbenchDestination,
@@ -496,16 +531,162 @@ fun HarnessApkApp(
             captureActionBusy = false
         }
     }
+    @Composable
+    fun ConversationContent(
+        conversationId: String,
+        displayTitle: String,
+        padding: PaddingValues,
+        projectId: String? = null,
+        focusInput: Boolean = false,
+        openCamera: Boolean = false,
+        startVoice: Boolean = false,
+        sourceMessageId: String? = null,
+        embeddedHome: Boolean = false,
+    ) {
+        androidx.compose.runtime.key(conversationId) {
+            val voiceInput = rememberVoiceInput(container)
+            ChatScreen(
+                container = container,
+                conversationId = conversationId,
+                displayTitle = displayTitle,
+                initialProjectId = projectId,
+                autoFocusInput = focusInput,
+                startWithCamera = openCamera,
+                startWithVoice = startVoice,
+                moreRequestKey = chatMoreRequestKey,
+                onMoreRequestConsumed = { chatMoreRequestKey = 0 },
+                backRequestKey = chatBackRequestKey,
+                onBackRequestConsumed = {
+                    chatBackRequestKey = 0
+                    if (embeddedHome) pendingHomeNavigation = null
+                },
+                handleSystemBack = !embeddedHome,
+                onNavigateBack = if (embeddedHome) pendingHomeNavigation else ({ navController.popBackStack(); Unit }),
+                onContextSummaryChanged = {
+                    if (it == null) chatContextSummaries.remove(conversationId)
+                    else chatContextSummaries[conversationId] = it
+                },
+                onOpenProviderSettings = { navController.navigate(Routes.Providers) },
+                onOpenVoiceSettings = { navController.navigate(Routes.Voice) },
+                sessionConfigRequestKey = chatSessionConfigRequestKey,
+                onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
+                wikiScopeRequestKey = chatWikiScopeRequestKey,
+                onWikiScopeRequestConsumed = { chatWikiScopeRequestKey = 0 },
+                searchRequestKey = chatSearchRequestKey,
+                onSearchRequestConsumed = { chatSearchRequestKey = 0 },
+                onOpenProjectFiles = { projectId, path ->
+                    openWorkbench(projectId, ProjectWorkbenchDestination.FILES, path)
+                },
+                onOpenProjectGit = { projectId ->
+                    openWorkbench(projectId, ProjectWorkbenchDestination.GIT)
+                },
+                onContinueInProject = { continuedConversationId, projectId ->
+                    navController.navigate(
+                        Routes.chat(
+                            conversationId = continuedConversationId,
+                            projectId = projectId,
+                            focusInput = true,
+                        ),
+                    )
+                },
+                initialSourceMessageId = sourceMessageId,
+                onOpenConversationMessage = { sourceConversationId, sourceMessageId ->
+                    navController.navigate(
+                        Routes.chat(
+                            conversationId = sourceConversationId,
+                            sourceMessageId = sourceMessageId,
+                        ),
+                    ) {
+                        launchSingleTop = true
+                    }
+                },
+                onOpenWikiCitation = { citationId ->
+                    navController.navigate(WikiRoutes.citation(citationId))
+                },
+                voiceInputState = voiceInput.state,
+                onStartVoiceInput = voiceInput.start,
+                onStopVoiceInput = voiceInput.stop,
+                onCancelVoiceInput = voiceInput.cancel,
+                onConfirmVoiceInput = voiceInput.confirm,
+                onEditVoiceReview = voiceInput.editReview,
+                onRestartVoiceInput = voiceInput.restart,
+                onVoiceInputConsumed = voiceInput.consume,
+                contentPadding = padding,
+            )
+        }
+    }
     val effectiveThemeMode = resolveThemeMode(mainMode, themeSourceMode)
     ModeTheme(effectiveThemeMode) {
     homeCreationError?.let { message ->
-        AlertDialog(onDismissRequest = { homeCreationError = null }, title = { Text("新建问题未完成") },
-            text = { Text(message) }, confirmButton = { TextButton(onClick = { homeCreationError = null }) { Text("知道了") } })
+        AlertDialog(
+            onDismissRequest = { homeCreationError = null },
+            title = { Text("问题未能打开") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { retryHomeCreation?.invoke() }) { Text("重试") } },
+            dismissButton = { TextButton(onClick = { homeCreationError = null }) { Text("关闭") } },
+        )
+    }
+    configImportWelcome?.let { message ->
+        AlertDialog(
+            onDismissRequest = { configImportWelcome = null },
+            title = { Text("配置完成") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { configImportWelcome = null }) { Text("好的") } },
+        )
     }
     Scaffold(
         modifier = Modifier.testTag("theme-${effectiveThemeMode.name}"),
         topBar = {
-            if (isHomeRoute) {
+            if (isHomeRoute && mainMode == MainMode.LIFE) {
+                TopAppBar(
+                    title = {
+                        ChatAppBarTitle(
+                            title = "生活",
+                            contextSummary = chatContextSummaries[homeConversationReadyId],
+                            onOpenSettings = { chatSessionConfigRequestKey += 1 },
+                        )
+                    },
+                    navigationIcon = {
+                        TextButton(onClick = { leaveHomeChat { navController.navigate(Routes.LifeHistory) } }) {
+                            Icon(Icons.Outlined.History, contentDescription = null)
+                            Spacer(Modifier.width(4.dp))
+                            Text("历史")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = onCreateConversation, enabled = !homeCreating) {
+                            Icon(Icons.Filled.Add, contentDescription = "新问题")
+                        }
+                        Box {
+                            IconButton(onClick = { lifeMenuExpanded = true }) {
+                                BadgedBox(badge = { if (activityState.pendingCount > 0) Badge() }) {
+                                    Icon(Icons.Outlined.MoreVert, contentDescription = "生活工具")
+                                }
+                            }
+                            DropdownMenu(expanded = lifeMenuExpanded, onDismissRequest = { lifeMenuExpanded = false }) {
+                                DropdownMenuItem(text = { Text("智能体") }, onClick = {
+                                    leaveHomeChat { navController.navigate(Routes.AgentPackages) }
+                                })
+                                DropdownMenuItem(text = { Text("知识库") }, onClick = {
+                                    leaveHomeChat { navController.navigate(Routes.WikiLibrary) }
+                                })
+                                DropdownMenuItem(text = { Text("会话操作") }, onClick = {
+                                    lifeMenuExpanded = false
+                                    chatMoreRequestKey += 1
+                                })
+                                DropdownMenuItem(text = { Text("归档列表") }, onClick = {
+                                    leaveHomeChat { navController.navigate(Routes.ArchivedConversations) }
+                                })
+                                DropdownMenuItem(text = { Text(
+                                    if (activityState.pendingCount > 0) "待处理任务 · ${activityState.pendingCount}" else "任务动态",
+                                ) }, onClick = {
+                                    leaveHomeChat { navController.navigate(Routes.Activity) }
+                                })
+                            }
+                        }
+                    },
+                )
+            } else if (isHomeRoute) {
                 TopAppBar(
                     title = { Text(topLevelTitle(mainMode, currentProjectName)) },
                     actions = {
@@ -516,7 +697,7 @@ fun HarnessApkApp(
                                 Text("远程")
                             }
                         }
-                        if (mainMode == MainMode.LIFE || mainMode == MainMode.WORK) {
+                        if (mainMode == MainMode.WORK) {
                             IconButton(
                                 onClick = { navController.navigate(Routes.Activity) },
                                 modifier = Modifier.semantics {
@@ -538,11 +719,17 @@ fun HarnessApkApp(
                 )
             } else {
                 TopAppBar(
-                    title = { Text(
-                        if (simpleMode && route == Routes.ChatPattern && title == "新会话") "新问题" else title,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.semantics { contentDescription = title },
-                    ) },
+                    title = {
+                        if (route == Routes.ChatPattern) {
+                            ChatAppBarTitle(
+                                title = if (title == "新会话") "新问题" else title,
+                                contextSummary = chatContextSummaries[currentConversationId],
+                                onOpenSettings = { chatSessionConfigRequestKey += 1 },
+                            )
+                        } else {
+                            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    },
                     navigationIcon = {
                         if (canGoBack) {
                             IconButton(
@@ -580,19 +767,9 @@ fun HarnessApkApp(
                     },
                     actions = {
                         when (route) {
-                            Routes.ChatPattern -> if (simpleMode) {
+                            Routes.ChatPattern -> {
                                 IconButton(onClick = { chatMoreRequestKey += 1 }) {
                                     Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
-                                }
-                            } else {
-                                IconButton(onClick = { chatSearchRequestKey += 1 }) {
-                                    Icon(Icons.Outlined.Search, contentDescription = "查找消息")
-                                }
-                                ConversationWikiTopBarAction(
-                                    onClick = { chatWikiScopeRequestKey += 1 },
-                                )
-                                IconButton(onClick = { chatSessionConfigRequestKey += 1 }) {
-                                    Icon(Icons.Outlined.Settings, contentDescription = "会话配置")
                                 }
                             }
                             Routes.WikiLibrary -> {
@@ -614,7 +791,7 @@ fun HarnessApkApp(
             }
         },
         bottomBar = {
-            if (isHomeRoute) {
+            if (isHomeRoute && !(mainMode == MainMode.LIFE && WindowInsets.isImeVisible)) {
                 NavigationBar {
                     val visibleModes = if (simpleMode) {
                         MainMode.entries.filter { it != MainMode.WORK }
@@ -625,8 +802,10 @@ fun HarnessApkApp(
                         NavigationBarItem(
                             selected = mainMode == mode,
                             onClick = {
-                                themeSourceMode = nextThemeSource(themeSourceMode, mode)
-                                mainMode = mode
+                                if (mainMode != mode) leaveHomeChat {
+                                    themeSourceMode = nextThemeSource(themeSourceMode, mode)
+                                    mainMode = mode
+                                }
                             },
                             modifier = Modifier.testTag("nav-${mode.name}"),
                             icon = { Icon(homeModeIcon(mode), contentDescription = null) },
@@ -643,22 +822,24 @@ fun HarnessApkApp(
         ) {
             composable(Routes.Conversations) {
                 when (mainMode) {
-                    MainMode.LIFE -> ConversationListScreen(
-                        container = container,
-                        contentPadding = padding,
-                        onOpenChat = { navController.navigate(Routes.chat(it)) },
-                        onCreateConversation = onCreateConversation,
-                        onCreatePhotoConversation = onCreatePhotoConversation,
-                        onCreateVoiceConversation = onCreateVoiceConversation,
-                        onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
-                        onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
-                        onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
-                        welcomeMessage = configImportWelcome,
-                        onWelcomeDismissed = { configImportWelcome = null },
-                        lifeOverviewRepository = container.lifeConversationOverviewRepository,
-                        onOpenArchive = { navController.navigate(Routes.ArchivedConversations) },
-                        creationInProgress = homeCreating,
-                    )
+                    MainMode.LIFE -> {
+                        val readyId = homeConversationReadyId
+                        if (readyId != null) {
+                            ConversationContent(
+                                conversationId = readyId,
+                                displayTitle = (lifeOverview as? LifeConversationOverviewState.Content)?.items
+                                    ?.firstOrNull { it.conversationId == readyId }?.title
+                                    ?: chatTopBarTitle(conversations, readyId),
+                                padding = padding,
+                                embeddedHome = true,
+                            )
+                        } else {
+                            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = androidx.compose.ui.Alignment.Center) {
+                                if (homeCreating) androidx.compose.material3.CircularProgressIndicator()
+                                else TextButton(onClick = { prepareHomeConversation() }) { Text("重新打开") }
+                            }
+                        }
+                    }
                     MainMode.WORK -> Column(
                         modifier = Modifier
                             .fillMaxSize()
@@ -772,66 +953,30 @@ fun HarnessApkApp(
                     },
                 ),
             ) { entry ->
-                val voiceInput = rememberVoiceInput(container)
-                ChatScreen(
-                    container = container,
+                ConversationContent(
                     conversationId = entry.arguments?.getString("conversationId").orEmpty(),
                     displayTitle = title,
-                    initialProjectId = entry.arguments?.getString("projectId"),
-                    autoFocusInput = entry.arguments?.getBoolean("focusInput") == true,
-                    startWithCamera = entry.arguments?.getBoolean("openCamera") == true,
-                    startWithVoice = entry.arguments?.getBoolean("startVoice") == true,
-                    moreRequestKey = chatMoreRequestKey,
-                    onMoreRequestConsumed = { chatMoreRequestKey = 0 },
-                    backRequestKey = chatBackRequestKey,
-                    onBackRequestConsumed = { chatBackRequestKey = 0 },
-                    onNavigateBack = { navController.popBackStack() },
-                    onOpenProviderSettings = { navController.navigate(Routes.Providers) },
-                    onOpenVoiceSettings = { navController.navigate(Routes.Voice) },
-                    sessionConfigRequestKey = chatSessionConfigRequestKey,
-                    onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
-                    wikiScopeRequestKey = chatWikiScopeRequestKey,
-                    onWikiScopeRequestConsumed = { chatWikiScopeRequestKey = 0 },
-                    searchRequestKey = chatSearchRequestKey,
-                    onSearchRequestConsumed = { chatSearchRequestKey = 0 },
-                    onOpenProjectFiles = { projectId, path ->
-                        openWorkbench(projectId, ProjectWorkbenchDestination.FILES, path)
-                    },
-                    onOpenProjectGit = { projectId ->
-                        openWorkbench(projectId, ProjectWorkbenchDestination.GIT)
-                    },
-                    onContinueInProject = { continuedConversationId, projectId ->
-                        navController.navigate(
-                            Routes.chat(
-                                conversationId = continuedConversationId,
-                                projectId = projectId,
-                                focusInput = true,
-                            ),
-                        )
-                    },
-                    initialSourceMessageId = entry.arguments?.getString("sourceMessageId"),
-                    onOpenConversationMessage = { sourceConversationId, sourceMessageId ->
-                        navController.navigate(
-                            Routes.chat(
-                                conversationId = sourceConversationId,
-                                sourceMessageId = sourceMessageId,
-                            ),
-                        ) {
-                            launchSingleTop = true
-                        }
-                    },
-                    onOpenWikiCitation = { citationId ->
-                        navController.navigate(WikiRoutes.citation(citationId))
-                    },
-                    voiceInputState = voiceInput.state,
-                    onStartVoiceInput = voiceInput.start,
-                    onStopVoiceInput = voiceInput.stop,
-                    onCancelVoiceInput = voiceInput.cancel,
-                    onConfirmVoiceInput = voiceInput.confirm,
-                    onEditVoiceReview = voiceInput.editReview,
-                    onRestartVoiceInput = voiceInput.restart,
-                    onVoiceInputConsumed = voiceInput.consume,
+                    padding = padding,
+                    projectId = entry.arguments?.getString("projectId"),
+                    focusInput = entry.arguments?.getBoolean("focusInput") == true,
+                    openCamera = entry.arguments?.getBoolean("openCamera") == true,
+                    startVoice = entry.arguments?.getBoolean("startVoice") == true,
+                    sourceMessageId = entry.arguments?.getString("sourceMessageId"),
+                )
+            }
+
+            composable(Routes.LifeHistory) {
+                ConversationListScreen(
+                    container = container,
                     contentPadding = padding,
+                    onOpenChat = { navController.navigate(Routes.chat(it)) },
+                    onCreateConversation = onCreateConversation,
+                    onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
+                    onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
+                    onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
+                    lifeOverviewRepository = container.lifeConversationOverviewRepository,
+                    onOpenArchive = { navController.navigate(Routes.ArchivedConversations) },
+                    creationInProgress = homeCreating,
                 )
             }
             composable(Routes.ArchivedConversations) {

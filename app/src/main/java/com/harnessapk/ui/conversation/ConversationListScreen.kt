@@ -21,21 +21,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Archive
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -66,7 +62,6 @@ import com.harnessapk.chat.LifeConversationDisplayStatus
 import com.harnessapk.chat.LifeConversationOverviewItem
 import com.harnessapk.chat.LifeConversationOverviewRepository
 import com.harnessapk.chat.LifeConversationOverviewState
-import com.harnessapk.chat.label
 import com.harnessapk.common.AppContainer
 import com.harnessapk.ui.components.ComfortListRow
 import com.harnessapk.ui.theme.HarnessSpacing
@@ -93,10 +88,11 @@ private data class UndoArchiveNotice(
 )
 
 /**
- * The home screen keeps the existing standard entry points while allowing the
+ * The history screen keeps the existing callback surface while allowing the
  * parent to supply the batched life overview. Until that wiring is installed,
  * the legacy conversation stream remains a safe compatibility fallback.
  */
+@Suppress("UNUSED_PARAMETER")
 @Composable
 fun ConversationListScreen(
     container: AppContainer,
@@ -116,7 +112,6 @@ fun ConversationListScreen(
 ) {
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
-    val simpleMode by container.settingsStore.simpleMode.collectAsState(initial = false)
     val lifeOverviewFlow = remember(lifeOverviewRepository) {
         lifeOverviewRepository?.observe(includeArchived = false)
     }
@@ -133,6 +128,8 @@ fun ConversationListScreen(
     var titleDraft by remember { mutableStateOf("") }
     var undoNotice by remember { mutableStateOf<UndoArchiveNotice?>(null) }
     var feedbackMessage by remember { mutableStateOf<String?>(null) }
+    var historySearchExpanded by remember { mutableStateOf(false) }
+    var historySearchQuery by remember { mutableStateOf("") }
     val agentsById = remember(agents) { agents.associateBy { it.id } }
     val visibleConversations = remember(conversations) { lifeConversations(conversations) }
 
@@ -197,29 +194,28 @@ fun ConversationListScreen(
             horizontal = HarnessSpacing.pageHorizontal,
             vertical = 16.dp,
         ),
-        verticalArrangement = Arrangement.spacedBy(HarnessSpacing.item),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        item(key = "life-welcome") {
-            LifeHomeHeader(
-                simpleMode = simpleMode,
+        item(key = "history-actions") {
+            HistoryActionRow(
+                searchExpanded = historySearchExpanded,
+                onToggleSearch = {
+                    if (historySearchExpanded) historySearchQuery = ""
+                    historySearchExpanded = !historySearchExpanded
+                },
                 onOpenArchive = onOpenArchive,
+                onCreateConversation = onCreateConversation,
+                creationInProgress = creationInProgress,
             )
-        }
-        item(key = "life-entry") {
-            if (simpleMode) {
-                SimpleLifeEntryRow(
-                    onCreateConversation = onCreateConversation,
-                    onCreatePhotoConversation = onCreatePhotoConversation,
-                    onCreateVoiceConversation = onCreateVoiceConversation,
-                    creationInProgress = creationInProgress,
-                )
-            } else {
-                QuickEntryRow(
-                    onOpenAgentPackages = onOpenAgentPackages,
-                    onOpenWikiLibrary = onOpenWikiLibrary,
-                    onOpenGlobalSearch = onOpenGlobalSearch,
-                    onCreateConversation = onCreateConversation,
-                    creationInProgress = creationInProgress,
+            if (historySearchExpanded) {
+                HistorySearchField(
+                    query = historySearchQuery,
+                    onQueryChange = { historySearchQuery = it },
+                    onClear = { historySearchQuery = "" },
+                    onClose = {
+                        historySearchQuery = ""
+                        historySearchExpanded = false
+                    },
                 )
             }
         }
@@ -251,18 +247,11 @@ fun ConversationListScreen(
                 FeedbackBanner(message = message, onDismiss = { feedbackMessage = null })
             }
         }
-        item(key = "recent-heading") {
-            Text(
-                text = "最近聊过",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-
         if (lifeOverviewRepository != null) {
             lifeOverviewItems(
                 state = lifeOverviewState ?: LifeConversationOverviewState.Loading,
                 agentsById = agentsById,
+                searchQuery = historySearchQuery,
                 onRetry = {
                     lifeOverviewRepository.refresh()
                     feedbackMessage = null
@@ -295,10 +284,13 @@ fun ConversationListScreen(
                 },
             )
         } else {
+            val filteredConversations = filterConversations(visibleConversations, historySearchQuery)
             conversationItems(
-                conversations = visibleConversations,
+                conversations = filteredConversations,
                 agentsById = agentsById,
                 onOpenChat = onOpenChat,
+                searchQuery = historySearchQuery,
+                hasUnfilteredConversations = visibleConversations.isNotEmpty(),
                 onEdit = {
                     conversationToEditId = it.id
                     titleDraft = it.title
@@ -315,92 +307,87 @@ fun ConversationListScreen(
 }
 
 @Composable
-private fun LifeHomeHeader(
-    simpleMode: Boolean,
+private fun HistoryActionRow(
+    searchExpanded: Boolean,
+    onToggleSearch: () -> Unit,
     onOpenArchive: (() -> Unit)?,
+    onCreateConversation: () -> Unit,
+    creationInProgress: Boolean,
 ) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = "想问点什么？",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = if (simpleMode) "从一个问题开始，文字、照片和声音都可以" else "生活问题从这里开始，标准工具也在上方",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        IconButton(
+            onClick = onToggleSearch,
+            modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
+        ) {
+            Icon(
+                Icons.Outlined.Search,
+                contentDescription = if (searchExpanded) "关闭搜索" else "搜索记录",
+            )
+        }
         onOpenArchive?.let { openArchive ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+            IconButton(
+                onClick = openArchive,
+                modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
             ) {
-                TextButton(
-                    onClick = openArchive,
-                    modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
-                ) {
-                    Icon(Icons.Outlined.Archive, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("归档列表")
-                }
+                Icon(Icons.Outlined.Archive, contentDescription = "归档列表")
             }
+        }
+        TextButton(
+            onClick = onCreateConversation,
+            enabled = !creationInProgress,
+            modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
+            contentPadding = PaddingValues(horizontal = 8.dp),
+        ) {
+            Icon(Icons.Outlined.Edit, contentDescription = null)
+            Spacer(Modifier.width(4.dp))
+            Text("新问题")
         }
     }
 }
 
 @Composable
-private fun SimpleLifeEntryRow(
-    onCreateConversation: () -> Unit,
-    onCreatePhotoConversation: () -> Unit,
-    onCreateVoiceConversation: () -> Unit,
-    creationInProgress: Boolean,
+private fun HistorySearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClear: () -> Unit,
+    onClose: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Button(
-            onClick = onCreateConversation,
-            enabled = !creationInProgress,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = HarnessSpacing.primaryControlHeight),
-        ) {
-            Icon(Icons.Outlined.Edit, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("打字提问")
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(
-                onClick = onCreatePhotoConversation,
-                enabled = !creationInProgress,
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = HarnessSpacing.primaryControlHeight),
-            ) {
-                Icon(Icons.Outlined.PhotoCamera, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text("拍照提问")
+    OutlinedTextField(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 8.dp),
+        value = query,
+        onValueChange = onQueryChange,
+        placeholder = { Text("搜索标题或摘要") },
+        singleLine = true,
+        leadingIcon = {
+            Icon(Icons.Outlined.Search, contentDescription = null)
+        },
+        trailingIcon = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (query.isNotEmpty()) {
+                    IconButton(
+                        onClick = onClear,
+                        modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
+                    ) {
+                        Icon(Icons.Outlined.Close, contentDescription = "清空搜索")
+                    }
+                }
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
+                ) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭搜索")
+                }
             }
-            OutlinedButton(
-                onClick = onCreateVoiceConversation,
-                enabled = !creationInProgress,
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = HarnessSpacing.primaryControlHeight),
-            ) {
-                Icon(Icons.Outlined.Mic, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text("说话提问")
-            }
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -426,6 +413,7 @@ internal fun LazyListScope.lifeOverviewItems(
     onOpenChat: (String) -> Unit,
     onEdit: (LifeConversationOverviewItem) -> Unit,
     onArchive: (LifeConversationOverviewItem) -> Unit,
+    searchQuery: String = "",
 ) {
     when (state) {
         LifeConversationOverviewState.Loading -> item(key = "overview-loading") {
@@ -437,13 +425,18 @@ internal fun LazyListScope.lifeOverviewItems(
                 OverviewErrorState(message = state.message, onRetry = onRetry)
             }
             if (state.cachedItems.isNotEmpty()) {
-                lifeOverviewRows(
-                    overviewItems = state.cachedItems,
-                    agentsById = agentsById,
-                    onOpenChat = onOpenChat,
-                    onEdit = onEdit,
-                    onArchive = onArchive,
-                )
+                val visibleItems = filterLifeOverviewItems(state.cachedItems, searchQuery)
+                if (visibleItems.isEmpty()) {
+                    item(key = "overview-no-matches") { OverviewNoMatchesState() }
+                } else {
+                    lifeOverviewRows(
+                        overviewItems = visibleItems,
+                        agentsById = agentsById,
+                        onOpenChat = onOpenChat,
+                        onEdit = onEdit,
+                        onArchive = onArchive,
+                    )
+                }
             }
         }
 
@@ -451,15 +444,58 @@ internal fun LazyListScope.lifeOverviewItems(
             if (state.items.isEmpty()) {
                 item(key = "overview-empty") { OverviewEmptyState() }
             } else {
-                lifeOverviewRows(
-                    overviewItems = state.items,
-                    agentsById = agentsById,
-                    onOpenChat = onOpenChat,
-                    onEdit = onEdit,
-                    onArchive = onArchive,
-                )
+                val visibleItems = filterLifeOverviewItems(state.items, searchQuery)
+                if (visibleItems.isEmpty()) {
+                    item(key = "overview-no-matches") { OverviewNoMatchesState() }
+                } else {
+                    lifeOverviewRows(
+                        overviewItems = visibleItems,
+                        agentsById = agentsById,
+                        onOpenChat = onOpenChat,
+                        onEdit = onEdit,
+                        onArchive = onArchive,
+                    )
+                }
             }
         }
+    }
+}
+
+internal fun filterLifeOverviewItems(
+    items: List<LifeConversationOverviewItem>,
+    query: String,
+): List<LifeConversationOverviewItem> {
+    val normalizedQuery = query.trim()
+    if (normalizedQuery.isEmpty()) return items
+    return items.filter { item ->
+        item.title.contains(normalizedQuery, ignoreCase = true) ||
+            item.summary.contains(normalizedQuery, ignoreCase = true)
+    }
+}
+
+private fun filterConversations(
+    conversations: List<Conversation>,
+    query: String,
+): List<Conversation> {
+    val normalizedQuery = query.trim()
+    if (normalizedQuery.isEmpty()) return conversations
+    return conversations.filter { it.title.contains(normalizedQuery, ignoreCase = true) }
+}
+
+@Composable
+private fun OverviewNoMatchesState() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text("没有匹配的记录", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "换个标题或摘要关键词试试。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -488,6 +524,7 @@ private fun LazyListScope.lifeOverviewRows(
             LifeOverviewRow(
                 item = overviewItem,
                 agentLabel = lifeAgentLabel(overviewItem, agentsById),
+                timeLabel = overviewItem.updatedAt.toOverviewTime(includeDate = false),
                 onOpen = { onOpenChat(overviewItem.conversationId) },
                 onEdit = { onEdit(overviewItem) },
                 onArchive = { onArchive(overviewItem) },
@@ -507,7 +544,7 @@ private fun OverviewLoadingState() {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-            Text("正在读取最近聊过…", style = MaterialTheme.typography.bodyLarge)
+            Text("正在读取历史记录…", style = MaterialTheme.typography.bodyLarge)
         }
     }
 }
@@ -551,7 +588,7 @@ private fun OverviewEmptyState() {
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text("还没有聊过", style = MaterialTheme.typography.titleMedium)
+            Text("还没有历史记录", style = MaterialTheme.typography.titleMedium)
             Text(
                 "先问一个天气、出行或购物清单问题，之后会在这里继续。",
                 style = MaterialTheme.typography.bodyMedium,
@@ -618,6 +655,7 @@ private fun FeedbackBanner(
 private fun LifeOverviewRow(
     item: LifeConversationOverviewItem,
     agentLabel: String?,
+    timeLabel: String,
     onOpen: () -> Unit,
     onEdit: () -> Unit,
     onArchive: () -> Unit,
@@ -625,158 +663,157 @@ private fun LifeOverviewRow(
     showEditAction: Boolean = true,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-    Card(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onOpen),
+            .clickable(onClick = onOpen)
+            .padding(vertical = 12.dp),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, top = 14.dp, end = 8.dp, bottom = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                Text(
-                    text = item.title,
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Box {
-                    IconButton(
-                        onClick = { menuExpanded = true },
-                        modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
-                    ) {
-                        Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
-                    }
-                    DropdownMenu(
-                        expanded = menuExpanded,
-                        onDismissRequest = { menuExpanded = false },
-                    ) {
-                        if (showEditAction) {
-                            DropdownMenuItem(
-                                text = { Text("修改标题") },
-                                leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
-                                onClick = {
-                                    menuExpanded = false
-                                    onEdit()
-                                },
-                            )
-                        }
-                        if (restoreAction != null) {
-                            DropdownMenuItem(
-                                text = { Text("恢复到最近聊过") },
-                                leadingIcon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
-                                onClick = {
-                                    menuExpanded = false
-                                    restoreAction()
-                                },
-                            )
-                        } else {
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        text = if (item.canArchive) "移到归档" else "暂不能归档",
-                                        color = if (item.canArchive) {
-                                            MaterialTheme.colorScheme.onSurface
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        },
-                                    )
-                                },
-                                leadingIcon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
-                                enabled = item.canArchive,
-                                onClick = {
-                                    menuExpanded = false
-                                    onArchive()
-                                },
-                            )
-                        }
-                    }
-                }
-            }
             Text(
-                text = item.summary,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                text = item.title,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+            Text(
+                text = timeLabel,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Box {
+                IconButton(
+                    onClick = { menuExpanded = true },
+                    modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
+                ) {
+                    Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
+                }
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                ) {
+                    if (showEditAction) {
+                        DropdownMenuItem(
+                            text = { Text("修改标题") },
+                            leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onEdit()
+                            },
+                        )
+                    }
+                    if (restoreAction != null) {
+                        DropdownMenuItem(
+                            text = { Text("恢复到最近聊过") },
+                            leadingIcon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                restoreAction()
+                            },
+                        )
+                    } else {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (item.canArchive) "移到归档" else "暂不能归档",
+                                    color = if (item.canArchive) {
+                                        MaterialTheme.colorScheme.onSurface
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            },
+                            leadingIcon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
+                            enabled = item.canArchive,
+                            onClick = {
+                                menuExpanded = false
+                                onArchive()
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        Text(
+            text = item.summary,
+            modifier = Modifier.padding(top = 4.dp),
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        val showStatus = item.status != LifeConversationDisplayStatus.NONE &&
+            item.status != LifeConversationDisplayStatus.COMPLETED
+        val showDraft = item.hasDraft && item.status != LifeConversationDisplayStatus.DRAFT
+        if (showStatus || showDraft) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                LifeStatusPill(status = item.status, label = item.statusLabel)
-                Text(
-                    text = item.updatedAt.toOverviewTime(),
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            agentLabel?.let { label ->
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (item.hasDraft) {
-                Text(
-                    text = "草稿已保留，打开后可继续",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            item.archiveBlockedReason?.let { reason ->
-                if (!item.canArchive && !item.isArchived) {
+                if (showStatus) LifeStatusText(item)
+                if (showDraft) {
                     Text(
-                        text = reason,
+                        text = "草稿",
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 }
             }
         }
+        agentLabel?.let { label ->
+            Text(
+                text = label,
+                modifier = Modifier.padding(top = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        item.archiveBlockedReason?.let { reason ->
+            if (!item.canArchive && !item.isArchived) {
+                Text(
+                    text = reason,
+                    modifier = Modifier.padding(top = 4.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
 }
 
 @Composable
-private fun LifeStatusPill(
-    status: LifeConversationDisplayStatus,
-    label: String = status.label,
-) {
-    if (status == LifeConversationDisplayStatus.NONE) return
-    val isError = status == LifeConversationDisplayStatus.FAILED
-    Surface(
-        color = if (isError) {
-            MaterialTheme.colorScheme.errorContainer
-        } else {
-            MaterialTheme.colorScheme.primaryContainer
-        },
-        shape = MaterialTheme.shapes.small,
-    ) {
-        Text(
-            text = label,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = if (isError) {
-                MaterialTheme.colorScheme.onErrorContainer
-            } else {
-                MaterialTheme.colorScheme.onPrimaryContainer
-            },
-        )
+private fun LifeStatusText(item: LifeConversationOverviewItem) {
+    if (item.status == LifeConversationDisplayStatus.NONE ||
+        item.status == LifeConversationDisplayStatus.COMPLETED
+    ) return
+    val color = if (item.status == LifeConversationDisplayStatus.FAILED) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.primary
     }
+    Text(
+        text = item.statusLabel,
+        style = MaterialTheme.typography.labelMedium,
+        color = color,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 private fun lifeAgentLabel(
@@ -822,22 +859,27 @@ fun ArchivedConversationListScreen(
             horizontal = HarnessSpacing.pageHorizontal,
             vertical = 16.dp,
         ),
-        verticalArrangement = Arrangement.spacedBy(HarnessSpacing.item),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         item(key = "archive-title") {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "归档列表",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
                 onBack?.let { back ->
                     TextButton(
                         onClick = back,
                         modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
-                ) { Text("返回生活") }
+                    ) { Text("返回生活") }
                 }
-                Text("归档列表", style = MaterialTheme.typography.headlineSmall)
-                Text(
-                    "归档会话仍可恢复；活动中的问题会继续留在最近聊过。",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
         feedbackMessage?.let { message ->
@@ -909,6 +951,7 @@ internal fun LazyListScope.archivedConversationRows(
             LifeOverviewRow(
                 item = item,
                 agentLabel = lifeAgentLabel(item, emptyMap()),
+                timeLabel = item.updatedAt.toOverviewTime(),
                 onOpen = { onOpenChat(item.conversationId) },
                 onEdit = {},
                 onArchive = {},
@@ -925,9 +968,17 @@ private fun LazyListScope.conversationItems(
     onOpenChat: (String) -> Unit,
     onEdit: (Conversation) -> Unit,
     onArchive: (Conversation) -> Unit,
+    searchQuery: String = "",
+    hasUnfilteredConversations: Boolean = conversations.isNotEmpty(),
 ) {
     if (conversations.isEmpty()) {
-        item(key = "legacy-empty") { OverviewEmptyState() }
+        item(key = "legacy-empty") {
+            if (searchQuery.trim().isNotEmpty() && hasUnfilteredConversations) {
+                OverviewNoMatchesState()
+            } else {
+                OverviewEmptyState()
+            }
+        }
     } else {
         items(conversations, key = { it.id }) { conversation ->
             ConversationRow(
@@ -992,56 +1043,11 @@ private fun ConversationRow(
     }
 }
 
-@Composable
-private fun QuickEntryRow(
-    onOpenAgentPackages: () -> Unit,
-    onOpenWikiLibrary: () -> Unit,
-    onOpenGlobalSearch: () -> Unit,
-    onCreateConversation: () -> Unit,
-    creationInProgress: Boolean,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Row(
-            modifier = Modifier.weight(1f),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(
-                onClick = onOpenAgentPackages,
-                modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
-                contentPadding = PaddingValues(horizontal = 8.dp),
-            ) {
-                Text("智能体", maxLines = 1)
-            }
-            TextButton(
-                onClick = onOpenWikiLibrary,
-                modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
-                contentPadding = PaddingValues(horizontal = 8.dp),
-            ) {
-                Text("知识库", maxLines = 1)
-            }
-        }
-        IconButton(
-            modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
-            onClick = onOpenGlobalSearch,
-        ) {
-            Icon(Icons.Outlined.Search, contentDescription = "全局搜索")
-        }
-        FilledIconButton(
-            modifier = Modifier.size(HarnessSpacing.minimumTouchTarget),
-            enabled = !creationInProgress,
-            onClick = onCreateConversation,
-        ) {
-            Icon(Icons.Filled.Add, contentDescription = "新建对话")
-        }
-    }
-}
-
-private fun Long.toOverviewTime(): String {
-    val formatter = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+private fun Long.toOverviewTime(includeDate: Boolean = true): String {
+    val formatter = SimpleDateFormat(
+        if (includeDate) "MM-dd HH:mm" else "HH:mm",
+        Locale.getDefault(),
+    )
     return formatter.format(Date(this))
 }
 

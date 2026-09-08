@@ -23,6 +23,16 @@ class HomeModeStore(context: Context) {
     val mode: StateFlow<MainMode> = _mode.asStateFlow()
     private val _themeSourceMode = MutableStateFlow(loadThemeSourceMode())
     val themeSourceMode: StateFlow<MainMode> = _themeSourceMode.asStateFlow()
+    private val _lifeConversationId = MutableStateFlow(preferences.getString("life_conversation_id", null))
+    val lifeConversationId: StateFlow<String?> = _lifeConversationId.asStateFlow()
+
+    fun saveLifeConversation(id: String) {
+        require(id.isNotBlank())
+        check(preferences.edit().putString("life_conversation_id", id).commit()) {
+            "当前问题保存失败"
+        }
+        _lifeConversationId.value = id
+    }
 
     fun save(mode: MainMode, themeSourceMode: MainMode) {
         val normalizedSource = nextThemeSource(themeSourceMode, mode)
@@ -38,6 +48,7 @@ class HomeModeStore(context: Context) {
         preferences.edit().clear().commit()
         _mode.value = loadMode()
         _themeSourceMode.value = loadThemeSourceMode()
+        _lifeConversationId.value = null
     }
 
     private fun loadMode(): MainMode = migrateStoredMode(preferences.getString("main_mode", null))

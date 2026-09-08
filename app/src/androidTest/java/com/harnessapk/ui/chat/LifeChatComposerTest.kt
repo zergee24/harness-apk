@@ -19,12 +19,14 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertWidthIsAtLeast
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
@@ -32,6 +34,7 @@ import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.withKeyDown
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import com.harnessapk.chat.ChatDocumentPresentation
 import com.harnessapk.chat.ExtractedDocument
 import com.harnessapk.chat.PendingImageAttachment
 import com.harnessapk.ui.theme.HarnessApkTheme
@@ -162,6 +165,49 @@ class LifeChatComposerTest {
         composeRule.onAllNodesWithText("附件", useUnmergedTree = true).assertCountEquals(1)
         composeRule.onNodeWithText("附件").assertIsDisplayed().assertIsEnabled()
         composeRule.onNodeWithText("发送").assertIsDisplayed().assertIsEnabled()
+    }
+
+    @Test
+    fun documentRowExpandsItsBodyAndKeepsTheTruncationNoticeAccessible() {
+        val document = ChatDocumentPresentation(
+            id = "document-1",
+            uri = "content://test/plan.txt",
+            fileName = "plan.txt",
+            mimeType = "text/plain",
+            sizeBytes = 2_048L,
+            sha256 = "hash",
+            extractedText = "文件正文仍然可读",
+            truncated = true,
+        )
+
+        composeRule.setContent {
+            HarnessApkTheme {
+                ChatDocumentCards(listOf(document))
+            }
+        }
+
+        composeRule.onNodeWithText("plan.txt").assertIsDisplayed()
+        composeRule.onNodeWithText("文件正文仍然可读").assertDoesNotExist()
+        composeRule.onNode(hasClickAction()).assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("文件正文仍然可读").assertIsDisplayed()
+        composeRule.onNodeWithText("文件较长，仅发送已提取的部分").assertIsDisplayed()
+    }
+
+    @Test
+    fun standaloneComposerKeepsAReachableContextEntryWhenRequested() {
+        var opened = 0
+
+        composeRule.setContent {
+            HarnessApkTheme {
+                TestChatInputBar(
+                    showContextBar = true,
+                    onOpenContext = { opened++ },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("conversation_context_bar").assertIsDisplayed().performClick()
+        assertEquals(1, opened)
     }
 
     @Test
@@ -356,6 +402,8 @@ private fun TestChatInputBar(
     isQueued: Boolean = false,
     onSend: () -> Unit = {},
     onStop: () -> Unit = {},
+    showContextBar: Boolean = false,
+    onOpenContext: () -> Unit = {},
 ) {
     CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 2f)) {
         Box(Modifier.width(320.dp).height(280.dp)) {
@@ -374,7 +422,7 @@ private fun TestChatInputBar(
                 isVoiceInputActive = isVoiceInputActive,
                 onStopVoiceTranscription = {},
                 contextSummary = TEST_CONTEXT_SUMMARY,
-                onOpenContext = {},
+                onOpenContext = onOpenContext,
                 inputFocusRequester = remember { FocusRequester() },
                 canSend = text.isNotBlank() || selectedImages.isNotEmpty() || pendingDocuments.isNotEmpty(),
                 isBusy = isBusy,
@@ -384,6 +432,7 @@ private fun TestChatInputBar(
                 showFileChangeSuggestion = false,
                 canSendFileChange = false,
                 onSendFileChange = {},
+                showContextBar = showContextBar,
                 simpleMode = true,
                 hasHistory = true,
                 isQueued = isQueued,
