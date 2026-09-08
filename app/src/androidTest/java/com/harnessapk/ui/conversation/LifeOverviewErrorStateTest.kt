@@ -39,7 +39,7 @@ class LifeOverviewErrorStateTest {
         }
 
         composeRule.onNodeWithText("记录读取失败").assertIsDisplayed()
-        composeRule.onAllNodesWithText("还没有聊过").assertCountEquals(0)
+        composeRule.onAllNodesWithText("还没有历史记录").assertCountEquals(0)
     }
 
     @Test
@@ -85,6 +85,92 @@ class LifeOverviewErrorStateTest {
         composeRule.onNodeWithText("恢复到最近聊过").performClick()
         composeRule.runOnIdle { assertEquals(1, restoreCalls) }
         assertEquals("恢复失败，请重试", archiveRestoreFeedbackMessage(restored = false))
+    }
+
+    @Test
+    fun completedOverviewRowUsesInlineTimeWithoutCompletionBadge() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                LazyColumn {
+                    lifeOverviewItems(
+                        state = LifeConversationOverviewState.Content(
+                            items = listOf(
+                                archivedItem().copy(
+                                    title = "今天的长标题会在需要时换行显示",
+                                    summary = "普通完成记录保留标题、摘要和时间。",
+                                    updatedAt = System.currentTimeMillis(),
+                                    isArchived = false,
+                                    canArchive = true,
+                                ),
+                            ),
+                        ),
+                        agentsById = emptyMap(),
+                        onRetry = {},
+                        onOpenChat = {},
+                        onEdit = {},
+                        onArchive = {},
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("今天的长标题会在需要时换行显示").assertIsDisplayed()
+        composeRule.onNodeWithText("今天").assertIsDisplayed()
+        composeRule.onAllNodesWithText("已完成").assertCountEquals(0)
+    }
+
+    @Test
+    fun historySearchMatchesTitleOrSummaryAndShowsDistinctNoMatchState() {
+        val titleMatch = archivedItem().copy(title = "周末购物清单")
+        val summaryMatch = archivedItem().copy(
+            conversationId = "archived-2",
+            title = "出门准备",
+            summary = "整理购物清单和路线",
+        )
+        val items = listOf(titleMatch, summaryMatch)
+
+        assertEquals(listOf(titleMatch, summaryMatch), filterLifeOverviewItems(items, "清单"))
+
+        composeRule.setContent {
+            HarnessApkTheme {
+                LazyColumn {
+                    lifeOverviewItems(
+                        state = LifeConversationOverviewState.Content(items = items),
+                        agentsById = emptyMap(),
+                        onRetry = {},
+                        onOpenChat = {},
+                        onEdit = {},
+                        onArchive = {},
+                        searchQuery = "不存在",
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("没有匹配的记录").assertIsDisplayed()
+        composeRule.onAllNodesWithText("还没有历史记录").assertCountEquals(0)
+    }
+
+    @Test
+    fun emptyHistoryKeepsItsOwnEmptyStateWhenSearchQueryIsPresent() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                LazyColumn {
+                    lifeOverviewItems(
+                        state = LifeConversationOverviewState.Content(items = emptyList()),
+                        agentsById = emptyMap(),
+                        onRetry = {},
+                        onOpenChat = {},
+                        onEdit = {},
+                        onArchive = {},
+                        searchQuery = "不存在",
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("还没有历史记录").assertIsDisplayed()
+        composeRule.onAllNodesWithText("没有匹配的记录").assertCountEquals(0)
     }
 
     private fun archivedItem() = LifeConversationOverviewItem(

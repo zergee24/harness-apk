@@ -30,7 +30,7 @@ class HarnessApkAppNavigationTest {
         }
         openSettings()
 
-        composeRule.onNodeWithText("智能体包").performClick()
+        composeRule.onNodeWithText("智能体包").performScrollTo().performClick()
         composeRule.onNodeWithText("智能体包").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("返回").performClick()
 
