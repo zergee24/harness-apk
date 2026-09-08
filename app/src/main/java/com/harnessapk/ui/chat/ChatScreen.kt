@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -48,6 +49,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -130,6 +132,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -330,6 +333,8 @@ fun ChatScreen(
     backRequestKey: Int = 0,
     onBackRequestConsumed: () -> Unit = {},
     onNavigateBack: (() -> Unit)? = null,
+    handleSystemBack: Boolean = true,
+    onContextSummaryChanged: ((String?) -> Unit)? = null,
     startWithCamera: Boolean = false,
     startWithVoice: Boolean = false,
     contentPadding: PaddingValues,
@@ -455,7 +460,7 @@ fun ChatScreen(
         }
     }
 
-    BackHandler(enabled = onNavigateBack != null) { onNavigateBack?.let(::leaveAfterSaving) }
+    BackHandler(enabled = handleSystemBack && onNavigateBack != null) { onNavigateBack?.let(::leaveAfterSaving) }
     LaunchedEffect(backRequestKey) {
         if (backRequestKey > 0) {
             onBackRequestConsumed()
@@ -873,6 +878,34 @@ fun ChatScreen(
     }
     val wikiScopeState = remember(conversationWikiMounts, conversationWikiCatalog) {
         conversationWikiUiState(conversationWikiMounts, conversationWikiCatalog)
+    }
+    val contextSummary = ConversationContextSummary(
+        projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
+        identityName = identityState.selectedName,
+        enabledWikiCount = wikiScopeState.options.count { it.enabled && !it.unavailable },
+        model = selectedModel,
+        reasoningEffortLabel = selectedReasoningEffort.label,
+        webSearchEnabled = webSearchEnabled,
+        contextPercent = contextWindowUsagePercent(contextStatus),
+    )
+    val contextSummaryText = buildList {
+        identityState.selectedAgentId?.let {
+            identityState.selectedName
+                .takeIf { name -> name.isNotBlank() && name != "普通助手" }
+                ?.let(::add)
+        }
+        if (!simpleMode) {
+            selectedModel
+                .takeIf { selectedProvider != null && it.isNotBlank() }
+                ?.let(::add)
+        }
+    }.joinToString(" · ").takeIf(String::isNotBlank)
+    val contextSummaryCallback by rememberUpdatedState(onContextSummaryChanged)
+    LaunchedEffect(conversationId, contextSummaryText, onContextSummaryChanged == null) {
+        contextSummaryCallback?.invoke(contextSummaryText)
+    }
+    DisposableEffect(conversationId) {
+        onDispose { contextSummaryCallback?.invoke(null) }
     }
     val executionByUserMessageId = remember(executionEntries) {
         executionEntries.associateBy(ChatExecutionEntry::userMessageId)
@@ -2534,15 +2567,6 @@ fun ChatScreen(
     }
 
     if (showConversationContext) {
-        val contextSummary = ConversationContextSummary(
-            projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
-            identityName = identityState.selectedName,
-            enabledWikiCount = wikiScopeState.options.count { it.enabled && !it.unavailable },
-            model = selectedModel,
-            reasoningEffortLabel = selectedReasoningEffort.label,
-            webSearchEnabled = webSearchEnabled,
-            contextPercent = contextWindowUsagePercent(contextStatus),
-        )
         ConversationContextSheet(
             summary = contextSummary,
             projects = projects.map { ContextProjectOption(it.id, it.name) },
@@ -2786,9 +2810,10 @@ fun ChatScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .consumeWindowInsets(contentPadding)
             .padding(contentPadding),
     ) {
-        if (!identityState.mutable && identityState.selectedAgentId != null) {
+        if (identityState.selectedAgentId != null) {
             ResponsiveChatContentRail {
                 ConversationIdentityPicker(
                     state = identityState,
@@ -2835,13 +2860,6 @@ fun ChatScreen(
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                emptyChatStateItem(
-                    messageState = messageState,
-                    contentMaxWidth = contentMaxWidth,
-                    showProviderHint = !simpleMode && !isAgentConversation,
-                    agentOpening = agentOpening,
-                    simpleMode = simpleMode,
-                )
                 items(messages, key = { it.id }) { message ->
                     val persistedParts = messagePartsById[message.id].orEmpty()
                     val wikiCitations = wikiCitationsByMessageId[message.id].orEmpty()
@@ -2876,7 +2894,7 @@ fun ChatScreen(
                                     simpleMode = simpleMode,
                                     canSpeak = voiceSettings.ttsEnabled,
                                     onFollowUp = if (
-                                        simpleMode && message.role == MessageRole.ASSISTANT &&
+                                        message.role == MessageRole.ASSISTANT &&
                                         message.status == MessageStatus.SUCCEEDED &&
                                         message.id == messages.lastOrNull { it.role == MessageRole.ASSISTANT }?.id &&
                                         !voiceOwnsDraft && !documentExtracting && !sendSnapshotInFlight &&
@@ -3097,7 +3115,6 @@ fun ChatScreen(
                 onAction = { scope.launch { persistDraft(currentDraftSnapshot()) } })
         } else if (simpleMode && !voiceOwnsDraft) ResponsiveChatContentRail {
             when {
-                sendRequestState?.phase == ChatSendRequestPhase.IN_FLIGHT -> LifeChatStatus("正在发送问题")
                 selectedProvider == null || selectedModel.isBlank() -> if (persistentDraftLoaded && identityMessageStateKnown) LifeChatStatus(
                     "还没完成模型设置，设置后就能提问", "去设置", onAction = { leaveAfterSaving(onOpenProviderSettings) },
                 )
@@ -3105,8 +3122,6 @@ fun ChatScreen(
                 documentExtracting -> Unit // The composer provides progress and cancellation.
                 attachmentProblems.isNotEmpty() -> Unit // Each unavailable attachment owns its recovery action.
                 errorText != null -> LifeChatStatus(errorText.orEmpty(), error = true)
-                isAssistantBusy -> LifeChatStatus("正在回答，可以先准备下一条问题")
-                hasQueuedExecution -> Unit // The primary button already names the queue state.
                 sessionStatus != null -> LifeChatStatus(sessionStatus.orEmpty())
             }
         }
@@ -3159,16 +3174,9 @@ fun ChatScreen(
                 },
                 isVoiceInputActive = voiceOwnsDraft,
                 onStopVoiceTranscription = onStopVoiceInput,
-                contextSummary = ConversationContextSummary(
-                    projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
-                    identityName = identityState.selectedName,
-                    enabledWikiCount = wikiScopeState.options.count { it.enabled && !it.unavailable },
-                    model = selectedModel,
-                    reasoningEffortLabel = selectedReasoningEffort.label,
-                    webSearchEnabled = webSearchEnabled,
-                    contextPercent = contextWindowUsagePercent(contextStatus),
-                ),
+                contextSummary = contextSummary,
                 onOpenContext = { showConversationContext = true },
+                showContextBar = onContextSummaryChanged == null,
                 inputFocusRequester = inputFocusRequester,
                 canSend = persistentDraftLoaded && selectedProvider != null &&
                     selectedModel.isNotBlank() &&
@@ -5007,11 +5015,11 @@ private fun MessageBubble(
     )
     val containerColor = when (presentation) {
         ChatBubblePresentation.UNFRAMED -> MaterialTheme.colorScheme.surface.copy(alpha = 0f)
-        ChatBubblePresentation.WARM_USER -> MaterialTheme.colorScheme.primaryContainer
+        ChatBubblePresentation.WARM_USER -> MaterialTheme.colorScheme.surfaceContainerHigh
         ChatBubblePresentation.NEUTRAL_EVENT -> MaterialTheme.colorScheme.surfaceVariant
     }
     val contentColor = when (presentation) {
-        ChatBubblePresentation.WARM_USER -> MaterialTheme.colorScheme.onPrimaryContainer
+        ChatBubblePresentation.WARM_USER -> MaterialTheme.colorScheme.onSurface
         ChatBubblePresentation.UNFRAMED,
         ChatBubblePresentation.NEUTRAL_EVENT,
         -> MaterialTheme.colorScheme.onSurface
@@ -5052,24 +5060,11 @@ private fun MessageBubble(
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        modifier = Modifier.weight(1f),
-                        text = if (isUser) "你" else if (simpleMode) "回答" else message.model ?: "助手",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (isUser) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.primary
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (onSteer != null && onEditQueued != null && onDeleteQueued != null) {
+                if (onSteer != null && onEditQueued != null && onDeleteQueued != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
                         Box {
                             IconButton(
                                 modifier = Modifier.size(48.dp),
@@ -5105,54 +5100,6 @@ private fun MessageBubble(
                                         queueMenuExpanded = false
                                         onDeleteQueued()
                                     },
-                                )
-                            }
-                        }
-                    }
-                }
-                executionEntry?.takeIf { !simpleMode }?.let { entry ->
-                    executionActivityLabel(entry)?.let { label ->
-                        Text(
-                            text = label,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
-                }
-                if (isUser && !simpleMode) {
-                    executionEntry?.requestContext?.contextSnapshot?.let { snapshot ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 40.dp)
-                                .clickable { contextSnapshotExpanded = !contextSnapshotExpanded },
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                modifier = Modifier.weight(1f),
-                                text = "发送上下文 · ${contextSnapshotSummary(snapshot)}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Icon(
-                                imageVector = if (contextSnapshotExpanded) {
-                                    Icons.Outlined.ExpandLess
-                                } else {
-                                    Icons.Outlined.ExpandMore
-                                },
-                                contentDescription = if (contextSnapshotExpanded) "收起发送上下文" else "展开发送上下文",
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
-                        if (contextSnapshotExpanded) {
-                            SelectionContainer {
-                                Text(
-                                    text = contextSnapshotDetails(snapshot),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
                                 )
                             }
                         }
@@ -5230,9 +5177,18 @@ private fun MessageBubble(
                     }
                 }
                 if (simpleMode && message.status == MessageStatus.CANCELLED) Text("已停止", style = MaterialTheme.typography.bodyMedium)
-                if (selectionCopyText.isNotBlank() || canWriteBack) {
+                if (
+                    selectionCopyText.isNotBlank() ||
+                        canWriteBack ||
+                        (isUser && executionEntry?.requestContext?.contextSnapshot != null)
+                ) {
                     FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (isUser) {
+                            Arrangement.End
+                        } else {
+                            Arrangement.spacedBy(4.dp)
+                        },
                     ) {
                         if (simpleMode && selectionCopyText.isNotBlank()) {
                             TextButton(onClick = onCopy, modifier = Modifier.heightIn(min = 48.dp)) {
@@ -5284,10 +5240,20 @@ private fun MessageBubble(
                                         },
                                     )
                                 }
-                                if (simpleMode && isUser && executionEntry?.requestContext?.contextSnapshot != null) {
+                                if (isUser && executionEntry?.requestContext?.contextSnapshot != null) {
                                     DropdownMenuItem(text = { Text("提问详情") }, onClick = {
                                         actionMenuExpanded = false
                                         contextSnapshotExpanded = true
+                                    })
+                                }
+                                if (message.role == MessageRole.ASSISTANT && onFollowUp != null) {
+                                    DropdownMenuItem(text = { Text("说简单一点") }, onClick = {
+                                        actionMenuExpanded = false
+                                        onFollowUp("说简单一点")
+                                    })
+                                    DropdownMenuItem(text = { Text("列成清单") }, onClick = {
+                                        actionMenuExpanded = false
+                                        onFollowUp("列成清单")
                                     })
                                 }
                                 if (selectionCopyText.isNotBlank()) {
@@ -5313,17 +5279,10 @@ private fun MessageBubble(
                         }
                     }
                 }
-                onFollowUp?.let { fill ->
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("说简单一点", "列成清单").forEach { suggestion ->
-                            TextButton(onClick = { fill(suggestion) }, modifier = Modifier.heightIn(min = 48.dp)) { Text(suggestion) }
-                        }
-                    }
-                }
             }
         }
     }
-    if (simpleMode && contextSnapshotExpanded) AlertDialog(
+    if (contextSnapshotExpanded) AlertDialog(
         onDismissRequest = { contextSnapshotExpanded = false }, title = { Text("提问详情") },
         text = { SelectionContainer { Text(executionEntry?.requestContext?.contextSnapshot?.let(::contextSnapshotDetails).orEmpty(), modifier = Modifier.verticalScroll(rememberScrollState())) } },
         confirmButton = { TextButton(onClick = { contextSnapshotExpanded = false }) { Text("关闭") } },
@@ -5464,6 +5423,7 @@ internal fun ChatInputBar(
     showFileChangeSuggestion: Boolean,
     canSendFileChange: Boolean,
     onSendFileChange: () -> Unit,
+    showContextBar: Boolean = true,
     simpleMode: Boolean = false,
     hasHistory: Boolean = false,
     isQueued: Boolean = false,
@@ -5481,10 +5441,10 @@ internal fun ChatInputBar(
         modifier = Modifier
             .fillMaxWidth()
             .imePadding(),
-        shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
-        tonalElevation = 2.dp,
-        shadowElevation = 3.dp,
-        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(18.dp),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -5526,7 +5486,7 @@ internal fun ChatInputBar(
                     enabled = inputEnabled,
                 )
             }
-            if (!simpleMode) ConversationContextBar(summary = contextSummary, onClick = onOpenContext)
+            if (showContextBar) ConversationContextBar(summary = contextSummary, onClick = onOpenContext)
             if (showFileChangeSuggestion) {
                 TextButton(
                     enabled = canSendFileChange && inputEnabled,
@@ -5536,11 +5496,12 @@ internal fun ChatInputBar(
                     Text("使用文件变更")
                 }
             }
-            OutlinedTextField(
+            BasicTextField(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 56.dp)
                     .focusRequester(inputFocusRequester)
+                    .testTag("chat-input")
                     .onPreviewKeyEvent { event ->
                         if ((!simpleMode || event.isCtrlPressed || event.isMetaPressed) &&
                             shouldSendChatInputOnKeyEvent(event.key, event.type, event.isShiftPressed, sendEnabled)) {
@@ -5551,34 +5512,57 @@ internal fun ChatInputBar(
                 readOnly = !inputEnabled,
                 value = text,
                 onValueChange = onTextChange,
-                placeholder = { Text(if (hasHistory) "接着问一个问题" else "写下你想问的问题") },
-                textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    fontSize = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                ),
                 minLines = 1,
                 maxLines = 6,
                 keyboardOptions = KeyboardOptions(imeAction = if (simpleMode) ImeAction.Default else ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { if (!simpleMode && sendEnabled) onSend() }),
+                decorationBox = { innerTextField ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                    ) {
+                        if (text.isEmpty()) {
+                            Text(
+                                if (hasHistory) "接着问一个问题" else "写下你想问的问题",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        innerTextField()
+                    }
+                },
             )
             }
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.End,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                OutlinedButton(
-                    enabled = inputEnabled && !documentExtracting,
-                    onClick = { showImageSourceSheet = true },
-                    modifier = Modifier.heightIn(min = 48.dp),
+                FlowRow(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Text("附件")
-                }
-                OutlinedButton(
-                    enabled = inputEnabled && !documentExtracting,
-                    onClick = onStartVoiceTranscription,
-                    modifier = Modifier.heightIn(min = 48.dp),
-                ) {
-                    Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Text("说话")
+                    TextButton(
+                        enabled = inputEnabled && !documentExtracting,
+                        onClick = { showImageSourceSheet = true },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Text("附件")
+                    }
+                    TextButton(
+                        enabled = inputEnabled && !documentExtracting,
+                        onClick = onStartVoiceTranscription,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Text("说话")
+                    }
                 }
                 Button(
                     enabled = if (isBusy) !isVoiceInputActive && !isPreparingSend else sendEnabled && !(simpleMode && isQueued),
