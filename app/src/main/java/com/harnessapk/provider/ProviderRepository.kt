@@ -401,7 +401,7 @@ fun defaultModelConfig(providerName: String, modelId: String): ModelConfig {
     if (catalogConfig != null) return catalogConfig.copy(id = modelId.trim()).normalized()
 
     val contextWindow = when {
-        normalizedModel.startsWith("deepseek-v4") -> 1_000_000
+        normalizedModel.startsWith("deepseek-") -> 1_000_000
         normalizedModel.startsWith("gpt-6") -> 1_050_000
         normalizedModel.startsWith("glm-5-turbo") -> 200_000
         normalizedModel.startsWith("glm-5.2") -> 1_000_000

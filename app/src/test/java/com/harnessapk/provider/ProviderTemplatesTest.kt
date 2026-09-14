@@ -30,16 +30,16 @@ class ProviderTemplatesTest {
         val template = ProviderTemplates.defaults.first { it.name == "DeepSeek" }
 
         assertEquals("https://api.deepseek.com", template.baseUrl)
-        assertEquals("deepseek-v4-pro", template.defaultModel)
-        assertEquals(listOf("deepseek-v4-pro", "deepseek-v4-flash"), template.availableModels)
-        assertEquals(1_000_000, template.modelConfigs.first { it.id == "deepseek-v4-pro" }.contextWindowTokens)
+        assertEquals("deepseek-flash", template.defaultModel)
+        assertEquals(listOf("deepseek-flash", "deepseek-v4-pro"), template.availableModels)
+        assertEquals(1_000_000, template.modelConfigs.first { it.id == "deepseek-flash" }.contextWindowTokens)
     }
 
     @Test
     fun openAiTemplateUsesConfiguredDefaultBaseUrl() {
         val template = ProviderTemplates.defaults.first { it.name == "OpenAI" }
 
-        assertEquals("https://happycode.vip/v1", template.baseUrl)
+        assertEquals("https://happycodeai.com/v1", template.baseUrl)
         assertEquals("gpt-6-astra", template.defaultModel)
         assertEquals("gpt-6-astra", template.defaultVisionModel)
         assertEquals(

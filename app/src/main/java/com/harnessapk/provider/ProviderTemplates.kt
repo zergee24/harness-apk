@@ -18,10 +18,11 @@ object ProviderTemplates {
         ProviderTemplate(
             name = "DeepSeek",
             baseUrl = "https://api.deepseek.com",
-            defaultModel = "deepseek-v4-pro",
+            defaultModel = "deepseek-flash",
             modelConfigs = listOf(
+                // deepseek-flash = DeepSeek-V4.1-Flash；deepseek-v4-pro 2026-09-14 12:00 起路由到 V4.1 Flash 计价
+                ModelConfig("deepseek-flash", contextWindowTokens = 1_000_000),
                 ModelConfig("deepseek-v4-pro", contextWindowTokens = 1_000_000),
-                ModelConfig("deepseek-v4-flash", contextWindowTokens = 1_000_000),
             ),
             defaultVisionModel = null,
             supportsVision = false,
@@ -29,7 +30,9 @@ object ProviderTemplates {
         ),
         ProviderTemplate(
             name = "OpenAI",
-            baseUrl = "https://happycode.vip/v1",
+            // 2026-09 起中转为 happycodeai.com（happycode.vip 为旧地址）；勿手误成 happycode.com——
+            // 那是无关站点且证书过期，会报 Chain validation failed。
+            baseUrl = "https://happycodeai.com/v1",
             defaultModel = "gpt-6-astra",
             modelConfigs = listOf(
                 openAiModelConfig("gpt-6-astra", contextWindowTokens = 1_050_000, maxOutputTokens = 128_000),
