@@ -81,11 +81,12 @@ fun DashboardScreen(
         // 副屏可能脱离远程页直接进入（进程被杀后冷启），先确保 WSS 连接。
         container.remoteRepository.connect()
         container.remoteRepository.requestDashboardSnapshot()
-        container.remoteRepository.focusResults.collect { result ->
-            snackbarHostState.showSnackbar(
-                if (result.ok) "已在 Mac 主屏打开该线程" else "聚焦失败：${result.message ?: "未知原因"}",
-            )
-        }
+            container.remoteRepository.focusResults.collect { result ->
+                snackbarHostState.showSnackbar(
+                    // zcode 卡聚焦打开的是工作区，措辞不绑「线程」。
+                    if (result.ok) "已在 Mac 前台打开" else "聚焦失败：${result.message ?: "未知原因"}",
+                )
+            }
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -239,6 +240,15 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                                 .size(8.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFFFF5C5C)),
+                        )
+                    }
+                    dashboardSourceLabel(thread).takeIf { it.isNotEmpty() }?.let { badge ->
+                        Text(
+                            badge,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            modifier = Modifier.padding(start = 8.dp),
                         )
                     }
                     Text(

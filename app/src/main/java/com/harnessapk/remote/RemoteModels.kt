@@ -548,6 +548,7 @@ data class DashboardThread(
     val lastEventAtMs: Long = 0,
     val contextPercent: Int = 0,
     val lastActivity: String? = null,
+    val source: String = "codex",
 )
 
 data class DashboardHost(
@@ -606,6 +607,7 @@ internal fun parseDashboardThread(element: JsonElement?): DashboardThread? {
         lastEventAtMs = item.long("lastEventAtMs") ?: 0L,
         contextPercent = item.long("contextPercent")?.toInt() ?: 0,
         lastActivity = item.string("lastActivity"),
+        source = item.string("source") ?: "codex",
     )
 }
 
