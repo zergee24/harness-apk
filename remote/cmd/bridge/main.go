@@ -1069,11 +1069,12 @@ func (b *bridge) focusDashboardThread(ctx context.Context, deviceID string, comm
 	if runner == nil {
 		runner = runFocusCommand
 	}
-	if !observer.ValidFocusThreadID(threadID) {
-		b.ackDashboardFocus(ctx, deviceID, threadID, errors.New("非法线程 ID"))
+	plans, err := b.dashboardFocusPlan(threadID)
+	if err != nil {
+		b.ackDashboardFocus(ctx, deviceID, threadID, err)
 		return nil
 	}
-	for _, args := range observer.FocusPlan(threadID) {
+	for _, args := range plans {
 		if err := runner(ctx, args[0], args[1:]...); err != nil {
 			if ctx.Err() == nil {
 				b.ackDashboardFocus(ctx, deviceID, threadID, err)
@@ -1083,6 +1084,29 @@ func (b *bridge) focusDashboardThread(ctx context.Context, deviceID string, comm
 	}
 	b.ackDashboardFocus(ctx, deviceID, threadID, nil)
 	return nil
+}
+
+// dashboardFocusPlan 依线程来源生成聚焦命令：codex 走线程深链；
+// zcode 只有 workspace 级深链，跳转目录取自当前快照。
+func (b *bridge) dashboardFocusPlan(threadID string) ([][]string, error) {
+	if strings.HasPrefix(threadID, observer.ZcodeThreadIDPrefix) {
+		b.dashboardMu.Lock()
+		sup := b.dashboard
+		b.dashboardMu.Unlock()
+		if sup == nil {
+			return nil, errors.New("副屏未就绪")
+		}
+		for _, snap := range sup.Current() {
+			if snap.ID == threadID {
+				return observer.ZcodeFocusPlan(snap.CWD)
+			}
+		}
+		return nil, errors.New("快照中无此 zcode 会话")
+	}
+	if !observer.ValidFocusThreadID(threadID) {
+		return nil, errors.New("非法线程 ID")
+	}
+	return observer.FocusPlan(threadID), nil
 }
 
 func (b *bridge) ackDashboardFocus(ctx context.Context, deviceID, threadID string, err error) {

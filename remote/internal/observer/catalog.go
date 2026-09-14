@@ -23,6 +23,16 @@ import (
 
 const SQLite3Bin = "/usr/bin/sqlite3"
 
+const (
+	// SourceCodex / SourceZcode 标记线程来源，副屏卡片据此分流聚焦动作。
+	SourceCodex = "codex"
+	SourceZcode = "zcode"
+
+	// ZcodeThreadIDPrefix 是 zcode 会话映射后的线程 ID 前缀，
+	// 避免与 codex 的 UUID 混淆。
+	ZcodeThreadIDPrefix = "zcode:"
+)
+
 const sqlite3Bin = SQLite3Bin
 
 // ThreadInfo 是副屏卡片需要的最小线程快照。
@@ -33,6 +43,7 @@ type ThreadInfo struct {
 	GitBranch   string `json:"gitBranch,omitempty"`
 	UpdatedAtMs int64  `json:"updatedAtMs"`
 	RolloutPath string `json:"-"`
+	Source      string `json:"source,omitempty"`
 }
 
 // Options 控制 Catalog 的数据源与过滤窗口，零值字段取 DefaultOptions 补齐。
@@ -43,6 +54,9 @@ type Options struct {
 	SQLitePath  string        // threads 目录库；打不开时降级 IndexPath
 	IndexPath   string        // session_index.jsonl 降级源
 	SessionsDir string        // 降级时按文件名内嵌 id 定位 rollout 的会话目录
+
+	ZcodeDBPath     string // zcode 会话目录库（session 表）
+	ZcodeRolloutDir string // zcode model-io 日志目录（mtime 状态源）
 }
 
 func DefaultOptions() Options {
@@ -54,6 +68,8 @@ func DefaultOptions() Options {
 		SQLitePath:  filepath.Join(codex, "state_5.sqlite"),
 		IndexPath:   filepath.Join(codex, "session_index.jsonl"),
 		SessionsDir: filepath.Join(codex, "sessions"),
+		ZcodeDBPath:      filepath.Join(home, ".zcode", "cli", "db", "db.sqlite"),
+		ZcodeRolloutDir:  filepath.Join(home, ".zcode", "cli", "rollout"),
 	}
 }
 
@@ -76,6 +92,12 @@ func (o Options) normalized() Options {
 	}
 	if o.SessionsDir == "" {
 		o.SessionsDir = def.SessionsDir
+	}
+	if o.ZcodeDBPath == "" {
+		o.ZcodeDBPath = def.ZcodeDBPath
+	}
+	if o.ZcodeRolloutDir == "" {
+		o.ZcodeRolloutDir = def.ZcodeRolloutDir
 	}
 	return o
 }
@@ -114,7 +136,7 @@ func catalogSQLite(ctx context.Context, o Options) ([]ThreadInfo, error) {
 
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, sqlite3Bin, "-readonly", "-json", o.SQLitePath, query)
+	cmd := execCommandContext(cctx, sqlite3Bin, "-readonly", "-json", o.SQLitePath, query)
 	var stdout strings.Builder
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
@@ -137,6 +159,7 @@ func catalogSQLite(ctx context.Context, o Options) ([]ThreadInfo, error) {
 			GitBranch:   branch,
 			UpdatedAtMs: r.UpdatedAtMs,
 			RolloutPath: r.RolloutPath,
+			Source:      SourceCodex,
 		})
 	}
 	return threads, nil
