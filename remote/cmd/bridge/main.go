@@ -35,6 +35,7 @@ import (
 	"github.com/harnessapk/remote/internal/protocol"
 	runstate "github.com/harnessapk/remote/internal/run"
 	bridgestate "github.com/harnessapk/remote/internal/state"
+	"github.com/harnessapk/remote/internal/webremote"
 	"github.com/harnessapk/remote/internal/workspace"
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -89,6 +90,7 @@ type bridge struct {
 	todayString           func() string
 	threadHistoryDB       string
 	focusRunner           func(ctx context.Context, name string, args ...string) error
+	webremoteRunner       func(ctx context.Context, name string, args ...string) (string, error)
 	dashboardSender       func(ctx context.Context, deviceID string, event protocol.Event) error
 	updateState           func(string, func(*bridgeState) error) error
 	backendBackoff        time.Duration
@@ -1135,6 +1137,73 @@ func runFocusCommand(ctx context.Context, name string, args ...string) error {
 	return exec.CommandContext(cctx, name, args...).Run()
 }
 
+// handleZcodeWebRemote 处理 zcode.webremote（method=refresh|link）：AX 自动化
+// 可能耗时十几秒，而 relay 读循环单 goroutine 同步分发，长任务必须脱离当前
+// 上下文异步执行，否则会卡住审批等后续指令；结果以 plain 帧回执。
+func (b *bridge) handleZcodeWebRemote(deviceID string, command protocol.Command) {
+	action := command.Method
+	if action != "refresh" && action != "link" {
+		b.ackZcodeWebRemote(context.Background(), deviceID, action,
+			webremote.Result{Stage: webremote.StageFailed, Err: fmt.Errorf("未知 action %q", action)})
+		return
+	}
+	wctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	go func() {
+		defer cancel()
+		result := b.runZcodeWebRemote(wctx, action)
+		b.ackZcodeWebRemote(wctx, deviceID, action, result)
+	}()
+}
+
+func (b *bridge) runZcodeWebRemote(ctx context.Context, action string) webremote.Result {
+	aut := &webremote.Automator{
+		Runner:     b.webremoteRunnerOrDefault(),
+		Pasteboard: readPasteboard,
+	}
+	if action == "refresh" {
+		return aut.Refresh(ctx)
+	}
+	return aut.Link(ctx)
+}
+
+func (b *bridge) webremoteRunnerOrDefault() webremote.Runner {
+	if b.webremoteRunner != nil {
+		return b.webremoteRunner
+	}
+	return runWebRemoteCommand
+}
+
+func (b *bridge) ackZcodeWebRemote(ctx context.Context, deviceID, action string, result webremote.Result) {
+	payload := map[string]any{
+		"ok":     result.Stage == webremote.StageOK,
+		"action": action,
+		"stage":  string(result.Stage),
+	}
+	if result.URL != "" {
+		payload["url"] = result.URL
+	}
+	if result.Err != nil {
+		payload["message"] = result.Err.Error()
+	}
+	if e := b.sendDashboardFrame(ctx, deviceID, "zcode.webremote", mustJSON(payload)); e != nil && ctx.Err() == nil {
+		log.Printf("ack zcode webremote to device %s: %v", deviceID, e)
+	}
+}
+
+func readPasteboard(ctx context.Context) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, "/usr/bin/pbpaste").Output()
+	return string(out), err
+}
+
+func runWebRemoteCommand(ctx context.Context, name string, args ...string) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, name, args...).Output()
+	return string(out), err
+}
+
 // backendFor resolves the backend for a command/event; empty id means the
 // default backend.
 func (b *bridge) backendFor(id string) backend.Backend {
@@ -1311,6 +1380,9 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 		return b.focusDashboardThread(ctx, deviceID, command)
 	case "dashboard.detail":
 		return b.sendDashboardDetail(ctx, deviceID, command.ThreadID)
+	case "zcode.webremote":
+		b.handleZcodeWebRemote(deviceID, command)
+		return nil
 	case "rpc":
 		return b.sendCommandEvent(ctx, deviceID, command, protocol.Event{
 			Type: "error", RequestID: command.RequestID, Message: "不支持通用后端调用",
