@@ -107,6 +107,38 @@ func TestAXDeniedClassification(t *testing.T) {
 	}
 }
 
+// launchd 常驻进程常见：Apple Events 自动化未授权（-1743）→ ax-denied。
+func TestAppleEventsDeniedClassification(t *testing.T) {
+	f := &fakeRunner{outputs: []string{""}}
+	f.errs = []error{&exec.ExitError{Stderr: []byte("execution error: Not authorized to send Apple events to System Events. (-1743)")}}
+	a := newAutomator(f, validURL)
+	res := a.Refresh(context.Background())
+	if res.Stage != StageAXDenied {
+		t.Fatalf("stage = %q, want ax-denied (err=%v)", res.Stage, res.Err)
+	}
+}
+
+// 授权框阻塞到超时被杀（signal: killed）→ ax-confirm。
+func TestConfirmBlockedClassification(t *testing.T) {
+	f := &fakeRunner{outputs: []string{""}}
+	f.errs = []error{killedExitError()}
+	a := newAutomator(f, validURL)
+	res := a.Refresh(context.Background())
+	if res.Stage != StageAXConfirm {
+		t.Fatalf("stage = %q, want ax-confirm (err=%v)", res.Stage, res.Err)
+	}
+}
+
+// killedExitError 造一个与生产同形的「进程被信号杀死」错误。
+func killedExitError() error {
+	cmd := exec.Command("/bin/sleep", "5")
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	cmd.Process.Kill()
+	return cmd.Wait()
+}
+
 // ZCode 未运行 → zcode-not-running。
 func TestZcodeNotRunning(t *testing.T) {
 	f := &fakeRunner{outputs: []string{"", "", "no-app"}}

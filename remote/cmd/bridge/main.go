@@ -1185,6 +1185,7 @@ func (b *bridge) ackZcodeWebRemote(ctx context.Context, deviceID, action string,
 	if result.Err != nil {
 		payload["message"] = result.Err.Error()
 	}
+	log.Printf("zcode webremote %s -> stage=%s ok=%v url=%v err=%v", action, result.Stage, result.Stage == webremote.StageOK, result.URL != "", result.Err)
 	if e := b.sendDashboardFrame(ctx, deviceID, "zcode.webremote", mustJSON(payload)); e != nil && ctx.Err() == nil {
 		log.Printf("ack zcode webremote to device %s: %v", deviceID, e)
 	}

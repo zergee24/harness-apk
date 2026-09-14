@@ -20,6 +20,7 @@ const (
 	StageOK               Stage = ""
 	StageZcodeNotRunning  Stage = "zcode-not-running" // ZCode 桌面端未运行
 	StageAXDenied         Stage = "ax-denied"         // 宿主缺 TCC「辅助功能」授权
+	StageAXConfirm        Stage = "ax-confirm"        // Apple Events 授权框待确认（阻塞到超时被杀）
 	StageAXEmpty          Stage = "ax-empty"          // Electron AX 树未激活/按钮未找到
 	StageDialogNotFound   Stage = "dialog-not-found"  // 侧边栏入口按钮未找到
 	StageClipboardInvalid Stage = "clipboard-invalid" // 剪贴板内容不是配对 URL
@@ -191,15 +192,23 @@ func classifyErr(defaultStage Stage, err error) Result {
 	if err == nil {
 		return Result{Stage: defaultStage}
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return Result{Stage: StageFailed, Err: err}
+	}
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "signal: killed") {
+		// CommandContext 超时杀进程：最常见原因是首次 Apple Events 授权框
+		// 弹出后阻塞等用户确认（屏幕睡眠时看不到），而非死循环。
+		return Result{Stage: StageAXConfirm, Err: err}
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		stderr := strings.ToLower(string(exitErr.Stderr))
+		// -25211/-1719：辅助功能未授权；-1743：Apple Events 自动化未授权
+		// （launchd 常驻进程首次弹不出授权框，两层都要在系统设置里放行）。
 		if strings.Contains(stderr, "-1719") || strings.Contains(stderr, "-25211") ||
+			strings.Contains(stderr, "-1743") ||
 			strings.Contains(stderr, "assistive") || strings.Contains(stderr, "辅助访问") ||
-			strings.Contains(stderr, "辅助功能") {
+			strings.Contains(stderr, "辅助功能") || strings.Contains(stderr, "not allowed to send apple events") {
 			return Result{Stage: StageAXDenied, Err: err}
 		}
 	}
