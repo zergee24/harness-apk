@@ -23,11 +23,14 @@ func TestZcodeSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	nowMs := time.Now().UnixMilli()
-	sql := `CREATE TABLE session (id TEXT, title TEXT, directory TEXT, time_updated TEXT, task_type TEXT);
-INSERT INTO session VALUES ('sess_abc123-4', '主会话', '/tmp/proj', '` + strconv.FormatInt(nowMs-1000, 10) + `', 'interactive');
-INSERT INTO session VALUES ('sess_child-9', '子代理', '/tmp/proj', '` + strconv.FormatInt(nowMs-2000, 10) + `', 'subagent_child');
-INSERT INTO session VALUES ('sess_notitle-7', '', '/tmp/other', '` + strconv.FormatInt(nowMs-3000, 10) + `', NULL);
-INSERT INTO session VALUES ('sess_old-1', '过期', '/tmp/old', '1000', 'interactive');`
+	// 真实库 time_updated 是 INTEGER（-json 输出 number）；额外插一行
+	// TEXT 形态覆盖老值兼容路径。
+	sql := `CREATE TABLE session (id TEXT, title TEXT, directory TEXT, time_updated INTEGER, task_type TEXT);
+INSERT INTO session VALUES ('sess_abc123-4', '主会话', '/tmp/proj', ` + strconv.FormatInt(nowMs-1000, 10) + `, 'interactive');
+INSERT INTO session VALUES ('sess_child-9', '子代理', '/tmp/proj', ` + strconv.FormatInt(nowMs-2000, 10) + `, 'subagent_child');
+INSERT INTO session VALUES ('sess_notitle-7', '', '/tmp/other', ` + strconv.FormatInt(nowMs-3000, 10) + `, NULL);
+INSERT INTO session VALUES ('sess_old-1', '过期', '/tmp/old', 1000, 'interactive');
+INSERT INTO session VALUES ('sess_text-2', '文本时间', '/tmp/text', '` + strconv.FormatInt(nowMs-4000, 10) + `', 'interactive');`
 	cmd := exec.Command(sqlite3Bin, dbPath, sql)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("建库失败: %v %s", err, out)
@@ -37,7 +40,7 @@ INSERT INTO session VALUES ('sess_old-1', '过期', '/tmp/old', '1000', 'interac
 	if !ok {
 		t.Fatal("ZcodeSessions 返回 ok=false")
 	}
-	if len(got) != 2 {
+	if len(got) != 3 {
 		t.Fatalf("应过滤 subagent 与过期会话，得 %d 条: %+v", len(got), got)
 	}
 	if got[0].ID != ZcodeThreadIDPrefix+"sess_abc123-4" {

@@ -18,11 +18,11 @@ import (
 const zcodeRunningWindow = 120 * time.Second
 
 type zcodeSessionRow struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Directory   string `json:"directory"`
-	TimeUpdated string `json:"time_updated"`
-	TaskType    string `json:"task_type"`
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	Directory   string          `json:"directory"`
+	TimeUpdated json.RawMessage `json:"time_updated"` // 真实库 INTEGER 输出 number，老值可能是 TEXT 字符串
+	TaskType    string          `json:"task_type"`
 }
 
 // ZcodeSessions 查询窗口内有更新的非子代理 zcode 会话，映射为
@@ -73,12 +73,19 @@ func ZcodeSessions(ctx context.Context, dbPath, rolloutDir string, windowStartMs
 	return threads, true
 }
 
-func parseMsOrZero(s string) int64 {
-	v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	if err != nil {
-		return 0
+// parseMsOrZero 兼容 number 与 string 两种 JSON 形态的毫秒时间戳。
+func parseMsOrZero(raw json.RawMessage) int64 {
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n
 	}
-	return v
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+			return v
+		}
+	}
+	return 0
 }
 
 // ZcodeStatusFromMtime 按 rollout 文件新鲜度给出运行状态：
