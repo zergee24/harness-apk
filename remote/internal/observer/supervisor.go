@@ -24,16 +24,17 @@ type Supervisor struct {
 	opts Options
 	topN int
 
-	mu     sync.Mutex
-	tails  map[string]*tailer
-	latest []ThreadSnapshot
+	mu        sync.Mutex
+	tails     map[string]*tailer
+	zcodeActs map[string]zcodeActCache
+	latest    []ThreadSnapshot
 }
 
 func NewSupervisor(opts Options, topN int) *Supervisor {
 	if topN <= 0 {
 		topN = 8
 	}
-	return &Supervisor{opts: opts, topN: topN, tails: map[string]*tailer{}}
+	return &Supervisor{opts: opts, topN: topN, tails: map[string]*tailer{}, zcodeActs: map[string]zcodeActCache{}}
 }
 
 // PollOnce 刷新目录、驱动各 tailer，返回按最近活动排序的一帧快照。
@@ -58,11 +59,16 @@ func (s *Supervisor) PollOnce(ctx context.Context, now time.Time) []ThreadSnapsh
 	merged := make([]ThreadSnapshot, 0, len(threads))
 	for _, th := range threads {
 		if th.Source == SourceZcode {
-			// zcode 无状态机可解析，mtime 启发式即状态；不占 tailer。
+			// zcode 无状态机可解析：mtime 启发式即状态，摘要取自
+			// model-io 尾部（mtime 未变时复用缓存，不重读大文件）。
+			prev := s.zcodeActs[th.ID]
+			status, modNs, text := ZcodeThreadState(th.RolloutPath, now, prev.modNs, prev.text)
+			s.zcodeActs[th.ID] = zcodeActCache{modNs: modNs, text: text}
 			merged = append(merged, ThreadSnapshot{
 				ThreadInfo:    th,
-				Status:        ZcodeStatusFromMtime(th.RolloutPath, now),
+				Status:        status,
 				LastEventAtMs: th.UpdatedAtMs,
+				LastActivity:  text,
 			})
 			continue
 		}

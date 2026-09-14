@@ -84,6 +84,74 @@ func TestZcodeStatusFromMtime(t *testing.T) {
 	}
 }
 
+func TestZcodeTailActivity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "model-io-sess_x.jsonl")
+	rec := func(text, tool string) string {
+		r := `{"type":"model_io","response":{`
+		if text != "" {
+			r += `"text":` + strconv.Quote(text)
+		}
+		if tool != "" {
+			if text != "" {
+				r += ","
+			}
+			r += `"toolCalls":[{"id":"c1","name":` + strconv.Quote(tool) + `}]`
+		}
+		return r + `}}` + "\n"
+	}
+	// 三条记录：旧文本轮、旧工具轮、最新文本轮；另留一个未写完的半行。
+	content := rec("旧总结", "") + rec("", "Read") + rec("最新一轮的模型输出", "Bash") + `{"type":"model_io","resp`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ZcodeTailActivity(path); got != "最新一轮的模型输出" {
+		t.Fatalf("应取最新完整记录的 text，得 %q", got)
+	}
+
+	// 纯工具轮（只有一条工具记录）：退化为工具名。
+	onlyTool := filepath.Join(dir, "tool.jsonl")
+	if err := os.WriteFile(onlyTool, []byte(rec("", "Bash")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ZcodeTailActivity(onlyTool); got != "调用 Bash" {
+		t.Fatalf("纯工具轮应退化工具名，得 %q", got)
+	}
+
+	// 空文件/缺文件：空串不报错。
+	empty := filepath.Join(dir, "empty.jsonl")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ZcodeTailActivity(empty); got != "" {
+		t.Fatalf("空文件应得空串，得 %q", got)
+	}
+	if got := ZcodeTailActivity(filepath.Join(dir, "missing.jsonl")); got != "" {
+		t.Fatalf("缺文件应得空串，得 %q", got)
+	}
+}
+
+func TestZcodeThreadState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "m.jsonl")
+	now := time.Now()
+	if _, _, text := ZcodeThreadState(filepath.Join(dir, "nope.jsonl"), now, 0, ""); text != "" {
+		t.Fatalf("缺文件活动应为空")
+	}
+	if err := os.WriteFile(path, []byte(`{"response":{"text":"hello"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, modNs, text := ZcodeThreadState(path, now, 0, "")
+	if st != StatusRunning || text != "hello" {
+		t.Fatalf("首查应 running+新文本，得 %s %q", st, text)
+	}
+	// mtime 未变：摘要走缓存（即使文件内容被换成坏 JSON 也不重读）。
+	st2, modNs2, text2 := ZcodeThreadState(path, now, modNs, "hello")
+	if st2 != StatusRunning || text2 != "hello" || modNs2 != modNs {
+		t.Fatalf("缓存命中应原样返回，得 %s %q %d", st2, text2, modNs2)
+	}
+}
+
 func TestZcodeFocusPlan(t *testing.T) {
 	plans, err := ZcodeFocusPlan("/Users/tony/Documents/harness-apk")
 	if err != nil {

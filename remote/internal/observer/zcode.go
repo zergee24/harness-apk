@@ -1,6 +1,7 @@
 package observer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -99,6 +100,96 @@ func ZcodeStatusFromMtime(path string, now time.Time) Status {
 		return StatusRunning
 	}
 	return StatusDone
+}
+
+// zcodeActCache 按 rollout mtime 缓存摘要，避免 5s 轮询反复读大文件。
+type zcodeActCache struct {
+	modNs int64
+	text  string
+}
+
+// ZcodeThreadState 一次 stat 给出状态与摘要；文件未变时直接复用缓存文本。
+// prevModNs/prevText 来自上一次调用（首次传 0/""）。
+func ZcodeThreadState(path string, now time.Time, prevModNs int64, prevText string) (Status, int64, string) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return StatusIdle, 0, ""
+	}
+	modNs := st.ModTime().UnixNano()
+	status := StatusDone
+	if now.Sub(st.ModTime()) <= zcodeRunningWindow {
+		status = StatusRunning
+	}
+	text := prevText
+	if modNs != prevModNs {
+		text = ActivitySnippet(ZcodeTailActivity(path))
+	}
+	return status, modNs, text
+}
+
+// zcodeTailWindow 是摘要提取读取的日志尾窗；单条 model_io 记录（整轮
+// LLM 请求）可能数百 KB，窗口太小会切在行中间拿不到完整记录。
+const zcodeTailWindow = 1 << 20
+
+// ZcodeTailActivity 从 model-io 日志尾部取最近一条记录的活动摘要：
+// 优先模型最终文本，纯工具轮退化为工具名。取不到返回空串。
+func ZcodeTailActivity(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	window := int64(zcodeTailWindow)
+	if st.Size() < window {
+		window = st.Size()
+	}
+	buf := make([]byte, window)
+	if _, err := f.ReadAt(buf, st.Size()-window); err != nil {
+		return ""
+	}
+	// 从尾往前找完整行（末段可能是正在写的半行），最多回退 3 段。
+	end := len(buf)
+	for try := 0; try < 3; try++ {
+		start := bytes.LastIndexByte(buf[:end], '\n') + 1
+		line := bytes.TrimSpace(buf[start:end])
+		if len(line) > 0 {
+			if text := zcodeActivityFromRecord(line); text != "" {
+				return text
+			}
+		}
+		if start == 0 {
+			return ""
+		}
+		end = start - 1
+	}
+	return ""
+}
+
+// zcodeActivityFromRecord 解析单条 model_io 记录：response.text 优先，
+// 空文本轮退化为最后一个工具调用名（「调用 Read」）。
+func zcodeActivityFromRecord(line []byte) string {
+	var rec struct {
+		Response *struct {
+			Text      string `json:"text"`
+			ToolCalls []struct {
+				Name string `json:"name"`
+			} `json:"toolCalls"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(line, &rec); err != nil || rec.Response == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(rec.Response.Text); s != "" {
+		return s
+	}
+	if n := len(rec.Response.ToolCalls); n > 0 {
+		return "调用 " + rec.Response.ToolCalls[n-1].Name
+	}
+	return ""
 }
 
 func execCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
