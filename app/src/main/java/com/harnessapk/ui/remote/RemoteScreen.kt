@@ -112,6 +112,7 @@ private fun RemoteThreadList(container: AppContainer, state: RemoteUiState, padd
                 container.remoteRepository.requestWorkspaceCandidates()
             },
             onOpenDashboard = { context.startActivity(android.content.Intent(context, com.harnessapk.ui.dashboard.DashboardActivity::class.java)) },
+            onOpenZcodeWebRemote = { context.startActivity(android.content.Intent(context, ZcodeWebRemoteActivity::class.java)) },
         )
         if (state.backends.size > 1) {
             BackendSwitcher(
@@ -189,6 +190,7 @@ internal fun RemoteThreadListHeader(
     onRefresh: () -> Unit,
     onCreate: () -> Unit,
     onOpenDashboard: () -> Unit = {},
+    onOpenZcodeWebRemote: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -215,6 +217,9 @@ internal fun RemoteThreadListHeader(
         }
         TextButton(onClick = onOpenDashboard) {
             Text("副屏")
+        }
+        TextButton(onClick = onOpenZcodeWebRemote) {
+            Text("ZCode")
         }
         IconButton(onClick = onRefresh) {
             Icon(Icons.Outlined.Refresh, contentDescription = "刷新远程会话")

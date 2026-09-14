@@ -117,6 +117,11 @@
             android:exported="false"
             android:label="Agent 副屏" />
 
+        <activity
+            android:name=".ui.remote.ZcodeWebRemoteActivity"
+            android:exported="false"
+            android:label="ZCode 远程" />
+
         <!-- Spike-画布 可行性试点：仅 debug 构建可用（onCreate 里非 debug 直接 finish） -->
         <activity
             android:name=".spike.canvas.SpikeCanvasActivity"

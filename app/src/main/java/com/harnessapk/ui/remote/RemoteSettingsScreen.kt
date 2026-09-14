@@ -134,6 +134,11 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
                     }) {
                         Text("副屏模式（常亮）")
                     }
+                    OutlinedButton(onClick = {
+                        context.startActivity(Intent(context, ZcodeWebRemoteActivity::class.java))
+                    }) {
+                        Text("ZCode 远程（二维码套壳）")
+                    }
                     OutlinedButton(onClick = { container.remoteRepository.disconnect(); container.remoteProfileStore.clear() }) {
                         Icon(Icons.Outlined.Delete, contentDescription = null); Text("移除节点")
                     }
@@ -162,7 +167,7 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
     }
 }
 
-private fun decodeQr(bitmap: Bitmap): Result<String> = runCatching { decodeQrText(bitmap) }
+internal fun decodeQr(bitmap: Bitmap): Result<String> = runCatching { decodeQrText(bitmap) }
 
 internal suspend fun decodeQrImage(context: android.content.Context, uri: Uri): String =
     withContext(Dispatchers.IO) {
