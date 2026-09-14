@@ -149,6 +149,7 @@ import com.harnessapk.chat.DraftDocumentAttachment
 import com.harnessapk.chat.DraftImageAttachment
 import com.harnessapk.chat.DraftAttachmentState
 import com.harnessapk.chat.DraftAttachmentRecord
+import com.harnessapk.network.NetworkFailureHints
 import com.harnessapk.chat.DraftAttachmentKind
 import com.harnessapk.chat.DraftImportOutcome
 import com.harnessapk.chat.DraftSaveResult
@@ -3473,11 +3474,10 @@ internal fun modelPickerButtonText(
     return "$selectedModel$reasoningText"
 }
 
-internal fun errorDisplayText(errorText: String): String = errorText
-    .lineSequence()
-    .firstOrNull()
-    ?.takeIf { it.isNotBlank() }
-    ?: errorText
+internal fun errorDisplayText(errorText: String): String {
+    val firstLine = errorText.lineSequence().firstOrNull()?.takeIf { it.isNotBlank() } ?: errorText
+    return NetworkFailureHints.chatHeadline(firstLine, errorText)
+}
 
 internal fun errorCopyText(errorText: String): String = errorText
 
@@ -5155,9 +5155,10 @@ private fun MessageBubble(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     if (!simpleMode) Text(
-                        text = "可复制详细日志",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = "复制详细日志",
+                        color = MaterialTheme.colorScheme.primary,
                         style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.clickable { onCopy() },
                     )
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         onRetryFailed?.let { retry ->

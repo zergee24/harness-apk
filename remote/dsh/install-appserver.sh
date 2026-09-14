@@ -30,11 +30,11 @@ fi
 echo "installing plugin dependencies into $PROFILE"
 pnpm --dir "$PROFILE" add --registry="$NPM_REGISTRY" \
   commander@15.0.0 \
-  @deepseek-ai/schemastery@3.18.1 \
-  @deepseek-ai/dsh-agent@0.1.0-rc.6 \
-  @deepseek-ai/dsh-cmdline@0.1.0-rc.6 \
-  @deepseek-ai/dsh-llm@0.1.0-rc.6 \
-  @deepseek-ai/dsh-session@0.1.0-rc.6 >/dev/null
+  @deepseek-ai/schemastery@3.18.2 \
+  @deepseek-ai/dsh-agent@0.1.5-rc.1 \
+  @deepseek-ai/dsh-cmdline@0.1.5-rc.1 \
+  @deepseek-ai/dsh-llm@0.1.5-rc.1 \
+  @deepseek-ai/dsh-session@0.1.5-rc.1 >/dev/null
 
 # The profile loader resolves plugin imports from the profile's node_modules;
 # a pnpm link: dependency would resolve from the repo instead, so copy the

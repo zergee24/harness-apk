@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.harnessapk.BuildConfig
 import com.harnessapk.common.AppContainer
+import com.harnessapk.network.NetworkFailureHints
 import com.harnessapk.provider.CapabilitySource
 import com.harnessapk.provider.DEFAULT_OPEN_AI_REASONING_EFFORT
 import com.harnessapk.provider.ModelConfig
@@ -229,7 +230,7 @@ fun ProviderSettingsScreen(
             }.onSuccess { result ->
                 status = "连通正常 · $testModel · ${result.latencyMillis}ms"
             }.onFailure { failure ->
-                status = failure.message ?: "连通测试失败"
+                status = NetworkFailureHints.connectionTestStatus(failure, baseUrl)
             }
             formBusyAction = null
         }

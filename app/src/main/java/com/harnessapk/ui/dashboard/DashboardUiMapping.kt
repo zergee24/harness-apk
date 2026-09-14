@@ -34,6 +34,10 @@ fun dashboardStatusLabel(thread: DashboardThread): String {
     return if (thread.approx) "$base · ${thread.note ?: "非精确"}" else base
 }
 
+// 来源徽标：只给 zcode 卡标注（混排里 codex 是默认主体，不加噪声）。
+fun dashboardSourceLabel(thread: DashboardThread): String =
+    if (thread.source == "zcode") "ZCode" else ""
+
 // done 且目录时间晚于上次查看时间 → 未读。查看时间戳只存本机。
 fun isDashboardUnread(thread: DashboardThread, lastViewedAtMs: Long): Boolean =
     dashboardTone(thread.status) == DashboardTone.DONE && thread.updatedAtMs > lastViewedAtMs

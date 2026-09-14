@@ -4,16 +4,12 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,9 +19,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Card
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -44,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,7 +56,6 @@ import com.harnessapk.remote.DashboardQuota
 import com.harnessapk.remote.DashboardThread
 import com.harnessapk.remote.DashboardViewedStore
 import com.harnessapk.remote.RemoteConnectionStatus
-import kotlin.math.ceil
 
 private val ThreadTileWidth = 260.dp
 
@@ -77,11 +78,12 @@ fun DashboardScreen(
         // 副屏可能脱离远程页直接进入（进程被杀后冷启），先确保 WSS 连接。
         container.remoteRepository.connect()
         container.remoteRepository.requestDashboardSnapshot()
-        container.remoteRepository.focusResults.collect { result ->
-            snackbarHostState.showSnackbar(
-                if (result.ok) "已在 Mac 主屏打开该线程" else "聚焦失败：${result.message ?: "未知原因"}",
-            )
-        }
+            container.remoteRepository.focusResults.collect { result ->
+                snackbarHostState.showSnackbar(
+                    // zcode 卡聚焦打开的是工作区，措辞不绑「线程」。
+                    if (result.ok) "已在 Mac 前台打开" else "聚焦失败：${result.message ?: "未知原因"}",
+                )
+            }
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -117,6 +119,17 @@ fun DashboardScreen(
                     style = MaterialTheme.typography.labelSmall,
                     color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
                 )
+                IconButton(
+                    onClick = { container.remoteRepository.requestDashboardSnapshot() },
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Refresh,
+                        contentDescription = "手动刷新",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 TextButton(onClick = onExit) { Text("退出") }
             }
             if (threads.isEmpty()) {
@@ -147,8 +160,10 @@ fun DashboardScreen(
     }
 }
 
-// 两行横滑线程区（非 Lazy：墨水屏上 Lazy 网格的文本层不触发面板刷新）。
-// 线程按 3 列一页切分，左右滑动翻页，底部页码点指示。
+// 两行横滑线程区。非 Lazy（Row+horizontalScroll+整页组合）：
+// 墨水屏上 Lazy 网格的 item 文本层会随复用丢刷新（标题/状态偶发整块
+// 不显示），全量组合整体重画才是面板刷新友好的；页列定高、页内两行
+// weight 等高，末页不足补空白撑位。
 @Composable
 private fun ThreadPagingGrid(
     threads: List<DashboardThread>,
@@ -156,33 +171,47 @@ private fun ThreadPagingGrid(
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier = modifier) {
-        val gridState = rememberLazyGridState()
+        val scrollState = rememberScrollState()
         val columns = (maxWidth / (ThreadTileWidth + 8.dp)).toInt().coerceAtLeast(1)
-        val pageSize = (columns * 2).coerceAtLeast(1)
-        val pages = ceil(threads.size.toDouble() / pageSize).toInt().coerceAtLeast(1)
-        val page = (gridState.firstVisibleItemIndex / pageSize).coerceIn(0, pages - 1)
-
-        LazyHorizontalGrid(
-            rows = GridCells.Fixed(2),
-            state = gridState,
-            modifier = Modifier.fillMaxSize(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+        val pages = threads.chunked(columns * 2)
+        val pageWidth = ThreadTileWidth * columns + 8.dp * (columns - 1)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .horizontalScroll(scrollState),
         ) {
-            items(threads, key = { it.threadId }) { thread ->
-                ConsoleTile(
-                    thread = thread,
-                    unread = false,
-                    onClick = { onTap(thread) },
-                )
+            pages.forEach { pageThreads ->
+                Column(
+                    // 右侧 8dp 充当页间距（Column 无横向 arrangement）。
+                    modifier = Modifier.padding(end = 8.dp).width(pageWidth).fillMaxHeight(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    pageThreads.chunked(columns).forEach { rowThreads ->
+                        Row(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            rowThreads.forEach { thread ->
+                                ConsoleTile(
+                                    thread = thread,
+                                    unread = false,
+                                    onClick = { onTap(thread) },
+                                )
+                            }
+                            repeat(columns - rowThreads.size) { Spacer(modifier = Modifier.weight(1f)) }
+                        }
+                    }
+                }
             }
         }
-        if (pages > 1) {
+        if (pages.size > 1) {
+            val pageStepPx = with(LocalDensity.current) { (pageWidth + 8.dp).toPx() }
+            val page = (scrollState.value / pageStepPx).toInt().coerceIn(0, pages.size - 1)
             Row(
                 modifier = Modifier.align(Alignment.BottomCenter).padding(top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                repeat(pages) { index ->
+                repeat(pages.size) { index ->
                     Box(
                         modifier = Modifier
                             .size(if (index == page) 7.dp else 5.dp)
@@ -213,7 +242,9 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                         thread.title,
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
+                        // 两行截断：单行会把长标题（CRM 业务名/zcode 会话名）
+                        // 压到七八个字就省略，卡片纵向有富余。
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
@@ -224,6 +255,15 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                                 .size(8.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFFFF5C5C)),
+                        )
+                    }
+                    dashboardSourceLabel(thread).takeIf { it.isNotEmpty() }?.let { badge ->
+                        Text(
+                            badge,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            modifier = Modifier.padding(start = 8.dp),
                         )
                     }
                     Text(
