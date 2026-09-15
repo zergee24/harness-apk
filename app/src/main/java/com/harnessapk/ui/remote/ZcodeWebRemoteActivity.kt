@@ -1,8 +1,11 @@
 package com.harnessapk.ui.remote
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
+import androidx.core.content.ContextCompat
 import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -262,6 +265,18 @@ private fun SetupView(
             onFailure = { error = it.message },
         )
     }
+    // Manifest 声明了 CAMERA 时，未授权直接启动取景 intent 会 SecurityException，
+    // 必须先走运行时权限（与聊天拍照同款语义）。
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) cameraLauncher.launch(null) else error = "未获得相机权限，可用「读取图片」或粘贴链接"
+    }
+    fun launchQrScan() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            cameraLauncher.launch(null)
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
     val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { selected ->
             scope.launch {
@@ -287,7 +302,7 @@ private fun SetupView(
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { cameraLauncher.launch(null) }, enabled = true) {
+                    Button(onClick = { launchQrScan() }, enabled = true) {
                         Icon(Icons.Outlined.CameraAlt, contentDescription = null)
                         Text("扫描二维码")
                     }
