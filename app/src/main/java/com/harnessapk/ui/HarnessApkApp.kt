@@ -690,11 +690,21 @@ fun HarnessApkApp(
                 TopAppBar(
                     title = { Text(topLevelTitle(mainMode, currentProjectName)) },
                     actions = {
-                        if (mainMode == MainMode.WORK && remoteProfile != null) {
-                            TextButton(onClick = { navController.navigate(Routes.RemoteControl) }) {
-                                Icon(Icons.Outlined.Dns, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text("远程")
+                        if (mainMode == MainMode.WORK) {
+                            if (remoteProfile != null) {
+                                TextButton(onClick = { navController.navigate(Routes.RemoteControl) }) {
+                                    Icon(Icons.Outlined.Dns, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("远程")
+                                }
+                            }
+                            // ZCode 远程与 bridge 体系相互独立，不依赖节点配对，工作页常驻直达。
+                            TextButton(onClick = {
+                                context.startActivity(
+                                    android.content.Intent(context, com.harnessapk.ui.remote.ZcodeWebRemoteActivity::class.java),
+                                )
+                            }) {
+                                Text("ZCode")
                             }
                         }
                         if (mainMode == MainMode.WORK) {
