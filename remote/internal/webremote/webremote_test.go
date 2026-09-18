@@ -2,7 +2,6 @@ package webremote
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -81,21 +80,6 @@ func TestRefreshHappyPath(t *testing.T) {
 	}
 }
 
-// Link 快乐路径：不点刷新按钮，直接复制链接。
-func TestLinkHappyPath(t *testing.T) {
-	f := &fakeRunner{outputs: []string{"", "", "ready", "clicked"}}
-	a := newAutomator(f, validURL)
-	res := a.Link(context.Background())
-	if res.Stage != StageOK || res.URL != validURL {
-		t.Fatalf("Link = %+v, want ok + url", res)
-	}
-	for _, c := range f.calls {
-		if c.name == "/usr/bin/osascript" && strings.Contains(c.args[1], btnRefresh) {
-			t.Fatalf("Link 不应触碰刷新按钮:\n%s", c.args[1])
-		}
-	}
-}
-
 // TCC 未授权：osascript 退出码 -1719 → ax-denied。
 func TestAXDeniedClassification(t *testing.T) {
 	f := &fakeRunner{outputs: []string{""}}
@@ -159,34 +143,13 @@ func TestDialogNotFound(t *testing.T) {
 	}
 }
 
-// 复制链接按钮缺失 → ax-empty。
+// 刷新链路里复制链接按钮缺失 → ax-empty（AX 仅剩 refresh 在用）。
 func TestCopyButtonMissing(t *testing.T) {
-	f := &fakeRunner{outputs: []string{"", "", "ready", "missing"}}
+	f := &fakeRunner{outputs: []string{"", "", "ready", "clicked", "yes", "clicked", "missing"}}
 	a := newAutomator(f, validURL)
-	res := a.Link(context.Background())
+	res := a.Refresh(context.Background())
 	if res.Stage != StageAXEmpty {
 		t.Fatalf("stage = %q, want ax-empty", res.Stage)
-	}
-}
-
-// 剪贴板内容不是配对 URL → clipboard-invalid。
-func TestClipboardInvalid(t *testing.T) {
-	f := &fakeRunner{outputs: []string{"", "", "ready", "clicked"}}
-	a := newAutomator(f, "hello world\nsecond line")
-	res := a.Link(context.Background())
-	if res.Stage != StageClipboardInvalid {
-		t.Fatalf("stage = %q, want clipboard-invalid", res.Stage)
-	}
-}
-
-// Pasteboard 注入失败 → failed。
-func TestPasteboardError(t *testing.T) {
-	f := &fakeRunner{outputs: []string{"", "", "ready", "clicked"}}
-	a := newAutomator(f, "")
-	a.Pasteboard = func(context.Context) (string, error) { return "", errors.New("pbpaste boom") }
-	res := a.Link(context.Background())
-	if res.Stage != StageFailed {
-		t.Fatalf("stage = %q, want failed", res.Stage)
 	}
 }
 

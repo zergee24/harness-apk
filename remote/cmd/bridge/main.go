@@ -1147,7 +1147,7 @@ func (b *bridge) handleZcodeWebRemote(deviceID string, command protocol.Command)
 			webremote.Result{Stage: webremote.StageFailed, Err: fmt.Errorf("未知 action %q", action)})
 		return
 	}
-	wctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	wctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	go func() {
 		defer cancel()
 		result := b.runZcodeWebRemote(wctx, action)
@@ -1170,7 +1170,20 @@ func (b *bridge) webremoteRunnerOrDefault() webremote.Runner {
 	if b.webremoteRunner != nil {
 		return b.webremoteRunner
 	}
-	return runWebRemoteCommand
+	// 包一层步骤日志：定位 AX 链卡在哪一步（entire contents 可能远超 30s）。
+	return func(ctx context.Context, name string, args ...string) (string, error) {
+		started := time.Now()
+		out, err := runWebRemoteCommand(ctx, name, args...)
+		argHint := ""
+		if len(args) >= 2 {
+			argHint = args[1]
+			if len(argHint) > 50 {
+				argHint = argHint[:50]
+			}
+		}
+		log.Printf("webremote step %q %.1fs out=%q err=%v", argHint, time.Since(started).Seconds(), strings.TrimSpace(out), err)
+		return out, err
+	}
 }
 
 func (b *bridge) ackZcodeWebRemote(ctx context.Context, deviceID, action string, result webremote.Result) {
@@ -1181,6 +1194,9 @@ func (b *bridge) ackZcodeWebRemote(ctx context.Context, deviceID, action string,
 	}
 	if result.URL != "" {
 		payload["url"] = result.URL
+	}
+	if result.ImageB64 != "" {
+		payload["imageB64"] = result.ImageB64
 	}
 	if result.Err != nil {
 		payload["message"] = result.Err.Error()
@@ -1199,7 +1215,8 @@ func readPasteboard(ctx context.Context) (string, error) {
 }
 
 func runWebRemoteCommand(ctx context.Context, name string, args ...string) (string, error) {
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// entire contents 遍历大 Electron 窗口可能远超 30s，给足预算。
+	cctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(cctx, name, args...).Output()
 	return string(out), err

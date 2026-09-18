@@ -23,6 +23,7 @@ const (
 	StageAXConfirm        Stage = "ax-confirm"        // Apple Events 授权框待确认（阻塞到超时被杀）
 	StageAXEmpty          Stage = "ax-empty"          // Electron AX 树未激活/按钮未找到
 	StageDialogNotFound   Stage = "dialog-not-found"  // 侧边栏入口按钮未找到
+	StageQRNotFound       Stage = "qr-not-found"      // 截图路线：对话框未开或屏幕录制未授权
 	StageClipboardInvalid Stage = "clipboard-invalid" // 剪贴板内容不是配对 URL
 	StageFailed           Stage = "failed"
 )
@@ -43,13 +44,16 @@ type Automator struct {
 	Runner     Runner
 	Pasteboard func(ctx context.Context) (string, error)
 	Sleep      func(context.Context, time.Duration) error
+	PNGPath    string // 截图路线的落盘路径；测试注入用，空则取默认临时路径
+	ToolDir    string // swift 辅助工具的编译缓存目录；测试注入用
 }
 
 // Result 是一次自动化动作的 outcome。
 type Result struct {
-	URL   string
-	Stage Stage
-	Err   error
+	URL      string
+	Stage    Stage
+	Err      error
+	ImageB64 string // 截图路线下 Mac 端解不出时，原图 base64 交给手机端 zxing 兜底
 }
 
 // Refresh 唤屏后走完整链：开对话框 → 刷新二维码（含确认弹窗）→ 复制链接。
@@ -91,14 +95,13 @@ func (a *Automator) Refresh(ctx context.Context) Result {
 }
 
 // Link 只取当前配对 URL，不刷新（刷新会作废旧链接）。
+// 走窗口截图 + 本地解码：不依赖 AX/Apple Events，仅需「屏幕录制」授权。
+// 前提：桌面端「移动端远程控制」对话框处于打开状态。
 func (a *Automator) Link(ctx context.Context) Result {
 	if err := a.wake(ctx); err != nil {
 		return classifyErr(StageFailed, err)
 	}
-	if res := a.ensureDialog(ctx); res.Stage != StageOK {
-		return res
-	}
-	return a.copyLink(ctx)
+	return a.CaptureLink(ctx)
 }
 
 func (a *Automator) sleep(ctx context.Context, d time.Duration) error {

@@ -7,49 +7,55 @@ import "strings"
 // tell 块内的脚本级 handler 调用必须带 my 前缀，否则会被派发给应用。
 
 const scriptHandlers = `on axReady()
-	tell application "System Events"
-		if not (exists application process "ZCode") then return "no-app"
-		try
-			set value of attribute "AXManualAccessibility" of application process "ZCode" to true
-		end try
-		try
-			set value of attribute "AXEnhancedUserInterface" of application process "ZCode" to true
-		end try
-	end tell
+	with timeout of 8 seconds
+		tell application "System Events"
+			if not (exists application process "ZCode") then return "no-app"
+			try
+				set value of attribute "AXManualAccessibility" of application process "ZCode" to true
+			end try
+			try
+				set value of attribute "AXEnhancedUserInterface" of application process "ZCode" to true
+			end try
+		end tell
+	end timeout
 	delay 0.6
 	return ""
 end axReady
 
 on findBtn(prefix)
-	tell application "System Events" to tell application process "ZCode"
-		if (count of windows) = 0 then return missing value
-		set els to entire contents of window 1
-		repeat with e in els
-			try
-				if class of e is button then
-					set n to name of e
-					if n is not missing value and n begins with prefix then return e
-				end if
-			end try
-		end repeat
-	end tell
+	with timeout of 100 seconds
+		tell application "System Events" to tell application process "ZCode"
+			if (count of windows) = 0 then return missing value
+			set els to entire contents of window 1
+			repeat with e in els
+				try
+					if class of e is button then
+						set n to name of e
+						if n is not missing value and n begins with prefix then return e
+					end if
+				end try
+			end repeat
+		end tell
+	end timeout
 	return missing value
 end findBtn
 
 on findText(marker)
-	tell application "System Events" to tell application process "ZCode"
-		if (count of windows) = 0 then return false
-		set els to entire contents of window 1
-		repeat with e in els
-			try
-				if class of e is static text then
-					set n to name of e
-					set v to value of e
-					if (n is not missing value and n contains marker) or (v is not missing value and v contains marker) then return true
-				end if
-			end try
-		end repeat
-	end tell
+	with timeout of 100 seconds
+		tell application "System Events" to tell application process "ZCode"
+			if (count of windows) = 0 then return false
+			set els to entire contents of window 1
+			repeat with e in els
+				try
+					if class of e is static text then
+						set n to name of e
+						set v to value of e
+						if (n is not missing value and n contains marker) or (v is not missing value and v contains marker) then return true
+					end if
+				end try
+			end repeat
+		end tell
+	end timeout
 	return false
 end findText
 `
