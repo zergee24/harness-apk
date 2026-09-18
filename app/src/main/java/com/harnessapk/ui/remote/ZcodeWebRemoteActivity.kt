@@ -1,18 +1,12 @@
 package com.harnessapk.ui.remote
 
-import android.Manifest
 import android.annotation.SuppressLint
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.os.Bundle
-import androidx.core.content.ContextCompat
 import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,8 +18,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.CameraAlt
-import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -47,7 +39,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.harnessapk.HarnessApkApplication
@@ -82,7 +73,6 @@ class ZcodeWebRemoteActivity : ComponentActivity() {
 
 @Composable
 fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, onExit: () -> Unit) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val savedUrl by store.url.collectAsState()
     val connection by container.remoteRepository.state.collectAsState()
@@ -171,7 +161,6 @@ fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, on
                 pairingText = pairingText,
                 onPairingTextChange = { pairingText = it },
                 onSave = { saveAndLoad(pairingText) },
-                onScan = { raw -> runCatching { saveAndLoad(raw) } },
                 onRequestLink = { reconnect("link") },
                 linkBusy = busy,
                 linkEnabled = connection.connectionStatus == RemoteConnectionStatus.CONNECTED,
@@ -248,49 +237,10 @@ private fun SetupView(
     pairingText: String,
     onPairingTextChange: (String) -> Unit,
     onSave: () -> Unit,
-    onScan: (String) -> Unit,
     onRequestLink: () -> Unit,
     linkBusy: Boolean,
     linkEnabled: Boolean,
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var error by remember { mutableStateOf<String?>(null) }
-
-    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
-        bitmap?.let(::decodeQr)?.fold(
-            onSuccess = { raw ->
-                if (looksLikeZcodeRemoteUrl(raw)) onScan(raw) else error = "二维码不是 ZCode 远程配对链接"
-            },
-            onFailure = { error = it.message },
-        )
-    }
-    // Manifest 声明了 CAMERA 时，未授权直接启动取景 intent 会 SecurityException，
-    // 必须先走运行时权限（与聊天拍照同款语义）。
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) cameraLauncher.launch(null) else error = "未获得相机权限，可用「读取图片」或粘贴链接"
-    }
-    fun launchQrScan() {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            cameraLauncher.launch(null)
-        } else {
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
-    }
-    val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let { selected ->
-            scope.launch {
-                runCatching { decodeQrImage(context, selected) }
-                    .fold(
-                        onSuccess = { raw ->
-                            if (looksLikeZcodeRemoteUrl(raw)) onScan(raw) else error = "二维码不是 ZCode 远程配对链接"
-                        },
-                        onFailure = { error = it.message },
-                    )
-            }
-        }
-    }
-
     Column(
         Modifier
             .fillMaxSize()
@@ -298,19 +248,12 @@ private fun SetupView(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("首次使用：在 Mac 的 ZCode 桌面端打开「移动端远程控制」，扫码或粘贴链接完成配对。", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            "首次使用：在 Mac 的 ZCode 桌面端「移动端远程控制」对话框点「复制链接」，粘贴到下面；Mac 在线时也可直接点「从 Mac 取链接」。",
+            style = MaterialTheme.typography.bodyMedium,
+        )
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { launchQrScan() }, enabled = true) {
-                        Icon(Icons.Outlined.CameraAlt, contentDescription = null)
-                        Text("扫描二维码")
-                    }
-                    OutlinedButton(onClick = { imageLauncher.launch("image/*") }, enabled = true) {
-                        Icon(Icons.Outlined.Image, contentDescription = null)
-                        Text("读取图片")
-                    }
-                }
                 OutlinedButton(onClick = onRequestLink, enabled = !linkBusy && linkEnabled) {
                     if (linkBusy) CircularProgressIndicator(Modifier.padding(end = 8.dp))
                     Text("从 Mac 取链接")
@@ -319,13 +262,12 @@ private fun SetupView(
                     value = pairingText,
                     onValueChange = onPairingTextChange,
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("或粘贴配对链接") },
+                    label = { Text("粘贴配对链接") },
                     minLines = 2,
                 )
                 Button(onClick = onSave, enabled = looksLikeZcodeRemoteUrl(pairingText)) {
                     Text("保存并打开")
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         }
     }

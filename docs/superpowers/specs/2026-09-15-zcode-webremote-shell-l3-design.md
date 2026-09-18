@@ -40,7 +40,7 @@
 ### App 端子模式
 
 - 入口：工作模式 → 远程 Hub 区，与副屏 Dashboard 入口并列。
-- 配对三通道（任一）：① App 内扫码直扫 ZCode 桌面端二维码（内容就是 URL）；② 手动粘贴 URL；③ bridge `link` 动作远程取。
+- 配对通道（2026-09-15 依 Tony 反馈做减法，"支持复制链接就够"）：① 粘贴链接（主路径，Mac 端「复制链接」后经任意通道传到手机）；② bridge `link` 动作「从 Mac 取链接」。~~扫码/读取图片~~已移除（CAMERA 声明未授权会 SecurityException 的坑在 Codex 配对扫码处保留修复）。
 - WebView：加载 URL；onError 显示「重连」按钮 → 发 `refresh` 命令 → 收到回执后 `loadUrl(new)`。
 - 单页面互踢约束显性化：页头提示「同一时间只允许一台手机页面打开」。
 
