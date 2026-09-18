@@ -624,6 +624,7 @@ data class ZcodeWebRemoteResult(
     val url: String? = null,
     val stage: String? = null,
     val message: String? = null,
+    val imageB64: String? = null,
 )
 
 internal fun parseZcodeWebRemoteResult(payload: JsonElement?): ZcodeWebRemoteResult {
@@ -634,6 +635,7 @@ internal fun parseZcodeWebRemoteResult(payload: JsonElement?): ZcodeWebRemoteRes
         url = item.string("url"),
         stage = item.string("stage"),
         message = item.string("message"),
+        imageB64 = item.string("imageB64"),
     )
 }
 
@@ -642,6 +644,7 @@ fun zcodeWebRemoteStageLabel(stage: String?): String? = when (stage) {
     null, "", "disconnected" -> null
     "ax-denied" -> "Mac 需一次性授权：系统设置→隐私与安全性→辅助功能与自动化，允许 harness-bridge 后重试"
     "ax-confirm" -> "Mac 屏幕上可能正弹授权确认框，请到 Mac 前点「允许」后重试"
+    "qr-not-found" -> "未在 ZCode 窗口找到二维码：请确认 Mac 端对话框已打开；首次使用需在 系统设置→隐私与安全性→屏幕录制 允许 harness-bridge"
     "zcode-not-running" -> "Mac 上的 ZCode 桌面端未运行"
     "dialog-not-found" -> "未找到「移动端远程控制」入口，请确认 Mac 端 ZCode 版本"
     "ax-empty" -> "ZCode 界面元素未就绪，稍后重试；持续失败多为 ZCode 升级改版"

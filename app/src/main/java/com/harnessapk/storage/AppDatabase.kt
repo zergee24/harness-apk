@@ -1400,7 +1400,22 @@ abstract class AppDatabase : RoomDatabase() {
 
         val LOCAL_SEARCH_CALLBACK: Callback = object : Callback() {
             override fun onOpen(db: SupportSQLiteDatabase) {
-                ensureLocalSearchSchema(db)
+                // force-stop 后秒重启时，旧进程仍持有 SQLite 写锁，onOpen 里直接
+                // execSQL 会 SQLITE_BUSY 直接崩掉 App——带退避重试渡过锁窗口。
+                var lastError: Exception? = null
+                repeat(10) { attempt ->
+                    try {
+                        ensureLocalSearchSchema(db)
+                        return
+                    } catch (e: android.database.sqlite.SQLiteException) {
+                        if (e.message?.contains("locked", ignoreCase = true) != true &&
+                            e.message?.contains("busy", ignoreCase = true) != true
+                        ) throw e
+                        lastError = e
+                        Thread.sleep(150L * (attempt + 1))
+                    }
+                }
+                lastError?.let { throw it }
             }
         }
     }
