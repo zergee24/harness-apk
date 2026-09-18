@@ -68,6 +68,8 @@ class RemoteRepository(
     val dashboard: StateFlow<DashboardState> = _dashboard.asStateFlow()
     private val _focusResults = MutableSharedFlow<DashboardFocusResult>(extraBufferCapacity = 4)
     val focusResults: SharedFlow<DashboardFocusResult> = _focusResults.asSharedFlow()
+    private val _webRemoteResults = MutableSharedFlow<ZcodeWebRemoteResult>(extraBufferCapacity = 4)
+    val webRemoteResults: SharedFlow<ZcodeWebRemoteResult> = _webRemoteResults.asSharedFlow()
     private val outgoingSequence = AtomicLong(0)
     private val seenMessages = LinkedHashSet<String>()
     private var socket: WebSocket? = null
@@ -144,6 +146,13 @@ class RemoteRepository(
     fun focusThread(threadId: String): Boolean {
         val sent = send(RemoteCommand(type = "thread.focus", requestId = requestId("thread.focus"), threadId = threadId))
         if (!sent) _focusResults.tryEmit(DashboardFocusResult(threadId, ok = false, message = "Mac 尚未连接"))
+        return sent
+    }
+
+    /** ZCode 远程：让 Mac 刷新二维码（refresh）或只取当前链接（link），回执经 webRemoteResults。 */
+    fun requestZcodeWebRemote(action: String): Boolean {
+        val sent = send(RemoteCommand(type = "zcode.webremote", requestId = requestId("zcode.webremote"), method = action))
+        if (!sent) _webRemoteResults.tryEmit(ZcodeWebRemoteResult(action = action, ok = false, stage = "disconnected", message = "Mac 尚未连接"))
         return sent
     }
     fun loadThreadSummary(threadId: String) {
@@ -538,6 +547,7 @@ class RemoteRepository(
                     ),
                 )
             }
+            "zcode.webremote" -> _webRemoteResults.tryEmit(parseZcodeWebRemoteResult(event.payload))
         }
     }
 

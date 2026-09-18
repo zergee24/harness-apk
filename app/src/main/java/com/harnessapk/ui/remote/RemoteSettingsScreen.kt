@@ -1,11 +1,15 @@
 package com.harnessapk.ui.remote
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -90,6 +94,17 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         bitmap?.let(::decodeQr)?.fold(onSuccess = { pairingText = it; enroll(it) }, onFailure = { error = it.message })
     }
+    // Manifest 声明了 CAMERA 时，未授权直接启动取景 intent 会 SecurityException。
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) cameraLauncher.launch(null) else error = "未获得相机权限，可用「读取图片」"
+    }
+    fun launchPairingScan() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            cameraLauncher.launch(null)
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
     val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { selected ->
             scope.launch {
@@ -134,6 +149,11 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
                     }) {
                         Text("副屏模式（常亮）")
                     }
+                    OutlinedButton(onClick = {
+                        context.startActivity(Intent(context, ZcodeWebRemoteActivity::class.java))
+                    }) {
+                        Text("ZCode 远程（二维码套壳）")
+                    }
                     OutlinedButton(onClick = { container.remoteRepository.disconnect(); container.remoteProfileStore.clear() }) {
                         Icon(Icons.Outlined.Delete, contentDescription = null); Text("移除节点")
                     }
@@ -142,7 +162,7 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
         } else {
             Text("在 Mac Bridge 上运行 pair 命令，然后扫描生成的二维码。节点默认不接受公开注册。")
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { cameraLauncher.launch(null) }, enabled = !busy) {
+                Button(onClick = { launchPairingScan() }, enabled = !busy) {
                     Icon(Icons.Outlined.CameraAlt, contentDescription = null); Text("扫描二维码")
                 }
                 OutlinedButton(onClick = { imageLauncher.launch("image/*") }, enabled = !busy) {
@@ -162,7 +182,7 @@ fun RemoteSettingsScreen(container: AppContainer, contentPadding: PaddingValues)
     }
 }
 
-private fun decodeQr(bitmap: Bitmap): Result<String> = runCatching { decodeQrText(bitmap) }
+internal fun decodeQr(bitmap: Bitmap): Result<String> = runCatching { decodeQrText(bitmap) }
 
 internal suspend fun decodeQrImage(context: android.content.Context, uri: Uri): String =
     withContext(Dispatchers.IO) {

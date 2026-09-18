@@ -616,6 +616,48 @@ data class DashboardDetailState(
     val items: List<RemoteTimelineItem> = emptyList(),
 )
 
+// —— ZCode 远程（二维码套壳）：bridge 以 zcode.webremote plain 帧回执 AX 自动化结果 ——
+
+data class ZcodeWebRemoteResult(
+    val action: String,
+    val ok: Boolean,
+    val url: String? = null,
+    val stage: String? = null,
+    val message: String? = null,
+)
+
+internal fun parseZcodeWebRemoteResult(payload: JsonElement?): ZcodeWebRemoteResult {
+    val item = payload?.jsonObject ?: return ZcodeWebRemoteResult(action = "", ok = false, message = "空回执")
+    return ZcodeWebRemoteResult(
+        action = item.string("action").orEmpty(),
+        ok = item.boolean("ok") ?: false,
+        url = item.string("url"),
+        stage = item.string("stage"),
+        message = item.string("message"),
+    )
+}
+
+/** stage → 手机端引导文案；null 表示无附加说明。 */
+fun zcodeWebRemoteStageLabel(stage: String?): String? = when (stage) {
+    null, "", "disconnected" -> null
+    "ax-denied" -> "Mac 需一次性授权：系统设置→隐私与安全性→辅助功能与自动化，允许 harness-bridge 后重试"
+    "ax-confirm" -> "Mac 屏幕上可能正弹授权确认框，请到 Mac 前点「允许」后重试"
+    "zcode-not-running" -> "Mac 上的 ZCode 桌面端未运行"
+    "dialog-not-found" -> "未找到「移动端远程控制」入口，请确认 Mac 端 ZCode 版本"
+    "ax-empty" -> "ZCode 界面元素未就绪，稍后重试；持续失败多为 ZCode 升级改版"
+    "clipboard-invalid" -> "Mac 剪贴板里不是有效的配对链接，请重试"
+    else -> "Mac 端自动化失败，可稍后重试"
+}
+
+/** 宽松结构校验：配对链接形如 https://…/remote/…?sid=…&hash=…。 */
+fun looksLikeZcodeRemoteUrl(raw: String): Boolean {
+    val token = raw.trim().lineSequence().flatMap { it.split(' ', '\t') }.firstOrNull { it.startsWith("https://") }
+        ?: return false
+    val withoutQuery = token.substringBefore('?')
+    return withoutQuery.contains("/remote/") &&
+        token.contains("sid=") && token.contains("hash=")
+}
+
 // thread_items 的 item_json -> 远程时间线 item（复用既有渲染）。
 internal fun parseDashboardDetailItems(payload: JsonElement?): List<RemoteTimelineItem> {
     val root = payload?.jsonObject ?: return emptyList()

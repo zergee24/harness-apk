@@ -146,6 +146,7 @@ import com.harnessapk.remote.RemoteSyncCoordinator
 import com.harnessapk.remote.RoomRemoteSyncState
 import com.harnessapk.remote.RemoteProfileStore
 import com.harnessapk.remote.RemoteRepository
+import com.harnessapk.remote.ZcodeWebRemoteStore
 import com.harnessapk.ui.HomeModeStore
 
 class AppContainer(
@@ -210,6 +211,7 @@ class AppContainer(
     val remoteEnrollmentClient = RemoteEnrollmentClient(remoteHttpClient)
     val aliyunPushManager = AliyunPushManager(appContext)
     val remoteRepository = RemoteRepository(remoteProfileStore, remoteHttpClient, applicationScope)
+    val zcodeWebRemoteStore = ZcodeWebRemoteStore(appContext)
     val remoteBindingRepository = RemoteBindingRepository(database.remoteDao())
     val remoteCommandOutbox = RemoteCommandOutbox(RoomRemoteCommandStore(database.remoteDao()))
     val remoteApprovalCommandCoordinator = RemoteApprovalCommandCoordinator(
