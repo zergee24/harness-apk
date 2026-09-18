@@ -123,18 +123,13 @@ fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, on
             IconButton(onClick = onExit) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
             }
-            Column(Modifier.weight(1f)) {
-                Text("ZCode 远程", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    if (connection.connectionStatus == RemoteConnectionStatus.CONNECTED) "Mac 已连接" else "Mac 未连接",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (connection.connectionStatus == RemoteConnectionStatus.CONNECTED) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.error
-                    },
-                )
-            }
+            // 不显示 bridge 连接状态：那是 Codex 节点的状态，与 ZCode 远程可用
+            // 与否无关；bridge 只服务于「从 Mac 取链接」，可用性体现在按钮上。
+            Text(
+                "ZCode 远程",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
             if (savedUrl != null) {
                 Button(onClick = { reconnect("refresh") }, enabled = !busy) {
                     if (busy) {
@@ -257,6 +252,13 @@ private fun SetupView(
                 OutlinedButton(onClick = onRequestLink, enabled = !linkBusy && linkEnabled) {
                     if (linkBusy) CircularProgressIndicator(Modifier.padding(end = 8.dp))
                     Text("从 Mac 取链接")
+                }
+                if (!linkEnabled) {
+                    Text(
+                        "Mac 未连接（Codex 节点离线），可手动粘贴链接",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 OutlinedTextField(
                     value = pairingText,
