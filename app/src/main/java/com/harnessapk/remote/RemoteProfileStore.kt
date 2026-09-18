@@ -36,6 +36,7 @@ class RemoteProfileStore(
     fun save(profile: RemoteProfile) {
         val encryptedToken = cipher.encrypt(profile.deviceToken)
         val encryptedSecret = cipher.encrypt(profile.pairingSecret)
+        // 同步落盘：进程被杀（instrumentation、后台回收）时不能丢配对凭据
         preferences.edit()
             .putString("relay_url", profile.relayUrl)
             .putString("host_id", profile.hostId)
@@ -44,12 +45,12 @@ class RemoteProfileStore(
             .putString("pairing_ticket", profile.pairingTicket)
             .putString("device_token", encryptedToken.encode())
             .putString("pairing_secret", encryptedSecret.encode())
-            .apply()
+            .commit()
         _profile.value = profile
     }
 
     fun clear() {
-        preferences.edit().clear().apply()
+        preferences.edit().clear().commit()
         _profile.value = null
     }
 
