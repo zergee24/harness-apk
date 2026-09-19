@@ -102,13 +102,27 @@ fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, on
         }
     }
 
-    // 回执：新链接直接换链重载；失败给 stage 引导文案。
+    // 回执：新链接直接换链重载；Mac 端解不出时原图兜底给手机端 zxing；
+    // 失败给 stage 引导文案。
     LaunchedEffect(Unit) {
         container.remoteRepository.webRemoteResults.collect { result ->
             busy = false
             if (result.ok && result.url != null) {
                 saveAndLoad(result.url)
                 feedback = "Mac 已返回新链接，正在重载"
+            } else if (result.imageB64 != null) {
+                val raw = android.util.Base64.decode(result.imageB64, android.util.Base64.DEFAULT)
+                val bitmap = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size)
+                if (bitmap != null) {
+                    val text = decodeQr(bitmap).getOrNull()
+                    bitmap.recycle()
+                    if (text != null && looksLikeZcodeRemoteUrl(text)) {
+                        saveAndLoad(text)
+                        feedback = "已从 Mac 截图解析出链接，正在重载"
+                        return@collect
+                    }
+                }
+                feedback = zcodeWebRemoteStageLabel(result.stage) ?: result.message ?: "截图解析失败，请稍后重试"
             } else {
                 feedback = zcodeWebRemoteStageLabel(result.stage) ?: result.message ?: "重连失败，请稍后重试"
             }
