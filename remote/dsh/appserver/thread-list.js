@@ -21,6 +21,24 @@ import { textBlocks } from "./translate.js";
 const TITLE_MAX = 60;
 const PREVIEW_MAX = 240;
 
+/**
+ * Rows hydrated (history read) when a caller passes no limit. A listing must
+ * stay fast on a real machine — this one holds ~1800 sessions and ~840 MB of
+ * logs — so an unbounded request is bounded here, and titles fill in over
+ * later polls instead of blocking the first one.
+ */
+const HYDRATE_ROWS_MAX = 50;
+
+/**
+ * Total time budget for hydrating one listing. Hydration is best-effort: a
+ * session whose read loses the race keeps its id as the title until the next
+ * poll, which is strictly better than making the phone wait on a 38 MB log.
+ */
+const HYDRATE_BUDGET_MS = 3000;
+
+/** Per-session read bound, so one slow log cannot consume the whole budget. */
+const HYDRATE_OBSERVE_MS = 1200;
+
 /** Milliseconds → Unix seconds, as the mobile wire requires. */
 export function protocolSeconds(value) {
 	return typeof value === "number" && Number.isFinite(value) ? Math.floor(value / 1000) : 0;
@@ -153,9 +171,18 @@ export async function apiThreadListResult(ctx, limit) {
 			status: statusOf(agents?.get?.(id)?.status === "running"),
 		});
 	}
-	const sorted = [...rows.values()].sort((left, right) => right.updatedAt - left.updatedAt);
-	const bounded = limit > 0 && sorted.length > limit ? sorted.slice(0, limit) : sorted;
+	// A live session is never dropped by the cap: it is the one the phone is
+	// most likely acting on, and its row is already complete without a read.
+	const live = [];
+	const stored = [];
+	for (const row of rows.values()) (row.status.type === "active" ? live : stored).push(row);
+	live.sort((left, right) => right.updatedAt - left.updatedAt);
+	stored.sort((left, right) => right.updatedAt - left.updatedAt);
+	const wanted = limit > 0 ? limit : HYDRATE_ROWS_MAX;
+	const bounded = [...live, ...stored].slice(0, Math.max(wanted, live.length));
 	const data = [];
+	let hydrated = 0;
+	const deadline = Date.now() + HYDRATE_BUDGET_MS;
 	for (const row of bounded) {
 		const cacheKey = `${row.id}@${row.updatedAt}`;
 		const cached = hydration.get(cacheKey);
@@ -167,6 +194,14 @@ export async function apiThreadListResult(ctx, limit) {
 			data.push(row);
 			continue;
 		}
+		// Hydration is best-effort and time-bounded: it must never exceed the
+		// rows the caller asked for, and a row that misses the budget keeps its
+		// header-level name until a later poll retries it.
+		if (hydrated >= Math.min(wanted, HYDRATE_ROWS_MAX) || Date.now() >= deadline) {
+			data.push(row);
+			continue;
+		}
+		hydrated += 1;
 		try {
 			data.push(await hydrateRow(ctx, row, cacheKey));
 		} catch {
