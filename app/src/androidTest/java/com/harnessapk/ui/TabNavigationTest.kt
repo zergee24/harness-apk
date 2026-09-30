@@ -48,19 +48,36 @@ class TabNavigationTest {
     }
 
     @Test
-    fun clickingWorkTabShowsProjectPanel() {
+    fun clickingWorkTabShowsEntryHub() {
         composeRule.setContent {
             HarnessApkTheme {
                 HarnessApkApp()
             }
         }
         composeRule.onNodeWithTag("nav-WORK").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("work-home-codex").assertExists()
+        composeRule.onNodeWithTag("work-home-zcode").assertExists()
+        composeRule.onNodeWithTag("work-home-dsh").assertExists()
+        composeRule.onNodeWithTag("work-home-workbench").assertExists()
+    }
+
+    @Test
+    fun workbenchEntryOpensProjectPanel() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                HarnessApkApp()
+            }
+        }
+        composeRule.onNodeWithTag("nav-WORK").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("work-home-workbench").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("从一个项目开始").assertExists()
     }
 
     @Test
-    fun emptyWorkHomeHasOnePrimaryProjectAction() {
+    fun emptyWorkbenchHasOnePrimaryProjectAction() {
         composeRule.setContent {
             HarnessApkTheme {
                 HarnessApkApp()
@@ -69,8 +86,9 @@ class TabNavigationTest {
 
         composeRule.onNodeWithTag("nav-WORK").performClick()
         composeRule.waitForIdle()
+        composeRule.onNodeWithTag("work-home-workbench").performClick()
+        composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("项目工作台").assertExists()
         composeRule.onNodeWithText("从一个项目开始").assertExists()
         composeRule.onAllNodesWithText("新建项目").assertCountEquals(1)
     }

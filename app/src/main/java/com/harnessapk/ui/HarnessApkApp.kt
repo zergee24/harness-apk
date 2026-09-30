@@ -1,6 +1,7 @@
 package com.harnessapk.ui
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,7 +18,6 @@ import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.MoreVert
@@ -111,6 +111,7 @@ import com.harnessapk.ui.wiki.WikiSourceReaderScreen
 import com.harnessapk.ui.dashboard.DashboardActivity
 import com.harnessapk.ui.remote.RemoteScreen
 import com.harnessapk.ui.remote.RemoteSettingsScreen
+import com.harnessapk.ui.work.WorkHomeScreen
 import com.harnessapk.updater.UpdateCheckResult
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -243,6 +244,8 @@ fun HarnessApkApp(
     var remoteProjectToStart by remember { mutableStateOf<Project?>(null) }
     var remoteRunStartBusy by remember { mutableStateOf(false) }
     var remoteRunStartError by remember { mutableStateOf<String?>(null) }
+    // 工作页视图状态：false = 入口 hub（Codex/ZCode/DSH），true = 项目工作台次级页。
+    var workWorkbenchActive by rememberSaveable { mutableStateOf(false) }
     val isHomeRoute = route == Routes.Conversations || route == null
     val context = LocalContext.current
     val container = (context.applicationContext as HarnessApkApplication).container
@@ -276,6 +279,13 @@ fun HarnessApkApp(
             themeSourceMode = nextThemeSource(themeSourceMode, MainMode.LIFE)
             mainMode = MainMode.LIFE
         }
+    }
+    // 切离工作模式即复位到 hub；聊天/搜索深链指定工作台目标时直入工作台次级页。
+    LaunchedEffect(mainMode) {
+        if (mainMode != MainMode.WORK) workWorkbenchActive = false
+    }
+    LaunchedEffect(workbenchTarget) {
+        if (workbenchTarget != null) workWorkbenchActive = true
     }
     val captureDraft by container.captureDraftRepository.activeDraft.collectAsState()
     val captureTransferState by container.captureImportCoordinator.transferState.collectAsState()
@@ -634,6 +644,10 @@ fun HarnessApkApp(
             confirmButton = { TextButton(onClick = { configImportWelcome = null }) { Text("好的") } },
         )
     }
+    // 工作台是工作模式内的次级页：系统返回先回入口 hub，而不是退出应用。
+    BackHandler(enabled = isHomeRoute && mainMode == MainMode.WORK && workWorkbenchActive) {
+        workWorkbenchActive = false
+    }
     Scaffold(
         modifier = Modifier.testTag("theme-${effectiveThemeMode.name}"),
         topBar = {
@@ -688,25 +702,17 @@ fun HarnessApkApp(
                 )
             } else if (isHomeRoute) {
                 TopAppBar(
-                    title = { Text(topLevelTitle(mainMode, currentProjectName)) },
+                    title = {
+                        // hub 态不携带残留的项目名，标题固定为“工作”。
+                        Text(
+                            if (mainMode == MainMode.WORK && !workWorkbenchActive) {
+                                MainMode.WORK.label
+                            } else {
+                                topLevelTitle(mainMode, currentProjectName)
+                            },
+                        )
+                    },
                     actions = {
-                        if (mainMode == MainMode.WORK) {
-                            if (remoteProfile != null) {
-                                TextButton(onClick = { navController.navigate(Routes.RemoteControl) }) {
-                                    Icon(Icons.Outlined.Dns, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("远程")
-                                }
-                            }
-                            // ZCode 远程与 bridge 体系相互独立，不依赖节点配对，工作页常驻直达。
-                            TextButton(onClick = {
-                                context.startActivity(
-                                    android.content.Intent(context, com.harnessapk.ui.remote.ZcodeWebRemoteActivity::class.java),
-                                )
-                            }) {
-                                Text("ZCode")
-                            }
-                        }
                         if (mainMode == MainMode.WORK) {
                             IconButton(
                                 onClick = { navController.navigate(Routes.Activity) },
@@ -850,7 +856,7 @@ fun HarnessApkApp(
                             }
                         }
                     }
-                    MainMode.WORK -> Column(
+                    MainMode.WORK -> if (workWorkbenchActive) Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(top = padding.calculateTopPadding()),
@@ -910,6 +916,17 @@ fun HarnessApkApp(
                             onOpenRemoteRun = { runId -> navController.navigate(Routes.remoteRun(runId)) },
                             onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                             modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        WorkHomeScreen(
+                            contentPadding = padding,
+                            remotePaired = remoteProfile != null,
+                            onOpenCodex = {
+                                navController.navigate(
+                                    if (remoteProfile != null) Routes.RemoteControl else Routes.RemoteSettings,
+                                )
+                            },
+                            onOpenWorkbench = { workWorkbenchActive = true },
                         )
                     }
                     MainMode.ME -> SettingsScreen(
