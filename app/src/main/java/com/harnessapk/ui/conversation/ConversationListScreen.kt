@@ -88,6 +88,13 @@ private data class UndoArchiveNotice(
 )
 
 /**
+ * 撤销横幅浮在列表底部，不再作为 LazyColumn 的一个 item。
+ * 作为 item 时它固定在列表顶端：用户在长列表中部归档一条记录，横幅插在视口上方，
+ * 5 秒后静默消失，用户唯一感知是"那行不见了"（撤销入口等于不存在）。
+ */
+private val UndoBannerReservedHeight = 72.dp
+
+/**
  * The history screen keeps the existing callback surface while allowing the
  * parent to supply the batched life overview. Until that wiring is installed,
  * the legacy conversation stream remains a safe compatibility fallback.
@@ -185,122 +192,129 @@ fun ConversationListScreen(
         )
     }
 
-    LazyColumn(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .padding(contentPadding),
-        contentPadding = PaddingValues(
-            horizontal = HarnessSpacing.pageHorizontal,
-            vertical = 16.dp,
-        ),
-        verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        item(key = "history-actions") {
-            HistoryActionRow(
-                searchExpanded = historySearchExpanded,
-                onToggleSearch = {
-                    if (historySearchExpanded) historySearchQuery = ""
-                    historySearchExpanded = !historySearchExpanded
-                },
-                onOpenArchive = onOpenArchive,
-                onCreateConversation = onCreateConversation,
-                creationInProgress = creationInProgress,
-            )
-            if (historySearchExpanded) {
-                HistorySearchField(
-                    query = historySearchQuery,
-                    onQueryChange = { historySearchQuery = it },
-                    onClear = { historySearchQuery = "" },
-                    onClose = {
-                        historySearchQuery = ""
-                        historySearchExpanded = false
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = HarnessSpacing.pageHorizontal,
+                end = HarnessSpacing.pageHorizontal,
+                top = 16.dp,
+                // 给浮在底部的撤销横幅让位，避免它盖住最后一条记录。
+                bottom = if (undoNotice != null) UndoBannerReservedHeight else 16.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
+        ) {
+            item(key = "history-actions") {
+                HistoryActionRow(
+                    searchExpanded = historySearchExpanded,
+                    onToggleSearch = {
+                        if (historySearchExpanded) historySearchQuery = ""
+                        historySearchExpanded = !historySearchExpanded
                     },
+                    onOpenArchive = onOpenArchive,
+                    onCreateConversation = onCreateConversation,
+                    creationInProgress = creationInProgress,
                 )
+                if (historySearchExpanded) {
+                    HistorySearchField(
+                        query = historySearchQuery,
+                        onQueryChange = { historySearchQuery = it },
+                        onClear = { historySearchQuery = "" },
+                        onClose = {
+                            historySearchQuery = ""
+                            historySearchExpanded = false
+                        },
+                    )
+                }
             }
-        }
-        if (creationInProgress) {
-            item(key = "life-creation-progress") {
-                CreationProgressBanner()
+            if (creationInProgress) {
+                item(key = "life-creation-progress") {
+                    CreationProgressBanner()
+                }
             }
-        }
-        if (undoNotice != null) {
-            item(key = "archive-undo") {
-                ArchiveUndoBanner(
-                    onUndo = {
-                        val notice = undoNotice ?: return@ArchiveUndoBanner
+            feedbackMessage?.let { message ->
+                item(key = "overview-feedback") {
+                    FeedbackBanner(message = message, onDismiss = { feedbackMessage = null })
+                }
+            }
+            if (lifeOverviewRepository != null) {
+                lifeOverviewItems(
+                    state = lifeOverviewState ?: LifeConversationOverviewState.Loading,
+                    agentsById = agentsById,
+                    searchQuery = historySearchQuery,
+                    onRetry = {
+                        lifeOverviewRepository.refresh()
+                        feedbackMessage = null
+                    },
+                    onOpenChat = onOpenChat,
+                    onEdit = { item ->
+                        conversationToEditId = item.conversationId
+                        titleDraft = item.title
+                    },
+                    onArchive = { item ->
                         scope.launch {
-                            val restored = lifeOverviewRepository?.undoArchive(notice.conversationId) == true
-                            if (restored) {
-                                undoNotice = null
-                                feedbackMessage = "已撤销归档"
-                            } else {
-                                feedbackMessage = "撤销窗口已结束，可在归档列表恢复"
+                            when (val result = lifeOverviewRepository.archive(item.conversationId)) {
+                                is LifeConversationArchiveResult.Archived -> {
+                                    val accessibleDeadline = lifeOverviewRepository.extendUndoDeadline(
+                                        conversationId = item.conversationId,
+                                        durationMillis = undoDurationMillis,
+                                    ) ?: result.undoDeadlineMillis
+                                    undoNotice = UndoArchiveNotice(
+                                        conversationId = item.conversationId,
+                                        deadlineMillis = accessibleDeadline,
+                                    )
+                                    feedbackMessage = null
+                                }
+
+                                is LifeConversationArchiveResult.Blocked -> feedbackMessage = result.reason
+                                LifeConversationArchiveResult.AlreadyArchived -> feedbackMessage = "已经在归档列表"
+                                LifeConversationArchiveResult.NotFound -> feedbackMessage = "记录已不存在"
                             }
+                        }
+                    },
+                )
+            } else {
+                val filteredConversations = filterConversations(visibleConversations, historySearchQuery)
+                conversationItems(
+                    conversations = filteredConversations,
+                    agentsById = agentsById,
+                    onOpenChat = onOpenChat,
+                    searchQuery = historySearchQuery,
+                    hasUnfilteredConversations = visibleConversations.isNotEmpty(),
+                    onEdit = {
+                        conversationToEditId = it.id
+                        titleDraft = it.title
+                    },
+                    onArchive = {
+                        scope.launch {
+                            container.chatRepository.archiveConversation(it.id)
+                            feedbackMessage = "已移到归档"
                         }
                     },
                 )
             }
         }
-        feedbackMessage?.let { message ->
-            item(key = "overview-feedback") {
-                FeedbackBanner(message = message, onDismiss = { feedbackMessage = null })
-            }
-        }
-        if (lifeOverviewRepository != null) {
-            lifeOverviewItems(
-                state = lifeOverviewState ?: LifeConversationOverviewState.Loading,
-                agentsById = agentsById,
-                searchQuery = historySearchQuery,
-                onRetry = {
-                    lifeOverviewRepository.refresh()
-                    feedbackMessage = null
-                },
-                onOpenChat = onOpenChat,
-                onEdit = { item ->
-                    conversationToEditId = item.conversationId
-                    titleDraft = item.title
-                },
-                onArchive = { item ->
+        undoNotice?.let { notice ->
+            ArchiveUndoBanner(
+                onUndo = {
                     scope.launch {
-                        when (val result = lifeOverviewRepository.archive(item.conversationId)) {
-                            is LifeConversationArchiveResult.Archived -> {
-                                val accessibleDeadline = lifeOverviewRepository.extendUndoDeadline(
-                                    conversationId = item.conversationId,
-                                    durationMillis = undoDurationMillis,
-                                ) ?: result.undoDeadlineMillis
-                                undoNotice = UndoArchiveNotice(
-                                    conversationId = item.conversationId,
-                                    deadlineMillis = accessibleDeadline,
-                                )
-                                feedbackMessage = null
-                            }
-
-                            is LifeConversationArchiveResult.Blocked -> feedbackMessage = result.reason
-                            LifeConversationArchiveResult.AlreadyArchived -> feedbackMessage = "已经在归档列表"
-                            LifeConversationArchiveResult.NotFound -> feedbackMessage = "记录已不存在"
+                        val restored = lifeOverviewRepository?.undoArchive(notice.conversationId) == true
+                        if (restored) {
+                            undoNotice = null
+                            feedbackMessage = "已撤销归档"
+                        } else {
+                            feedbackMessage = "撤销窗口已结束，可在归档列表恢复"
                         }
                     }
                 },
-            )
-        } else {
-            val filteredConversations = filterConversations(visibleConversations, historySearchQuery)
-            conversationItems(
-                conversations = filteredConversations,
-                agentsById = agentsById,
-                onOpenChat = onOpenChat,
-                searchQuery = historySearchQuery,
-                hasUnfilteredConversations = visibleConversations.isNotEmpty(),
-                onEdit = {
-                    conversationToEditId = it.id
-                    titleDraft = it.title
-                },
-                onArchive = {
-                    scope.launch {
-                        container.chatRepository.archiveConversation(it.id)
-                        feedbackMessage = "已移到归档"
-                    }
-                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 16.dp),
             )
         }
     }
@@ -599,8 +613,11 @@ private fun OverviewEmptyState() {
 }
 
 @Composable
-private fun ArchiveUndoBanner(onUndo: () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+private fun ArchiveUndoBanner(
+    onUndo: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()

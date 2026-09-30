@@ -1099,7 +1099,12 @@ fun HarnessApkApp(
                         onOpenSource = { chunkId -> navController.navigate(WikiRoutes.source(wikiRef, chunkId)) },
                         onTitleLoaded = { title -> browserWikiTitle = title },
                         onUseInNewConversation = {
-                            val projectId = currentProjectId
+                            // currentProjectId 只在用户确实停留在工作页时才代表"当前项目"。
+                            // 离开工作页后它是残留值（rememberSaveable，没有清空逻辑）：一旦被
+                            // 带进这里，生活/知识库入口新建的会话就会被挂到项目上，而生活概览
+                            // 只查 projectId IS NULL，这条会话会直接从"历史记录"里消失。
+                            // 与 AgentPackageImportState 的同名守卫保持一致。
+                            val projectId = currentProjectId.takeIf { mainMode == MainMode.WORK }
                             val conversationId = container.newConversationUseCase.create(
                                 title = "新会话",
                                 projectId = projectId,

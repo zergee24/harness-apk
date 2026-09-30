@@ -57,6 +57,15 @@ import kotlinx.coroutines.withContext
 
 private val VALIDITY_OPTIONS_HOURS = listOf(12, 24, 72)
 
+/** 顺序即展示顺序：不包含 / 开启 / 关闭。 */
+private val SIMPLE_MODE_OPTIONS = listOf<Boolean?>(null, true, false)
+
+private fun simpleModeChoiceLabel(choice: Boolean?): String = when (choice) {
+    null -> "不包含"
+    true -> "开启"
+    false -> "关闭"
+}
+
 @Composable
 fun ConfigPackageExportScreen(
     container: AppContainer,
@@ -71,7 +80,14 @@ fun ConfigPackageExportScreen(
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var includeWebSearch by remember { mutableStateOf(true) }
     var includeTtsAutoRead by remember { mutableStateOf(false) }
-    var includeSimpleMode by remember { mutableStateOf(true) }
+    // 三态：null = 包里不包含这一项（对方保持原样），true/false = 显式开启/关闭。
+    var simpleModeChoice by remember { mutableStateOf<Boolean?>(null) }
+    var simpleModeChoiceTouched by remember { mutableStateOf(false) }
+    val ownSimpleMode by container.settingsStore.simpleMode.collectAsState(initial = null)
+    // 默认跟随导出者自己的设置，而不是无条件"替对方打开"；用户手动选过之后不再覆盖。
+    LaunchedEffect(ownSimpleMode) {
+        ownSimpleMode?.let { current -> if (!simpleModeChoiceTouched) simpleModeChoice = current }
+    }
     var validityHours by remember { mutableStateOf(12) }
     var passphrase by remember { mutableStateOf("") }
     var confirmPassphrase by remember { mutableStateOf("") }
@@ -166,13 +182,27 @@ fun ConfigPackageExportScreen(
                 checked = includeTtsAutoRead,
                 onCheckedChange = { includeTtsAutoRead = it },
             )
-            SettingToggleRow(
-                title = "开启生活简洁模式",
-                description = "对方导入后生活页只保留新建对话和最近会话",
-                enabled = true,
-                checked = includeSimpleMode,
-                onCheckedChange = { includeSimpleMode = it },
+            ListItem(
+                headlineContent = { Text("生活简洁模式") },
+                supportingContent = {
+                    Text("不包含：对方保持原样；开启/关闭：导入后按此设置")
+                },
             )
+            Row(
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                SIMPLE_MODE_OPTIONS.forEach { option ->
+                    FilterChip(
+                        selected = simpleModeChoice == option,
+                        onClick = {
+                            simpleModeChoiceTouched = true
+                            simpleModeChoice = option
+                        },
+                        label = { Text(simpleModeChoiceLabel(option)) },
+                    )
+                }
+            }
         }
 
         SectionCard(title = "有效期") {
@@ -239,7 +269,7 @@ fun ConfigPackageExportScreen(
                             providerIds = selectedIds,
                             includeWebSearch = includeWebSearch,
                             includeTtsAutoRead = includeTtsAutoRead,
-                            includeSimpleMode = includeSimpleMode,
+                            includeSimpleMode = simpleModeChoice,
                             validityHours = validityHours,
                             passphrase = passphrase,
                         )
@@ -288,7 +318,7 @@ private suspend fun exportConfigPackage(
     providerIds: Set<String>,
     includeWebSearch: Boolean,
     includeTtsAutoRead: Boolean,
-    includeSimpleMode: Boolean,
+    includeSimpleMode: Boolean?,
     validityHours: Int,
     passphrase: String,
 ): ExportedPackageFile = withContext(Dispatchers.Default) {

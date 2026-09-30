@@ -49,6 +49,28 @@ class LifeConversationOverviewTest {
     }
 
     @Test
+    fun systemSuggestedIdentityDoesNotKeepAnEmptyShellVisible() {
+        // 创建会话时 identityRepository.suggest() 会把最近用过的智能体写进 agentId，
+        // 这是系统默认挂载，不是用户主动保存配置；空壳必须照常隐藏。
+        // 只有用户真的动过身份（userRetained）才保留。
+        val suggestedRow = row("suggested-shell").copy(agentId = "agent-1", agentVersion = 1)
+        val retainedRow = row("agent-retained-shell").copy(agentId = "agent-1", agentVersion = 1)
+        val rows = listOf(suggestedRow, retainedRow)
+        val metadata = mapOf(
+            "suggested-shell" to LifeConversationMetadata(origin = LifeConversationOrigin.STANDARD),
+            "agent-retained-shell" to LifeConversationMetadata(
+                origin = LifeConversationOrigin.STANDARD,
+                userRetained = true,
+            ),
+        )
+
+        val all = aggregateLifeConversationItems(rows, emptyList(), emptyList(), metadata)
+        val visible = all.filterNot { item -> isHiddenEmptyShell(item, rows, metadata) }
+
+        assertEquals(listOf("agent-retained-shell"), visible.map { it.conversationId })
+    }
+
+    @Test
     fun standardShellWithConfigurationOrDraftRemainsVisible() {
         val configuredRow = row("standard-configured").copy(defaultModel = "demo-model")
         val configuredItem = aggregateLifeConversationItems(
