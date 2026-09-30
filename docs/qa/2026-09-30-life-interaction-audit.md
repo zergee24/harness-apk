@@ -5,6 +5,7 @@
 > **修复状态**：
 > - P0 四项（F04 / F10 / F21 / F22）已修复，见 [第 16 节](#16-修复记录p0)。
 > - 根因 6 清理（F13–F19）已修复，见 [第 17 节](#17-修复记录根因-6-清理)。
+> - F23 / F24 输入被静默吞掉，见 [第 18 节](#18-修复记录f23--f24-输入被静默吞掉)。
 >
 > **注意行号漂移**：本文档的行号基于 `3f66546`。此后有并行会话在工作树上重构工作页（新增 `ui/work/WorkHomeScreen.kt`、work hub 入口、`remote/dsh/*`），`HarnessApkApp.kt` 与 `TabNavigationTest.kt` 的行号已经漂移，核对时请以符号名为准。
 
@@ -396,5 +397,30 @@
 - 单元测试 174 个套件 / 1325 个用例 / 0 失败 / 0 错误。
 - `compileDebugAndroidTestKotlin` 通过，验证了仪器测试的文案断言改动与新图标 import。
 - **未做**：`assembleDebug`、仪器测试实机执行、真机目视核对。
+
+## 18. 修复记录（F23 / F24 输入被静默吞掉）
+
+### F23 快速连点，后一次操作被静默吞掉
+- **改动 1（核心）**：`ChatScreen.leaveAfterSaving` 开头的 `if (leaveInProgress) return` 改成把这次意图记进新的 `queuedLeaveAction`，不再丢弃。
+- **改动 2**：保存成功后以"最后一次意图"为准——`(queuedLeaveAction ?: action)()`，已经被取代的那一次不执行；保存失败时清空队列，交给"这次修改还没有保存"对话框处理（那种场景下以对话框为准）。
+- **改动 3**：`HarnessApkApp.leaveHomeChat` 里 `if (pendingHomeNavigation != null) return` 改成用最后一次意图覆盖 pending，并且只在原本没有 pending 时才 `chatBackRequestKey += 1`。这消掉了另一个更短（一帧）但同样静默的丢弃窗口。
+- **原来的危害**：第二次点击既没执行、闩锁也已经 `onBackRequestConsumed()` 清掉，无法补救；窗口不短，因为草稿保存是同步 `commit()` 且排在逐键 autosave 的互斥锁后面。
+- **队列不变量**：`queuedLeaveAction` 只在 `leaveInProgress == true` 期间可能非空；成功路径排空、失败路径清空、组件销毁时随 `remember(conversationId)` 一起消失。所以不存在"上一轮残留的意图被下一轮误执行"。
+- **行为变化**：以往是"先点的赢"，现在是"最后点的赢"。连点「历史」再点「我的」会停在「我的」，而不是停在历史页。
+
+### F24 "+" 和"历史"在草稿保存窗口内可点但无反应
+- **状态**：随 F23 一并解决。这个窗口内的点击现在会被排队执行（略有延迟），不再是无反应的假按钮，所以 `enabled = !homeCreating` 与实际行为不再矛盾。
+- **未做**：没有为"保存进行中"新增 UI 状态。如果后续希望按钮在保存期间明确置灰或显示进度，需要把 `leaveInProgress` 通过回调上抛给 `HarnessApkApp`（目前只有 `onContextSummaryChanged` 这一条上行通道）。
+
+### 验证
+- `./gradlew testDebugUnitTest compileDebugAndroidTestKotlin`：**174 个套件 / 1325 个用例 / 0 失败 / 0 错误**。
+- 中途出现过一次 `ProjectRetrievalPerformanceTest` 失败，那是环境问题，已用对照实验证明，记录在此以免后来者误判：
+  - 失败项是 wall-clock 微基准（10k chunk 检索，10 次采样取 p95，门槛 `p95 < 250ms`），位于 `com.harnessapk.projectsearch`，与本次改动（`ChatScreen.kt` 的离开队列、`HarnessApkApp.kt` 的 `leaveHomeChat`）没有共享代码路径。
+  - 机器当时 load average 46–71，来自仓库外的其他进程；仓库内没有别的 Gradle 在跑。
+  - 该测试 p95 随负载变化：**55ms**（load 27，通过）→ 525ms / 626ms（load 33–47，失败）→ **5032ms**（load 71，失败）。
+  - 决定性对照：把本次改动 `git stash` 掉后在同样负载下重跑全量，**同一个测试照样失败且更差**（5032ms；有改动时 525ms）。基线那轮全量跑了 20m37s，有改动时 3m23s。
+  - 结论：该测试是负载敏感的微基准，不是回归。若要长期依赖它，建议给它加负载门槛或改为相对基线比较。
+- **未做**：`assembleDebug`、仪器测试实机执行、真机目视核对。F23 是时序修复，建议在设备上按「在生活主屏打字后立刻连点两个底部 Tab」复现一次，确认落在最后点的那个 Tab 上。
+
 
 

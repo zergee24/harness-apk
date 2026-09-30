@@ -396,6 +396,8 @@ fun ChatScreen(
     var draftReadError by remember(conversationId) { mutableStateOf<DraftStoreError?>(null) }
     var draftSaveError by remember(conversationId) { mutableStateOf<String?>(null) }
     var leaveInProgress by remember(conversationId) { mutableStateOf(false) }
+    // 草稿保存期间用户发起的"最后一次离开意图"，由 leaveAfterSaving 消费。
+    var queuedLeaveAction by remember(conversationId) { mutableStateOf<(() -> Unit)?>(null) }
     var pendingNavigation by remember(conversationId) { mutableStateOf<(() -> Unit)?>(null) }
     var discardUnstoredChanges by remember(conversationId) { mutableStateOf(false) }
     val pendingDocuments = draftDocuments.filter { it.state == DraftAttachmentState.READY }.map { it.toExtractedDocument() }
@@ -447,7 +449,14 @@ fun ChatScreen(
     }
 
     fun leaveAfterSaving(action: () -> Unit) {
-        if (leaveInProgress) return
+        // 草稿保存期间再次离开：记住最后一次意图，等这一轮结束后执行它，
+        // 而不是像以前那样直接 return 把点击吞掉。生活主屏快速连点两个入口
+        // （先"历史"再"我的"、连点两次底部 Tab）时，后一次点击原本会永久丢失，
+        // 而且 HarnessApkApp 侧的闩锁已经被 onBackRequestConsumed 清掉，无法补救。
+        if (leaveInProgress) {
+            queuedLeaveAction = action
+            return
+        }
         if (!persistentDraftLoaded || documentExtracting || container.chatSendRecoveryStore.current(conversationId) != null) {
             action()
             return
@@ -456,7 +465,17 @@ fun ChatScreen(
         leaveInProgress = true
         scope.launch {
             try {
-                if (persistDraft(draft)) action() else pendingNavigation = action
+                if (persistDraft(draft)) {
+                    // 保存期间用户又点了别的入口：以最后一次意图为准，
+                    // 不执行已经被取代的那一次。
+                    val next = queuedLeaveAction
+                    queuedLeaveAction = null
+                    (next ?: action)()
+                } else {
+                    // 交给"这次修改还没有保存"对话框处理，此时以对话框为准。
+                    queuedLeaveAction = null
+                    pendingNavigation = action
+                }
             } finally { leaveInProgress = false }
         }
     }

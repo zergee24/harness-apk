@@ -415,12 +415,15 @@ fun HarnessApkApp(
     fun leaveHomeChat(action: () -> Unit) {
         lifeMenuExpanded = false
         if (isHomeRoute && mainMode == MainMode.LIFE && homeConversationReadyId != null) {
-            if (pendingHomeNavigation != null) return
+            // 已经在等聊天页落盘时，用最后一次意图覆盖它而不是丢弃这次点击：
+            // 覆盖后不会再 bump chatBackRequestKey，所以聊天页那侧的 effect 只会跑一次，
+            // 并且读到的是覆盖后的 lambda（两次写入落在同一帧）。
+            val alreadyPending = pendingHomeNavigation != null
             pendingHomeNavigation = {
                 homeConversationReadyId = null
                 action()
             }
-            chatBackRequestKey += 1
+            if (!alreadyPending) chatBackRequestKey += 1
         } else {
             action()
         }
