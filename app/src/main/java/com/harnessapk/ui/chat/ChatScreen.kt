@@ -3177,6 +3177,10 @@ fun ChatScreen(
                 onStopVoiceTranscription = onStopVoiceInput,
                 contextSummary = contextSummary,
                 onOpenContext = { showConversationContext = true },
+                // 只有"上层不负责展示上下文摘要"时才在输入区上方补一条内联栏。
+                // 目前 HarnessApkApp 是唯一调用方，它始终传 onContextSummaryChanged
+                // 并把摘要放进顶栏副标题（见 ChatAppBarTitle），所以生产环境恒为 false，
+                // 内联栏不会出现。这不是漏接线：普通模式的模型/身份信息在顶栏出现一次。
                 showContextBar = onContextSummaryChanged == null,
                 inputFocusRequester = inputFocusRequester,
                 canSend = persistentDraftLoaded && selectedProvider != null &&

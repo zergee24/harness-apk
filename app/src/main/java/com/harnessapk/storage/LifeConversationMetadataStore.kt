@@ -13,7 +13,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
-/** Where a conversation was created from the V2 life entry point. */
+/**
+ * Where a conversation was created from the V2 life entry point.
+ *
+ * LIFE_PHOTO / LIFE_VOICE 对应的一级入口在"界面减法"后已经不存在，新的 recordOrigin
+ * 只会写 LIFE_TEXT 或 STANDARD。但这两个值必须保留：早期版本可能已经把
+ * origin=LIFE_PHOTO / LIFE_VOICE 落盘，删掉枚举会让 decode 的 valueOf 失败并回退成
+ * UNKNOWN，使一批原本被正确隐藏的空壳重新出现在历史里。
+ */
 enum class LifeConversationOrigin {
     UNKNOWN,
     LIFE_TEXT,

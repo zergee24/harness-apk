@@ -27,6 +27,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -99,18 +100,12 @@ private val UndoBannerReservedHeight = 72.dp
  * parent to supply the batched life overview. Until that wiring is installed,
  * the legacy conversation stream remains a safe compatibility fallback.
  */
-@Suppress("UNUSED_PARAMETER")
 @Composable
 fun ConversationListScreen(
     container: AppContainer,
     contentPadding: PaddingValues,
     onOpenChat: (String) -> Unit,
     onCreateConversation: () -> Unit,
-    onCreatePhotoConversation: () -> Unit = {},
-    onCreateVoiceConversation: () -> Unit = {},
-    onOpenAgentPackages: () -> Unit = {},
-    onOpenWikiLibrary: () -> Unit = {},
-    onOpenGlobalSearch: () -> Unit = {},
     welcomeMessage: String? = null,
     onWelcomeDismissed: () -> Unit = {},
     lifeOverviewRepository: LifeConversationOverviewRepository? = null,
@@ -729,8 +724,11 @@ private fun LifeOverviewRow(
                     }
                     if (restoreAction != null) {
                         DropdownMenuItem(
-                            text = { Text("恢复到最近聊过") },
-                            leadingIcon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
+                            // 与"移到归档"对应。旧文案"恢复到最近聊过"指向一个已经不存在
+                            // 的首页区块（生活页现在是聊天框，列表页叫"历史记录"），
+                            // 而且这个动作只做 un-archive，并不会把它变成主屏当前会话。
+                            text = { Text("移出归档") },
+                            leadingIcon = { Icon(Icons.Outlined.Unarchive, contentDescription = null) },
                             onClick = {
                                 menuExpanded = false
                                 restoreAction()
@@ -878,20 +876,17 @@ fun ArchivedConversationListScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        item(key = "archive-title") {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "归档列表",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                onBack?.let { back ->
+        // 顶栏已经显示"归档列表"并提供返回箭头，这里不再重复标题。
+        // 但家人用户未必会把顶栏箭头和"回到生活"联系起来，所以保留一个明确的返回入口。
+        onBack?.let { back ->
+            item(key = "archive-back") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     TextButton(
                         onClick = back,
                         modifier = Modifier.heightIn(min = HarnessSpacing.minimumTouchTarget),
@@ -914,7 +909,7 @@ fun ArchivedConversationListScreen(
 }
 
 internal fun archiveRestoreFeedbackMessage(restored: Boolean): String =
-    if (restored) "已恢复到最近聊过" else "恢复失败，请重试"
+    if (restored) "已移出归档" else "移出归档失败，请重试"
 
 internal fun LazyListScope.archivedConversationItems(
     state: LifeConversationOverviewState,

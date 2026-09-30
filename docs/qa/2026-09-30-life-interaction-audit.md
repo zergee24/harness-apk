@@ -2,7 +2,9 @@
 
 审计日期 2026-09-30 · 分支 `test` @ `3f66546`（`app/` 源码与 `3ce426c` 逐字节一致，两个新提交只动了 `.gitignore` 与 `docs/`）
 
-> **修复状态**：P0 四项（F04 / F10 / F21 / F22）已修复，见 [第 16 节](#16-修复记录p0)。
+> **修复状态**：
+> - P0 四项（F04 / F10 / F21 / F22）已修复，见 [第 16 节](#16-修复记录p0)。
+> - 根因 6 清理（F13–F19）已修复，见 [第 17 节](#17-修复记录根因-6-清理)。
 >
 > **注意行号漂移**：本文档的行号基于 `3f66546`。此后有并行会话在工作树上重构工作页（新增 `ui/work/WorkHomeScreen.kt`、work hub 入口、`remote/dsh/*`），`HarnessApkApp.kt` 与 `TabNavigationTest.kt` 的行号已经漂移，核对时请以符号名为准。
 
@@ -51,7 +53,7 @@
 | 3 | `simpleMode` 走 DataStore 冷流且两处 `initial` 假设不一致；`mainMode` 却是 SharedPreferences 同步读 | F07 F08 | 单独修，与 C 无关 |
 | 4 | `openWorkbench()` 绕过 `leaveHomeChat` 直接切 `mainMode=WORK`，防踢逻辑只挂在 `simpleMode` 上 | F09 | 单独修 |
 | 5 | `currentProjectId` 是 App 级 `rememberSaveable`，从不清空 | F10 F11 F12 | C-2.1 直接根治生活路径 |
-| 6 | 减法改造删了界面元素，文案/断言/死参数没跟着清 | F13–F19 | 纯清理，最低风险 |
+| 6 | 减法改造删了界面元素，文案/断言/死参数没跟着清 | F13–F19 | ✅ 已修复（第 17 节） |
 | 7 | 同一条会话在不同页面走不同的数据装配路径 | F20 | 单独修 |
 
 ## 3. 无条件必修（P0，与方向无关）
@@ -357,4 +359,42 @@
 - `./gradlew testDebugUnitTest --tests LifeConversationOverviewTest --tests ConfigPackageCodecTest` → BUILD SUCCESSFUL，35 项全通过（含两个新增回归测试）。
 - 全量 `testDebugUnitTest` 首次以 `java.io.EOFException` 失败（测试 worker 中途崩溃，已完成的 19 个套件 0 失败）——同一工作树当时有并行构建在跑，判为环境问题，已重跑复核。
 - **未做**：`assembleDebug`、仪器测试、真机验证。涉及 UI 结构改动（`ConversationListScreen` 根节点换了）与新增交互（三态 chip），建议在设备上补一次目视核对。
+
+## 17. 修复记录（根因 6 清理）
+
+### F13 配置包完成文案
+- **改动**：`ConfigPackageImportScreen.kt` 的 `welcomeMessage` 首句由"配置完成。点下方 + 试试问一个问题。"改为"配置完成，可以开始提问了。"。
+- **说明**：没有照抄规格 §2.3 的"选一种方式开始提问"——那是三个一级入口时代的说法，当前生活页是聊天框，没有"几种方式"可选。
+
+### F14 导入成功后回到生活页
+- **改动**：`HarnessApkApp.kt` 的 `onApplied` 在 `popBackStack` 之前补上 `themeSourceMode = MainMode.LIFE` / `mainMode = MainMode.LIFE`。
+- **理由**：只 pop 到 `Routes.Conversations` 的话，从"我的 → 配置包"进来的人会停在"我的"页，而完成弹窗讲的是怎么开始提问。规格 §2.3 明确要求回到有意义的生活入口。
+
+### F15 "恢复到最近聊过"改为"移出归档"
+- **改动**：菜单项文案 → "移出归档"，图标换成 `Icons.Outlined.Unarchive`（`material-icons-extended` 已引入，新增 import）；`archiveRestoreFeedbackMessage` → "已移出归档" / "移出归档失败，请重试"。
+- **理由**：旧文案指向的"最近聊过"区块在减法后已不存在（列表页叫"历史记录"），而且该动作只做 un-archive，并不会把它变成主屏当前会话——文案承诺了没做的事。
+- **连带**：仪器测试 `LifeOverviewErrorStateTest` 断言了这两个字符串，已同步更新。
+
+### F16 导出页说明文案
+- **状态**：已在 F21 改造导出 UI 时一并修掉（旧文案"对方导入后生活页只保留新建对话和最近会话"已随 `SettingToggleRow` 一起移除）。本轮仅核实。
+
+### F17 输入区上方的内联上下文栏
+- **结论**：**评估后决定不改代码，只补注释**。
+- **理由**：`showContextBar = onContextSummaryChanged == null` 是"上层不展示摘要时才补内联栏"的兜底机制，不是漏接线；`HarnessApkApp` 是唯一调用方且始终把摘要放进顶栏副标题，所以内联栏在生产恒不显示——这是减法时"当前模型在普通模式顶栏出现一次"的有意结果。另外 `ConversationContextBar` 有专门的单测（`ConversationContextBarTest`）与仪器测试（`ConversationContextBarComposeTest`），删除会连带砍掉对仍在使用的 `ConversationContextSheet` 的覆盖。
+- **改动**：在 `ChatScreen` 的调用点补注释说明"恒为 false 是设计结果，不是 bug"，避免后续被重复报为缺陷。
+
+### F18 归档列表的返回入口与重复标题
+- **改动**：`ConversationListScreen.kt` 的归档列表去掉页内"归档列表"标题（顶栏已有），只保留右对齐的"返回生活"按钮，并把整个 item 包在 `onBack?.let { }` 里（为 null 时不再渲染空行）；`HarnessApkApp.kt` 补上 `onBack = { navController.popBackStack() }`。
+- **理由**：此前 `onBack` 从没被传过，那个按钮是死代码；同时页内标题与顶栏重复。归档列表可从生活工具菜单和历史页两处进入，`popBackStack()` 对两者都正确。
+
+### F19 死参数与僵尸枚举
+- **死参数**：实际有 **5 个**（比原报告多 2 个）——`onCreatePhotoConversation`、`onCreateVoiceConversation`（三个一级入口时代的遗留）、`onOpenAgentPackages`、`onOpenWikiLibrary`、`onOpenGlobalSearch`。全部从 `ConversationListScreen` 签名移除，`HarnessApkApp` 的对应传参一并删除，顺带去掉已经不需要的 `@Suppress("UNUSED_PARAMETER")`。
+- **僵尸枚举**：`LIFE_PHOTO` / `LIFE_VOICE` **保留不删**，只补注释说明理由——早期版本可能已把这两个 origin 落盘，删掉枚举会让 `decode` 的 `valueOf` 失败并回退成 `UNKNOWN`，使一批原本被正确隐藏的空壳重新出现在历史里。删除的收益远小于这个风险。
+
+### 验证
+- `./gradlew testDebugUnitTest compileDebugAndroidTestKotlin` → BUILD SUCCESSFUL。
+- 单元测试 174 个套件 / 1325 个用例 / 0 失败 / 0 错误。
+- `compileDebugAndroidTestKotlin` 通过，验证了仪器测试的文案断言改动与新图标 import。
+- **未做**：`assembleDebug`、仪器测试实机执行、真机目视核对。
+
 

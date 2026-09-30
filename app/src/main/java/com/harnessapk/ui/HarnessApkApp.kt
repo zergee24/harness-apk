@@ -981,9 +981,6 @@ fun HarnessApkApp(
                     contentPadding = padding,
                     onOpenChat = { navController.navigate(Routes.chat(it)) },
                     onCreateConversation = onCreateConversation,
-                    onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
-                    onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
-                    onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                     lifeOverviewRepository = container.lifeConversationOverviewRepository,
                     onOpenArchive = { navController.navigate(Routes.ArchivedConversations) },
                     creationInProgress = homeCreating,
@@ -994,6 +991,8 @@ fun HarnessApkApp(
                     repository = container.lifeConversationOverviewRepository,
                     contentPadding = padding,
                     onOpenChat = { navController.navigate(Routes.chat(it)) },
+                    // 归档列表可从生活工具菜单和历史页两处进入，popBackStack 对两者都正确。
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(Routes.ConfigPackageExport) {
@@ -1019,6 +1018,11 @@ fun HarnessApkApp(
                     packageUri = entry.arguments?.getString("uri"),
                     onApplied = { message ->
                         configImportWelcome = message
+                        // 规格 §2.3：外部配置导入成功后要回到有意义的生活入口。
+                        // 只 popBackStack 的话，从"我的 → 配置包"进来的人会停在"我的"页，
+                        // 而完成弹窗讲的是怎么开始提问。
+                        themeSourceMode = MainMode.LIFE
+                        mainMode = MainMode.LIFE
                         navController.popBackStack(Routes.Conversations, inclusive = false)
                     },
                 )

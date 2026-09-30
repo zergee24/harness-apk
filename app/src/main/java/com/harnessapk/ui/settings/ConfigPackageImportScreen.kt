@@ -267,7 +267,7 @@ private fun welcomeMessage(
     container: AppContainer,
     summary: ConfigPackageApplier.AppliedSummary,
 ): String = buildString {
-    append("配置完成。点下方 + 试试问一个问题。")
+    append("配置完成，可以开始提问了。")
     if (summary.webSearchApplied) {
         append(" 联网搜索已开启，问问题会自动查资料。")
     }
