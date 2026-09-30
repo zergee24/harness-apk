@@ -63,6 +63,23 @@ class TabNavigationTest {
     }
 
     @Test
+    fun dshEntryIsEnabledAndLeadsToPairingWhenUnpaired() {
+        composeRule.setContent {
+            HarnessApkTheme {
+                HarnessApkApp()
+            }
+        }
+        composeRule.onNodeWithTag("nav-WORK").performClick()
+        composeRule.waitForIdle()
+        // The DSH card is a working entry, not a placeholder: an unpaired phone
+        // must reach the node pairing page rather than a dead card.
+        composeRule.onNodeWithTag("work-home-dsh").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("在 Mac Bridge 上运行 pair 命令，然后扫描生成的二维码。节点默认不接受公开注册。")
+            .assertExists()
+    }
+
+    @Test
     fun workbenchEntryOpensProjectPanel() {
         composeRule.setContent {
             HarnessApkTheme {

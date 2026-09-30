@@ -39,13 +39,14 @@ import androidx.compose.ui.unit.dp
 import com.harnessapk.ui.remote.ZcodeWebRemoteActivity
 import com.harnessapk.ui.theme.HarnessSpacing
 
-// 工作模式首页：远程代理为主入口（Codex > ZCode > DSH 预留），
+// 工作模式首页：远程代理为主入口（Codex / ZCode / DSH），
 // 本地项目工作台（含自主 Git）降级为次级入口。
 @Composable
 internal fun WorkHomeScreen(
     contentPadding: PaddingValues,
     remotePaired: Boolean,
     onOpenCodex: () -> Unit,
+    onOpenDsh: () -> Unit,
     onOpenWorkbench: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -75,9 +76,13 @@ internal fun WorkHomeScreen(
         WorkHomeEntry(
             testTag = "work-home-dsh",
             title = "DSH",
-            supportingText = "预留入口",
+            supportingText = if (remotePaired) {
+                "DeepSeek Harness · 续接 Mac 上的会话"
+            } else {
+                "需先配对 Mac Bridge 节点"
+            },
             icon = Icons.Outlined.Monitor,
-            onClick = null,
+            onClick = onOpenDsh,
         )
         Spacer(modifier = Modifier.padding(top = 8.dp))
         Text(
