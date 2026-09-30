@@ -7,6 +7,7 @@
 > - 根因 6 清理（F13–F19）已修复，见 [第 17 节](#17-修复记录根因-6-清理)。
 > - F23 / F24 输入被静默吞掉，见 [第 18 节](#18-修复记录f23--f24-输入被静默吞掉)。
 > - 根因 3（F07 / F08 冷启动模式错乱），见 [第 19 节](#19-修复记录根因-3simplemode-与-mainmode-的加载时序不一致)。
+> - F02 生活主屏顶栏标题（C-2.3），见 [第 20 节](#20-修复记录f02--c-23-生活主屏顶栏标题)。
 >
 > **注意行号漂移**：本文档的行号基于 `3f66546`。此后有并行会话在工作树上重构工作页（新增 `ui/work/WorkHomeScreen.kt`、work hub 入口、`remote/dsh/*`），`HarnessApkApp.kt` 与 `TabNavigationTest.kt` 的行号已经漂移，核对时请以符号名为准。
 
@@ -50,7 +51,7 @@
 
 | # | 根因 | 覆盖发现 | 在方向 C 下的处理 |
 | --- | --- | --- | --- |
-| 1 | `homeModeStore.lifeConversationId` 是唯一的主屏会话指针，**只在自动创建时写入** | F01 F02 F03 | C-2.3 顶栏可见 + C-2.1 语义 |
+| 1 | `homeModeStore.lifeConversationId` 是唯一的主屏会话指针，**只在自动创建时写入** | F01 F02 F03 | C-2.3 ✅（第 20 节）；C-2.1 与 F01/F03 未做 |
 | 2 | 空壳过滤拿 Room 行字段当"用户配置过"的证据，而创建路径会自动写 `agentId`/`agentVersion` | F04 F05 F06 | C-2.4 判据换成 `userRetained` |
 | 3 | `simpleMode` 走 DataStore 冷流且两处 `initial` 假设不一致；`mainMode` 却是 SharedPreferences 同步读 | F07 F08 | ✅ 已修复（第 19 节） |
 | 4 | `openWorkbench()` 绕过 `leaveHomeChat` 直接切 `mainMode=WORK`，防踢逻辑只挂在 `simpleMode` 上 | F09 | 单独修 |
@@ -449,6 +450,27 @@
 - `./gradlew testDebugUnitTest compileDebugAndroidTestKotlin` → BUILD SUCCESSFUL，174 个套件 / 1325 个用例 / 0 失败 / 0 错误。
 - 新增仪器测试 `AppSettingsStoreTest.simpleModeIsSynchronouslyReadableOnTheNextColdStart`：用新实例模拟下一次冷启动，不 collect、不 await，直接断言 `simpleModeState.value`；同时验证 reconcile 后镜像与 DataStore 一致。**未在设备上执行**，仅编译通过。
 - **未做**：冷启动录屏 / Macrobenchmark。首帧是否还会闪、闪几帧，需要真机确认。
+
+## 20. 修复记录（F02 / C-2.3 生活主屏顶栏标题）
+
+### 现象
+生活主屏顶栏恒为字面量"生活"（`HarnessApkApp.kt` 的生活分支），而**同一条会话**从历史打开时显示的是真实标题。同一条会话两个名字；叠加 F01（主屏只自动打开"最后一次创建的会话"），用户没有任何线索判断自己正在哪条会话里。
+
+### 改动
+- 新增纯函数 `lifeHomeTopBarTitle(overviewTitle, conversationTitle)`（放在 `HarnessApkApp.kt` 的 `chatTopBarTitle` 旁边）：
+  - 优先用生活概览算出的**可读标题**（规格 §3.4 的派生规则，例如首个用户问题）；
+  - 概览还没算出来时退回 Room 里的会话标题；
+  - 仍是占位符（"新会话"/"新问题"）或是空串时退回"生活"——全新会话没有可读标题，不该把占位符顶到主屏上。
+- 主屏顶栏改用该函数。
+
+### 未做
+- **F01**（主屏只认"最后一次自动创建的会话"，你在历史里实际使用的会话不会成为主屏会话）——那是 C-2.1 的语义改动，涉及"生活页会话要不要跟随用户实际使用的会话"，是产品决策：跟随会让"生活页"更像"最近会话"，不跟随则要接受"主屏和刚看过的不是同一条"。本批不动。
+- **F03**（简洁模式不决定首页会话身份）同理，属 C-2.2。
+
+### 验证
+- 新增 2 个单测：`lifeHomeTopBarTitleShowsTheCurrentConversation`、`lifeHomeTopBarTitleFallsBackForFreshConversations`。
+- `./gradlew testDebugUnitTest` → BUILD SUCCESSFUL，174 个套件 / **1327** 个用例 / 0 失败。
+
 
 
 
