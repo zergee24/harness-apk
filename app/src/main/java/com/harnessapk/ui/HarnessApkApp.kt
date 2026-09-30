@@ -425,12 +425,15 @@ fun HarnessApkApp(
     fun leaveHomeChat(action: () -> Unit) {
         lifeMenuExpanded = false
         if (isHomeRoute && mainMode == MainMode.LIFE && homeConversationReadyId != null) {
-            if (pendingHomeNavigation != null) return
+            // 已经在等聊天页落盘时，用最后一次意图覆盖它而不是丢弃这次点击：
+            // 覆盖后不会再 bump chatBackRequestKey，所以聊天页那侧的 effect 只会跑一次，
+            // 并且读到的是覆盖后的 lambda（两次写入落在同一帧）。
+            val alreadyPending = pendingHomeNavigation != null
             pendingHomeNavigation = {
                 homeConversationReadyId = null
                 action()
             }
-            chatBackRequestKey += 1
+            if (!alreadyPending) chatBackRequestKey += 1
         } else {
             action()
         }
@@ -998,9 +1001,6 @@ fun HarnessApkApp(
                     contentPadding = padding,
                     onOpenChat = { navController.navigate(Routes.chat(it)) },
                     onCreateConversation = onCreateConversation,
-                    onOpenAgentPackages = { navController.navigate(Routes.AgentPackages) },
-                    onOpenWikiLibrary = { navController.navigate(Routes.WikiLibrary) },
-                    onOpenGlobalSearch = { navController.navigate(Routes.GlobalSearch) },
                     lifeOverviewRepository = container.lifeConversationOverviewRepository,
                     onOpenArchive = { navController.navigate(Routes.ArchivedConversations) },
                     creationInProgress = homeCreating,
@@ -1011,6 +1011,8 @@ fun HarnessApkApp(
                     repository = container.lifeConversationOverviewRepository,
                     contentPadding = padding,
                     onOpenChat = { navController.navigate(Routes.chat(it)) },
+                    // 归档列表可从生活工具菜单和历史页两处进入，popBackStack 对两者都正确。
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(Routes.ConfigPackageExport) {
@@ -1036,6 +1038,11 @@ fun HarnessApkApp(
                     packageUri = entry.arguments?.getString("uri"),
                     onApplied = { message ->
                         configImportWelcome = message
+                        // 规格 §2.3：外部配置导入成功后要回到有意义的生活入口。
+                        // 只 popBackStack 的话，从"我的 → 配置包"进来的人会停在"我的"页，
+                        // 而完成弹窗讲的是怎么开始提问。
+                        themeSourceMode = MainMode.LIFE
+                        mainMode = MainMode.LIFE
                         navController.popBackStack(Routes.Conversations, inclusive = false)
                     },
                 )
@@ -1116,7 +1123,12 @@ fun HarnessApkApp(
                         onOpenSource = { chunkId -> navController.navigate(WikiRoutes.source(wikiRef, chunkId)) },
                         onTitleLoaded = { title -> browserWikiTitle = title },
                         onUseInNewConversation = {
-                            val projectId = currentProjectId
+                            // currentProjectId 只在用户确实停留在工作页时才代表"当前项目"。
+                            // 离开工作页后它是残留值（rememberSaveable，没有清空逻辑）：一旦被
+                            // 带进这里，生活/知识库入口新建的会话就会被挂到项目上，而生活概览
+                            // 只查 projectId IS NULL，这条会话会直接从"历史记录"里消失。
+                            // 与 AgentPackageImportState 的同名守卫保持一致。
+                            val projectId = currentProjectId.takeIf { mainMode == MainMode.WORK }
                             val conversationId = container.newConversationUseCase.create(
                                 title = "新会话",
                                 projectId = projectId,

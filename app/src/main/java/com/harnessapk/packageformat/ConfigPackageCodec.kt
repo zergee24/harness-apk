@@ -150,7 +150,9 @@ object ConfigPackageCodec {
         payload.aliyunVoiceApiKey?.let { put("aliyunVoiceApiKey", it) }
         payload.siliconFlowVoiceApiKey?.let { put("siliconFlowVoiceApiKey", it) }
         if (payload.webSearchEnabled) put("webSearchEnabled", true)
-        if (payload.simpleMode) put("simpleMode", true)
+        // simpleMode 是三态：null 表示不包含该项，不写字段；true/false 都显式写出，
+        // 这样"未包含"与"要求关闭"在格式上可以区分。
+        payload.simpleMode?.let { put("simpleMode", it) }
         if (payload.ttsAutoRead) put("ttsAutoRead", true)
         if (payload.generatedFrom.isNotBlank()) put("generatedFrom", payload.generatedFrom)
     }.toString().encodeToByteArray()
@@ -188,7 +190,8 @@ object ConfigPackageCodec {
             aliyunVoiceApiKey = root.stringField("aliyunVoiceApiKey"),
             siliconFlowVoiceApiKey = root.stringField("siliconFlowVoiceApiKey"),
             webSearchEnabled = root.booleanField("webSearchEnabled") ?: false,
-            simpleMode = root.booleanField("simpleMode") ?: false,
+            // 缺字段就是 null，交给 Applier 判断为"不改变接收方设置"。
+            simpleMode = root.booleanField("simpleMode"),
             ttsAutoRead = root.booleanField("ttsAutoRead") ?: false,
             generatedFrom = root.stringField("generatedFrom") ?: "",
         )

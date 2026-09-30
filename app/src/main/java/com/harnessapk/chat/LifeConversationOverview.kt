@@ -472,9 +472,12 @@ internal fun isHiddenEmptyShell(
         LifeConversationOrigin.LIFE_VOICE,
         LifeConversationOrigin.STANDARD,
     )
-    val hasStoredConfiguration = row.agentId != null ||
-        row.agentVersion != null ||
-        !row.defaultProviderId.isNullOrBlank() ||
+    // agentId/agentVersion 不算"用户保存了会话配置"：它们是创建会话时由系统默认挂载写入的
+    // （NewConversationUseCase.create → identityRepository.suggest），会沿用最近一次用过的
+    // 智能体。用户主动改身份的信号是 facts.userRetained（markExplicitConversationChoice），
+    // 已在下方隐藏条件里单独判断。defaultProviderId/defaultModel/prompt* 在创建时都是 null/空，
+    // 只有用户真的设置过才会非空，因此保留为"用户保存了配置"的证据。
+    val hasStoredConfiguration = !row.defaultProviderId.isNullOrBlank() ||
         !row.defaultModel.isNullOrBlank() ||
         row.promptOriginal.isNotBlank() ||
         row.promptOptimized.isNotBlank() ||

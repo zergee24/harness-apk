@@ -203,8 +203,11 @@ fun ConfigPackageImportScreen(
                 if (decrypted.webSearchEnabled) {
                     Text("将开启联网搜索", style = MaterialTheme.typography.bodyMedium)
                 }
-                if (decrypted.simpleMode) {
-                    Text("将开启生活简洁模式", style = MaterialTheme.typography.bodyMedium)
+                when (decrypted.simpleMode) {
+                    true -> Text("将开启生活简洁模式", style = MaterialTheme.typography.bodyMedium)
+                    false -> Text("将关闭生活简洁模式", style = MaterialTheme.typography.bodyMedium)
+                    // null：包里没带这一项，接收方设置保持不变，不需要提示。
+                    null -> Unit
                 }
                 if (decrypted.ttsAutoRead) {
                     Text("将开启自动朗读回复", style = MaterialTheme.typography.bodyMedium)
@@ -264,9 +267,15 @@ private fun welcomeMessage(
     container: AppContainer,
     summary: ConfigPackageApplier.AppliedSummary,
 ): String = buildString {
-    append("配置完成。点下方 + 试试问一个问题。")
+    append("配置完成，可以开始提问了。")
     if (summary.webSearchApplied) {
         append(" 联网搜索已开启，问问题会自动查资料。")
+    }
+    // 简洁模式的三态结果要明确告知：改动不能是静默的。
+    when (summary.simpleModeApplied) {
+        true -> append(" 生活简洁模式已开启。")
+        false -> append(" 生活简洁模式已关闭。")
+        null -> Unit
     }
     if (summary.speechProviderForcedToAliyun) {
         append(" 这台设备没有系统语音识别，已默认使用阿里云语音输入。")

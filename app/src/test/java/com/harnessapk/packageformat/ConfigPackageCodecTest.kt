@@ -47,6 +47,29 @@ class ConfigPackageCodecTest {
     }
 
     @Test
+    fun simpleModeTriStateSurvivesRoundTrip() {
+        // "未包含"（null）必须与"显式关闭"（false）在格式上区分开：
+        // 老版本导出的包没有这个字段，如果解码成 false，导入时就会静默关掉
+        // 接收方原本开着的简洁模式。
+        listOf(null, true, false).forEach { choice ->
+            val bytes = ConfigPackageCodec.exportPackage(
+                payload = payload.copy(simpleMode = choice),
+                passphrase = "ab234567",
+                issuedAtMillis = 1_000_000L,
+                expiresAtMillis = 1_000_000L + VALIDITY_MILLIS,
+            )
+
+            val decrypted = ConfigPackageCodec.decryptPayload(
+                envelope = ConfigPackageCodec.parseEnvelope(bytes),
+                passphrase = "ab234567",
+                nowMillis = 1_000_000L,
+            )
+
+            assertEquals(choice, decrypted.simpleMode)
+        }
+    }
+
+    @Test
     fun tamperedAadFieldFailsWithPassphraseOrCorruptMessage() {
         val bytes = ConfigPackageCodec.exportPackage(
             payload = payload,
