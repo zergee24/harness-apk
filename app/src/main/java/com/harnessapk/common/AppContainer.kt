@@ -233,6 +233,10 @@ class AppContainer(
     init {
         remoteRepository.attachSyncCoordinator(remoteSyncCoordinator)
         remoteRepository.attachConnectedHandler { _, _ -> remoteTransport.flush() }
+        // 用 DataStore 真值校正 simpleMode 的 SharedPreferences 镜像（见 AppSettingsStore）。
+        // 正常路径由 setSimpleMode 双写，这里只处理"镜像还不存在"的升级安装，
+        // 否则镜像会一直停在默认的 false，导致首帧模式反复错乱。
+        applicationScope.launch { settingsStore.reconcileSimpleModeMirror() }
     }
     val gitEngine = JGitEngine()
     val providerRepository = ProviderRepository(

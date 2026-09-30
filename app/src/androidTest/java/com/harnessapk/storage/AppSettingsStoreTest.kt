@@ -55,4 +55,22 @@ class AppSettingsStoreTest {
 
         store.setDefaultSpeechProvider(VoiceProviderType.ANDROID_SYSTEM)
     }
+
+    @Test
+    fun simpleModeIsSynchronouslyReadableOnTheNextColdStart() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        AppSettingsStore(context).setSimpleMode(true)
+
+        // 关键点：新实例模拟下一次冷启动，不 collect、不 await，直接同步读。
+        // DataStore 是冷流，第一帧拿不到值；首帧模式错乱（先闪出工作 Tab、甚至整屏
+        // 工作页再跳回生活页）就是这么来的，所以 simpleModeState 必须有值。
+        assertEquals(true, AppSettingsStore(context).simpleModeState.value)
+
+        AppSettingsStore(context).setSimpleMode(false)
+        assertEquals(false, AppSettingsStore(context).simpleModeState.value)
+
+        // 镜像与 DataStore 必须一致，否则升级安装后会一直读到默认值。
+        AppSettingsStore(context).reconcileSimpleModeMirror()
+        assertEquals(false, AppSettingsStore(context).simpleModeState.value)
+    }
 }

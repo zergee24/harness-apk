@@ -24,7 +24,6 @@ import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.text.style.TextOverflow
-import kotlinx.coroutines.flow.first
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -271,8 +270,9 @@ fun HarnessApkApp(
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val lifeOverview by remember(container) { container.lifeConversationOverviewRepository.observe() }
         .collectAsState(initial = LifeConversationOverviewState.Loading)
-    val loadedSimpleMode by container.settingsStore.simpleMode.collectAsState(initial = null)
-    val simpleMode = loadedSimpleMode == true
+    // simpleMode 现在是同步可读的 StateFlow（见 AppSettingsStore.simpleModeState），
+    // 首帧拿到的就是真值，不再有"先按非简洁模式画一帧"的窗口。
+    val simpleMode by container.settingsStore.simpleModeState.collectAsState()
     // 简洁模式下工作入口整体隐藏，若当前正处在 WORK 页则退回生活页
     LaunchedEffect(simpleMode) {
         if (simpleMode && mainMode == MainMode.WORK) {
@@ -455,8 +455,9 @@ fun HarnessApkApp(
                     if (!forceNew && previous != null) {
                         previous.id
                     } else {
-                        // Wait for the stored preference; the initial UI state is not a mode choice.
-                        val useSimpleMode = loadedSimpleMode ?: container.settingsStore.simpleMode.first()
+                        // simpleModeState 是同步可读的，这里直接取值即可，
+                        // 不需要再回落到 first() 等 DataStore。
+                        val useSimpleMode = container.settingsStore.simpleModeState.value
                         val created = container.newConversationUseCase.create(homeConversationRequest(useSimpleMode))
                         container.lifeConversationOverviewRepository.recordOrigin(
                             created,
