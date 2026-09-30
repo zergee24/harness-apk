@@ -82,9 +82,9 @@ class LifeOverviewErrorStateTest {
 
         composeRule.onNodeWithText("周末出行归档").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("更多").performClick()
-        composeRule.onNodeWithText("恢复到最近聊过").performClick()
+        composeRule.onNodeWithText("移出归档").performClick()
         composeRule.runOnIdle { assertEquals(1, restoreCalls) }
-        assertEquals("恢复失败，请重试", archiveRestoreFeedbackMessage(restored = false))
+        assertEquals("移出归档失败，请重试", archiveRestoreFeedbackMessage(restored = false))
     }
 
     @Test

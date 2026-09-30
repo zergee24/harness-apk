@@ -47,7 +47,13 @@ data class ConfigPackagePayload(
     val aliyunVoiceApiKey: String? = null,
     val siliconFlowVoiceApiKey: String? = null,
     val webSearchEnabled: Boolean = false,
-    val simpleMode: Boolean = false,
+    /**
+     * 三态语义：null = 包未包含该项，导入时保持接收方现有设置不变；
+     * true = 显式开启；false = 显式关闭。
+     * 旧版本导出的包不会写这个字段，因此一律落到 null（不动接收方设置），
+     * 不会再把"没带这一项"误当成"要求关闭"。
+     */
+    val simpleMode: Boolean? = null,
     val ttsAutoRead: Boolean = false,
     val generatedFrom: String = "",
 )

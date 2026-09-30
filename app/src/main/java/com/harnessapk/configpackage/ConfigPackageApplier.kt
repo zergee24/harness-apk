@@ -26,7 +26,8 @@ class ConfigPackageApplier(
         val siliconFlowVoiceApplied: Boolean = false,
         val speechProviderForcedToAliyun: Boolean = false,
         val webSearchApplied: Boolean = false,
-        val simpleModeEnabled: Boolean = false,
+        /** null 表示包里没有这一项，接收方设置未被改动。 */
+        val simpleModeApplied: Boolean? = null,
     )
 
     suspend fun apply(payload: ConfigPackagePayload): AppliedSummary {
@@ -67,7 +68,8 @@ class ConfigPackageApplier(
 
         settingsStore.setWebSearchEnabled(payload.webSearchEnabled)
         settingsStore.setTtsAutoRead(payload.ttsAutoRead)
-        settingsStore.setSimpleMode(payload.simpleMode)
+        // 三态：只有包里真的带了这一项才写设置，否则保持接收方原状。
+        payload.simpleMode?.let { settingsStore.setSimpleMode(it) }
 
         return AppliedSummary(
             providerNames = names,
@@ -75,7 +77,7 @@ class ConfigPackageApplier(
             siliconFlowVoiceApplied = siliconFlowApplied,
             speechProviderForcedToAliyun = speechProviderForcedToAliyun,
             webSearchApplied = payload.webSearchEnabled,
-            simpleModeEnabled = payload.simpleMode,
+            simpleModeApplied = payload.simpleMode,
         )
     }
 
