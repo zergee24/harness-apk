@@ -6,18 +6,26 @@ import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -48,12 +56,18 @@ import com.harnessapk.remote.RemoteConnectionService
 import com.harnessapk.remote.ZcodeWebRemoteStore
 import com.harnessapk.remote.looksLikeZcodeRemoteUrl
 import com.harnessapk.remote.zcodeWebRemoteStageLabel
+import com.harnessapk.ui.MainMode
+import com.harnessapk.ui.theme.ModeTheme
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
  * ZCode 远程（二维码套壳）：WebView 加载 ZCode 桌面端「移动端远程控制」配对
  * 网页；「重连」经 bridge 让 Mac 自动刷新二维码并把新链接回推回来。
  * 掉线的默认恢复是页面自刷新，重连按钮用于 relay 互踢/链接作废场景。
+ *
+ * 视觉基准是页面本体（深色、全出血）：套壳只提供同色底和两个图标位
+ * （关闭/重连），不再叠加标题、常驻提示条等自己的 chrome。
  */
 class ZcodeWebRemoteActivity : ComponentActivity() {
     private val store by lazy { ZcodeWebRemoteStore(this) }
@@ -62,9 +76,16 @@ class ZcodeWebRemoteActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // 复用前台服务保活连接，与副屏同款语义。
         RemoteConnectionService.start(this)
+        // 页面是深色 UI：系统栏强制深色样式（浅色前景），避免随系统亮色模式
+        // 翻成深色图标压在深底上；scrim 透明，由 Compose 侧统一铺深色底。
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         val container = (application as HarnessApkApplication).container
         setContent {
-            MaterialTheme {
+            // 工作模式的科技深色方案：与 zcode.z.ai 页面底色同族，chrome 不再割裂。
+            ModeTheme(MainMode.WORK) {
                 ZcodeWebRemoteScreen(container = container, store = store, onExit = { finish() })
             }
         }
@@ -129,114 +150,147 @@ fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, on
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onExit) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+    // 反馈浮层化：出现后数秒自动消散，不再常驻挤压页面。
+    LaunchedEffect(feedback) {
+        if (feedback != null) {
+            delay(4_500)
+            feedback = null
+        }
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        val target = pendingUrl ?: savedUrl
+        if (target == null) {
+            Box(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
+                SetupView(
+                    pairingText = pairingText,
+                    onPairingTextChange = { pairingText = it },
+                    onSave = { saveAndLoad(pairingText) },
+                    onRequestLink = { reconnect("link") },
+                    linkBusy = busy,
+                    linkEnabled = connection.connectionStatus == RemoteConnectionStatus.CONNECTED,
+                )
             }
-            // 不显示 bridge 连接状态：那是 Codex 节点的状态，与 ZCode 远程可用
-            // 与否无关；bridge 只服务于「从 Mac 取链接」，可用性体现在按钮上。
-            Text(
-                "ZCode 远程",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.weight(1f),
-            )
-            if (savedUrl != null) {
-                Button(onClick = { reconnect("refresh") }, enabled = !busy) {
-                    if (busy) {
-                        CircularProgressIndicator(Modifier.padding(end = 8.dp))
-                    } else {
-                        Icon(Icons.Outlined.Refresh, contentDescription = null)
+        } else {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.safeDrawing),
+            ) {
+                // 顶栏只留关闭与重连两个图标位；标题/地址交给页面自己的头部。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .background(MaterialTheme.colorScheme.surface),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onExit, modifier = Modifier.size(44.dp)) {
+                        Icon(
+                            Icons.Outlined.Close,
+                            contentDescription = "关闭",
+                            modifier = Modifier.size(22.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                    Text("重连")
+                    Box(Modifier.weight(1f))
+                    if (savedUrl != null) {
+                        IconButton(onClick = { reconnect("refresh") }, enabled = !busy, modifier = Modifier.size(44.dp)) {
+                            if (busy) {
+                                CircularProgressIndicator(Modifier.size(18.dp))
+                            } else {
+                                Icon(
+                                    Icons.Outlined.Refresh,
+                                    contentDescription = "重连：让 Mac 刷新二维码并返回新链接",
+                                    modifier = Modifier.size(22.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    AndroidView(
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                )
+                                @SuppressLint("SetJavaScriptEnabled")
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                // 深底消白闪：页面首帧绘制前 WebView 默认白底会割裂。
+                                setBackgroundColor(android.graphics.Color.parseColor("#101417"))
+                                webViewClient = object : WebViewClient() {
+                                    override fun onReceivedError(
+                                        view: WebView,
+                                        errorCode: Int,
+                                        description: String?,
+                                        failingUrl: String?,
+                                    ) {
+                                        webError = true
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        update = { view ->
+                            if (loadedUrl != target) {
+                                loadedUrl = target
+                                webError = false
+                                view.loadUrl(target)
+                            }
+                        },
+                        onRelease = { view -> view.destroy() },
+                    )
+                    if (webError) {
+                        Surface(
+                            modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                            tonalElevation = 2.dp,
+                            shape = MaterialTheme.shapes.medium,
+                        ) {
+                            Column(
+                                Modifier.padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Text("页面加载失败", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "链接可能已被踢出或作废；重连会让 Mac 刷新二维码并换新链接。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Button(onClick = { reconnect("refresh") }, enabled = !busy) {
+                                    Text("重连")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        val target = pendingUrl ?: savedUrl
-        if (feedback != null) {
-            Text(
-                feedback!!,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (target == null) {
-            SetupView(
-                pairingText = pairingText,
-                onPairingTextChange = { pairingText = it },
-                onSave = { saveAndLoad(pairingText) },
-                onRequestLink = { reconnect("link") },
-                linkBusy = busy,
-                linkEnabled = connection.connectionStatus == RemoteConnectionStatus.CONNECTED,
-            )
-        } else {
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                AndroidView(
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            )
-                            @SuppressLint("SetJavaScriptEnabled")
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            webViewClient = object : WebViewClient() {
-                                override fun onReceivedError(
-                                    view: WebView,
-                                    errorCode: Int,
-                                    description: String?,
-                                    failingUrl: String?,
-                                ) {
-                                    webError = true
-                                }
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                    update = { view ->
-                        if (loadedUrl != target) {
-                            loadedUrl = target
-                            webError = false
-                            view.loadUrl(target)
-                        }
-                    },
-                    onRelease = { view -> view.destroy() },
+        feedback?.let { message ->
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(bottom = 12.dp),
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                tonalElevation = 2.dp,
+            ) {
+                Text(
+                    message,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
                 )
-                if (webError) {
-                    Surface(
-                        modifier = Modifier.align(Alignment.Center).padding(24.dp),
-                        tonalElevation = 2.dp,
-                        shape = MaterialTheme.shapes.medium,
-                    ) {
-                        Column(
-                            Modifier.padding(20.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Text("页面加载失败", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "链接可能已被踢出或作废；重连会让 Mac 刷新二维码并换新链接。",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Button(onClick = { reconnect("refresh") }, enabled = !busy) {
-                                Text("重连")
-                            }
-                        }
-                    }
-                }
             }
-            Text(
-                "同一时间只允许一个手机页面连接；在浏览器等其他地方打开会互踢。",
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }
@@ -284,6 +338,11 @@ private fun SetupView(
                 Button(onClick = onSave, enabled = looksLikeZcodeRemoteUrl(pairingText)) {
                     Text("保存并打开")
                 }
+                Text(
+                    "同一时间只允许一个手机页面连接，在浏览器等其他地方打开会互踢。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
