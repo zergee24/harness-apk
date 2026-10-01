@@ -45,6 +45,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -2871,7 +2872,7 @@ fun ChatScreen(
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(messages, key = { it.id }) { message ->
+                itemsIndexed(messages, key = { _, item -> item.id }) { index, message ->
                     val persistedParts = messagePartsById[message.id].orEmpty()
                     val wikiCitations = wikiCitationsByMessageId[message.id].orEmpty()
                     val attachments = if (message.role == MessageRole.USER) {
@@ -2882,7 +2883,12 @@ fun ChatScreen(
                     ChatContentRail(contentMaxWidth = contentMaxWidth) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             if (message.role == MessageRole.SYSTEM) {
-                                ContextEventLine(message.content)
+                                // 连续系统记录聚为一组：只在组首渲染可展开项，其余行留空由组承担。
+                                val isSystemRunStart = index == 0 || messages[index - 1].role != MessageRole.SYSTEM
+                                if (isSystemRunStart) {
+                                    val run = messages.drop(index).takeWhile { it.role == MessageRole.SYSTEM }
+                                    ContextEventGroup(lines = run.map { it.content })
+                                }
                             } else {
                                 val executionEntry = executionByUserMessageId[message.id]
                                     ?: executionByAssistantMessageId[message.id]
@@ -3895,6 +3901,39 @@ private fun ContextEventLine(text: String) {
                 style = MaterialTheme.typography.labelSmall,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
+        }
+    }
+}
+
+// 连续系统记录（上下文压缩、沉淀写回等）聚合为一条：单条保持原胶囊，
+// 多条默认只显示计数胶囊，点开逐条铺开——信息不丢，但不再常驻刷屏。
+@Composable
+private fun ContextEventGroup(lines: List<String>) {
+    if (lines.size <= 1) {
+        lines.firstOrNull()?.let { ContextEventLine(it) }
+        return
+    }
+    var expanded by remember(lines) { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+        ) {
+            Text(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                text = if (expanded) "收起系统记录 · ${lines.size} 条" else "系统记录 · ${lines.size} 条",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        if (expanded) {
+            lines.forEach { line -> ContextEventLine(line) }
         }
     }
 }
@@ -5601,71 +5640,6 @@ internal fun ChatInputBar(
     }
 }
 
-@Composable
-internal fun ChatInputAttachmentAction(
-    enabled: Boolean,
-    onAttach: () -> Unit,
-) {
-    IconButton(
-        modifier = Modifier.size(48.dp),
-        enabled = enabled,
-        onClick = onAttach,
-    ) {
-        Icon(
-            imageVector = Icons.Outlined.Add,
-            contentDescription = "添加附件",
-        )
-    }
-}
-
-@Composable
-internal fun ChatInputPrimaryAction(
-    action: ChatInputTrailingAction,
-    canSend: Boolean,
-    voiceActive: Boolean,
-    onSend: () -> Unit,
-    onStopGeneration: () -> Unit,
-) {
-    FilledIconButton(
-        modifier = Modifier.size(48.dp),
-        enabled = !voiceActive && (action != ChatInputTrailingAction.SEND || canSend),
-        onClick = when (action) {
-            ChatInputTrailingAction.SEND -> onSend
-            ChatInputTrailingAction.STOP -> onStopGeneration
-        },
-    ) {
-        when (action) {
-            ChatInputTrailingAction.SEND -> Icon(
-                imageVector = Icons.AutoMirrored.Filled.Send,
-                contentDescription = sendButtonContentDescription(isBusy = false),
-            )
-            ChatInputTrailingAction.STOP -> Icon(
-                imageVector = Icons.Filled.Stop,
-                contentDescription = sendButtonContentDescription(isBusy = true),
-            )
-        }
-    }
-}
-
-@Composable
-internal fun ChatInputVoiceAction(
-    voiceActive: Boolean,
-    enabled: Boolean,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
-) {
-    IconButton(
-        modifier = Modifier.size(40.dp),
-        enabled = enabled,
-        onClick = if (voiceActive) onStop else onStart,
-    ) {
-        Icon(
-            imageVector = if (voiceActive) Icons.Filled.Stop else Icons.Outlined.Mic,
-            contentDescription = if (voiceActive) "停止语音输入" else "开始语音输入",
-        )
-    }
-}
-
 internal fun shouldSendChatInputOnKeyEvent(
     key: Key,
     eventType: KeyEventType,
@@ -5676,20 +5650,6 @@ internal fun shouldSendChatInputOnKeyEvent(
     !shiftPressed &&
     canSend
 
-@Composable
-internal fun ConversationWikiTopBarAction(
-    onClick: () -> Unit,
-) {
-    IconButton(
-        onClick = onClick,
-    ) {
-        Icon(
-            imageVector = Icons.AutoMirrored.Outlined.MenuBook,
-            contentDescription = "调整本会话可用知识库",
-        )
-    }
-}
-
 internal fun shouldAutoExpandReasoningPart(
     part: UiMessagePartDraft,
     parts: List<UiMessagePartDraft>,
@@ -5698,43 +5658,6 @@ internal fun shouldAutoExpandReasoningPart(
     part.type == UiMessagePartType.REASONING &&
     !part.stable &&
     parts.lastOrNull { it.type == UiMessagePartType.REASONING }?.index == part.index
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun ChatImageSourceEntryMenu(
-    onTakePhoto: () -> Unit,
-    onPickFromAlbum: () -> Unit,
-    onPickDocument: () -> Unit,
-    enabled: Boolean = true,
-) {
-    var showImageSourceSheet by remember { mutableStateOf(false) }
-
-    IconButton(
-        modifier = Modifier.size(56.dp),
-        enabled = enabled,
-        onClick = { showImageSourceSheet = true },
-    ) {
-        Icon(Icons.Outlined.Add, contentDescription = "添加附件")
-    }
-
-    if (showImageSourceSheet) {
-        ChatImageSourceSheet(
-            onDismiss = { showImageSourceSheet = false },
-            onTakePhoto = {
-                showImageSourceSheet = false
-                onTakePhoto()
-            },
-            onPickFromAlbum = {
-                showImageSourceSheet = false
-                onPickFromAlbum()
-            },
-            onPickDocument = {
-                showImageSourceSheet = false
-                onPickDocument()
-            },
-        )
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -5828,138 +5751,6 @@ private fun ChatImageSourceSheet(
                 Text("选择文件（PDF / Word / Excel / TXT）")
             }
         }
-    }
-}
-
-@Composable
-private fun ModelStatusChip(
-    providers: List<ProviderProfile>,
-    selectedProviderId: String?,
-    selectedModel: String,
-    selectedReasoningEffort: ReasoningEffort,
-    onOpenModelPicker: () -> Unit,
-) {
-    FilterChip(
-        modifier = Modifier.heightIn(min = 48.dp),
-        selected = false,
-        enabled = providers.isNotEmpty(),
-        onClick = onOpenModelPicker,
-        label = {
-            Text(
-                text = modelPickerButtonText(providers, selectedProviderId, selectedModel, selectedReasoningEffort),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-    )
-}
-
-@Composable
-private fun ContextStatusChip(
-    contextStatus: ContextWindowStatus,
-    expanded: Boolean,
-    isCompressingContext: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    onCompressContext: () -> Unit,
-) {
-    val canManualCompress = contextWindowCanManualCompress(contextStatus)
-    Box {
-        FilterChip(
-            modifier = Modifier.heightIn(min = 48.dp),
-            selected = false,
-            onClick = { onExpandedChange(true) },
-            leadingIcon = {
-                ContextUsageRing(
-                    progress = contextWindowUsageProgress(contextStatus),
-                    modifier = Modifier.size(18.dp),
-                )
-            },
-            label = {
-                Text(
-                    text = contextWindowStatusCompactText(contextStatus),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            },
-        )
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { onExpandedChange(false) },
-        ) {
-            Column(
-                modifier = Modifier
-                    .widthIn(min = 260.dp, max = 320.dp)
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(
-                    text = "上下文使用",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = contextWindowStatusText(contextStatus),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                LinearProgressIndicator(
-                    progress = { contextWindowUsageProgress(contextStatus) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text(
-                    text = "自动压缩阈值：${contextStatus.compressionThresholdPercent}%",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(
-                    enabled = canManualCompress && !isCompressingContext,
-                    onClick = {
-                        onExpandedChange(false)
-                        onCompressContext()
-                    },
-                ) {
-                    Text(
-                        when {
-                            isCompressingContext -> "压缩中..."
-                            canManualCompress -> "手动压缩"
-                            else -> "暂不需要压缩"
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ContextUsageRing(
-    progress: Float,
-    modifier: Modifier = Modifier,
-) {
-    val trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)
-    val progressColor = MaterialTheme.colorScheme.primary
-    Canvas(modifier = modifier) {
-        val strokeWidth = 2.5.dp.toPx()
-        val inset = strokeWidth / 2f
-        val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
-        drawArc(
-            color = trackColor,
-            startAngle = -90f,
-            sweepAngle = 360f,
-            useCenter = false,
-            topLeft = Offset(inset, inset),
-            size = arcSize,
-            style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-        )
-        drawArc(
-            color = progressColor,
-            startAngle = -90f,
-            sweepAngle = 360f * progress.coerceIn(0f, 1f),
-            useCenter = false,
-            topLeft = Offset(inset, inset),
-            size = arcSize,
-            style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-        )
     }
 }
 
