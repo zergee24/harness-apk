@@ -27,6 +27,8 @@ import struct
 import sys
 
 ASAR = "/Applications/DeepSeek Harness.app/Contents/Resources/app.asar"
+# Inside the asar (and its unpacked twin) the scope hangs under dsh/node_modules.
+UNPACKED = ASAR + ".unpacked/dsh/node_modules"
 SCOPE = "@deepseek-ai"
 PREFIX_BYTES = 2
 
@@ -89,21 +91,34 @@ def vendor(packages: list[str], destination: str) -> int:
             target_root = os.path.join(destination, SCOPE, package)
             shutil.rmtree(target_root, ignore_errors=True)
             unpacked = 0
+            unpacked_missing = 0
             for relative, size, offset in files:
+                target = os.path.join(target_root, relative)
                 if offset is None:
-                    # The entry lives in app.asar.unpacked (native binaries and
-                    # similar); copying it is outside this tool's purpose.
-                    unpacked += 1
+                    # The entry lives in app.asar.unpacked (native binaries,
+                    # e.g. node-addon-system's flock shim). Copy it from the
+                    # unpacked tree: a missing binary crashes session takeover
+                    # the first time the profile takes a cross-process lock.
+                    source = os.path.join(UNPACKED, SCOPE, package, relative)
+                    if not os.path.isfile(source):
+                        unpacked_missing += 1
+                        print(
+                            f"warning: unpacked entry not found on disk: {SCOPE}/{package}/{relative}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    shutil.copy2(source, target)
+                    written += 1
                     continue
                 archive.seek(data_offset + int(offset) + PREFIX_BYTES)
                 payload = archive.read(size)
-                target = os.path.join(target_root, relative)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with open(target, "wb") as out:
                     out.write(payload)
                 written += 1
-            note = f", {unpacked} unpacked entry/entries skipped" if unpacked else ""
-            print(f"vendored {SCOPE}/{package} ({len(files) - unpacked} files{note})")
+            note = f", {unpacked_missing} unpacked entry/entries missing" if unpacked_missing else ""
+            print(f"vendored {SCOPE}/{package} ({len(files) - unpacked_missing} files{note})")
     return written
 
 
