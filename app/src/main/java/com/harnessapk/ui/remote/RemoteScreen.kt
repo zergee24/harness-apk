@@ -77,11 +77,30 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Remote control surface for one paired Mac.
+ *
+ * @param initialBackendId backend a hub entry asked for (for example `dsh`).
+ *   Selection is applied once the Mac's advertised backends arrive, so a phone
+ *   opened before the handshake still lands on the requested agent.
+ */
 @Composable
-fun RemoteScreen(container: AppContainer, contentPadding: PaddingValues) {
+fun RemoteScreen(
+    container: AppContainer,
+    contentPadding: PaddingValues,
+    initialBackendId: String? = null,
+) {
     val state by container.remoteRepository.state.collectAsState()
     val profile by container.remoteProfileStore.profile.collectAsState()
     LaunchedEffect(profile) { if (profile != null) container.remoteRepository.connect() }
+    val requestedBackend = initialBackendId
+    LaunchedEffect(requestedBackend, state.backends, state.selectedBackendId) {
+        if (requestedBackend == null) return@LaunchedEffect
+        val advertised = state.backends.any { it.id == requestedBackend }
+        if (advertised && state.selectedBackendId != requestedBackend) {
+            container.remoteRepository.selectBackend(requestedBackend)
+        }
+    }
     if (profile == null) {
         Box(Modifier.fillMaxSize().padding(contentPadding).padding(24.dp)) {
             Text("请先在设置中扫描 Mac Bridge 的配对二维码。")

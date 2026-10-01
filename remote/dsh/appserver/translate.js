@@ -29,20 +29,32 @@ export function turnID(event) {
 	return `turn-${event.seq}`;
 }
 
-/** Map a dsh turn/end reason to a codex turn status object. */
+/**
+ * Map a dsh turn/end reason to a codex turn status object. The mobile client
+ * only understands `completed`, `failed`, `inProgress` and `interrupted`, and
+ * treats an `interrupted` turn without a completion time as still running — so
+ * a cancelled turn must never be reported as `failed`.
+ */
 export function turnStatusFromReason(reason) {
-	const kind = reason?.kind ?? "completed";
-	return { type: kind === "completed" ? "completed" : "failed" };
+	return { type: turnStatusString(reason) };
 }
 
 /** String status used by the mobile `thread/turns/list` summary view. */
 export function turnStatusString(reason) {
 	const kind = reason?.kind ?? "completed";
-	return kind === "completed" ? "completed" : "failed";
+	if (kind === "completed") return "completed";
+	if (kind === "interrupted" || kind === "cancelled" || kind === "canceled" || kind === "aborted") {
+		return "interrupted";
+	}
+	if (kind === "inProgress" || kind === "running") return "inProgress";
+	return "failed";
 }
 
 /**
  * Project session events into codex turns: `[{id, status, items}]`.
+ *
+ * `status` is the plain wire string the mobile summary view compares against;
+ * an open turn reports `inProgress` until its `turn/end` arrives.
  * @param events - dsh session events (`.seq`, `.type`, `.data`).
  * @param firstSeq - only project events at or after this seq.
  */
@@ -52,7 +64,7 @@ export function projectTurns(events, firstSeq = 0) {
 	for (const event of events) {
 		if (event.seq < firstSeq) continue;
 		if (event.type === "turn/start") {
-			current = { id: turnID(event), status: { type: "inProgress" }, items: [] };
+			current = { id: turnID(event), status: "inProgress", items: [] };
 			turns.push(current);
 			continue;
 		}
@@ -74,7 +86,7 @@ export function projectTurns(events, firstSeq = 0) {
 				text, status: "completed",
 			});
 		} else if (event.type === "turn/end") {
-			current.status = turnStatusFromReason(event.data?.reason);
+			current.status = turnStatusString(event.data?.reason);
 		}
 	}
 	return turns;
