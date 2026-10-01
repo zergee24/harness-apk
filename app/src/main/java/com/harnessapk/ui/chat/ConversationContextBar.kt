@@ -145,6 +145,7 @@ internal fun ConversationContextSheet(
     isCompressingContext: Boolean,
     autoReadEnabled: Boolean = false,
     onToggleAutoRead: (Boolean) -> Unit = {},
+    simpleMode: Boolean = false,
     onSelectProject: (String?) -> Unit,
     onSelectIdentity: (String?) -> Unit,
     onOpenWiki: () -> Unit,
@@ -179,14 +180,16 @@ internal fun ConversationContextSheet(
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
-            Text(
-                text = summary.primaryText(),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            )
+            if (!simpleMode) {
+                Text(
+                    text = summary.primaryText(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
             HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
-            ContextDropdownRow(
+            if (!simpleMode) ContextDropdownRow(
                 modifier = Modifier.testTag("context_project_selector"),
                 title = "项目",
                 value = selectedProjectName,
@@ -215,7 +218,7 @@ internal fun ConversationContextSheet(
                         )
                     }
             }
-            if (projectLocked) {
+            if (projectLocked && !simpleMode) {
                 Text(
                     text = "切换项目会在目标项目创建新会话，当前历史不会移动。",
                     style = MaterialTheme.typography.bodySmall,
@@ -223,8 +226,8 @@ internal fun ConversationContextSheet(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 )
             }
-            HorizontalDivider()
-            ContextDropdownRow(
+            if (!simpleMode) HorizontalDivider()
+            if (!simpleMode) ContextDropdownRow(
                 modifier = Modifier.testTag("context_agent_selector"),
                 title = "智能体",
                 value = if (identityState.mutable) {
@@ -260,10 +263,10 @@ internal fun ConversationContextSheet(
                     )
                 }
             }
-            HorizontalDivider()
-            ContextActionRow("Wiki", wikiLabel, onOpenWiki)
-            ContextActionRow("模型", summary.model.ifBlank { "未配置" }, onOpenModel)
-            if (showWebSearch) {
+            if (!simpleMode) HorizontalDivider()
+            if (!simpleMode) ContextActionRow("Wiki", wikiLabel, onOpenWiki)
+            if (!simpleMode) ContextActionRow("模型", summary.model.ifBlank { "未配置" }, onOpenModel)
+            if (showWebSearch && !simpleMode) {
                 ListItem(
                     headlineContent = { Text("联网搜索") },
                     supportingContent = { Text(if (webSearchEnabled) "已开启" else "已关闭") },
@@ -285,7 +288,7 @@ internal fun ConversationContextSheet(
                     )
                 },
             )
-            ListItem(
+            if (!simpleMode) ListItem(
                 headlineContent = { Text("上下文") },
                 supportingContent = { Text("已使用 ${summary.contextPercent.coerceIn(0, 100)}%") },
                 trailingContent = {

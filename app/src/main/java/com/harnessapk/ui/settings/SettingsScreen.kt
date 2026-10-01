@@ -62,7 +62,15 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        settingsDestinations(showUpdateBadge = showUpdateBadge).forEach { destination ->
+        val destinations = settingsDestinations(showUpdateBadge = showUpdateBadge)
+        // 简洁模式（父母设备）只留检查更新与配置包：排障走配置包重导入，
+        // 智能体/知识库从生活页 ⋯ 菜单进入，其余管理项对父母是噪音。
+        val visibleDestinations = if (simpleMode) {
+            destinations.filter { it.id == "updates" || it.id == "config" }
+        } else {
+            destinations
+        }
+        visibleDestinations.forEach { destination ->
             SettingsRow(
                 destination = destination,
                 icon = iconFor(destination.id),

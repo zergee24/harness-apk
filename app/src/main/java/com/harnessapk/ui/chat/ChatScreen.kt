@@ -2561,6 +2561,9 @@ fun ChatScreen(
                     }
                 }
             },
+            // 简洁模式的会话设置只留父母用得上的开关；工作概念项（项目/智能体/Wiki/
+            // 模型/搜索/上下文/提示词）全部不出现，模型跟随全局默认。
+            simpleMode = simpleMode,
             onSelectProject = ::selectContextProject,
             onSelectIdentity = { if (inputEditsAllowed()) { markExplicitConversationChoice(); identityController.selectIdentity(it) } },
             onOpenWiki = {
@@ -2583,29 +2586,33 @@ fun ChatScreen(
                 }
             },
             onCompressContext = ::compressContextNow,
-            promptSection = {
-                SessionPromptSection(
-                    promptText = finalSessionPrompt.ifBlank { rawSessionPrompt },
-                    optimizedPrompt = optimizedSessionPrompt,
-                    status = sessionConfigStatus,
-                    isOptimizing = isOptimizingPrompt,
-                    onPromptChange = {
-                        if (inputEditsAllowed()) {
-                            markExplicitConversationChoice()
-                            rawSessionPrompt = it
-                            finalSessionPrompt = it
+            promptSection = if (simpleMode) {
+                null
+            } else {
+                {
+                    SessionPromptSection(
+                        promptText = finalSessionPrompt.ifBlank { rawSessionPrompt },
+                        optimizedPrompt = optimizedSessionPrompt,
+                        status = sessionConfigStatus,
+                        isOptimizing = isOptimizingPrompt,
+                        onPromptChange = {
+                            if (inputEditsAllowed()) {
+                                markExplicitConversationChoice()
+                                rawSessionPrompt = it
+                                finalSessionPrompt = it
+                                sessionConfigStatus = null
+                            }
+                        },
+                        onOptimizePrompt = ::optimizeSessionPrompt,
+                        onUseOptimizedPrompt = {
+                            finalSessionPrompt = optimizedSessionPrompt
+                            rawSessionPrompt = optimizedSessionPrompt
+                            saveSessionPrompt(final = optimizedSessionPrompt)
+                            optimizedSessionPrompt = ""
                             sessionConfigStatus = null
-                        }
-                    },
-                    onOptimizePrompt = ::optimizeSessionPrompt,
-                    onUseOptimizedPrompt = {
-                        finalSessionPrompt = optimizedSessionPrompt
-                        rawSessionPrompt = optimizedSessionPrompt
-                        saveSessionPrompt(final = optimizedSessionPrompt)
-                        optimizedSessionPrompt = ""
-                        sessionConfigStatus = null
-                    },
-                )
+                        },
+                    )
+                }
             },
             onDismiss = {
                 saveSessionPrompt()
@@ -4992,7 +4999,6 @@ private fun MessageBubble(
     val isUser = message.role == MessageRole.USER
     var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
     var actionMenuExpanded by remember(message.id) { mutableStateOf(false) }
-    var contextSnapshotExpanded by remember(message.id) { mutableStateOf(false) }
     var errorExpanded by remember(message.id) { mutableStateOf(false) }
     val presentation = chatBubblePresentation(message.role)
     val uriHandler = LocalUriHandler.current
@@ -5232,12 +5238,6 @@ private fun MessageBubble(
                                         },
                                     )
                                 }
-                                if (isUser && executionEntry?.requestContext?.contextSnapshot != null) {
-                                    DropdownMenuItem(text = { Text("提问详情") }, onClick = {
-                                        actionMenuExpanded = false
-                                        contextSnapshotExpanded = true
-                                    })
-                                }
                                 if (message.role == MessageRole.ASSISTANT && onFollowUp != null) {
                                     DropdownMenuItem(text = { Text("说简单一点") }, onClick = {
                                         actionMenuExpanded = false
@@ -5274,11 +5274,6 @@ private fun MessageBubble(
             }
         }
     }
-    if (contextSnapshotExpanded) AlertDialog(
-        onDismissRequest = { contextSnapshotExpanded = false }, title = { Text("提问详情") },
-        text = { SelectionContainer { Text(executionEntry?.requestContext?.contextSnapshot?.let(::contextSnapshotDetails).orEmpty(), modifier = Modifier.verticalScroll(rememberScrollState())) } },
-        confirmButton = { TextButton(onClick = { contextSnapshotExpanded = false }) { Text("关闭") } },
-    )
 }
 
 @Composable
