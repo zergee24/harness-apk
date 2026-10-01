@@ -131,6 +131,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import com.harnessapk.remote.AliyunPushManager
+import com.harnessapk.remote.DashboardViewedStore
 import com.harnessapk.remote.RemoteEnrollmentClient
 import com.harnessapk.remote.RemoteBindingRepository
 import com.harnessapk.remote.RemoteApprovalCommandCoordinator
@@ -212,6 +213,7 @@ class AppContainer(
     val aliyunPushManager = AliyunPushManager(appContext)
     val remoteRepository = RemoteRepository(remoteProfileStore, remoteHttpClient, applicationScope)
     val zcodeWebRemoteStore = ZcodeWebRemoteStore(appContext)
+    val dashboardViewedStore = DashboardViewedStore(appContext)
     val remoteBindingRepository = RemoteBindingRepository(database.remoteDao())
     val remoteCommandOutbox = RemoteCommandOutbox(RoomRemoteCommandStore(database.remoteDao()))
     val remoteApprovalCommandCoordinator = RemoteApprovalCommandCoordinator(

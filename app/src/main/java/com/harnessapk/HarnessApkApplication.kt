@@ -28,8 +28,11 @@ class HarnessApkApplication : Application() {
             onFailure = { task, error -> Log.e(TAG, "Application recovery failed: $task", error) },
         )
         applicationScope.launch {
-            observeAppBadgeCount(container.database.remoteDao().observePendingApprovals())
-                .collect { count -> updateAppBadge(this@HarnessApkApplication, count) }
+            observeAppBadgeCount(
+                pendingApprovals = container.database.remoteDao().observePendingApprovals(),
+                dashboard = container.remoteRepository.dashboard,
+                viewedStore = container.dashboardViewedStore,
+            ).collect { count -> updateAppBadge(this@HarnessApkApplication, count) }
         }
     }
 
