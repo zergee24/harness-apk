@@ -6,6 +6,8 @@
 > - P0 四项（F04 / F10 / F21 / F22）已修复，见 [第 16 节](#16-修复记录p0)。
 > - 根因 6 清理（F13–F19）已修复，见 [第 17 节](#17-修复记录根因-6-清理)。
 > - F23 / F24 输入被静默吞掉，见 [第 18 节](#18-修复记录f23--f24-输入被静默吞掉)。
+> - 根因 3（F07 / F08 冷启动模式错乱），见 [第 19 节](#19-修复记录根因-3simplemode-与-mainmode-的加载时序不一致)。
+> - F02 生活主屏顶栏标题（C-2.3），见 [第 20 节](#20-修复记录f02--c-23-生活主屏顶栏标题)。
 >
 > **注意行号漂移**：本文档的行号基于 `3f66546`。此后有并行会话在工作树上重构工作页（新增 `ui/work/WorkHomeScreen.kt`、work hub 入口、`remote/dsh/*`），`HarnessApkApp.kt` 与 `TabNavigationTest.kt` 的行号已经漂移，核对时请以符号名为准。
 
@@ -49,9 +51,9 @@
 
 | # | 根因 | 覆盖发现 | 在方向 C 下的处理 |
 | --- | --- | --- | --- |
-| 1 | `homeModeStore.lifeConversationId` 是唯一的主屏会话指针，**只在自动创建时写入** | F01 F02 F03 | C-2.3 顶栏可见 + C-2.1 语义 |
+| 1 | `homeModeStore.lifeConversationId` 是唯一的主屏会话指针，**只在自动创建时写入** | F01 F02 F03 | C-2.3 ✅（第 20 节）；C-2.1 与 F01/F03 未做 |
 | 2 | 空壳过滤拿 Room 行字段当"用户配置过"的证据，而创建路径会自动写 `agentId`/`agentVersion` | F04 F05 F06 | C-2.4 判据换成 `userRetained` |
-| 3 | `simpleMode` 走 DataStore 冷流且两处 `initial` 假设不一致；`mainMode` 却是 SharedPreferences 同步读 | F07 F08 | 单独修，与 C 无关 |
+| 3 | `simpleMode` 走 DataStore 冷流且两处 `initial` 假设不一致；`mainMode` 却是 SharedPreferences 同步读 | F07 F08 | ✅ 已修复（第 19 节） |
 | 4 | `openWorkbench()` 绕过 `leaveHomeChat` 直接切 `mainMode=WORK`，防踢逻辑只挂在 `simpleMode` 上 | F09 | 单独修 |
 | 5 | `currentProjectId` 是 App 级 `rememberSaveable`，从不清空 | F10 F11 F12 | C-2.1 直接根治生活路径 |
 | 6 | 减法改造删了界面元素，文案/断言/死参数没跟着清 | F13–F19 | ✅ 已修复（第 17 节） |
@@ -421,6 +423,55 @@
   - 决定性对照：把本次改动 `git stash` 掉后在同样负载下重跑全量，**同一个测试照样失败且更差**（5032ms；有改动时 525ms）。基线那轮全量跑了 20m37s，有改动时 3m23s。
   - 结论：该测试是负载敏感的微基准，不是回归。若要长期依赖它，建议给它加负载门槛或改为相对基线比较。
 - **未做**：`assembleDebug`、仪器测试实机执行、真机目视核对。F23 是时序修复，建议在设备上按「在生活主屏打字后立刻连点两个底部 Tab」复现一次，确认落在最后点的那个 Tab 上。
+
+## 19. 修复记录（根因 3：simpleMode 与 mainMode 的加载时序不一致）
+
+### 根因
+`mainMode` 走 `HomeModeStore` 的 SharedPreferences **同步读**，第一帧就有值；`simpleMode` 走 DataStore **冷流**，第一帧必然拿不到。两者不同源，于是首帧按"非简洁模式"组合渲染。
+
+### F07 冷启动先按非简洁模式渲染，且会把工作页选择改写掉
+- **改动**：`AppSettingsStore` 新增 SharedPreferences 写穿镜像 + `simpleModeState: StateFlow<Boolean>`。
+  - 镜像在 `setSimpleMode` 里与 DataStore 双写，所以不会漂移；
+  - `reconcileSimpleModeMirror()` 用 DataStore 真值校正镜像，由 `AppContainer.init` 在启动时调一次，处理"镜像还不存在"的升级安装；
+  - 原来那个 `simpleMode: Flow<Boolean>` 已移除——留着的话调用方仍会写 `collectAsState(initial = ...)`，第一帧照样是猜的值。
+- **效果**：`HarnessApkApp` 现在写 `collectAsState()`（无 initial），首帧就是真值。底部不再先闪出工作 Tab，上次停在工作页也不会先画一整屏深色工作页再跳回生活页。
+- **保留的行为**：简洁模式下若 `mainMode` 仍是 WORK，仍然会被修复成 LIFE 并持久化——这是修复一个不一致状态（WORK 在简洁模式下不可达），本身是对的；错的是它此前伴随可见的闪烁。**注意这不能解决 F05**：关掉简洁模式后仍然回不到工作页。
+
+### F08 聊天页自己又收一次同一个设置，且假设不同
+- **改动**：`ChatScreen` 的 `collectAsState(initial = false)` 改为同一个 `simpleModeState.collectAsState()`。顶层此前用 `initial = null`，两处对"设置未加载"的假设不一致，导致聊天页首帧按普通模式布局（先闪出执行队列条、简洁模式专属状态晚一帧出现、回车键含义也会变）。
+- **连带**：`ConfigPackageExportScreen` 的 `collectAsState(initial = null)` 也换到同一个源，它内部 `ownSimpleMode?.let {}` 的 null 分支随之取消。
+- **顺带清理**：`HarnessApkApp` 里 `loadedSimpleMode ?: settingsStore.simpleMode.first()` 这个回落不再需要（同步可读），连同不再使用的 `kotlinx.coroutines.flow.first` 导入一并删除。
+
+### 已知边界
+- 升级安装后的**第一次**启动，镜像尚不存在，首帧仍可能读到默认的 `false` → 有一次闪烁；`AppContainer` 的 reconcile 跑完后就被校正，之后不再复现。
+- 未做：没有把 `simpleMode` 改成启动时阻塞读取（`runBlocking`），那会在主线程上做一次磁盘 I/O，得不偿失。
+
+### 验证
+- `./gradlew testDebugUnitTest compileDebugAndroidTestKotlin` → BUILD SUCCESSFUL，174 个套件 / 1325 个用例 / 0 失败 / 0 错误。
+- 新增仪器测试 `AppSettingsStoreTest.simpleModeIsSynchronouslyReadableOnTheNextColdStart`：用新实例模拟下一次冷启动，不 collect、不 await，直接断言 `simpleModeState.value`；同时验证 reconcile 后镜像与 DataStore 一致。**未在设备上执行**，仅编译通过。
+- **未做**：冷启动录屏 / Macrobenchmark。首帧是否还会闪、闪几帧，需要真机确认。
+
+## 20. 修复记录（F02 / C-2.3 生活主屏顶栏标题）
+
+### 现象
+生活主屏顶栏恒为字面量"生活"（`HarnessApkApp.kt` 的生活分支），而**同一条会话**从历史打开时显示的是真实标题。同一条会话两个名字；叠加 F01（主屏只自动打开"最后一次创建的会话"），用户没有任何线索判断自己正在哪条会话里。
+
+### 改动
+- 新增纯函数 `lifeHomeTopBarTitle(overviewTitle, conversationTitle)`（放在 `HarnessApkApp.kt` 的 `chatTopBarTitle` 旁边）：
+  - 优先用生活概览算出的**可读标题**（规格 §3.4 的派生规则，例如首个用户问题）；
+  - 概览还没算出来时退回 Room 里的会话标题；
+  - 仍是占位符（"新会话"/"新问题"）或是空串时退回"生活"——全新会话没有可读标题，不该把占位符顶到主屏上。
+- 主屏顶栏改用该函数。
+
+### 未做
+- **F01**（主屏只认"最后一次自动创建的会话"，你在历史里实际使用的会话不会成为主屏会话）——那是 C-2.1 的语义改动，涉及"生活页会话要不要跟随用户实际使用的会话"，是产品决策：跟随会让"生活页"更像"最近会话"，不跟随则要接受"主屏和刚看过的不是同一条"。本批不动。
+- **F03**（简洁模式不决定首页会话身份）同理，属 C-2.2。
+
+### 验证
+- 新增 2 个单测：`lifeHomeTopBarTitleShowsTheCurrentConversation`、`lifeHomeTopBarTitleFallsBackForFreshConversations`。
+- `./gradlew testDebugUnitTest` → BUILD SUCCESSFUL，174 个套件 / **1327** 个用例 / 0 失败。
+
+
 
 
 

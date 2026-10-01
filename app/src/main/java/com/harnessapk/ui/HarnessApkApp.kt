@@ -24,7 +24,6 @@ import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.text.style.TextOverflow
-import kotlinx.coroutines.flow.first
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -282,8 +281,9 @@ fun HarnessApkApp(
     val conversations by container.chatRepository.observeConversations().collectAsState(initial = emptyList())
     val lifeOverview by remember(container) { container.lifeConversationOverviewRepository.observe() }
         .collectAsState(initial = LifeConversationOverviewState.Loading)
-    val loadedSimpleMode by container.settingsStore.simpleMode.collectAsState(initial = null)
-    val simpleMode = loadedSimpleMode == true
+    // simpleMode 现在是同步可读的 StateFlow（见 AppSettingsStore.simpleModeState），
+    // 首帧拿到的就是真值，不再有"先按非简洁模式画一帧"的窗口。
+    val simpleMode by container.settingsStore.simpleModeState.collectAsState()
     // 简洁模式下工作入口整体隐藏，若当前正处在 WORK 页则退回生活页
     LaunchedEffect(simpleMode) {
         if (simpleMode && mainMode == MainMode.WORK) {
@@ -466,8 +466,9 @@ fun HarnessApkApp(
                     if (!forceNew && previous != null) {
                         previous.id
                     } else {
-                        // Wait for the stored preference; the initial UI state is not a mode choice.
-                        val useSimpleMode = loadedSimpleMode ?: container.settingsStore.simpleMode.first()
+                        // simpleModeState 是同步可读的，这里直接取值即可，
+                        // 不需要再回落到 first() 等 DataStore。
+                        val useSimpleMode = container.settingsStore.simpleModeState.value
                         val created = container.newConversationUseCase.create(homeConversationRequest(useSimpleMode))
                         container.lifeConversationOverviewRepository.recordOrigin(
                             created,
@@ -669,7 +670,17 @@ fun HarnessApkApp(
                 TopAppBar(
                     title = {
                         ChatAppBarTitle(
-                            title = "生活",
+                            // C-2.3：显示当前会话的真实标题（没有可读标题时才退回"生活"），
+                            // 而不是恒定的"生活"。
+                            title = lifeHomeTopBarTitle(
+                                overviewTitle = (lifeOverview as? LifeConversationOverviewState.Content)
+                                    ?.items
+                                    ?.firstOrNull { it.conversationId == homeConversationReadyId }
+                                    ?.title,
+                                conversationTitle = conversations
+                                    .firstOrNull { it.id == homeConversationReadyId }
+                                    ?.title,
+                            ),
                             contextSummary = chatContextSummaries[homeConversationReadyId],
                             onOpenSettings = { chatSessionConfigRequestKey += 1 },
                         )
@@ -1400,3 +1411,27 @@ internal fun chatTopBarTitle(
     ?.title
     ?.takeIf { it.isNotBlank() }
     ?: "对话"
+
+/** 生活主屏还没有可读标题时顶栏显示的占位。 */
+private const val LIFE_HOME_PLACEHOLDER_TITLE = "生活"
+
+/**
+ * 生活主屏顶栏标题。
+ *
+ * 方向 C 的 C-2.3：顶栏必须让用户知道自己正在哪条会话里。此前这里写死"生活"，
+ * 同一条会话在历史里显示真实标题、在主屏显示"生活"，两个名字；加上主屏只会自动
+ * 打开"最后一次创建的会话"，用户没有任何线索判断自己在哪条会话里。
+ *
+ * 全新会话还没有可读标题（标题仍是"新会话"/"新问题"）时退回"生活"，
+ * 避免顶栏直接显示占位符。
+ */
+internal fun lifeHomeTopBarTitle(
+    overviewTitle: String?,
+    conversationTitle: String?,
+): String {
+    val readable = overviewTitle?.trim()?.takeIf { it.isNotBlank() }
+        ?: conversationTitle?.trim()?.takeIf { it.isNotBlank() }
+    return readable
+        ?.takeIf { it != "新会话" && it != "新问题" }
+        ?: LIFE_HOME_PLACEHOLDER_TITLE
+}

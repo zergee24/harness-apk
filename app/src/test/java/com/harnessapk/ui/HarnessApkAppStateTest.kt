@@ -25,6 +25,29 @@ class HarnessApkAppStateTest {
     }
 
     @Test
+    fun lifeHomeTopBarTitleShowsTheCurrentConversation() {
+        // C-2.3：主屏必须让用户知道自己正在哪条会话里，而不是恒定显示"生活"。
+        assertEquals(
+            "周末买菜要带什么",
+            lifeHomeTopBarTitle(overviewTitle = "周末买菜要带什么", conversationTitle = "新会话"),
+        )
+        // 概览还没算出来时退回 Room 里的标题。
+        assertEquals(
+            "周末买菜要带什么",
+            lifeHomeTopBarTitle(overviewTitle = null, conversationTitle = "周末买菜要带什么"),
+        )
+    }
+
+    @Test
+    fun lifeHomeTopBarTitleFallsBackForFreshConversations() {
+        // 全新会话还没有可读标题，不要在主屏顶栏显示"新会话"/"新问题"这种占位符。
+        assertEquals("生活", lifeHomeTopBarTitle(overviewTitle = "新会话", conversationTitle = "新会话"))
+        assertEquals("生活", lifeHomeTopBarTitle(overviewTitle = "新问题", conversationTitle = "新问题"))
+        assertEquals("生活", lifeHomeTopBarTitle(overviewTitle = " ", conversationTitle = null))
+        assertEquals("生活", lifeHomeTopBarTitle(overviewTitle = null, conversationTitle = null))
+    }
+
+    @Test
     fun workbenchTargetCarriesProjectPathAndRequestKey() {
         val target = projectWorkbenchTarget(
             projectId = "project-1",

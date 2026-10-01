@@ -378,7 +378,10 @@ fun ChatScreen(
         initial = VoiceSettings(),
     )
     val context = LocalContext.current
-    val simpleMode by container.settingsStore.simpleMode.collectAsState(initial = false)
+    // 与 HarnessApkApp 用同一个同步可读的源。此前这里用 initial = false，
+    // 顶层用 initial = null，两处对"设置未加载"的假设不一致：聊天页首帧会按普通模式
+    // 布局（先闪出执行队列条、简洁模式专属状态晚一帧出现、回车键含义也会变）。
+    val simpleMode by container.settingsStore.simpleModeState.collectAsState()
     val clipboard = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current

@@ -19,9 +19,23 @@ import com.harnessapk.voice.decodeVoiceProviderType
 import com.harnessapk.websearch.WebSearchSettings
 import com.harnessapk.websearch.normalizeWebSearchMaxResults
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.appSettingsDataStore by preferencesDataStore("app_settings")
+
+/**
+ * simpleMode 的 SharedPreferences 镜像位置。
+ *
+ * DataStore 是冷流，冷启动第一帧读不到值；而 mainMode 走的是 SharedPreferences 同步读。
+ * 两者不同源会让首帧按"非简洁模式"组合渲染：底部先出现工作 Tab，若上次停在过工作页
+ * 还会先画一整屏工作页再被踢回生活页；"我的"里的开关也会短暂显示为关。
+ */
+private const val SIMPLE_MODE_MIRROR_PREFERENCES = "app_settings_mirror"
+private const val SIMPLE_MODE_MIRROR_KEY = "simple_mode"
 
 data class DefaultModelPreference(
     val providerId: String? = null,
@@ -41,9 +55,22 @@ class AppSettingsStore(private val context: Context) {
         it[HAS_SEEN_IMAGE_PRIVACY_NOTICE] ?: false
     }
 
-    val simpleMode: Flow<Boolean> = context.appSettingsDataStore.data.map {
-        it[SIMPLE_MODE] ?: false
-    }
+    private val simpleModeMirror = context.applicationContext
+        .getSharedPreferences(SIMPLE_MODE_MIRROR_PREFERENCES, Context.MODE_PRIVATE)
+    private val _simpleMode = MutableStateFlow(
+        simpleModeMirror.getBoolean(SIMPLE_MODE_MIRROR_KEY, false),
+    )
+
+    /**
+     * 首帧就有值的 simpleMode，和 mainMode 一样是同步可读的。
+     *
+     * 消费方一律用它配合 `collectAsState()`；**不要**再用 `collectAsState(initial = ...)`，
+     * 那样第一帧一定是 initial 里猜的那个值，正是首帧模式错乱的来源。
+     *
+     * 唯一的写入点是 [setSimpleMode]，所以镜像不会漂移；升级安装（镜像尚不存在）时由
+     * [reconcileSimpleModeMirror] 用 DataStore 真值校正一次。
+     */
+    val simpleModeState: StateFlow<Boolean> = _simpleMode.asStateFlow()
 
     val defaultModelPreference: Flow<DefaultModelPreference> = context.appSettingsDataStore.data.map {
         DefaultModelPreference(
@@ -104,7 +131,23 @@ class AppSettingsStore(private val context: Context) {
     }
 
     suspend fun setSimpleMode(value: Boolean) {
+        // 先写镜像再写 DataStore：镜像要在下一次冷启动的第一帧就能读到。
+        simpleModeMirror.edit().putBoolean(SIMPLE_MODE_MIRROR_KEY, value).apply()
+        _simpleMode.value = value
         context.appSettingsDataStore.edit { it[SIMPLE_MODE] = value }
+    }
+
+    /**
+     * 用 DataStore 的真值校正镜像。
+     *
+     * 正常路径不需要它（[setSimpleMode] 两边都写）；它只处理"镜像还不存在"的升级安装，
+     * 以及 DataStore 被外部恢复/迁移导致与镜像不一致的情况。冷启动时调用一次即可。
+     */
+    suspend fun reconcileSimpleModeMirror() {
+        val stored = context.appSettingsDataStore.data.first()[SIMPLE_MODE] ?: false
+        if (stored == _simpleMode.value) return
+        simpleModeMirror.edit().putBoolean(SIMPLE_MODE_MIRROR_KEY, stored).apply()
+        _simpleMode.value = stored
     }
 
     suspend fun setDefaultModelPreference(providerId: String, model: String) {
