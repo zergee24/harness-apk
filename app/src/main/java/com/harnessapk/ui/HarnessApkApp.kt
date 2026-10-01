@@ -236,8 +236,6 @@ fun HarnessApkApp(
     var wikiImportError by remember { mutableStateOf<String?>(null) }
     var browserWikiTitle by remember { mutableStateOf<String?>(null) }
     var chatSessionConfigRequestKey by remember { mutableStateOf(0) }
-    var chatWikiScopeRequestKey by remember { mutableStateOf(0) }
-    var chatSearchRequestKey by remember { mutableStateOf(0) }
     var chatMoreRequestKey by remember { mutableStateOf(0) }
     var chatBackRequestKey by remember { mutableStateOf(0) }
     val chatContextSummaries = remember { androidx.compose.runtime.mutableStateMapOf<String, String>() }
@@ -594,10 +592,6 @@ fun HarnessApkApp(
                 onOpenProviderSettings = { navController.navigate(Routes.Providers) },
                 sessionConfigRequestKey = chatSessionConfigRequestKey,
                 onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
-                wikiScopeRequestKey = chatWikiScopeRequestKey,
-                onWikiScopeRequestConsumed = { chatWikiScopeRequestKey = 0 },
-                searchRequestKey = chatSearchRequestKey,
-                onSearchRequestConsumed = { chatSearchRequestKey = 0 },
                 onOpenProjectFiles = { projectId, path ->
                     openWorkbench(projectId, ProjectWorkbenchDestination.FILES, path)
                 },
