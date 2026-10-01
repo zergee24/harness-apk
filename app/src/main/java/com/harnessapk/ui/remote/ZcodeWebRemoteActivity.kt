@@ -71,6 +71,7 @@ import kotlinx.coroutines.launch
  */
 class ZcodeWebRemoteActivity : ComponentActivity() {
     private val store by lazy { ZcodeWebRemoteStore(this) }
+    private var webView: WebView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,17 +84,41 @@ class ZcodeWebRemoteActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         val container = (application as HarnessApkApplication).container
+        // 旋转由 configChanges 兜住不重建；系统回收后重建走到这里时，带上
+        // WebView 历史栈，让页面续上原会话链接而不是重开最初配对链接。
+        val restoredWebViewState = savedInstanceState?.getBundle(KEY_WEB_VIEW_STATE)
         setContent {
             // 工作模式的科技深色方案：与 zcode.z.ai 页面底色同族，chrome 不再割裂。
             ModeTheme(MainMode.WORK) {
-                ZcodeWebRemoteScreen(container = container, store = store, onExit = { finish() })
+                ZcodeWebRemoteScreen(
+                    container = container,
+                    store = store,
+                    initialWebViewState = restoredWebViewState,
+                    onWebViewChange = { webView = it },
+                    onExit = { finish() },
+                )
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        webView?.let { outState.putBundle(KEY_WEB_VIEW_STATE, Bundle().also { bundle -> it.saveState(bundle) }) }
+    }
+
+    private companion object {
+        const val KEY_WEB_VIEW_STATE = "webBackForwardState"
     }
 }
 
 @Composable
-fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, onExit: () -> Unit) {
+fun ZcodeWebRemoteScreen(
+    container: AppContainer,
+    store: ZcodeWebRemoteStore,
+    initialWebViewState: Bundle?,
+    onWebViewChange: (WebView?) -> Unit,
+    onExit: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
     val savedUrl by store.url.collectAsState()
     val connection by container.remoteRepository.state.collectAsState()
@@ -237,6 +262,16 @@ fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, on
                                         webError = true
                                     }
                                 }
+                                // 重建恢复：restoreState 会自行加载历史栈当前条目
+                                // （续的是会话页 URL），标记 loadedUrl 以免下方 update
+                                // 再用最初配对链接 loadUrl 把恢复冲掉。
+                                initialWebViewState?.let { state ->
+                                    restoreState(state)
+                                    if (copyBackForwardList().currentItem != null) {
+                                        loadedUrl = target
+                                    }
+                                }
+                                onWebViewChange(this)
                             }
                         },
                         modifier = Modifier.fillMaxSize(),
@@ -247,7 +282,10 @@ fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, on
                                 view.loadUrl(target)
                             }
                         },
-                        onRelease = { view -> view.destroy() },
+                        onRelease = { view ->
+                            onWebViewChange(null)
+                            view.destroy()
+                        },
                     )
                     if (webError) {
                         Surface(
