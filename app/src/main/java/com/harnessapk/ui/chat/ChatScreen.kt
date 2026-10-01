@@ -5145,40 +5145,76 @@ private fun MessageBubble(
                             )
                         }
                     }
-                message.errorMessage?.let {
-                    Text(
-                        text = if (simpleMode && !errorExpanded) "这次没能回答，问题已经保留" else errorDisplayText(it),
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    if (!simpleMode) Text(
-                        text = "复制详细日志",
-                        color = MaterialTheme.colorScheme.primary,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.clickable { onCopy() },
-                    )
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        onRetryFailed?.let { retry ->
-                            TextButton(onClick = retry) {
-                                Icon(Icons.Outlined.Refresh, contentDescription = null)
-                                Text(if (simpleMode) "重新生成" else "重试")
+                // 失败提醒单点化：一条失败只渲染这一个紧凑错误卡（一行原因 + 重试 + 详情），
+                // 完整日志/复制日志/电池限制收进展开区；出错时下方的常规动作行不再渲染，
+                // 避免同一条失败出现两组复制/菜单和多层红字。
+                message.errorMessage?.let { error ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    modifier = Modifier.weight(1f),
+                                    text = if (simpleMode && !errorExpanded) {
+                                        "这次没能回答，问题已经保留"
+                                    } else {
+                                        errorDisplayText(error)
+                                    },
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                onRetryFailed?.let { retry ->
+                                    TextButton(
+                                        modifier = Modifier.heightIn(min = 40.dp),
+                                        onClick = retry,
+                                        contentPadding = PaddingValues(horizontal = 8.dp),
+                                    ) {
+                                        Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(if (simpleMode) "重新生成" else "重试")
+                                    }
+                                }
+                                TextButton(
+                                    modifier = Modifier.heightIn(min = 40.dp),
+                                    onClick = { errorExpanded = !errorExpanded },
+                                    contentPadding = PaddingValues(horizontal = 8.dp),
+                                ) {
+                                    Text(if (errorExpanded) "收起" else "详情")
+                                }
                             }
-                        }
-                        onOpenBatterySettings?.let { openSettings ->
-                            TextButton(onClick = openSettings) {
-                                Text("检查电池限制")
+                            if (errorExpanded) {
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TextButton(onClick = onCopy) {
+                                        Text("复制详细日志")
+                                    }
+                                    onOpenBatterySettings?.let { openSettings ->
+                                        TextButton(onClick = openSettings) {
+                                            Text("检查电池限制")
+                                        }
+                                    }
+                                }
                             }
-                        }
-                        if (simpleMode) TextButton(onClick = { errorExpanded = !errorExpanded }) {
-                            Text(if (errorExpanded) "收起详情" else "查看详情")
                         }
                     }
                 }
                 if (simpleMode && message.status == MessageStatus.CANCELLED) Text("已停止", style = MaterialTheme.typography.bodyMedium)
                 if (
-                    selectionCopyText.isNotBlank() ||
-                        canWriteBack ||
-                        (isUser && executionEntry?.requestContext?.contextSnapshot != null)
+                    message.errorMessage == null &&
+                    (
+                        selectionCopyText.isNotBlank() ||
+                            canWriteBack ||
+                            (isUser && executionEntry?.requestContext?.contextSnapshot != null)
+                        )
                 ) {
                     FlowRow(
                         modifier = Modifier.fillMaxWidth(),
