@@ -83,10 +83,10 @@ fun ConfigPackageExportScreen(
     // 三态：null = 包里不包含这一项（对方保持原样），true/false = 显式开启/关闭。
     var simpleModeChoice by remember { mutableStateOf<Boolean?>(null) }
     var simpleModeChoiceTouched by remember { mutableStateOf(false) }
-    val ownSimpleMode by container.settingsStore.simpleMode.collectAsState(initial = null)
+    val ownSimpleMode by container.settingsStore.simpleModeState.collectAsState()
     // 默认跟随导出者自己的设置，而不是无条件"替对方打开"；用户手动选过之后不再覆盖。
     LaunchedEffect(ownSimpleMode) {
-        ownSimpleMode?.let { current -> if (!simpleModeChoiceTouched) simpleModeChoice = current }
+        if (!simpleModeChoiceTouched) simpleModeChoice = ownSimpleMode
     }
     var validityHours by remember { mutableStateOf(12) }
     var passphrase by remember { mutableStateOf("") }
