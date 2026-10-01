@@ -1,19 +1,24 @@
 {
   "name": "dsh-appserver",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "M4 G2: codex app-server compatible stdio JSON-RPC surface over dsh-base (`dsh --profile appserver --listen stdio://`).",
+  "description": "M4 G2: codex app-server compatible stdio JSON-RPC surface over dsh-base, with session resume and turn interrupt (`dsh --profile appserver --listen stdio://`).",
   "exports": {
     ".": "./index.js",
     "./startup": "./startup.js"
   },
+  "scripts": {
+    "test": "node --test translate.test.js list-projection.test.js",
+    "smoke": "node smoke.mjs"
+  },
   "dependencies": {
-    "@deepseek-ai/dsh-agent": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-cmdline": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-llm": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-session": "0.1.5-rc.1",
-    "@deepseek-ai/schemastery": "3.18.2",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-base": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-cmdline": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
     "commander": "15.0.0"
   }
 }
