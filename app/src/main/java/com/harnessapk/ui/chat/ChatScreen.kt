@@ -253,9 +253,9 @@ import com.harnessapk.websearch.shouldUseExternalWebSearch
 import com.harnessapk.voice.VoiceSettings
 import com.harnessapk.voice.VoiceInputPhase
 import com.harnessapk.voice.VoiceInputState
-import com.harnessapk.wiki.WikiRef
-import com.harnessapk.wiki.WikiVersionState
 import com.harnessapk.wiki.MessageWikiCitation
+import com.harnessapk.ui.wiki.ConversationWikiPicker
+import com.harnessapk.ui.wiki.rememberConversationWikiScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -359,7 +359,6 @@ fun ChatScreen(
         container.conversationWikiRepository.observeCitationsForConversation(conversationId)
     }.collectAsState(initial = emptyMap())
     val agents by container.agentRepository.observeAgents().collectAsState(initial = emptyList())
-    val installedWikis by container.wikiRepository.observeWikis().collectAsState(initial = emptyList())
     val executionEntries by container.chatExecutionRepository
         .observeForConversation(conversationId)
         .collectAsState(initial = emptyList())
@@ -642,7 +641,6 @@ fun ChatScreen(
     var identityMessageStateKnown by remember(conversationId) { mutableStateOf(false) }
     var persistedUserMessage by remember(conversationId) { mutableStateOf(false) }
     var showIdentityDetails by remember { mutableStateOf(false) }
-    var showWikiScopePicker by remember(conversationId) { mutableStateOf(false) }
     var showMessageSearch by remember(conversationId) { mutableStateOf(false) }
     var messageSearchQuery by remember(conversationId) { mutableStateOf("") }
     var debouncedMessageSearchQuery by remember(conversationId) { mutableStateOf("") }
@@ -651,8 +649,6 @@ fun ChatScreen(
     var highlightedMessageId by remember(conversationId) { mutableStateOf<String?>(null) }
     var messageSearchOriginIndex by remember(conversationId) { mutableStateOf(0) }
     var messageSearchOriginOffset by remember(conversationId) { mutableStateOf(0) }
-    var conversationWikiMounts by remember(conversationId) { mutableStateOf(emptyList<com.harnessapk.wiki.ConversationWikiMount>()) }
-    var conversationWikiCatalog by remember(conversationId) { mutableStateOf(emptyList<ConversationWikiCatalogEntry>()) }
     var fixedVersionCoverage by remember(conversationId) { mutableStateOf<AgentVersionCoverage?>(null) }
     var agentOpening by remember(conversationId) { mutableStateOf<String?>(null) }
     var showConversationContext by remember { mutableStateOf(false) }
@@ -767,21 +763,10 @@ fun ChatScreen(
         )
     }
     val identityControllerState by identityController.state.collectAsState()
-    val wikiScopeController = remember(conversationId) {
-        ConversationWikiController(
-            scope = scope,
-            applyScope = { selections ->
-                container.conversationWikiRepository.replaceMountScope(conversationId, selections)
-            },
-            restoreDefaultsAction = {
-                container.conversationWikiRepository.restoreDefaults(conversationId)
-            },
-            reloadMounts = {
-                container.conversationWikiRepository.mounts(conversationId)
-            },
-        )
+    val conversationWikiScope = rememberConversationWikiScope(container, conversationId) { failure ->
+        errorText = failure.toUserMessage()
     }
-    val wikiScopeControllerState by wikiScopeController.state.collectAsState()
+    val wikiScopeControllerState by conversationWikiScope.controller.state.collectAsState()
     val sendRequestState by container.chatSendRecoveryStore
         .observe(conversationId)
         .collectAsState(initial = container.chatSendRecoveryStore.current(conversationId))
@@ -897,13 +882,10 @@ fun ChatScreen(
             persistedUserMessage = persistedUserMessage,
         )
     }
-    val wikiScopeState = remember(conversationWikiMounts, conversationWikiCatalog) {
-        conversationWikiUiState(conversationWikiMounts, conversationWikiCatalog)
-    }
     val contextSummary = ConversationContextSummary(
         projectName = projects.firstOrNull { it.id == selectedProjectId }?.name,
         identityName = identityState.selectedName,
-        enabledWikiCount = wikiScopeState.options.count { it.enabled && !it.unavailable },
+        enabledWikiCount = conversationWikiScope.enabledReadyCount,
         model = selectedModel,
         reasoningEffortLabel = selectedReasoningEffort.label,
         webSearchEnabled = webSearchEnabled,
@@ -1039,30 +1021,6 @@ fun ChatScreen(
             .onFailure { sessionStatus = it.toUserMessage() }
     }
 
-    LaunchedEffect(conversationId, installedWikis) {
-        runCatching {
-            val catalog = installedWikis.map { wiki ->
-                ConversationWikiCatalogEntry(
-                    wikiId = wiki.id,
-                    title = wiki.title,
-                    versions = container.wikiRepository.listVersions(wiki.id).map { version ->
-                        ConversationWikiCatalogVersion(
-                            ref = WikiRef(version.wikiId, version.version),
-                            ready = version.state == WikiVersionState.READY.name,
-                            active = wiki.activeVersion == version.version,
-                        )
-                    },
-                )
-            }
-            container.conversationWikiRepository.mounts(conversationId) to catalog
-        }.onSuccess { (mounts, catalog) ->
-            conversationWikiMounts = mounts
-            conversationWikiCatalog = catalog
-        }.onFailure { failure ->
-            errorText = failure.toUserMessage()
-        }
-    }
-
     LaunchedEffect(identityControllerState.settledGeneration) {
         identityControllerState.refreshedConversation?.let { refreshedConversation ->
             conversation = refreshedConversation
@@ -1070,13 +1028,6 @@ fun ChatScreen(
             if (isAgentConversation) webSearchEnabled = false
         }
         identityControllerState.failure?.let { errorText = it.toUserMessage() }
-    }
-
-    LaunchedEffect(wikiScopeControllerState.settledGeneration) {
-        wikiScopeControllerState.refreshedMounts?.let { mounts ->
-            conversationWikiMounts = mounts
-            showWikiScopePicker = false
-        }
     }
 
     LaunchedEffect(
@@ -1249,7 +1200,7 @@ fun ChatScreen(
 
     LaunchedEffect(wikiScopeRequestKey) {
         if (wikiScopeRequestKey > 0) {
-            showWikiScopePicker = true
+            conversationWikiScope.openPicker()
             onWikiScopeRequestConsumed()
         }
     }
@@ -1667,7 +1618,7 @@ fun ChatScreen(
                             title = targetProject?.name?.let { "$it 会话" } ?: "新会话",
                             projectId = targetProjectId,
                             identity = identity,
-                            wikiScope = conversationWikiMounts.filter { it.enabled }.map { it.ref },
+                            wikiScope = conversationWikiScope.enabledRefs,
                         )
                         container.conversationDraftStore.save(
                             newConversationId,
@@ -2578,13 +2529,13 @@ fun ChatScreen(
         )
     }
 
-    if (showWikiScopePicker) {
+    if (conversationWikiScope.pickerVisible) {
         ConversationWikiPicker(
-            state = wikiScopeState,
+            state = conversationWikiScope.uiState,
             controllerState = wikiScopeControllerState,
-            onApply = { if (inputEditsAllowed()) { markExplicitConversationChoice(); wikiScopeController.apply(it) } },
-            onRestoreDefaults = { if (inputEditsAllowed()) { markExplicitConversationChoice(); wikiScopeController.restoreDefaults() } },
-            onDismiss = { showWikiScopePicker = false },
+            onApply = { if (inputEditsAllowed()) { markExplicitConversationChoice(); conversationWikiScope.controller.apply(it) } },
+            onRestoreDefaults = { if (inputEditsAllowed()) { markExplicitConversationChoice(); conversationWikiScope.controller.restoreDefaults() } },
+            onDismiss = { conversationWikiScope.closePicker() },
         )
     }
 
@@ -2595,7 +2546,7 @@ fun ChatScreen(
             selectedProjectId = selectedProjectId,
             projectLocked = persistedUserMessage || firstMessagePending || messages.any { it.role == MessageRole.USER },
             identityState = identityState,
-            wikiLabel = wikiScopeState.toolbarLabel,
+            wikiLabel = conversationWikiScope.toolbarLabel,
             showWebSearch = shouldShowWebSearchButton(webSearchSettings) && !isAgentConversation,
             webSearchEnabled = webSearchEnabled,
             canCompressContext = contextWindowCanManualCompress(contextStatus),
@@ -2614,7 +2565,7 @@ fun ChatScreen(
             onSelectIdentity = { if (inputEditsAllowed()) { markExplicitConversationChoice(); identityController.selectIdentity(it) } },
             onOpenWiki = {
                 showConversationContext = false
-                showWikiScopePicker = true
+                conversationWikiScope.openPicker()
             },
             onOpenModel = {
                 showConversationContext = false
@@ -3206,7 +3157,7 @@ fun ChatScreen(
                     !voiceOwnsDraft && !documentExtracting && attachmentProblems.isEmpty() && !imageModelUnsupported &&
                     (!simpleMode || (!isAssistantBusy && !hasQueuedExecution)) &&
                     identityController.canSend() &&
-                    wikiScopeController.canApply() &&
+                    conversationWikiScope.canApply() &&
                     canAcceptChatSend(
                         identityMessageStateKnown,
                         container.chatSendRecoveryStore.current(conversationId),

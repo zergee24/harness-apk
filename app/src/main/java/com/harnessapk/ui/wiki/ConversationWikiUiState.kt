@@ -1,4 +1,4 @@
-package com.harnessapk.ui.chat
+package com.harnessapk.ui.wiki
 
 import com.harnessapk.wiki.ConversationWikiMount
 import com.harnessapk.wiki.ConversationWikiMountSelection

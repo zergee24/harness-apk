@@ -1,4 +1,4 @@
-package com.harnessapk.ui.chat
+package com.harnessapk.ui.wiki
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
