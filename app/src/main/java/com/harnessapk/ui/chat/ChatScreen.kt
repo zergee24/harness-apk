@@ -330,7 +330,6 @@ fun ChatScreen(
     moreRequestKey: Int = 0,
     onMoreRequestConsumed: () -> Unit = {},
     onOpenProviderSettings: () -> Unit = {},
-    onOpenVoiceSettings: () -> Unit = {},
     backRequestKey: Int = 0,
     onBackRequestConsumed: () -> Unit = {},
     onNavigateBack: (() -> Unit)? = null,
@@ -655,12 +654,10 @@ fun ChatScreen(
     var conversationWikiCatalog by remember(conversationId) { mutableStateOf(emptyList<ConversationWikiCatalogEntry>()) }
     var fixedVersionCoverage by remember(conversationId) { mutableStateOf<AgentVersionCoverage?>(null) }
     var agentOpening by remember(conversationId) { mutableStateOf<String?>(null) }
-    var showSessionConfig by remember { mutableStateOf(false) }
     var showConversationContext by remember { mutableStateOf(false) }
     var showLifeMore by remember(conversationId) { mutableStateOf(false) }
     var showLifeRename by remember(conversationId) { mutableStateOf(false) }
     var lifeTitleDraft by remember(conversationId) { mutableStateOf("") }
-    var showLifeDetails by remember(conversationId) { mutableStateOf(false) }
     var followUpDraft by remember(conversationId) { mutableStateOf<String?>(null) }
     var projects by remember { mutableStateOf<List<WorkspaceProject>>(emptyList()) }
     var deliverables by remember { mutableStateOf<List<MarkdownDeliverable>>(emptyList()) }
@@ -1243,7 +1240,8 @@ fun ChatScreen(
 
     LaunchedEffect(sessionConfigRequestKey) {
         if (sessionConfigRequestKey > 0) {
-            showSessionConfig = true
+            // 顶栏标题点击直达统一「会话设置」浮层（原独立提示词对话框已并入）。
+            showConversationContext = true
             onSessionConfigRequestConsumed()
         }
     }
@@ -2601,6 +2599,16 @@ fun ChatScreen(
             webSearchEnabled = webSearchEnabled,
             canCompressContext = contextWindowCanManualCompress(contextStatus),
             isCompressingContext = isCompressingContext,
+            autoReadEnabled = voiceSettings.ttsAutoRead,
+            onToggleAutoRead = { enabled ->
+                scope.launch {
+                    container.settingsStore.setTtsAutoRead(enabled)
+                    // 打开自动朗读时顺带启用回复朗读，避免出现"开关开了却不读"的死开关。
+                    if (enabled && !voiceSettings.ttsEnabled) {
+                        container.settingsStore.setTtsEnabled(true)
+                    }
+                }
+            },
             onSelectProject = ::selectContextProject,
             onSelectIdentity = { if (inputEditsAllowed()) { markExplicitConversationChoice(); identityController.selectIdentity(it) } },
             onOpenWiki = {
@@ -2623,7 +2631,34 @@ fun ChatScreen(
                 }
             },
             onCompressContext = ::compressContextNow,
-            onDismiss = { showConversationContext = false },
+            promptSection = {
+                SessionPromptSection(
+                    promptText = finalSessionPrompt.ifBlank { rawSessionPrompt },
+                    optimizedPrompt = optimizedSessionPrompt,
+                    status = sessionConfigStatus,
+                    isOptimizing = isOptimizingPrompt,
+                    onPromptChange = {
+                        if (inputEditsAllowed()) {
+                            markExplicitConversationChoice()
+                            rawSessionPrompt = it
+                            finalSessionPrompt = it
+                            sessionConfigStatus = null
+                        }
+                    },
+                    onOptimizePrompt = ::optimizeSessionPrompt,
+                    onUseOptimizedPrompt = {
+                        finalSessionPrompt = optimizedSessionPrompt
+                        rawSessionPrompt = optimizedSessionPrompt
+                        saveSessionPrompt(final = optimizedSessionPrompt)
+                        optimizedSessionPrompt = ""
+                        sessionConfigStatus = null
+                    },
+                )
+            },
+            onDismiss = {
+                saveSessionPrompt()
+                showConversationContext = false
+            },
         )
     }
 
@@ -2642,8 +2677,6 @@ fun ChatScreen(
                 showLifeRename = true
             },
             onSettings = { showConversationContext = true },
-            onDetails = { showLifeDetails = true },
-            onVoiceSettings = { leaveAfterSaving(onOpenVoiceSettings) },
             onDismiss = { showLifeMore = false },
         )
     }
@@ -2673,22 +2706,6 @@ fun ChatScreen(
         },
         dismissButton = { TextButton(onClick = { showLifeRename = false }) { Text("取消") } },
     )
-    if (showLifeDetails) AlertDialog(
-        onDismissRequest = { showLifeDetails = false },
-        title = { Text("提问详情") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text((displayTitle ?: conversation?.title.orEmpty()).ifBlank { "新问题" }, style = MaterialTheme.typography.titleMedium)
-                val sent = executionEntries.maxByOrNull(ChatExecutionEntry::sequence)
-                Text("查看最近一次提问的上下文。单条消息的详情也可从消息更多中打开。")
-                SelectionContainer {
-                    Text(sent?.requestContext?.contextSnapshot?.let(::contextSnapshotDetails) ?: "还没有已发送的问题")
-                }
-                TextButton(onClick = { showLifeDetails = false; showSessionConfig = true }) { Text("查看或修改会话提示") }
-            }
-        },
-        confirmButton = { TextButton(onClick = { showLifeDetails = false }) { Text("关闭") } },
-    )
     followUpDraft?.let { suggestion ->
         AlertDialog(
             onDismissRequest = { followUpDraft = null }, title = { Text("替换当前草稿文字？") },
@@ -2700,35 +2717,6 @@ fun ChatScreen(
                 inputFocusRequester.requestFocus()
             }) { Text("替换当前草稿") } },
             dismissButton = { TextButton(onClick = { followUpDraft = null }) { Text("取消") } },
-        )
-    }
-
-    if (showSessionConfig) {
-        SessionConfigDialog(
-            promptText = finalSessionPrompt.ifBlank { rawSessionPrompt },
-            optimizedPrompt = optimizedSessionPrompt,
-            status = sessionConfigStatus,
-            isOptimizing = isOptimizingPrompt,
-            onPromptChange = {
-                if (inputEditsAllowed()) {
-                markExplicitConversationChoice()
-                rawSessionPrompt = it
-                finalSessionPrompt = it
-                sessionConfigStatus = null
-                }
-            },
-            onOptimizePrompt = ::optimizeSessionPrompt,
-            onUseOptimizedPrompt = {
-                finalSessionPrompt = optimizedSessionPrompt
-                rawSessionPrompt = optimizedSessionPrompt
-                saveSessionPrompt(final = optimizedSessionPrompt)
-                optimizedSessionPrompt = ""
-                sessionConfigStatus = null
-            },
-            onDismiss = {
-                saveSessionPrompt()
-                showSessionConfig = false
-            },
         )
     }
 
@@ -4014,7 +4002,7 @@ private fun MarkdownUpdateReviewItem(
 }
 
 @Composable
-private fun SessionConfigDialog(
+private fun SessionPromptSection(
     promptText: String,
     optimizedPrompt: String,
     status: String?,
@@ -4022,80 +4010,65 @@ private fun SessionConfigDialog(
     onPromptChange: (String) -> Unit,
     onOptimizePrompt: () -> Unit,
     onUseOptimizedPrompt: () -> Unit,
-    onDismiss: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("会话配置") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 460.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = promptText,
+            onValueChange = onPromptChange,
+            label = { Text("会话提示词") },
+            minLines = 3,
+            maxLines = 5,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                modifier = Modifier.weight(1f),
+                enabled = !isOptimizing,
+                onClick = onOptimizePrompt,
             ) {
-                OutlinedTextField(
-                    modifier = Modifier.fillMaxWidth(),
-                    value = promptText,
-                    onValueChange = onPromptChange,
-                    label = { Text("会话提示词") },
-                    minLines = 3,
-                    maxLines = 5,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        modifier = Modifier.weight(1f),
-                        enabled = !isOptimizing,
-                        onClick = onOptimizePrompt,
-                    ) {
-                        Text(if (isOptimizing) "优化中..." else "优化")
-                    }
-                    Button(
-                        modifier = Modifier.weight(1f),
-                        enabled = optimizedPrompt.isNotBlank(),
-                        onClick = onUseOptimizedPrompt,
-                    ) { Text("使用结果") }
-                }
-                if (optimizedPrompt.isNotBlank()) {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = MaterialTheme.shapes.medium,
-                        tonalElevation = 1.dp,
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Text(
-                                text = "优化结果",
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 180.dp)
-                                    .verticalScroll(rememberScrollState()),
-                                text = optimizedPrompt,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                        }
-                    }
-                }
-                status?.let {
+                Text(if (isOptimizing) "优化中..." else "优化")
+            }
+            Button(
+                modifier = Modifier.weight(1f),
+                enabled = optimizedPrompt.isNotBlank(),
+                onClick = onUseOptimizedPrompt,
+            ) { Text("使用结果") }
+        }
+        if (optimizedPrompt.isNotBlank()) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 1.dp,
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     Text(
-                        text = it,
-                        color = MaterialTheme.colorScheme.primary,
+                        text = "优化结果",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 180.dp)
+                            .verticalScroll(rememberScrollState()),
+                        text = optimizedPrompt,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("完成") }
-        },
-    )
+        }
+        status?.let {
+            Text(
+                text = it,
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
 }
 
 private const val MAX_REVIEW_DIFF_LINES = 120
@@ -5155,7 +5128,9 @@ private fun MessageBubble(
                             },
                             onOpenWikiCitation = onOpenWikiCitation,
                             onOpenProjectSource = onOpenProjectSource,
-                            reasoningStreaming = reasoningStreaming && !simpleMode,
+                            // 思考过程一律默认收起（简洁/普通模式一致）：流式时走「过程与来源」
+                            // 摘要卡，想看细节手动展开；不再随流式自动铺开。
+                            reasoningStreaming = false,
                             forceExpandProcess = highlighted,
                             executionEntry = executionEntry,
                         )

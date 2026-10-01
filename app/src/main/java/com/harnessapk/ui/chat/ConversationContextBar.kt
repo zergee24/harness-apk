@@ -143,17 +143,21 @@ internal fun ConversationContextSheet(
     webSearchEnabled: Boolean,
     canCompressContext: Boolean,
     isCompressingContext: Boolean,
+    autoReadEnabled: Boolean = false,
+    onToggleAutoRead: (Boolean) -> Unit = {},
     onSelectProject: (String?) -> Unit,
     onSelectIdentity: (String?) -> Unit,
     onOpenWiki: () -> Unit,
     onOpenModel: () -> Unit,
     onToggleWebSearch: (Boolean) -> Unit,
     onCompressContext: () -> Unit,
+    promptSection: (@Composable () -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var projectExpanded by remember { mutableStateOf(false) }
     var agentExpanded by remember { mutableStateOf(false) }
+    var promptExpanded by remember { mutableStateOf(false) }
     val selectedProjectName = projects.firstOrNull { it.id == selectedProjectId }?.name ?: "临时会话"
 
     ModalBottomSheet(
@@ -171,7 +175,7 @@ internal fun ConversationContextSheet(
                 .testTag("conversation_context_sheet_content"),
         ) {
             Text(
-                text = "会话上下文",
+                text = "会话设置",
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
@@ -272,6 +276,16 @@ internal fun ConversationContextSheet(
                 )
             }
             ListItem(
+                headlineContent = { Text("自动朗读回复") },
+                supportingContent = { Text(if (autoReadEnabled) "已开启" else "已关闭") },
+                trailingContent = {
+                    Switch(
+                        checked = autoReadEnabled,
+                        onCheckedChange = onToggleAutoRead,
+                    )
+                },
+            )
+            ListItem(
                 headlineContent = { Text("上下文") },
                 supportingContent = { Text("已使用 ${summary.contextPercent.coerceIn(0, 100)}%") },
                 trailingContent = {
@@ -285,6 +299,39 @@ internal fun ConversationContextSheet(
                     }
                 },
             )
+            promptSection?.let { section ->
+                HorizontalDivider()
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.surface,
+                    onClick = { promptExpanded = !promptExpanded },
+                ) {
+                    ListItem(
+                        headlineContent = { Text("会话提示词") },
+                        supportingContent = {
+                            Text(if (promptExpanded) "收起" else "点击展开编辑")
+                        },
+                        trailingContent = {
+                            Icon(
+                                imageVector = if (promptExpanded) {
+                                    Icons.Outlined.KeyboardArrowUp
+                                } else {
+                                    Icons.Outlined.KeyboardArrowDown
+                                },
+                                contentDescription = if (promptExpanded) "收起会话提示词" else "展开会话提示词",
+                            )
+                        },
+                    )
+                }
+                if (promptExpanded) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    ) {
+                        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { section() }
+                    }
+                }
+            }
         }
     }
 }
