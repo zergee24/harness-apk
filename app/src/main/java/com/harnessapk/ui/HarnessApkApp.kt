@@ -131,6 +131,17 @@ object Routes {
     const val Updates = "updates"
     const val RemoteSettings = "remote-settings"
     const val RemoteControl = "remote-control"
+
+    /**
+     * Remote control with one Mac backend preselected, so a hub entry opens the
+     * agent it names instead of whichever backend was last active. The route
+     * carries an optional query argument: `remote-control?backendId=dsh`.
+     */
+    const val RemoteControlBackendPattern = "remote-control?backendId={backendId}"
+
+    fun remoteControl(backendId: String? = null): String =
+        if (backendId == null) RemoteControl else "$RemoteControl?backendId=$backendId"
+
     const val WorkBriefCapturePattern = "workbrief-capture/{briefId}"
     const val Activity = "activity"
     const val RemoteRunPattern = "remote-run/{runId}"
@@ -929,6 +940,19 @@ fun HarnessApkApp(
                                     if (remoteProfile != null) Routes.RemoteControl else Routes.RemoteSettings,
                                 )
                             },
+                            onOpenDsh = {
+                                // The DSH card opens the remote screen with the
+                                // dsh backend preselected; pairing is shared
+                                // with the Codex entry, so an unpaired phone
+                                // still lands on the node pairing page.
+                                navController.navigate(
+                                    if (remoteProfile != null) {
+                                        Routes.remoteControl(backendId = "dsh")
+                                    } else {
+                                        Routes.RemoteSettings
+                                    },
+                                )
+                            },
                             onOpenWorkbench = { workWorkbenchActive = true },
                         )
                     }
@@ -1222,6 +1246,22 @@ fun HarnessApkApp(
             }
             composable(Routes.RemoteControl) {
                 RemoteScreen(container = container, contentPadding = padding)
+            }
+            composable(
+                route = Routes.RemoteControlBackendPattern,
+                arguments = listOf(
+                    navArgument("backendId") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                ),
+            ) { entry ->
+                RemoteScreen(
+                    container = container,
+                    contentPadding = padding,
+                    initialBackendId = entry.arguments?.getString("backendId"),
+                )
             }
             composable(Routes.Activity) {
                 ActivityScreen(
