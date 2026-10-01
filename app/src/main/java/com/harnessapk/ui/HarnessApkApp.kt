@@ -2,6 +2,10 @@ package com.harnessapk.ui
 
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,11 +14,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -32,9 +40,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -49,12 +56,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -826,27 +837,25 @@ fun HarnessApkApp(
         },
         bottomBar = {
             if (isHomeRoute && !(mainMode == MainMode.LIFE && WindowInsets.isImeVisible)) {
-                NavigationBar {
-                    val visibleModes = if (simpleMode) {
-                        MainMode.entries.filter { it != MainMode.WORK }
-                    } else {
-                        MainMode.entries.toList()
-                    }
-                    visibleModes.forEach { mode ->
-                        NavigationBarItem(
-                            selected = mainMode == mode,
-                            onClick = {
-                                if (mainMode != mode) leaveHomeChat {
-                                    themeSourceMode = nextThemeSource(themeSourceMode, mode)
-                                    mainMode = mode
-                                }
-                            },
-                            modifier = Modifier.testTag("nav-${mode.name}"),
-                            icon = { Icon(homeModeIcon(mode), contentDescription = null) },
-                            label = { Text(mode.label) },
-                        )
-                    }
+                val visibleModes = if (simpleMode) {
+                    MainMode.entries.filter { it != MainMode.WORK }
+                } else {
+                    MainMode.entries.toList()
                 }
+                FloatingNavPill(
+                    modes = visibleModes,
+                    selected = mainMode,
+                    onSelect = { mode ->
+                        if (mainMode != mode) leaveHomeChat {
+                            themeSourceMode = nextThemeSource(themeSourceMode, mode)
+                            mainMode = mode
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 64.dp, vertical = 8.dp),
+                )
             }
         },
     ) { padding ->
@@ -1404,6 +1413,61 @@ internal fun chatTopBarTitle(
     ?.title
     ?.takeIf { it.isNotBlank() }
     ?: "对话"
+
+// 底部导航：悬浮玻璃药丸，纯文本尽量少占屏。半透明面 + 细描边读作玻璃
+// （墨水屏上模糊无意义，不做真实 background blur）；选中项给一枚小药丸高亮。
+@Composable
+private fun FloatingNavPill(
+    modes: List<MainMode>,
+    selected: MainMode,
+    onSelect: (MainMode) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)),
+        shadowElevation = 6.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            modes.forEach { mode ->
+                val isSelected = mode == selected
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(50))
+                        .background(
+                            if (isSelected) {
+                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.92f)
+                            } else {
+                                Color.Transparent
+                            },
+                        )
+                        .clickable { onSelect(mode) }
+                        .testTag("nav-${mode.name}")
+                        .heightIn(min = 34.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = mode.label,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (isSelected) {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+}
 
 /** 生活主屏还没有可读标题时顶栏显示的占位。 */
 private const val LIFE_HOME_PLACEHOLDER_TITLE = "生活"
