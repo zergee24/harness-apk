@@ -4,6 +4,8 @@ import android.app.Application
 import android.util.Log
 import com.harnessapk.common.AppContainer
 import com.harnessapk.chat.ChatExecutionService
+import com.harnessapk.remote.observeAppBadgeCount
+import com.harnessapk.remote.updateAppBadge
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +27,10 @@ class HarnessApkApplication : Application() {
             startChatService = { ChatExecutionService.start(this@HarnessApkApplication) },
             onFailure = { task, error -> Log.e(TAG, "Application recovery failed: $task", error) },
         )
+        applicationScope.launch {
+            observeAppBadgeCount(container.database.remoteDao().observePendingApprovals())
+                .collect { count -> updateAppBadge(this@HarnessApkApplication, count) }
+        }
     }
 
     private companion object {

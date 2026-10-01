@@ -1,12 +1,16 @@
 package com.harnessapk
 
+import android.Manifest
 import android.content.ContentResolver
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -30,10 +34,13 @@ class MainActivity : ComponentActivity() {
     private var incomingWikiPackageUri by mutableStateOf<String?>(null)
     private var incomingConfigPackageUri by mutableStateOf<String?>(null)
     private var incomingRemoteRunId by mutableStateOf<String?>(null)
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         acceptIncomingIntent(intent)
+        maybeRequestNotificationPermission()
         setContent {
             HarnessApkTheme {
                 HarnessApkApp(
@@ -64,6 +71,14 @@ class MainActivity : ComponentActivity() {
                 ChatExecutionService.start(this@MainActivity)
             }
         }
+    }
+
+    // Android 13+ 角标/提醒通知都依赖 POST_NOTIFICATIONS 运行时授权；
+    // 拒绝后系统自动转"不再询问"，冷启动的重复请求会自行哑火。
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun acceptIncomingIntent(intent: Intent) {
