@@ -66,8 +66,7 @@ class HarnessApkAppStateTest {
     fun homeNavigationUsesBottomBarWithoutPager() {
         val source = File("src/main/java/com/harnessapk/ui/HarnessApkApp.kt").readText().replace("\r\n", "\n")
 
-        assertTrue(source.contains("NavigationBar {"))
-        assertTrue(source.contains("NavigationBarItem("))
+        assertTrue(source.contains("FloatingNavPill("))
         assertFalse(source.contains("HorizontalPager("))
         assertFalse(source.contains("rememberPagerState("))
         assertFalse(source.contains("WarmSegmentedControl("))
