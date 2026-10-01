@@ -1,14 +1,19 @@
 package com.harnessapk.ui.remote
 
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.net.Uri
 import android.os.Bundle
 import android.view.ViewGroup
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,6 +77,33 @@ import kotlinx.coroutines.launch
 class ZcodeWebRemoteActivity : ComponentActivity() {
     private val store by lazy { ZcodeWebRemoteStore(this) }
 
+    // 网页文件选择器：WebView 不实现 onShowFileChooser 时，页面的附件/上传按钮
+    // 是静默无效的（不弹窗、不报错）。
+    private var pendingFileChooser: ValueCallback<Array<Uri>>? = null
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val callback = pendingFileChooser
+            pendingFileChooser = null
+            callback?.onReceiveValue(
+                WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data),
+            )
+        }
+
+    fun onWebViewFileChooser(
+        callback: ValueCallback<Array<Uri>>,
+        params: WebChromeClient.FileChooserParams,
+    ): Boolean {
+        pendingFileChooser?.onReceiveValue(null)
+        pendingFileChooser = callback
+        return try {
+            fileChooserLauncher.launch(params.createIntent())
+            true
+        } catch (error: ActivityNotFoundException) {
+            pendingFileChooser = null
+            false
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 复用前台服务保活连接，与副屏同款语义。
@@ -86,14 +118,24 @@ class ZcodeWebRemoteActivity : ComponentActivity() {
         setContent {
             // 工作模式的科技深色方案：与 zcode.z.ai 页面底色同族，chrome 不再割裂。
             ModeTheme(MainMode.WORK) {
-                ZcodeWebRemoteScreen(container = container, store = store, onExit = { finish() })
+                ZcodeWebRemoteScreen(
+                    container = container,
+                    store = store,
+                    onFileChooser = ::onWebViewFileChooser,
+                    onExit = { finish() },
+                )
             }
         }
     }
 }
 
 @Composable
-fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, onExit: () -> Unit) {
+fun ZcodeWebRemoteScreen(
+    container: AppContainer,
+    store: ZcodeWebRemoteStore,
+    onFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams) -> Boolean,
+    onExit: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
     val savedUrl by store.url.collectAsState()
     val connection by container.remoteRepository.state.collectAsState()
@@ -236,6 +278,13 @@ fun ZcodeWebRemoteScreen(container: AppContainer, store: ZcodeWebRemoteStore, on
                                     ) {
                                         webError = true
                                     }
+                                }
+                                webChromeClient = object : WebChromeClient() {
+                                    override fun onShowFileChooser(
+                                        webView: WebView,
+                                        callback: ValueCallback<Array<Uri>>,
+                                        params: FileChooserParams,
+                                    ): Boolean = onFileChooser(callback, params)
                                 }
                             }
                         },
