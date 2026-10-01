@@ -6,29 +6,33 @@
 
 ## 联网（GitHub）配置
 
-本机直连 GitHub（github.com:443）不通，必须走系统代理 `http://127.0.0.1:12334` 才能访问远程仓库。
-
-使用 git 访问远程时，请通过代理执行：
+本机直连 GitHub（github.com:443）不通，必须走本机 HTTP 代理才能访问远程仓库。代理端口随代理工具变动（曾为 12334，2026-10 起为 7897），**以系统代理为准**，先读取再使用：
 
 ```bash
-git -c http.proxy=http://127.0.0.1:12334 -c https.proxy=http://127.0.0.1:12334 <命令>
+scutil --proxy | grep -E "HTTPPort|HTTPSProxy"
+```
+
+使用 git 访问远程时，请通过代理执行（`<port>` 换成上一步读到的端口）：
+
+```bash
+git -c http.proxy=http://127.0.0.1:<port> -c https.proxy=http://127.0.0.1:<port> <命令>
 ```
 
 例如：
 
 ```bash
-git -c http.proxy=http://127.0.0.1:12334 -c https.proxy=http://127.0.0.1:12334 fetch origin
-git -c http.proxy=http://127.0.0.1:12334 -c https.proxy=http://127.0.0.1:12334 push
+git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 fetch origin
+git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push
 ```
 
-也可一次性写入仓库或全局配置，避免每次带参：
+也可一次性写入仓库或全局配置，避免每次带参（注意：全局写死后端口再变时记得回来改）：
 
 ```bash
-git config --global http.proxy http://127.0.0.1:12334
-git config --global https.proxy http://127.0.0.1:12334
+git config --global http.proxy http://127.0.0.1:7897
+git config --global https.proxy http://127.0.0.1:7897
 ```
 
-注意：仓库远端为 `https://github.com/zergee24/harness-apk.git`，联网失败时先确认代理进程（127.0.0.1:12334）是否在运行。
+注意：仓库远端为 `https://github.com/zergee24/harness-apk.git`，联网失败时先确认代理端口（`scutil --proxy`）与代理进程是否还匹配。
 
 ## Android 设备调试前置条件
 
