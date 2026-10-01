@@ -592,7 +592,6 @@ fun HarnessApkApp(
                     else chatContextSummaries[conversationId] = it
                 },
                 onOpenProviderSettings = { navController.navigate(Routes.Providers) },
-                onOpenVoiceSettings = { navController.navigate(Routes.Voice) },
                 sessionConfigRequestKey = chatSessionConfigRequestKey,
                 onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
                 wikiScopeRequestKey = chatWikiScopeRequestKey,
@@ -709,9 +708,9 @@ fun HarnessApkApp(
                                 DropdownMenuItem(text = { Text("知识库") }, onClick = {
                                     leaveHomeChat { navController.navigate(Routes.WikiLibrary) }
                                 })
-                                DropdownMenuItem(text = { Text("会话操作") }, onClick = {
+                                DropdownMenuItem(text = { Text("会话设置") }, onClick = {
                                     lifeMenuExpanded = false
-                                    chatMoreRequestKey += 1
+                                    chatSessionConfigRequestKey += 1
                                 })
                                 DropdownMenuItem(text = { Text("归档列表") }, onClick = {
                                     leaveHomeChat { navController.navigate(Routes.ArchivedConversations) }

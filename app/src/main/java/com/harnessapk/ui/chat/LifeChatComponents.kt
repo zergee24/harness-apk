@@ -119,8 +119,6 @@ internal fun LifeChatMoreSheet(
     onSearch: () -> Unit,
     onRename: () -> Unit,
     onSettings: () -> Unit,
-    onDetails: () -> Unit,
-    onVoiceSettings: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -128,8 +126,7 @@ internal fun LifeChatMoreSheet(
             Text("更多", style = MaterialTheme.typography.titleLarge)
             identity?.let { Text(it, Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodyMedium) }
             listOf(
-                "查找消息" to onSearch, "修改标题" to onRename,
-                "本次提问设置" to onSettings, "提问详情" to onDetails, "朗读设置" to onVoiceSettings,
+                "查找消息" to onSearch, "修改标题" to onRename, "会话设置" to onSettings,
             ).forEach { (label, callback) ->
                 TextButton(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), onClick = { onDismiss(); callback() }) { Text(label) }
             }
