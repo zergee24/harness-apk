@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.harnessapk.common.AppContainer
 import com.harnessapk.configpackage.ConfigPackageApplier
+import com.harnessapk.configpackage.ConfigTransfer
 import com.harnessapk.packageformat.ConfigPackageCodec
 import com.harnessapk.packageformat.ConfigPackageEnvelope
 import com.harnessapk.packageformat.ConfigPackageException
@@ -65,6 +66,9 @@ fun ConfigPackageImportScreen(
     var passphrase by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var claimCode by remember { mutableStateOf("") }
+    var claiming by remember { mutableStateOf(false) }
+    var claimError by remember { mutableStateOf<String?>(null) }
 
     // 微信「用其他应用打开」等 VIEW/SEND 路由带来的 uri：进入页面即自动加载
     LaunchedEffect(packageUri) {
@@ -111,12 +115,75 @@ fun ConfigPackageImportScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        SectionCard(title = "第 1 步 · 选择配置包") {
+        SectionCard(title = "第 1 步 · 获取配置包") {
             val loaded = envelope
             if (loaded == null) {
                 Text(
-                    "请选择家人发来的 .hconfig 文件（微信里点开文件 → 用其他应用 → Harness）。",
+                    "输入家人给的 8 位领取码（免发文件，领取后即作废）；或选择 .hconfig 文件导入。",
                     style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedTextField(
+                    modifier = Modifier.fillMaxWidth(),
+                    value = claimCode,
+                    onValueChange = { claimCode = it },
+                    label = { Text("领取码（如 ABCD-2345）") },
+                    singleLine = true,
+                )
+                Button(
+                    enabled = ConfigTransfer.normalizeCode(claimCode).length == 8 && !claiming,
+                    onClick = {
+                        claiming = true
+                        claimError = null
+                        errorMessage = null
+                        scope.launch {
+                            var claimedCode = ""
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    val code = ConfigTransfer.normalizeCode(claimCode)
+                                    val relayUrl = ConfigTransfer.resolveRelayUrl(
+                                        container.remoteProfileStore.profile.value?.relayUrl,
+                                    )
+                                    val bytes = ConfigTransfer.claim(relayUrl, code)
+                                        ?: error("领取码无效、已过期或已被领取")
+                                    val envelopeParsed = ConfigPackageCodec.parseEnvelope(bytes)
+                                    // 码即解密口令：领取成功即解密，直达第 3 步确认
+                                    val decrypted = ConfigPackageCodec.decryptPayload(
+                                        envelope = envelopeParsed,
+                                        passphrase = code,
+                                        nowMillis = System.currentTimeMillis(),
+                                    )
+                                    Triple(
+                                        LoadedEnvelope(
+                                            envelope = envelopeParsed,
+                                            displayName = "中继领取 · " + ConfigTransfer.formatCode(code),
+                                        ),
+                                        decrypted,
+                                        code,
+                                    )
+                                }
+                            }
+                            claiming = false
+                            result.fold(
+                                onSuccess = { (loaded, decrypted, code) ->
+                                    envelope = loaded
+                                    passphrase = code
+                                    payload = decrypted
+                                },
+                                onFailure = { error -> claimError = error.userMessage() },
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (claiming) "正在从中继领取…" else "从中继领取")
+                }
+                claimError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                Text(
+                    "没有领取码？选择家人发来的 .hconfig 文件（微信里点开文件 → 用其他应用 → Harness）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedButton(
                     onClick = { filePicker.launch("*/*") },

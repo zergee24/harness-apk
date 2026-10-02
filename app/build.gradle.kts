@@ -293,6 +293,11 @@ android {
                     .get()
                     .asBuildConfigString(),
             )
+            buildConfigField(
+                "String",
+                "CONFIG_RELAY_OVERRIDE",
+                providers.gradleProperty("configRelayOverride").orElse("").get().asBuildConfigString(),
+            )
         }
     }
 

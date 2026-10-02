@@ -43,6 +43,7 @@ type server struct {
 	mu        sync.RWMutex
 	hosts     map[string]*client
 	devices   map[string]*client
+	blobs     *configBlobStore
 }
 
 func main() {
@@ -53,7 +54,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &server{store: store, bootstrap: os.Getenv("HARNESS_RELAY_BOOTSTRAP_TOKEN"), notifier: notifierFromEnv(), hosts: map[string]*client{}, devices: map[string]*client{}}
+	s := &server{store: store, bootstrap: os.Getenv("HARNESS_RELAY_BOOTSTRAP_TOKEN"), notifier: notifierFromEnv(), hosts: map[string]*client{}, devices: map[string]*client{}, blobs: newConfigBlobStore()}
+	s.sweepConfigBlobs()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /v1/hosts/register", s.registerHost)
@@ -63,6 +65,9 @@ func main() {
 	mux.HandleFunc("PATCH /v1/devices/{deviceID}", s.updateDevice)
 	mux.HandleFunc("DELETE /v1/devices/{deviceID}", s.revokeDevice)
 	mux.HandleFunc("GET /v1/ws", s.websocket)
+	mux.HandleFunc("POST /v1/config-blobs", s.createConfigBlob)
+	mux.HandleFunc("GET /v1/config-blobs/{code}", s.getConfigBlob)
+	mux.HandleFunc("DELETE /v1/config-blobs/{code}", s.revokeConfigBlob)
 	handler := rateLimit(limits(corsDenied(mux)))
 	log.Printf("Harness Relay listening on %s", *listen)
 	log.Fatal(http.ListenAndServe(*listen, handler))
