@@ -3401,8 +3401,8 @@ internal fun assistantActivityLabel(messages: List<ChatMessage>): String? {
 
 internal fun assistantMessageDisplayText(message: ChatMessage): String = when {
     message.content.isNotBlank() -> message.content
-    message.role == MessageRole.ASSISTANT && message.status == MessageStatus.PENDING -> "助手正在思考..."
-    message.role == MessageRole.ASSISTANT && message.status == MessageStatus.STREAMING -> "助手正在回复..."
+    // 占位语尽量短：进行中状态已由执行队列条（「正在生成回答」等）播报，不再整句重复。
+    message.role == MessageRole.ASSISTANT && message.status == MessageStatus.PENDING -> "思考中…"
     message.role == MessageRole.ASSISTANT && message.status == MessageStatus.CANCELLED -> "已暂停生成"
     else -> ""
 }
@@ -5232,21 +5232,12 @@ private fun MessageBubble(
                             if (!isUser && canSpeak && !reasoningStreaming) TextButton(onClick = onSpeak, modifier = Modifier.heightIn(min = 48.dp)) {
                                 Text(if (isSpeaking) "停止朗读" else "朗读")
                             }
-                        } else if (selectionCopyText.isNotBlank()) {
-                            IconButton(
-                                modifier = Modifier.size(48.dp),
-                                onClick = onCopy,
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Outlined.ContentCopy,
-                                    contentDescription = "复制",
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            }
                         }
                         Box {
+                            // 普通模式动作行收敛为单个 ⋯：复制/朗读等全部收进菜单，
+                            // 不再每条消息挂一排按钮。
                             IconButton(
-                                modifier = Modifier.size(48.dp),
+                                modifier = Modifier.size(32.dp),
                                 onClick = { actionMenuExpanded = true },
                             ) {
                                 Icon(
@@ -5259,6 +5250,18 @@ private fun MessageBubble(
                                 expanded = actionMenuExpanded,
                                 onDismissRequest = { actionMenuExpanded = false },
                             ) {
+                                if (selectionCopyText.isNotBlank()) {
+                                    DropdownMenuItem(
+                                        text = { Text("复制") },
+                                        leadingIcon = {
+                                            Icon(Icons.Outlined.ContentCopy, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            actionMenuExpanded = false
+                                            onCopy()
+                                        },
+                                    )
+                                }
                                 if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank() && (!simpleMode || canSpeak)) {
                                     DropdownMenuItem(
                                         text = { Text(if (isSpeaking) "停止朗读" else "朗读回复") },
