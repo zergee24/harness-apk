@@ -174,7 +174,7 @@ class ChatUiStateTest {
     fun assistantMessageDisplayTextUsesThinkingTextWhenPendingContentIsBlank() {
         val message = assistantMessage(status = MessageStatus.PENDING)
 
-        assertEquals("助手正在思考...", assistantMessageDisplayText(message))
+        assertEquals("思考中…", assistantMessageDisplayText(message))
     }
 
     @Test
