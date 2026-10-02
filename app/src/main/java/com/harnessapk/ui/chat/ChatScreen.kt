@@ -17,6 +17,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -5463,6 +5464,7 @@ internal fun ChatInputBar(
         (!simpleMode || (!isBusy && !isQueued))
     var showImageSourceSheet by remember { mutableStateOf(false) }
 
+    // 输入框与底部导航同一套玻璃语言：半透明面 + 细描边，内容从下方透出。
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -5470,7 +5472,8 @@ internal fun ChatInputBar(
         shape = RoundedCornerShape(18.dp),
         tonalElevation = 0.dp,
         shadowElevation = 0.dp,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.78f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)),
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
