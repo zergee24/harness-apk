@@ -39,9 +39,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.harnessapk.common.AppContainer
 import com.harnessapk.packageformat.CONFIG_PACKAGE_MIME_TYPE
+import com.harnessapk.configpackage.ConfigTransfer
 import com.harnessapk.packageformat.ConfigPackageCodec
 import com.harnessapk.packageformat.ConfigPackagePayload
 import com.harnessapk.packageformat.ConfigPackageProvider
@@ -56,6 +58,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private val VALIDITY_OPTIONS_HOURS = listOf(12, 24, 72)
+
+private val TRANSFER_TTL_OPTIONS = listOf(10, 60, 1440)
+
+fun transferTtlLabel(minutes: Int): String = when (minutes) {
+    10 -> "10 分钟"
+    60 -> "1 小时"
+    1440 -> "24 小时"
+    else -> "${minutes}分钟"
+}
 
 /** 顺序即展示顺序：不包含 / 开启 / 关闭。 */
 private val SIMPLE_MODE_OPTIONS = listOf<Boolean?>(null, true, false)
@@ -94,6 +105,10 @@ fun ConfigPackageExportScreen(
     var exporting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var exported by remember { mutableStateOf<ExportedPackageFile?>(null) }
+    var transferTtlMinutes by remember { mutableStateOf(60) }
+    var transferBusy by remember { mutableStateOf(false) }
+    var transferError by remember { mutableStateOf<String?>(null) }
+    var transferReceipt by remember { mutableStateOf<ConfigTransfer.Receipt?>(null) }
 
     // 默认勾选当前默认 profile
     LaunchedEffect(profiles) {
@@ -244,6 +259,90 @@ fun ConfigPackageExportScreen(
             )
         }
 
+        SectionCard(title = "通过中继传送（免发文件）") {
+            Text(
+                "生成 8 位领取码上传中继，对方在配置包页输入领取码即可导入；" +
+                    "码同时是解密口令，中继看不到内容，领取即焚。",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TRANSFER_TTL_OPTIONS.forEach { option ->
+                    FilterChip(
+                        selected = transferTtlMinutes == option,
+                        onClick = { transferTtlMinutes = option },
+                        label = { Text(transferTtlLabel(option)) },
+                    )
+                }
+            }
+            val receipt = transferReceipt
+            if (receipt == null) {
+                Button(
+                    enabled = selectedIds.isNotEmpty() && !transferBusy,
+                    onClick = {
+                        transferBusy = true
+                        transferError = null
+                        scope.launch {
+                            runCatching {
+                                val code = ConfigTransfer.generateClaimCode()
+                                val envelope = buildConfigEnvelope(
+                                    container = container,
+                                    providerIds = selectedIds,
+                                    includeWebSearch = includeWebSearch,
+                                    includeTtsAutoRead = includeTtsAutoRead,
+                                    includeSimpleMode = simpleModeChoice,
+                                    validityHours = validityHours,
+                                    passphrase = code,
+                                )
+                                val relayUrl = ConfigTransfer.resolveRelayUrl(
+                                    container.remoteProfileStore.profile.value?.relayUrl,
+                                )
+                                ConfigTransfer.upload(relayUrl, code, envelope, transferTtlMinutes)
+                            }.onSuccess { receipt ->
+                                transferReceipt = receipt
+                            }.onFailure { error ->
+                                transferError = error.message ?: "上传失败"
+                            }
+                            transferBusy = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (transferBusy) "正在上传…" else "生成领取码")
+                }
+            } else {
+                Text(
+                    ConfigTransfer.formatCode(receipt.code),
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 2.sp,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "请在 " + java.text.SimpleDateFormat("HH:mm", Locale.US).format(Date(receipt.expiresAtMillis)) +
+                        " 前把领取码告诉对方；对方领取后此码即作废。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            val relayUrl = ConfigTransfer.resolveRelayUrl(
+                                container.remoteProfileStore.profile.value?.relayUrl,
+                            )
+                            val revoked = ConfigTransfer.revoke(relayUrl, receipt.code, receipt.adminToken)
+                            if (revoked) transferReceipt = null
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("作废此码")
+                }
+            }
+            transferError?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
         val passphrasesValid = passphrase.length >= 8 && passphrase == confirmPassphrase
         if (!passphrase.isEmpty() && !passphrasesValid) {
             Text(
@@ -323,6 +422,33 @@ private suspend fun exportConfigPackage(
     passphrase: String,
 ): ExportedPackageFile = withContext(Dispatchers.Default) {
     val now = System.currentTimeMillis()
+    val envelope = buildConfigEnvelope(
+        container = container,
+        providerIds = providerIds,
+        includeWebSearch = includeWebSearch,
+        includeTtsAutoRead = includeTtsAutoRead,
+        includeSimpleMode = includeSimpleMode,
+        validityHours = validityHours,
+        passphrase = passphrase,
+    )
+    val dir = File(context.cacheDir, "config-exports").apply { mkdirs() }
+    val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(now))
+    val file = File(dir, "harness-config-$stamp.hconfig")
+    file.writeBytes(envelope)
+    ExportedPackageFile(file = file, fileName = file.name, validityHours = validityHours)
+}
+
+/** 组装并口令加密配置包（文件导出与中继传送共用）。 */
+private suspend fun buildConfigEnvelope(
+    container: AppContainer,
+    providerIds: Set<String>,
+    includeWebSearch: Boolean,
+    includeTtsAutoRead: Boolean,
+    includeSimpleMode: Boolean?,
+    validityHours: Int,
+    passphrase: String,
+): ByteArray = withContext(Dispatchers.Default) {
+    val now = System.currentTimeMillis()
     val providers = providerIds.mapNotNull { id ->
         runCatching { container.providerRepository.providerWithKey(id) }.getOrNull()
     }.map { withKey ->
@@ -353,17 +479,12 @@ private suspend fun exportConfigPackage(
         ttsAutoRead = includeTtsAutoRead,
         generatedFrom = com.harnessapk.BuildConfig.VERSION_NAME,
     )
-    val bytes = ConfigPackageCodec.exportPackage(
+    ConfigPackageCodec.exportPackage(
         payload = payload,
         passphrase = passphrase,
         issuedAtMillis = now,
         expiresAtMillis = now + validityHours * 60L * 60L * 1000L,
     )
-    val dir = File(context.cacheDir, "config-exports").apply { mkdirs() }
-    val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(now))
-    val file = File(dir, "harness-config-$stamp.hconfig")
-    file.writeBytes(bytes)
-    ExportedPackageFile(file = file, fileName = file.name, validityHours = validityHours)
 }
 
 private fun shareConfigPackage(context: Context, file: File) {
