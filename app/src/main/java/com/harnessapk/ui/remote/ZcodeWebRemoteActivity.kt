@@ -30,8 +30,10 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,9 +48,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -145,6 +149,14 @@ fun ZcodeWebRemoteScreen(
     var loadedUrl by remember { mutableStateOf<String?>(null) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     var pairingText by remember { mutableStateOf("") }
+    var pageZoom by rememberSaveable { mutableFloatStateOf(1f) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    fun applyZoom(value: Float) {
+        val clamped = value.coerceIn(0.5f, 2f)
+        pageZoom = clamped
+        webViewRef?.evaluateJavascript("document.documentElement.style.zoom='$clamped'", null)
+    }
 
     fun saveAndLoad(raw: String) {
         store.save(raw)
@@ -241,6 +253,36 @@ fun ZcodeWebRemoteScreen(
                     }
                     Box(Modifier.weight(1f))
                     if (savedUrl != null) {
+                        // 页面缩放：CSS zoom 步进 0.1，范围 50%–200%；onPageFinished 重放。
+                        IconButton(
+                            onClick = { applyZoom(pageZoom - 0.1f) },
+                            enabled = pageZoom > 0.55f,
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Remove,
+                                contentDescription = "缩小页面",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            "${(pageZoom * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        IconButton(
+                            onClick = { applyZoom(pageZoom + 0.1f) },
+                            enabled = pageZoom < 1.95f,
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Add,
+                                contentDescription = "放大页面",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         IconButton(onClick = { reconnect("refresh") }, enabled = !busy, modifier = Modifier.size(44.dp)) {
                             if (busy) {
                                 CircularProgressIndicator(Modifier.size(18.dp))
@@ -278,6 +320,14 @@ fun ZcodeWebRemoteScreen(
                                     ) {
                                         webError = true
                                     }
+
+                                    // 页面每次加载完重放当前缩放，SPA 内部跳转/重连换链不丢。
+                                    override fun onPageFinished(view: WebView, url: String?) {
+                                        view.evaluateJavascript(
+                                            "document.documentElement.style.zoom='$pageZoom'",
+                                            null,
+                                        )
+                                    }
                                 }
                                 webChromeClient = object : WebChromeClient() {
                                     override fun onShowFileChooser(
@@ -286,6 +336,7 @@ fun ZcodeWebRemoteScreen(
                                         params: FileChooserParams,
                                     ): Boolean = onFileChooser(callback, params)
                                 }
+                                webViewRef = this
                             }
                         },
                         modifier = Modifier.fillMaxSize(),
@@ -296,7 +347,10 @@ fun ZcodeWebRemoteScreen(
                                 view.loadUrl(target)
                             }
                         },
-                        onRelease = { view -> view.destroy() },
+                        onRelease = { view ->
+                            if (webViewRef === view) webViewRef = null
+                            view.destroy()
+                        },
                     )
                     if (webError) {
                         Surface(
