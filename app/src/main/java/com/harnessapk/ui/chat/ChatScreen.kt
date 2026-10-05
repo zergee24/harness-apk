@@ -19,6 +19,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -3051,14 +3052,6 @@ fun ChatScreen(
             }
         }
 
-        val openExecutions = executionEntries.filter {
-            it.status == ChatExecutionStatus.QUEUED || it.status == ChatExecutionStatus.RUNNING
-        }
-        if (openExecutions.isNotEmpty() && !simpleMode) {
-            ResponsiveChatContentRail {
-                ChatQueueStrip(openExecutions)
-            }
-        }
         if (voiceOwnsDraft) ResponsiveChatContentRail {
             LifeVoicePanel(
                 label = when (voiceInputState.phase) {
@@ -3387,23 +3380,9 @@ internal fun messageBubbleMaxWidthDp(contentWidthDp: Int): Int =
         .coerceAtMost(MAX_MESSAGE_BUBBLE_WIDTH_DP)
         .coerceAtLeast(0)
 
-internal fun assistantActivityLabel(messages: List<ChatMessage>): String? {
-    val activeAssistant = messages.lastOrNull {
-        it.role == MessageRole.ASSISTANT &&
-            (it.status == MessageStatus.PENDING || it.status == MessageStatus.STREAMING)
-    } ?: return null
-
-    return when (activeAssistant.status) {
-        MessageStatus.PENDING -> "助手正在思考..."
-        MessageStatus.STREAMING -> "助手正在回复..."
-        else -> null
-    }
-}
-
 internal fun assistantMessageDisplayText(message: ChatMessage): String = when {
     message.content.isNotBlank() -> message.content
-    // 占位语尽量短：进行中状态已由执行队列条（「正在生成回答」等）播报，不再整句重复。
-    message.role == MessageRole.ASSISTANT && message.status == MessageStatus.PENDING -> "思考中…"
+    // 进行中状态由 MessageBubble 的灰字状态行播报，不再产占位文本 part
     message.role == MessageRole.ASSISTANT && message.status == MessageStatus.CANCELLED -> "已暂停生成"
     else -> ""
 }
@@ -3548,26 +3527,6 @@ internal fun executionStatusLabel(status: ChatExecutionStatus): String? = when (
 
 internal fun hasRunningChatExecution(entries: List<ChatExecutionEntry>): Boolean =
     entries.any { it.status == ChatExecutionStatus.RUNNING }
-
-internal fun executionActivityLabel(entry: ChatExecutionEntry): String? = when (entry.status) {
-    ChatExecutionStatus.QUEUED -> if (entry.automaticRetryCount > 0) {
-        "连接中断，准备重试 ${entry.automaticRetryCount}/2"
-    } else {
-        executionStatusLabel(entry.status)
-    }
-    ChatExecutionStatus.RUNNING -> when (entry.phase) {
-        ChatExecutionPhase.PREPARING_CONTEXT, null -> "正在准备上下文"
-        ChatExecutionPhase.SEARCHING_WEB -> "正在联网搜索"
-        ChatExecutionPhase.RETRIEVING_KNOWLEDGE -> "正在检索知识库"
-        ChatExecutionPhase.GENERATING -> if (entry.automaticRetryCount > 0) {
-            "正在重新生成 ${entry.automaticRetryCount}/2"
-        } else {
-            "正在生成回答"
-        }
-        ChatExecutionPhase.FINALIZING -> "正在整理结果"
-    }
-    else -> executionStatusLabel(entry.status)
-}
 
 internal enum class FileChangeSendDecision {
     SEND,
@@ -5036,6 +4995,11 @@ private fun MessageBubble(
         Surface(
             modifier = Modifier
                 .widthIn(max = maxBubbleWidth)
+                .combinedClickable(
+                    onClick = {},
+                    // 消息流零常驻 chrome：全部消息操作长按气泡呼出
+                    onLongClick = { actionMenuExpanded = true },
+                )
                 .then(
                     if (highlighted) {
                         Modifier.border(2.dp, MaterialTheme.colorScheme.primary, bubbleShape)
@@ -5056,51 +5020,6 @@ private fun MessageBubble(
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (onSteer != null && onEditQueued != null && onDeleteQueued != null) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                    ) {
-                        Box {
-                            IconButton(
-                                modifier = Modifier.size(48.dp),
-                                onClick = { queueMenuExpanded = true },
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Outlined.MoreVert,
-                                    contentDescription = "队列操作",
-                                    modifier = Modifier.size(20.dp),
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = queueMenuExpanded,
-                                onDismissRequest = { queueMenuExpanded = false },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("引导当前") },
-                                    onClick = {
-                                        queueMenuExpanded = false
-                                        onSteer()
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("编辑") },
-                                    onClick = {
-                                        queueMenuExpanded = false
-                                        onEditQueued()
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("删除") },
-                                    onClick = {
-                                        queueMenuExpanded = false
-                                        onDeleteQueued()
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
                 if (parts.isNotEmpty()) {
                     MaterialTheme(typography = if (simpleMode) MaterialTheme.typography.copy(
                         bodyLarge = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp),
@@ -5210,140 +5129,101 @@ private fun MessageBubble(
                 }
                 if (simpleMode && message.status == MessageStatus.CANCELLED) Text("已停止", style = MaterialTheme.typography.bodyMedium)
                 if (
-                    message.errorMessage == null &&
-                    (
-                        selectionCopyText.isNotBlank() ||
-                            canWriteBack ||
-                            (isUser && executionEntry?.requestContext?.contextSnapshot != null)
-                        )
+                    parts.isEmpty() &&
+                    message.role == MessageRole.ASSISTANT &&
+                    (message.status == MessageStatus.PENDING || message.status == MessageStatus.STREAMING)
                 ) {
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = if (isUser) {
-                            Arrangement.End
-                        } else {
-                            Arrangement.spacedBy(4.dp)
+                    // 执行状态只在流内播报一次（替代原「助手正在思考…」+ 底部队列条双份）
+                    Text(
+                        text = when {
+                            (executionEntry?.automaticRetryCount ?: 0) > 0 ->
+                                "自动重试中 ${executionEntry!!.automaticRetryCount}/2"
+                            message.status == MessageStatus.PENDING -> "思考中…"
+                            else -> "正在回答…"
                         },
-                    ) {
-                        if (simpleMode && selectionCopyText.isNotBlank()) {
-                            TextButton(onClick = onCopy, modifier = Modifier.heightIn(min = 48.dp)) {
-                                Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Text("复制")
-                            }
-                            if (!isUser && canSpeak && !reasoningStreaming) TextButton(onClick = onSpeak, modifier = Modifier.heightIn(min = 48.dp)) {
-                                Text(if (isSpeaking) "停止朗读" else "朗读")
-                            }
-                        }
-                        Box {
-                            // 普通模式动作行收敛为单个 ⋯：复制/朗读等全部收进菜单，
-                            // 不再每条消息挂一排按钮。
-                            IconButton(
-                                modifier = Modifier.size(32.dp),
-                                onClick = { actionMenuExpanded = true },
-                            ) {
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (isUser && executionEntry?.status == ChatExecutionStatus.QUEUED) {
+                    Text(
+                        text = "排队中，等当前回答完成",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (simpleMode && message.status == MessageStatus.CANCELLED) Text("已停止", style = MaterialTheme.typography.bodyMedium)
+                // 长按菜单：引导当前/编辑/删除（排队）、复制/朗读/追问变体/选择复制/沉淀到项目
+                DropdownMenu(
+                    expanded = actionMenuExpanded,
+                    onDismissRequest = { actionMenuExpanded = false },
+                ) {
+                    if (onSteer != null && onEditQueued != null && onDeleteQueued != null) {
+                        DropdownMenuItem(text = { Text("引导当前") }, onClick = {
+                            actionMenuExpanded = false
+                            onSteer()
+                        })
+                        DropdownMenuItem(text = { Text("编辑") }, onClick = {
+                            actionMenuExpanded = false
+                            onEditQueued()
+                        })
+                        DropdownMenuItem(text = { Text("删除") }, onClick = {
+                            actionMenuExpanded = false
+                            onDeleteQueued()
+                        })
+                    }
+                    if (selectionCopyText.isNotBlank()) {
+                        DropdownMenuItem(
+                            text = { Text("复制") },
+                            leadingIcon = { Icon(Icons.Outlined.ContentCopy, contentDescription = null) },
+                            onClick = {
+                                actionMenuExpanded = false
+                                onCopy()
+                            },
+                        )
+                    }
+                    if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank() && (!simpleMode || canSpeak)) {
+                        DropdownMenuItem(
+                            text = { Text(if (isSpeaking) "停止朗读" else "朗读回复") },
+                            leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Outlined.MoreVert,
-                                    contentDescription = "更多消息操作",
-                                    modifier = Modifier.size(18.dp),
+                                    if (isSpeaking) Icons.Filled.Stop else Icons.AutoMirrored.Outlined.VolumeUp,
+                                    contentDescription = null,
                                 )
-                            }
-                            DropdownMenu(
-                                expanded = actionMenuExpanded,
-                                onDismissRequest = { actionMenuExpanded = false },
-                            ) {
-                                if (selectionCopyText.isNotBlank()) {
-                                    DropdownMenuItem(
-                                        text = { Text("复制") },
-                                        leadingIcon = {
-                                            Icon(Icons.Outlined.ContentCopy, contentDescription = null)
-                                        },
-                                        onClick = {
-                                            actionMenuExpanded = false
-                                            onCopy()
-                                        },
-                                    )
-                                }
-                                if (message.role == MessageRole.ASSISTANT && selectionCopyText.isNotBlank() && (!simpleMode || canSpeak)) {
-                                    DropdownMenuItem(
-                                        text = { Text(if (isSpeaking) "停止朗读" else "朗读回复") },
-                                        leadingIcon = {
-                                            Icon(
-                                                if (isSpeaking) Icons.Filled.Stop else Icons.AutoMirrored.Outlined.VolumeUp,
-                                                contentDescription = null,
-                                            )
-                                        },
-                                        onClick = {
-                                            actionMenuExpanded = false
-                                            onSpeak()
-                                        },
-                                    )
-                                }
-                                if (message.role == MessageRole.ASSISTANT && onFollowUp != null) {
-                                    DropdownMenuItem(text = { Text("说简单一点") }, onClick = {
-                                        actionMenuExpanded = false
-                                        onFollowUp("说简单一点")
-                                    })
-                                    DropdownMenuItem(text = { Text("列成清单") }, onClick = {
-                                        actionMenuExpanded = false
-                                        onFollowUp("列成清单")
-                                    })
-                                }
-                                if (selectionCopyText.isNotBlank()) {
-                                    DropdownMenuItem(
-                                        text = { Text("选择复制") },
-                                        leadingIcon = { Icon(Icons.Outlined.TextFields, contentDescription = null) },
-                                        onClick = {
-                                            actionMenuExpanded = false
-                                            onSelectCopy()
-                                        },
-                                    )
-                                }
-                                if (canWriteBack) {
-                                    DropdownMenuItem(
-                                        text = { Text("沉淀到项目") },
-                                        onClick = {
-                                            actionMenuExpanded = false
-                                            onWriteBack()
-                                        },
-                                    )
-                                }
-                            }
-                        }
+                            },
+                            onClick = {
+                                actionMenuExpanded = false
+                                onSpeak()
+                            },
+                        )
+                    }
+                    if (message.role == MessageRole.ASSISTANT && onFollowUp != null) {
+                        DropdownMenuItem(text = { Text("说简单一点") }, onClick = {
+                            actionMenuExpanded = false
+                            onFollowUp("说简单一点")
+                        })
+                        DropdownMenuItem(text = { Text("列成清单") }, onClick = {
+                            actionMenuExpanded = false
+                            onFollowUp("列成清单")
+                        })
+                    }
+                    if (selectionCopyText.isNotBlank()) {
+                        DropdownMenuItem(
+                            text = { Text("选择复制") },
+                            leadingIcon = { Icon(Icons.Outlined.TextFields, contentDescription = null) },
+                            onClick = {
+                                actionMenuExpanded = false
+                                onSelectCopy()
+                            },
+                        )
+                    }
+                    if (canWriteBack) {
+                        DropdownMenuItem(text = { Text("沉淀到项目") }, onClick = {
+                            actionMenuExpanded = false
+                            onWriteBack()
+                        })
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChatQueueStrip(entries: List<ChatExecutionEntry>) {
-    val running = entries.firstOrNull { it.status == ChatExecutionStatus.RUNNING }
-    val queuedCount = entries.count { it.status == ChatExecutionStatus.QUEUED }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                modifier = Modifier.weight(1f),
-                text = running?.let(::executionActivityLabel) ?: "等待处理",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (queuedCount > 0) {
-                Text(
-                    text = "等待 $queuedCount",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
             }
         }
     }

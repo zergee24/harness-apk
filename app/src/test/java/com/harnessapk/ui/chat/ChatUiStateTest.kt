@@ -147,34 +147,11 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun assistantActivityLabelShowsThinkingForPendingAssistant() {
-        val messages = listOf(assistantMessage(status = MessageStatus.PENDING))
-
-        assertEquals("助手正在思考...", assistantActivityLabel(messages))
-    }
-
-    @Test
-    fun assistantActivityLabelShowsReplyingForStreamingAssistant() {
-        val messages = listOf(assistantMessage(status = MessageStatus.STREAMING, content = "你好"))
-
-        assertEquals("助手正在回复...", assistantActivityLabel(messages))
-    }
-
-    @Test
-    fun assistantActivityLabelIsNullWhenThereIsNoActiveAssistant() {
-        val messages = listOf(
-            userMessage(),
-            assistantMessage(status = MessageStatus.SUCCEEDED, content = "你好"),
-        )
-
-        assertNull(assistantActivityLabel(messages))
-    }
-
-    @Test
     fun assistantMessageDisplayTextUsesThinkingTextWhenPendingContentIsBlank() {
         val message = assistantMessage(status = MessageStatus.PENDING)
 
-        assertEquals("思考中…", assistantMessageDisplayText(message))
+        // 进行中不再产占位文本 part（灰字状态行由气泡内渲染）
+        assertEquals("", assistantMessageDisplayText(message))
     }
 
     @Test
@@ -636,21 +613,6 @@ class ChatUiStateTest {
         assertEquals("等待处理", executionStatusLabel(com.harnessapk.chat.ChatExecutionStatus.QUEUED))
         assertEquals("已按引导结束", executionStatusLabel(com.harnessapk.chat.ChatExecutionStatus.STEERED))
         assertEquals("已中断", executionStatusLabel(com.harnessapk.chat.ChatExecutionStatus.INTERRUPTED))
-    }
-
-    @Test
-    fun executionActivityLabelShowsPersistedPhaseAndRetryCount() {
-        val running = chatExecutionEntry(
-            status = com.harnessapk.chat.ChatExecutionStatus.RUNNING,
-            phase = com.harnessapk.chat.ChatExecutionPhase.RETRIEVING_KNOWLEDGE,
-        )
-        val retrying = chatExecutionEntry(
-            status = com.harnessapk.chat.ChatExecutionStatus.QUEUED,
-            automaticRetryCount = 2,
-        )
-
-        assertEquals("正在检索知识库", executionActivityLabel(running))
-        assertEquals("连接中断，准备重试 2/2", executionActivityLabel(retrying))
     }
 
     @Test
