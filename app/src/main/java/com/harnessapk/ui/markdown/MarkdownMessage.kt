@@ -142,7 +142,8 @@ fun MarkdownMessage(
     val chunks = remember(markdown) { blockCache.chunksFor(markdown) }
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        // 文档式阅读节奏：块间距放宽，长答案读起来不打架
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         chunks.forEach { chunk ->
             key(chunk.id) {
@@ -438,7 +439,7 @@ private fun MarkdownList(
     markerForIndex: (Int) -> String,
     onLinkClick: (String) -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         items.forEachIndexed { index, item ->
             MarkdownListRow(
                 marker = item.taskChecked?.let { if (it) "[x]" else "[ ]" } ?: markerForIndex(index),
@@ -652,7 +653,7 @@ internal fun markdownHeadingLineHeightSp(level: Int): Int = when (level) {
     else -> 25
 }
 
-internal fun markdownBodyLineHeightSp(): Int = 22
+internal fun markdownBodyLineHeightSp(): Int = 24
 
 internal fun markdownCodeFontSizeSp(): Int = 13
 

@@ -74,8 +74,10 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
@@ -87,6 +89,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -118,6 +121,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
@@ -5153,7 +5157,26 @@ private fun MessageBubble(
                     )
                 }
                 if (simpleMode && message.status == MessageStatus.CANCELLED) Text("已停止", style = MaterialTheme.typography.bodyMedium)
-                // 长按菜单：引导当前/编辑/删除（排队）、复制/朗读/追问变体/选择复制/沉淀到项目
+                // 高频操作内嵌可见（豆包式）：复制/朗读直接点，低频项收进长按菜单
+                if (
+                    message.role == MessageRole.ASSISTANT &&
+                    message.status == MessageStatus.SUCCEEDED &&
+                    selectionCopyText.isNotBlank()
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        InlineMessageAction(icon = Icons.Outlined.ContentCopy, label = "复制", onClick = {
+                            onCopy()
+                        })
+                        if (canSpeak && !reasoningStreaming) {
+                            InlineMessageAction(
+                                icon = if (isSpeaking) Icons.Filled.Stop else Icons.AutoMirrored.Outlined.VolumeUp,
+                                label = if (isSpeaking) "停止朗读" else "朗读",
+                                onClick = onSpeak,
+                            )
+                        }
+                    }
+                }
+                // 长按菜单：引导当前/编辑/删除（排队）、追问变体/选择复制/沉淀到项目
                 DropdownMenu(
                     expanded = actionMenuExpanded,
                     onDismissRequest = { actionMenuExpanded = false },
@@ -5225,6 +5248,28 @@ private fun MessageBubble(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun InlineMessageAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.clip(MaterialTheme.shapes.small).clickable(onClick = onClick),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp).heightIn(min = 32.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -5349,20 +5394,16 @@ internal fun ChatInputBar(
         modifier = Modifier
             .fillMaxWidth()
             .imePadding(),
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(24.dp),
         tonalElevation = 0.dp,
         shadowElevation = 0.dp,
         color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.78f),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)),
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(
-                modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
             if (documentExtracting) {
                 Text("正在读取附件", style = MaterialTheme.typography.bodyMedium)
                 TextButton(onClick = onCancelImport, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消读取") }
@@ -5405,86 +5446,107 @@ internal fun ChatInputBar(
                     Text("使用文件变更")
                 }
             }
-            BasicTextField(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 56.dp)
-                    .focusRequester(inputFocusRequester)
-                    .testTag("chat-input")
-                    .onPreviewKeyEvent { event ->
-                        if ((!simpleMode || event.isCtrlPressed || event.isMetaPressed) &&
-                            shouldSendChatInputOnKeyEvent(event.key, event.type, event.isShiftPressed, sendEnabled)) {
-                            onSend()
-                            true
-                        } else false
-                    },
-                readOnly = !inputEnabled,
-                value = text,
-                onValueChange = onTextChange,
-                textStyle = MaterialTheme.typography.bodyLarge.copy(
-                    fontSize = 17.sp,
-                    color = MaterialTheme.colorScheme.onSurface,
-                ),
-                minLines = 1,
-                maxLines = 6,
-                keyboardOptions = KeyboardOptions(imeAction = if (simpleMode) ImeAction.Default else ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { if (!simpleMode && sendEnabled) onSend() }),
-                decorationBox = { innerTextField ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 12.dp),
-                    ) {
-                        if (text.isEmpty()) {
-                            Text(
-                                if (hasHistory) "接着问一个问题" else "写下你想问的问题",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        innerTextField()
-                    }
-                },
-            )
-            }
-            FlowRow(
+
+            // 豆包式单行胶囊：相机 | 输入 | 语音 | 发送/停止，一层解决
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.Bottom,
             ) {
-                FlowRow(
-                    modifier = Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                IconButton(
+                    onClick = { showImageSourceSheet = true },
+                    enabled = inputEnabled && !documentExtracting,
+                    modifier = Modifier.size(44.dp),
                 ) {
-                    TextButton(
-                        enabled = inputEnabled && !documentExtracting,
-                        onClick = { showImageSourceSheet = true },
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Text("附件")
-                    }
-                    TextButton(
-                        enabled = inputEnabled && !documentExtracting,
-                        onClick = onStartVoiceTranscription,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) {
-                        Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Text("说话")
-                    }
+                    Icon(
+                        Icons.Outlined.PhotoCamera,
+                        contentDescription = "拍照、相册或文件",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                Button(
-                    enabled = if (isBusy) !isVoiceInputActive && !isPreparingSend else sendEnabled && !(simpleMode && isQueued),
-                    onClick = if (isBusy) onStop else onSend,
-                    modifier = Modifier.heightIn(min = 48.dp),
+                BasicTextField(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 44.dp)
+                        .focusRequester(inputFocusRequester)
+                        .testTag("chat-input")
+                        .onPreviewKeyEvent { event ->
+                            if ((!simpleMode || event.isCtrlPressed || event.isMetaPressed) &&
+                                shouldSendChatInputOnKeyEvent(event.key, event.type, event.isShiftPressed, sendEnabled)) {
+                                onSend()
+                                true
+                            } else false
+                        },
+                    readOnly = !inputEnabled,
+                    value = text,
+                    onValueChange = onTextChange,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        fontSize = 17.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    ),
+                    minLines = 1,
+                    maxLines = 5,
+                    keyboardOptions = KeyboardOptions(imeAction = if (simpleMode) ImeAction.Default else ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { if (!simpleMode && sendEnabled) onSend() }),
+                    decorationBox = { innerTextField ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 10.dp),
+                        ) {
+                            if (text.isEmpty()) {
+                                Text(
+                                    if (hasHistory) "接着问一个问题" else "写下你想问的问题",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            innerTextField()
+                        }
+                    },
+                )
+                IconButton(
+                    onClick = onStartVoiceTranscription,
+                    enabled = inputEnabled && !documentExtracting,
+                    modifier = Modifier.size(44.dp),
                 ) {
-                    Icon(if (isBusy) Icons.Filled.Stop else Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Text(when {
-                        isBusy -> "停止生成"
-                        simpleMode && isQueued -> "等待处理"
-                        isPreparingSend -> "正在准备"
-                        else -> "发送"
-                    })
+                    Icon(
+                        Icons.Outlined.Mic,
+                        contentDescription = "语音输入",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                when {
+                    isBusy -> FilledIconButton(
+                        onClick = onStop,
+                        enabled = !isVoiceInputActive && !isPreparingSend,
+                        modifier = Modifier.size(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Icon(Icons.Filled.Stop, contentDescription = if (isBusy) "停止生成" else null)
+                    }
+                    isPreparingSend -> FilledIconButton(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.size(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Icon(Icons.Outlined.Schedule, contentDescription = "正在准备")
+                    }
+                    sendEnabled && !(simpleMode && isQueued) -> FilledIconButton(
+                        onClick = onSend,
+                        modifier = Modifier.size(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
+                    }
+                    simpleMode && isQueued -> FilledIconButton(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.size(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Icon(Icons.Outlined.Schedule, contentDescription = "等待处理")
+                    }
                 }
             }
             if (showImageSourceSheet) {
