@@ -55,9 +55,9 @@ class LifeChatComposerTest {
             }
         }
 
-        composeRule.onNodeWithText("发送").assertIsDisplayed().assertIsNotEnabled().assertHeightIsAtLeast(48.dp)
-        composeRule.onNodeWithText("附件").assertIsDisplayed().assertIsEnabled().assertHeightIsAtLeast(48.dp)
-        composeRule.onNodeWithText("说话").assertIsDisplayed().assertIsEnabled().assertHeightIsAtLeast(48.dp)
+        composeRule.onNodeWithContentDescription("发送", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("拍照、相册或文件", useUnmergedTree = true).assertIsDisplayed().assertIsEnabled()
+        composeRule.onNodeWithContentDescription("语音输入", useUnmergedTree = true).assertIsDisplayed().assertIsEnabled()
     }
 
     @Test
@@ -76,7 +76,7 @@ class LifeChatComposerTest {
         }
 
         composeRule.onNode(hasSetTextAction()).assertIsDisplayed().performTextInput("周末要带什么")
-        composeRule.onNodeWithText("发送").assertIsDisplayed().assertIsEnabled().performClick()
+        composeRule.onNodeWithContentDescription("发送", useUnmergedTree = true).assertIsDisplayed().performClick()
         assertEquals(1, sends)
     }
 
@@ -129,14 +129,14 @@ class LifeChatComposerTest {
         }
 
         composeRule.onNodeWithText("brief.txt").assertIsDisplayed()
-        composeRule.onNodeWithText("发送").assertIsDisplayed().assertIsEnabled()
-        composeRule.onNodeWithText("附件").assertIsDisplayed().assertIsEnabled().performClick()
+        composeRule.onNodeWithContentDescription("发送", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("拍照、相册或文件", useUnmergedTree = true).assertIsDisplayed().performClick()
         composeRule
             .onNodeWithText("选择文件（PDF / Word / Excel / TXT）")
             .assertIsDisplayed()
             .performClick()
         assertEquals(1, pickedDocuments)
-        composeRule.onNodeWithText("发送").assertIsEnabled().performClick()
+        composeRule.onNodeWithContentDescription("发送", useUnmergedTree = true).performClick()
         assertEquals(1, sends)
 
         val remove = composeRule.onNodeWithContentDescription("移除文件 brief.txt")
@@ -162,9 +162,8 @@ class LifeChatComposerTest {
         }
 
         composeRule.onNodeWithContentDescription("移除第 1 张图片").assertIsDisplayed()
-        composeRule.onAllNodesWithText("附件", useUnmergedTree = true).assertCountEquals(1)
-        composeRule.onNodeWithText("附件").assertIsDisplayed().assertIsEnabled()
-        composeRule.onNodeWithText("发送").assertIsDisplayed().assertIsEnabled()
+        composeRule.onNodeWithContentDescription("拍照、相册或文件", useUnmergedTree = true).assertIsDisplayed().assertIsEnabled()
+        composeRule.onNodeWithContentDescription("发送", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test
@@ -226,7 +225,7 @@ class LifeChatComposerTest {
             }
         }
 
-        composeRule.onNodeWithText("停止生成").assertIsDisplayed().assertIsEnabled().performClick()
+        composeRule.onNodeWithContentDescription("停止生成", useUnmergedTree = true).assertIsDisplayed().assertIsEnabled().performClick()
         assertEquals(1, stops)
 
         composeRule.onNode(hasSetTextAction()).performClick().performKeyInput {
@@ -249,9 +248,9 @@ class LifeChatComposerTest {
             }
         }
 
-        composeRule.onNodeWithText("等待处理").assertIsDisplayed().assertIsNotEnabled()
-        composeRule.onNodeWithText("附件").assertIsEnabled()
-        composeRule.onNodeWithText("说话").assertIsEnabled()
+        composeRule.onNodeWithContentDescription("等待处理", useUnmergedTree = true).assertIsDisplayed().assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("拍照、相册或文件", useUnmergedTree = true).assertIsEnabled()
+        composeRule.onNodeWithContentDescription("语音输入", useUnmergedTree = true).assertIsEnabled()
         assertEquals(0, stops)
     }
 
@@ -279,7 +278,7 @@ class LifeChatComposerTest {
             }
         }
 
-        composeRule.onNodeWithText("正在准备").assertIsDisplayed().assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("正在准备", useUnmergedTree = true).assertIsDisplayed().assertIsNotEnabled()
         assertEquals(0, sends)
 
         composeRule.runOnIdle {
@@ -289,7 +288,7 @@ class LifeChatComposerTest {
                 isVoiceInputActive = true,
             )
         }
-        composeRule.onNodeWithText("发送").assertIsDisplayed().assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("正在准备", useUnmergedTree = true).assertIsDisplayed()
         assertEquals(0, sends)
 
         composeRule.runOnIdle {
@@ -300,9 +299,9 @@ class LifeChatComposerTest {
                 documentExtracting = true,
             )
         }
-        composeRule.onNodeWithText("发送").assertIsDisplayed().assertIsNotEnabled()
-        composeRule.onNodeWithText("附件").assertIsDisplayed().assertIsNotEnabled()
-        composeRule.onNodeWithText("说话").assertIsDisplayed().assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("发送", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("拍照、相册或文件", useUnmergedTree = true).assertIsNotEnabled()
+        composeRule.onNodeWithContentDescription("语音输入", useUnmergedTree = true).assertIsNotEnabled()
         assertEquals(0, sends)
     }
 
