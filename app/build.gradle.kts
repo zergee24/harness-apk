@@ -216,6 +216,14 @@ android {
         targetSdk = 37
         versionCode = appVersionCode
         versionName = appVersionName
+        // 配置包中继 override 仅调试用：release 恒空串（走内置默认中继，不读本机 property），
+        // debug 由本机 gradle.properties 的 configRelayOverride 覆盖（本地 relay 验证）。
+        // 必须在 defaultConfig 定义，否则 assembleRelease 编译失败（CI main 通道 10-02 起全挂的根因）。
+        buildConfigField(
+            "String",
+            "CONFIG_RELAY_OVERRIDE",
+            "".asBuildConfigString(),
+        )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "ALIYUN_PUSH_APP_KEY", aliyunPushAppKey.get().asBuildConfigString())
@@ -296,7 +304,10 @@ android {
             buildConfigField(
                 "String",
                 "CONFIG_RELAY_OVERRIDE",
-                providers.gradleProperty("configRelayOverride").orElse("").get().asBuildConfigString(),
+                providers.gradleProperty("configRelayOverride")
+                    .orElse("http://localhost:8080")
+                    .get()
+                    .asBuildConfigString(),
             )
         }
     }
