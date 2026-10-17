@@ -65,6 +65,9 @@ import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.AddCircle
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -106,6 +109,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -2859,12 +2863,23 @@ fun ChatScreen(
                                 val displayedMessage = if (message.role == MessageRole.USER) {
                                     message.copy(content = displayedUserQuestion(message.content, executionEntry?.requestContext))
                                 } else message
+                                // 长回复折叠：超长助手纯文本回复默认截断，点「显示更多」展开
+                                var longContentExpanded by remember(message.id) { mutableStateOf(false) }
+                                val contentCollapsed = !longContentExpanded &&
+                                    message.role == MessageRole.ASSISTANT &&
+                                    message.status == MessageStatus.SUCCEEDED &&
+                                    message.content.length > CONTENT_COLLAPSE_THRESHOLD
+                                val bubbleMessage = if (contentCollapsed) {
+                                    displayedMessage.copy(content = displayedMessage.content.take(CONTENT_COLLAPSE_THRESHOLD) + "\n\n……")
+                                } else {
+                                    displayedMessage
+                                }
                                 val displayParts = messageDisplayParts(
-                                    displayedMessage,
+                                    bubbleMessage,
                                     if (message.role == MessageRole.USER && executionEntry?.requestContext?.userInputText != null) emptyList() else persistedParts,
                                 )
                                 MessageBubble(
-                                    message = displayedMessage,
+                                    message = bubbleMessage,
                                     parts = displayParts,
                                     wikiCitations = wikiCitations,
                                     executionEntry = executionEntry,
@@ -2974,6 +2989,8 @@ fun ChatScreen(
                                     reasoningStreaming = message.status == MessageStatus.PENDING ||
                                         message.status == MessageStatus.STREAMING,
                                     highlighted = highlightedMessageId == message.id,
+                                    contentCollapsed = contentCollapsed,
+                                    onExpandContent = { longContentExpanded = true },
                                 )
                                 executionEntry?.takeIf { entry ->
                                     message.role == MessageRole.USER &&
@@ -4036,6 +4053,9 @@ private const val MAX_REVIEW_DIFF_LINES = 120
 private const val MAX_WRITE_BACK_EVENT_PATHS = 3
 private const val MAX_TTS_TEXT_LENGTH = 4_000
 internal const val MAX_CHAT_IMAGE_ATTACHMENTS = 4
+
+/** 助手纯文本回复超过该字符数时默认折叠，提供「显示更多」。 */
+internal const val CONTENT_COLLAPSE_THRESHOLD = 1200
 internal const val MAX_CHAT_IMAGE_BYTES = 8L * 1024L * 1024L
 private const val MAX_CHAT_CONTENT_WIDTH_DP = 760
 private const val MAX_MESSAGE_BUBBLE_WIDTH_DP = 700
@@ -4959,6 +4979,8 @@ private fun MessageBubble(
     onOpenProjectSource: (String) -> Unit,
     reasoningStreaming: Boolean,
     highlighted: Boolean,
+    contentCollapsed: Boolean = false,
+    onExpandContent: () -> Unit = {},
 ) {
     val isUser = message.role == MessageRole.USER
     var queueMenuExpanded by remember(message.id) { mutableStateOf(false) }
@@ -5132,22 +5154,18 @@ private fun MessageBubble(
                     }
                 }
                 if (simpleMode && message.status == MessageStatus.CANCELLED) Text("已停止", style = MaterialTheme.typography.bodyMedium)
+                if (contentCollapsed) {
+                    TextButton(onClick = onExpandContent) {
+                        Text("显示更多", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
                 if (
                     parts.isEmpty() &&
                     message.role == MessageRole.ASSISTANT &&
                     (message.status == MessageStatus.PENDING || message.status == MessageStatus.STREAMING)
                 ) {
-                    // 执行状态只在流内播报一次（替代原「助手正在思考…」+ 底部队列条双份）
-                    Text(
-                        text = when {
-                            (executionEntry?.automaticRetryCount ?: 0) > 0 ->
-                                "自动重试中 ${executionEntry!!.automaticRetryCount}/2"
-                            message.status == MessageStatus.PENDING -> "思考中…"
-                            else -> "正在回答…"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    // Coze 式执行状态：处理中计时 + 当前步骤行，一次播报不重复
+                    ProcessingStatusLines(executionEntry = executionEntry)
                 }
                 if (isUser && executionEntry?.status == ChatExecutionStatus.QUEUED) {
                     Text(
@@ -5157,6 +5175,11 @@ private fun MessageBubble(
                     )
                 }
                 if (simpleMode && message.status == MessageStatus.CANCELLED) Text("已停止", style = MaterialTheme.typography.bodyMedium)
+                if (contentCollapsed) {
+                    TextButton(onClick = onExpandContent) {
+                        Text("显示更多", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
                 // 高频操作内嵌可见（豆包式）：复制/朗读直接点，低频项收进长按菜单
                 if (
                     message.role == MessageRole.ASSISTANT &&
@@ -5247,6 +5270,51 @@ private fun MessageBubble(
                         })
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProcessingStatusLines(executionEntry: ChatExecutionEntry?) {
+    var elapsedSeconds by remember { mutableIntStateOf(0) }
+    LaunchedEffect(executionEntry?.id) {
+        while (true) {
+            delay(1_000)
+            elapsedSeconds += 1
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "处理中 ${elapsedSeconds}秒",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        executionEntry?.let { entry ->
+            val stepLabel = when (entry.status) {
+                ChatExecutionStatus.QUEUED -> "排队等待处理"
+                ChatExecutionStatus.RUNNING -> when (entry.phase) {
+                    ChatExecutionPhase.PREPARING_CONTEXT, null -> "正在准备上下文"
+                    ChatExecutionPhase.SEARCHING_WEB -> "已搜索网页"
+                    ChatExecutionPhase.RETRIEVING_KNOWLEDGE -> "已检索知识库"
+                    ChatExecutionPhase.GENERATING -> "正在生成回答"
+                    ChatExecutionPhase.FINALIZING -> "正在整理上下文"
+                }
+                else -> null
+            }
+            stepLabel?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if ((entry.automaticRetryCount ?: 0) > 0) {
+                Text(
+                    text = "自动重试中 ${entry.automaticRetryCount}/2",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -5388,6 +5456,7 @@ internal fun ChatInputBar(
     val sendEnabled = canSend && inputEnabled && !documentExtracting &&
         (!simpleMode || (!isBusy && !isQueued))
     var showImageSourceSheet by remember { mutableStateOf(false) }
+    var attachmentPanelExpanded by remember { mutableStateOf(false) }
 
     // 输入框与底部导航同一套玻璃语言：半透明面 + 细描边，内容从下方透出。
     Surface(
@@ -5447,27 +5516,15 @@ internal fun ChatInputBar(
                 }
             }
 
-            // 豆包式单行胶囊：相机 | 输入 | 语音 | 发送/停止，一层解决
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                verticalAlignment = Alignment.Bottom,
+            // 文本输入区（Coze 式两段：上文本、下工具行）
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 40.dp),
             ) {
-                IconButton(
-                    onClick = { showImageSourceSheet = true },
-                    enabled = inputEnabled && !documentExtracting,
-                    modifier = Modifier.size(44.dp),
-                ) {
-                    Icon(
-                        Icons.Outlined.PhotoCamera,
-                        contentDescription = "拍照、相册或文件",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
                 BasicTextField(
                     modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 44.dp)
+                        .fillMaxWidth()
                         .focusRequester(inputFocusRequester)
                         .testTag("chat-input")
                         .onPreviewKeyEvent { event ->
@@ -5485,14 +5542,14 @@ internal fun ChatInputBar(
                         color = MaterialTheme.colorScheme.onSurface,
                     ),
                     minLines = 1,
-                    maxLines = 5,
+                    maxLines = 6,
                     keyboardOptions = KeyboardOptions(imeAction = if (simpleMode) ImeAction.Default else ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { if (!simpleMode && sendEnabled) onSend() }),
                     decorationBox = { innerTextField ->
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 4.dp, vertical = 10.dp),
+                                .padding(horizontal = 8.dp, vertical = 10.dp),
                         ) {
                             if (text.isEmpty()) {
                                 Text(
@@ -5504,6 +5561,65 @@ internal fun ChatInputBar(
                         }
                     },
                 )
+            }
+
+            // ➕ 附件面板：点开在输入框内展开网格（拍照/相册/文件），不再弹 bottom sheet
+            if (attachmentPanelExpanded) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    AttachmentPanelTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Outlined.PhotoCamera,
+                        label = "拍照",
+                        enabled = inputEnabled,
+                        onClick = {
+                            attachmentPanelExpanded = false
+                            onTakePhoto()
+                        },
+                    )
+                    AttachmentPanelTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Outlined.PhotoLibrary,
+                        label = "相册",
+                        enabled = inputEnabled,
+                        onClick = {
+                            attachmentPanelExpanded = false
+                            onPickFromAlbum()
+                        },
+                    )
+                    AttachmentPanelTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Outlined.Description,
+                        label = "文件",
+                        enabled = inputEnabled,
+                        onClick = {
+                            attachmentPanelExpanded = false
+                            onPickDocument()
+                        },
+                    )
+                }
+            }
+
+            // 工具行：➕ | 弹性 | 🎤 | 发送/停止圆钮
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(
+                    onClick = { attachmentPanelExpanded = !attachmentPanelExpanded },
+                    enabled = inputEnabled && !documentExtracting,
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    Icon(
+                        if (attachmentPanelExpanded) Icons.Outlined.Close else Icons.Outlined.AddCircle,
+                        contentDescription = if (attachmentPanelExpanded) "收起附件面板" else "添加附件",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
                 IconButton(
                     onClick = onStartVoiceTranscription,
                     enabled = inputEnabled && !documentExtracting,
@@ -5519,33 +5635,41 @@ internal fun ChatInputBar(
                     isBusy -> FilledIconButton(
                         onClick = onStop,
                         enabled = !isVoiceInputActive && !isPreparingSend,
-                        modifier = Modifier.size(48.dp),
-                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(50),
                     ) {
-                        Icon(Icons.Filled.Stop, contentDescription = if (isBusy) "停止生成" else null)
+                        Icon(Icons.Filled.Stop, contentDescription = "停止生成")
                     }
                     isPreparingSend -> FilledIconButton(
                         onClick = {},
                         enabled = false,
-                        modifier = Modifier.size(48.dp),
-                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(50),
                     ) {
                         Icon(Icons.Outlined.Schedule, contentDescription = "正在准备")
                     }
                     sendEnabled && !(simpleMode && isQueued) -> FilledIconButton(
                         onClick = onSend,
-                        modifier = Modifier.size(48.dp),
-                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(50),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
                     }
                     simpleMode && isQueued -> FilledIconButton(
                         onClick = {},
                         enabled = false,
-                        modifier = Modifier.size(48.dp),
-                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(50),
                     ) {
                         Icon(Icons.Outlined.Schedule, contentDescription = "等待处理")
+                    }
+                    else -> FilledIconButton(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(50),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
                     }
                 }
             }
@@ -5566,6 +5690,35 @@ internal fun ChatInputBar(
                     },
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun AttachmentPanelTile(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .clip(MaterialTheme.shapes.medium)
+            .clickable(enabled = enabled, onClick = onClick),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.7f),
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 72.dp)
+                .padding(vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
