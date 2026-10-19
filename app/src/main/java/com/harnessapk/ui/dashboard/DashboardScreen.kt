@@ -5,6 +5,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Box
@@ -97,64 +98,103 @@ fun DashboardScreen(
     val threads = remember(dashboard.threads) { sortDashboardThreadsForConsole(dashboard.threads) }
 
     Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Agent 副屏", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            // 手机竖屏（窄宽）与横宽双布局：窄宽=整列滚动 + 全宽卡 + 两列仪表；
+            // 横宽=分页网格 + 固定高度仪表带。两支都是非 Lazy 全量组合（墨水屏约束）。
+            val phoneLayout = maxWidth < 600.dp
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Agent 副屏", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            dashboardSummaryLabel(threads),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    val connected = connection.connectionStatus == RemoteConnectionStatus.CONNECTED
                     Text(
-                        dashboardSummaryLabel(threads),
+                        if (connected) "Mac 已连接" else "Mac 未连接",
                         style = MaterialTheme.typography.labelSmall,
+                        color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
+                    )
+                    IconButton(
+                        onClick = { container.remoteRepository.requestDashboardSnapshot() },
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Refresh,
+                            contentDescription = "手动刷新",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = onExit) { Text("退出") }
+                }
+                if (threads.isEmpty()) {
+                    Text(
+                        "暂无活跃线程。在 Mac 上开始一个 Codex 任务后，这里会实时亮起。",
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                val connected = connection.connectionStatus == RemoteConnectionStatus.CONNECTED
-                Text(
-                    if (connected) "Mac 已连接" else "Mac 未连接",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
-                )
-                IconButton(
-                    onClick = { container.remoteRepository.requestDashboardSnapshot() },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        Icons.Outlined.Refresh,
-                        contentDescription = "手动刷新",
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (phoneLayout) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        threads.forEach { thread ->
+                            ConsoleTile(
+                                thread = thread,
+                                unread = false,
+                                onClick = { container.remoteRepository.focusThread(thread.threadId) },
+                                modifier = Modifier.fillMaxWidth(),
+                                fillHeight = false,
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
+                            HostCard(
+                                modifier = Modifier.weight(1f),
+                                host = dashboard.host,
+                                hostName = hostName,
+                            )
+                        }
+                        TodayCard(modifier = Modifier.fillMaxWidth(), host = dashboard.host)
+                    }
+                } else {
+                    ThreadPagingGrid(
+                        threads = threads,
+                        onTap = { container.remoteRepository.focusThread(it.threadId) },
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
                     )
+                    Row(
+                        modifier = Modifier.height(150.dp).fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
+                        HostCard(
+                            modifier = Modifier.weight(1f),
+                            host = dashboard.host,
+                            hostName = hostName,
+                        )
+                        TodayCard(modifier = Modifier.weight(1f), host = dashboard.host)
+                    }
                 }
-                TextButton(onClick = onExit) { Text("退出") }
-            }
-            if (threads.isEmpty()) {
-                Text(
-                    "暂无活跃线程。在 Mac 上开始一个 Codex 任务后，这里会实时亮起。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            ThreadPagingGrid(
-                threads = threads,
-                onTap = { container.remoteRepository.focusThread(it.threadId) },
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-            )
-            Row(
-                modifier = Modifier.height(150.dp).fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
-                HostCard(
-                    modifier = Modifier.weight(1f),
-                    host = dashboard.host,
-                    hostName = hostName,
-                )
-                TodayCard(modifier = Modifier.weight(1f), host = dashboard.host)
             }
         }
     }
@@ -196,6 +236,7 @@ private fun ThreadPagingGrid(
                                     thread = thread,
                                     unread = false,
                                     onClick = { onTap(thread) },
+                                    modifier = Modifier.width(ThreadTileWidth),
                                 )
                             }
                             repeat(columns - rowThreads.size) { Spacer(modifier = Modifier.weight(1f)) }
@@ -225,10 +266,22 @@ private fun ThreadPagingGrid(
 }
 
 @Composable
-private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit) {
+private fun ConsoleTile(
+    thread: DashboardThread,
+    unread: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    // 网格模式定高填充（页内两行等高）；列表模式包裹内容，摘要限三行。
+    fillHeight: Boolean = true,
+) {
     val accent = Color(dashboardToneArgb(dashboardTone(thread.status)))
-    Card(modifier = Modifier.width(ThreadTileWidth).combinedClickable(onClick = onClick)) {
-        Row(modifier = Modifier.fillMaxWidth().fillMaxHeight().heightIn(min = 96.dp)) {
+    Card(modifier = modifier.combinedClickable(onClick = onClick)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
+                .heightIn(min = 96.dp),
+        ) {
             Box(modifier = Modifier.width(14.dp).fillMaxHeight().background(accent))
             Column(
                 modifier = Modifier
@@ -306,8 +359,9 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                         ?: "等待 agent 输出…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface,
-                    // 网格两行定高、卡片等高：weight 填充剩余空间，放不下自动省略。
-                    modifier = Modifier.weight(1f),
+                    // 网格模式 weight 填充剩余空间放不下自动省略；列表模式定三行。
+                    modifier = if (fillHeight) Modifier.weight(1f) else Modifier,
+                    maxLines = if (fillHeight) Int.MAX_VALUE else 3,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
