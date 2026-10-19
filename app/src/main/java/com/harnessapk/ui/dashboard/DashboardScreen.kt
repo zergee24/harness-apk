@@ -40,7 +40,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -57,6 +59,7 @@ import com.harnessapk.remote.DashboardQuota
 import com.harnessapk.remote.DashboardThread
 import com.harnessapk.remote.DashboardViewedStore
 import com.harnessapk.remote.RemoteConnectionStatus
+import kotlinx.coroutines.delay
 
 private val ThreadTileWidth = 260.dp
 
@@ -104,43 +107,23 @@ fun DashboardScreen(
                 .padding(padding)
                 .padding(12.dp),
         ) {
-            // 布局分派按宽高双条件：窄宽（手机竖屏）或矮高（手机横屏，如海信 720x360dp——
-            // 固定仪表带 + 两行 96dp 卡放不下）都走整列滚动的紧凑布局；
-            // 宽且高（平板/桌面横屏）才用分页网格 + 固定仪表带。
-            // 两支都是非 Lazy 全量组合（墨水屏约束）。旋转由 configChanges 兜住不重建。
-            val phoneLayout = maxWidth < 600.dp || maxHeight < 480.dp
+            // 布局三分派：①矮高（手机横屏，如海信 720x360dp）=时钟 + 仪表带固定首屏，
+            // 线程垫底滚动；②窄宽（手机竖屏）=整列滚动，仪表带垫底；③宽且高（平板/
+            // 桌面横屏）=分页网格 + 固定仪表带。三支都是非 Lazy 全量组合（墨水屏约束）。
+            // 旋转由 configChanges 兜住不重建，分支随 BoxWithConstraints 原位切换。
+            val shortHeight = maxHeight < 480.dp
+            val narrowWidth = maxWidth < 600.dp
             Column(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Agent 副屏", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            dashboardSummaryLabel(threads),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    val connected = connection.connectionStatus == RemoteConnectionStatus.CONNECTED
-                    Text(
-                        if (connected) "Mac 已连接" else "Mac 未连接",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
-                    )
-                    IconButton(
-                        onClick = { container.remoteRepository.requestDashboardSnapshot() },
-                        modifier = Modifier.size(32.dp),
-                    ) {
-                        Icon(
-                            Icons.Outlined.Refresh,
-                            contentDescription = "手动刷新",
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    TextButton(onClick = onExit) { Text("退出") }
-                }
+                DashboardTitleRow(
+                    summary = dashboardSummaryLabel(threads),
+                    connected = connection.connectionStatus == RemoteConnectionStatus.CONNECTED,
+                    onRefresh = { container.remoteRepository.requestDashboardSnapshot() },
+                    onExit = onExit,
+                    showClock = shortHeight,
+                )
                 if (threads.isEmpty()) {
                     Text(
                         "暂无活跃线程。在 Mac 上开始一个 Codex 任务后，这里会实时亮起。",
@@ -148,7 +131,39 @@ fun DashboardScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (phoneLayout) {
+                if (shortHeight) {
+                    // 横屏首屏：仪表带固定可见（用户要求：首屏保留仪表盘和系统时间），
+                    // 线程列表垫底滚动。
+                    Row(
+                        modifier = Modifier.height(124.dp).fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
+                        HostCard(
+                            modifier = Modifier.weight(1f),
+                            host = dashboard.host,
+                            hostName = hostName,
+                        )
+                        TodayCard(modifier = Modifier.weight(1f), host = dashboard.host)
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        threads.forEach { thread ->
+                            ConsoleTile(
+                                thread = thread,
+                                unread = false,
+                                onClick = { container.remoteRepository.focusThread(thread.threadId) },
+                                modifier = Modifier.fillMaxWidth(),
+                                fillHeight = false,
+                            )
+                        }
+                    }
+                } else if (narrowWidth) {
                     Column(
                         modifier = Modifier
                             .weight(1f)
@@ -199,6 +214,73 @@ fun DashboardScreen(
                 }
             }
         }
+    }
+}
+
+// 标题行：左侧标题与汇总，右侧可选时钟（横屏首屏要求）+ 连接态 + 刷新 + 退出。
+@Composable
+private fun DashboardTitleRow(
+    summary: String,
+    connected: Boolean,
+    onRefresh: () -> Unit,
+    onExit: () -> Unit,
+    showClock: Boolean,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Agent 副屏", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                summary,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (showClock) {
+            DashboardClock(modifier = Modifier.padding(end = 12.dp))
+        }
+        Text(
+            if (connected) "Mac 已连接" else "Mac 未连接",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
+        )
+        IconButton(
+            onClick = onRefresh,
+            modifier = Modifier.size(32.dp),
+        ) {
+            Icon(
+                Icons.Outlined.Refresh,
+                contentDescription = "手动刷新",
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onExit) { Text("退出") }
+    }
+}
+
+// 系统时钟：HH:mm 大字 + 中文日期，分钟级刷新（秒跳会让墨水屏疯狂全刷）。
+@Composable
+private fun DashboardClock(modifier: Modifier = Modifier) {
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        // 首帧后对齐到下一个整分边界，之后每 30s 校准一次。
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(30_000 - nowMs % 30_000)
+        }
+    }
+    val zoned = remember(nowMs) { java.time.Instant.ofEpochMilli(nowMs).atZone(java.time.ZoneId.systemDefault()) }
+    val timeText = remember(nowMs) { java.time.format.DateTimeFormatter.ofPattern("HH:mm").format(zoned) }
+    val dateText = remember(nowMs) {
+        java.time.format.DateTimeFormatter.ofPattern("M月d日 EEE", java.util.Locale.CHINESE).format(zoned)
+    }
+    Column(modifier = modifier, horizontalAlignment = Alignment.End) {
+        Text(timeText, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(
+            dateText,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
