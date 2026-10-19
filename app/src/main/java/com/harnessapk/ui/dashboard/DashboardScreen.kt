@@ -7,6 +7,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -114,6 +115,7 @@ fun DashboardScreen(
             // 旋转由 configChanges 兜住不重建，分支随 BoxWithConstraints 原位切换。
             val shortHeight = maxHeight < 480.dp
             val narrowWidth = maxWidth < 600.dp
+            val availWidth = maxWidth
             Column(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -147,6 +149,9 @@ fun DashboardScreen(
                         )
                         TodayCard(modifier = Modifier.weight(1f).fillMaxHeight(), host = dashboard.host)
                     }
+                    // 横屏线程区：一行三卡（列数按可用宽自适应，海信横屏 696dp→3 列），
+                    // 纵向滚动；IntrinsicSize.Min 让同排卡片等高；非 Lazy 全量组合（墨水屏约束）。
+                    val cols = (availWidth / 200.dp).toInt().coerceIn(1, 3)
                     Column(
                         modifier = Modifier
                             .weight(1f)
@@ -154,14 +159,23 @@ fun DashboardScreen(
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        threads.forEach { thread ->
-                            ConsoleTile(
-                                thread = thread,
-                                unread = false,
-                                onClick = { container.remoteRepository.focusThread(thread.threadId) },
-                                modifier = Modifier.fillMaxWidth(),
-                                fillHeight = false,
-                            )
+                        threads.chunked(cols).forEach { rowThreads ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(IntrinsicSize.Min),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                rowThreads.forEach { thread ->
+                                    ConsoleTile(
+                                        thread = thread,
+                                        unread = false,
+                                        onClick = { container.remoteRepository.focusThread(thread.threadId) },
+                                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                                    )
+                                }
+                                repeat(cols - rowThreads.size) { Spacer(modifier = Modifier.weight(1f)) }
+                            }
                         }
                     }
                 } else if (narrowWidth) {
