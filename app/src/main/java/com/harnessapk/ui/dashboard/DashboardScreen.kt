@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
@@ -374,7 +375,7 @@ private fun ConsoleTile(
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.Top) {
                     Text(
                         thread.title,
                         style = MaterialTheme.typography.bodyLarge,
@@ -388,33 +389,37 @@ private fun ConsoleTile(
                     if (unread) {
                         Box(
                             modifier = Modifier
-                                .padding(start = 8.dp)
+                                .padding(start = 8.dp, top = 4.dp)
                                 .size(8.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFFFF5C5C)),
                         )
                     }
-                    dashboardSourceLabel(thread).takeIf { it.isNotEmpty() }?.let { badge ->
+                    // 状态是卡片的第一信息：实色胶囊 + 高对比字（灰阶下靠明度差）。
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 8.dp, top = 2.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(accent)
+                            .padding(horizontal = 10.dp, vertical = 3.dp),
+                    ) {
                         Text(
-                            badge,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            statusPillLabel(thread),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (accent.luminance() > 0.5f) Color(0xFF101417) else Color.White,
                             maxLines = 1,
-                            modifier = Modifier.padding(start = 8.dp),
                         )
                     }
-                    Text(
-                        dashboardStatusLabel(thread),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = accent,
-                        maxLines = 1,
-                        modifier = Modifier.padding(start = 10.dp),
-                    )
                 }
-Row(verticalAlignment = Alignment.CenterVertically) {
-                    val place = thread.cwd?.substringAfterLast('/') ?: ""
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        listOf(place, dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs))
+                        listOf(
+                            dashboardSourceLabel(thread),
+                            thread.cwd?.substringAfterLast('/') ?: "",
+                            dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs),
+                            thread.note.orEmpty(),
+                        )
                             .filter { it.isNotBlank() }
                             .joinToString(" · "),
                         style = MaterialTheme.typography.labelSmall,
@@ -580,6 +585,18 @@ private fun formatTokenCount(tokens: Long): String = when {
     tokens >= 1_000_000 -> "%.1fM".format(tokens / 1_000_000.0)
     tokens >= 1_000 -> "%.1fk".format(tokens / 1_000.0)
     else -> tokens.toString()
+}
+
+// 状态胶囊的短词：只保留状态本身，approx 的诊断注记下沉到元信息行。
+private fun statusPillLabel(thread: DashboardThread): String {
+    val word = when (dashboardTone(thread.status)) {
+        DashboardTone.THINKING -> "思考中"
+        DashboardTone.RUNNING -> "运行中"
+        DashboardTone.DONE -> "已完成"
+        DashboardTone.ERROR -> "已中断"
+        DashboardTone.IDLE -> "空闲"
+    }
+    return if (thread.approx) "≈$word" else word
 }
 
 @Composable
