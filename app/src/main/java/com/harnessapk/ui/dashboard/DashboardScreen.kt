@@ -138,13 +138,13 @@ fun DashboardScreen(
                         modifier = Modifier.height(124.dp).fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
+                        QuotaStripCard(modifier = Modifier.weight(1f).fillMaxHeight(), quota = dashboard.quota)
                         HostCard(
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.weight(1f).fillMaxHeight(),
                             host = dashboard.host,
                             hostName = hostName,
                         )
-                        TodayCard(modifier = Modifier.weight(1f), host = dashboard.host)
+                        TodayCard(modifier = Modifier.weight(1f).fillMaxHeight(), host = dashboard.host)
                     }
                     Column(
                         modifier = Modifier
@@ -465,7 +465,7 @@ private fun QuotaStripCard(modifier: Modifier = Modifier, quota: DashboardQuota?
     }
     Card(modifier = modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp).fillMaxWidth(),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -534,8 +534,8 @@ private fun HostCard(
 ) {
     Card(modifier = modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp).fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
         ) {
             Text(
                 "主机 · $hostName",
@@ -562,12 +562,11 @@ private fun HostCard(
 private fun TodayCard(modifier: Modifier = Modifier, host: DashboardHost?) {
     Card(modifier = modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp).fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
         ) {
             Text("今日", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             InfoRow("turn", if (host != null && host.todayTurns > 0) "${host.todayTurns}" else "0")
-            InfoRow("连续 streak", if (host != null && host.streakDays > 0) "${host.streakDays} 天" else "—")
             InfoRow(
                 "近 7 天 tokens",
                 if (host == null || host.weekTokens <= 0) "—" else formatTokenCount(host.weekTokens),
