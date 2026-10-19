@@ -104,9 +104,11 @@ fun DashboardScreen(
                 .padding(padding)
                 .padding(12.dp),
         ) {
-            // 手机竖屏（窄宽）与横宽双布局：窄宽=整列滚动 + 全宽卡 + 两列仪表；
-            // 横宽=分页网格 + 固定高度仪表带。两支都是非 Lazy 全量组合（墨水屏约束）。
-            val phoneLayout = maxWidth < 600.dp
+            // 布局分派按宽高双条件：窄宽（手机竖屏）或矮高（手机横屏，如海信 720x360dp——
+            // 固定仪表带 + 两行 96dp 卡放不下）都走整列滚动的紧凑布局；
+            // 宽且高（平板/桌面横屏）才用分页网格 + 固定仪表带。
+            // 两支都是非 Lazy 全量组合（墨水屏约束）。旋转由 configChanges 兜住不重建。
+            val phoneLayout = maxWidth < 600.dp || maxHeight < 480.dp
             Column(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),

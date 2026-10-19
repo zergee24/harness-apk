@@ -116,6 +116,7 @@
         <activity
             android:name=".ui.dashboard.DashboardActivity"
             android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:label="Agent 副屏" />
 
         <activity
