@@ -5457,6 +5457,12 @@ internal fun ChatInputBar(
         (!simpleMode || (!isBusy && !isQueued))
     var showImageSourceSheet by remember { mutableStateOf(false) }
     var attachmentPanelExpanded by remember { mutableStateOf(false) }
+    // 发送后收起键盘：避免键盘遮挡流内新消息与生成状态行
+    val inputKeyboard = LocalSoftwareKeyboardController.current
+    fun sendAndHideKeyboard() {
+        inputKeyboard?.hide()
+        onSend()
+    }
 
     // 输入框与底部导航同一套玻璃语言：半透明面 + 细描边，内容从下方透出。
     Surface(
@@ -5530,7 +5536,7 @@ internal fun ChatInputBar(
                         .onPreviewKeyEvent { event ->
                             if ((!simpleMode || event.isCtrlPressed || event.isMetaPressed) &&
                                 shouldSendChatInputOnKeyEvent(event.key, event.type, event.isShiftPressed, sendEnabled)) {
-                                onSend()
+                                sendAndHideKeyboard()
                                 true
                             } else false
                         },
@@ -5544,7 +5550,7 @@ internal fun ChatInputBar(
                     minLines = 1,
                     maxLines = 6,
                     keyboardOptions = KeyboardOptions(imeAction = if (simpleMode) ImeAction.Default else ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { if (!simpleMode && sendEnabled) onSend() }),
+                    keyboardActions = KeyboardActions(onSend = { if (!simpleMode && sendEnabled) sendAndHideKeyboard() }),
                     decorationBox = { innerTextField ->
                         Box(
                             modifier = Modifier
@@ -5649,7 +5655,7 @@ internal fun ChatInputBar(
                         Icon(Icons.Outlined.Schedule, contentDescription = "正在准备")
                     }
                     sendEnabled && !(simpleMode && isQueued) -> FilledIconButton(
-                        onClick = onSend,
+                        onClick = ::sendAndHideKeyboard,
                         modifier = Modifier.size(44.dp),
                         shape = RoundedCornerShape(50),
                     ) {
