@@ -3,16 +3,22 @@ package observer
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 )
 
 // QuotaSnapshot 是 Codex 账户限额/余额的副屏快照。
 // 数据源：codex app-server 的 account/rateLimits/read（bridge 自有通道，
-// 不依赖任何外部配额软件）。
+// 不依赖任何外部配额软件）。CreditsRemaining/creditsTodayUsed 在主额度
+// （百分比）归零时由副屏今日卡额外展示——promax 类计划额度耗尽后按
+// credits 计费，余额即剩余可用量。
 type QuotaSnapshot struct {
-	UsedPercent      int    `json:"usedPercent"`
-	RemainingPercent int    `json:"remainingPercent"`
-	ResetsAtMs       int64  `json:"resetsAtMs,omitempty"`
-	PlanType         string `json:"planType,omitempty"`
+	UsedPercent      int     `json:"usedPercent"`
+	RemainingPercent int     `json:"remainingPercent"`
+	ResetsAtMs       int64   `json:"resetsAtMs,omitempty"`
+	PlanType         string  `json:"planType,omitempty"`
+	CreditsRemaining *float64 `json:"creditsRemaining,omitempty"`
+	CreditsTodayUsed *float64 `json:"creditsTodayUsed,omitempty"`
 }
 
 // ParseQuota 解析 account/rateLimits/read 的 result 载荷：
@@ -29,6 +35,11 @@ func ParseQuota(raw json.RawMessage) (QuotaSnapshot, bool) {
 				ResetsAt    int64  `json:"resetsAt"`
 			} `json:"primary"`
 			PlanType  *string `json:"planType"`
+			Credits *struct {
+				HasCredits *bool   `json:"hasCredits"`
+				Unlimited  *bool   `json:"unlimited"`
+				Balance    *string `json:"balance"`
+			} `json:"credits"`
 		} `json:"rateLimits"`
 	}
 	if err := json.Unmarshal(raw, &root); err != nil || root.RateLimits == nil || root.RateLimits.Primary == nil || root.RateLimits.Primary.UsedPercent == nil {
@@ -42,6 +53,17 @@ func ParseQuota(raw json.RawMessage) (QuotaSnapshot, bool) {
 	}
 	if resets := root.RateLimits.Primary.ResetsAt; resets > 0 {
 		q.ResetsAtMs = resets * 1000
+	}
+	// credits 余额：限额耗尽后按量计费的余量（字符串十进制，如 "73231.7522"）。
+	// 仅在计划明确带 credits 且非无限量时下发；今日消耗由调用方按日基线差值回填。
+	if creds := root.RateLimits.Credits; creds != nil && creds.Balance != nil {
+		has := creds.HasCredits == nil || *creds.HasCredits
+		unlimited := creds.Unlimited != nil && *creds.Unlimited
+		if has && !unlimited {
+			if balance, err := strconv.ParseFloat(strings.TrimSpace(*creds.Balance), 64); err == nil {
+				q.CreditsRemaining = &balance
+			}
+		}
 	}
 	return q, true
 }

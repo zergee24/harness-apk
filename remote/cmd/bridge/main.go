@@ -60,6 +60,12 @@ type turnTransition struct {
 	release                       func()
 }
 
+// creditsBaseline 记录当日首次采样的 credits 余额，今日消耗按它与当前的差值估算。
+type creditsBaseline struct {
+	day     string
+	balance float64
+}
+
 type bridge struct {
 	mu                    sync.Mutex
 	writeMu               sync.Mutex
@@ -82,6 +88,7 @@ type bridge struct {
 	dashboardMu           sync.Mutex
 	dashboardLastSent     map[string]string
 	dashboardQuota        *observer.QuotaSnapshot
+	creditsBaseline       *creditsBaseline
 	dashboardUsageLast    *observer.UsageSummary
 	dashboardQuotaSent    string
 	dashboardHostSent     string
@@ -928,7 +935,20 @@ func (b *bridge) pollDashboardQuota(ctx context.Context) *observer.QuotaSnapshot
 		log.Printf("dashboard host: unparseable rateLimits payload %.200s", raw)
 		return nil
 	}
+	// credits 今日消耗 = 当日基线余额与当前的差值；基线取当日首次采样，
+	// 内存态即可（bridge 重启后当日消耗从重启时刻重新累计）。
 	b.dashboardMu.Lock()
+	if parsed.CreditsRemaining != nil {
+		today := b.dashboardTodayString()
+		if b.creditsBaseline == nil || b.creditsBaseline.day != today {
+			b.creditsBaseline = &creditsBaseline{day: today, balance: *parsed.CreditsRemaining}
+		}
+		used := b.creditsBaseline.balance - *parsed.CreditsRemaining
+		if used < 0 {
+			used = 0
+		}
+		parsed.CreditsTodayUsed = &used
+	}
 	b.dashboardQuota = &parsed
 	b.dashboardMu.Unlock()
 	return &parsed
