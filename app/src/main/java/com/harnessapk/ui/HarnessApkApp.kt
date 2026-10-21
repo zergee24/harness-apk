@@ -948,11 +948,6 @@ fun HarnessApkApp(
                         WorkHomeScreen(
                             contentPadding = padding,
                             remotePaired = remoteProfile != null,
-                            onOpenCodex = {
-                                navController.navigate(
-                                    if (remoteProfile != null) Routes.RemoteControl else Routes.RemoteSettings,
-                                )
-                            },
                             onOpenDsh = {
                                 // The DSH card opens the remote screen with the
                                 // dsh backend preselected; pairing is shared

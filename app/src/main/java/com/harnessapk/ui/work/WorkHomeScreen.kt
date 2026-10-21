@@ -36,6 +36,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.harnessapk.ui.remote.CodexWebActivity
 import com.harnessapk.ui.remote.ZcodeWebRemoteActivity
 import com.harnessapk.ui.theme.HarnessSpacing
 
@@ -45,7 +46,6 @@ import com.harnessapk.ui.theme.HarnessSpacing
 internal fun WorkHomeScreen(
     contentPadding: PaddingValues,
     remotePaired: Boolean,
-    onOpenCodex: () -> Unit,
     onOpenDsh: () -> Unit,
     onOpenWorkbench: () -> Unit,
     modifier: Modifier = Modifier,
@@ -62,9 +62,11 @@ internal fun WorkHomeScreen(
         WorkHomeEntry(
             testTag = "work-home-codex",
             title = "Codex",
-            supportingText = if (remotePaired) "Mac 节点已配对 · 远程会话与任务" else "扫描 Mac Bridge 二维码完成配对",
+            // Codex 入口改浏览器套壳：手机无官方 App（依赖 Google Play），
+            // 浏览器登录同一 ChatGPT 账号即可用云端任务；与 Mac 远程连接独立。
+            supportingText = "Codex 网页 · 浏览器登录 ChatGPT 后云端任务",
             icon = Icons.Outlined.Dns,
-            onClick = onOpenCodex,
+            onClick = { context.startActivity(Intent(context, CodexWebActivity::class.java)) },
         )
         WorkHomeEntry(
             testTag = "work-home-zcode",

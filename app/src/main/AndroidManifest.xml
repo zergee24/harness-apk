@@ -120,6 +120,13 @@
             android:label="Agent 副屏" />
 
         <activity
+            android:name=".ui.remote.CodexWebActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize"
+            android:label="Codex 网页" />
+
+        <activity
             android:name=".ui.remote.ZcodeWebRemoteActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden"
