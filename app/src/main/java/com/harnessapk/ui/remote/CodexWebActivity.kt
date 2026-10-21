@@ -97,6 +97,15 @@ class CodexWebActivity : ComponentActivity() {
 
 private const val CodexWebUrl = "https://chatgpt.com/codex"
 
+// Codex 网页端（dots）只对桌面环境开放：UA 伪装成 macOS Chrome，
+// 配合 navigator.platform/userAgentData 补丁（语义对齐 Chrome 桌面模式）。
+private const val DesktopUa =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+private const val DesktopSpoofJs =
+    "try{Object.defineProperty(navigator,'platform',{get:function(){return 'MacIntel'}});}catch(e){}" +
+        "try{Object.defineProperty(navigator,'userAgentData',{get:function(){return {mobile:false,platform:'macOS',brands:[]}}});}catch(e){}"
+
 @Composable
 private fun CodexWebScreen(
     onFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams) -> Boolean,
@@ -201,8 +210,25 @@ private fun CodexWebScreen(
                             @SuppressLint("SetJavaScriptEnabled")
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
+                            // 桌面 UA + 宽视口概览缩放：桌面版布局缩到手机宽度内呈现，
+                            // 配合 pinch 与顶栏 ± 按钮查看细节。
+                            settings.userAgentString = DesktopUa
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
+                            settings.setSupportZoom(true)
+                            settings.builtInZoomControls = true
+                            settings.displayZoomControls = false
                             setBackgroundColor(android.graphics.Color.parseColor("#101417"))
                             webViewClient = object : WebViewClient() {
+                                override fun onPageStarted(
+                                    view: WebView,
+                                    url: String?,
+                                    favicon: android.graphics.Bitmap?,
+                                ) {
+                                    // 尽早打上桌面环境补丁，抢在页面脚本探测之前。
+                                    view.evaluateJavascript(DesktopSpoofJs, null)
+                                }
+
                                 override fun onReceivedError(
                                     view: WebView,
                                     errorCode: Int,
