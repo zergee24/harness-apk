@@ -5,7 +5,9 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -39,12 +41,15 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
@@ -56,6 +61,7 @@ import com.harnessapk.remote.DashboardQuota
 import com.harnessapk.remote.DashboardThread
 import com.harnessapk.remote.DashboardViewedStore
 import com.harnessapk.remote.RemoteConnectionStatus
+import kotlinx.coroutines.delay
 
 private val ThreadTileWidth = 260.dp
 
@@ -97,66 +103,199 @@ fun DashboardScreen(
     val threads = remember(dashboard.threads) { sortDashboardThreadsForConsole(dashboard.threads) }
 
     Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Agent 副屏", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            // 布局三分派：①矮高（手机横屏，如海信 720x360dp）=时钟 + 仪表带固定首屏，
+            // 线程垫底滚动；②窄宽（手机竖屏）=整列滚动，仪表带垫底；③宽且高（平板/
+            // 桌面横屏）=分页网格 + 固定仪表带。三支都是非 Lazy 全量组合（墨水屏约束）。
+            // 旋转由 configChanges 兜住不重建，分支随 BoxWithConstraints 原位切换。
+            val shortHeight = maxHeight < 480.dp
+            val narrowWidth = maxWidth < 600.dp
+            val availWidth = maxWidth
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                DashboardTitleRow(
+                    summary = dashboardSummaryLabel(threads),
+                    connected = connection.connectionStatus == RemoteConnectionStatus.CONNECTED,
+                    onRefresh = { container.remoteRepository.requestDashboardSnapshot() },
+                    onExit = onExit,
+                    showClock = shortHeight,
+                )
+                if (threads.isEmpty()) {
                     Text(
-                        dashboardSummaryLabel(threads),
-                        style = MaterialTheme.typography.labelSmall,
+                        "暂无活跃线程。在 Mac 上开始一个 Codex 任务后，这里会实时亮起。",
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                val connected = connection.connectionStatus == RemoteConnectionStatus.CONNECTED
-                Text(
-                    if (connected) "Mac 已连接" else "Mac 未连接",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
-                )
-                IconButton(
-                    onClick = { container.remoteRepository.requestDashboardSnapshot() },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        Icons.Outlined.Refresh,
-                        contentDescription = "手动刷新",
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (shortHeight) {
+                    // 横屏首屏：仪表带固定可见（用户要求：首屏保留仪表盘和系统时间），
+                    // 线程列表垫底滚动。
+                    Row(
+                        modifier = Modifier.height(124.dp).fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        QuotaStripCard(modifier = Modifier.weight(1f).fillMaxHeight(), quota = dashboard.quota)
+                        HostCard(
+                            modifier = Modifier.weight(1f).fillMaxHeight(),
+                            host = dashboard.host,
+                            hostName = hostName,
+                        )
+                        TodayCard(modifier = Modifier.weight(1f).fillMaxHeight(), host = dashboard.host, quota = dashboard.quota)
+                    }
+                    // 横屏线程区：一行三卡（列数按可用宽自适应，海信横屏 696dp→3 列），
+                    // 纵向滚动；IntrinsicSize.Min 让同排卡片等高；非 Lazy 全量组合（墨水屏约束）。
+                    val cols = (availWidth / 200.dp).toInt().coerceIn(1, 3)
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        threads.chunked(cols).forEach { rowThreads ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(IntrinsicSize.Min),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                rowThreads.forEach { thread ->
+                                    ConsoleTile(
+                                        thread = thread,
+                                        unread = false,
+                                        onClick = { container.remoteRepository.focusThread(thread.threadId) },
+                                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                                    )
+                                }
+                                repeat(cols - rowThreads.size) { Spacer(modifier = Modifier.weight(1f)) }
+                            }
+                        }
+                    }
+                } else if (narrowWidth) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        threads.forEach { thread ->
+                            ConsoleTile(
+                                thread = thread,
+                                unread = false,
+                                onClick = { container.remoteRepository.focusThread(thread.threadId) },
+                                modifier = Modifier.fillMaxWidth(),
+                                fillHeight = false,
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
+                            HostCard(
+                                modifier = Modifier.weight(1f),
+                                host = dashboard.host,
+                                hostName = hostName,
+                            )
+                        }
+                        TodayCard(modifier = Modifier.fillMaxWidth(), host = dashboard.host, quota = dashboard.quota)
+                    }
+                } else {
+                    ThreadPagingGrid(
+                        threads = threads,
+                        onTap = { container.remoteRepository.focusThread(it.threadId) },
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
                     )
+                    Row(
+                        modifier = Modifier.height(150.dp).fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
+                        HostCard(
+                            modifier = Modifier.weight(1f),
+                            host = dashboard.host,
+                            hostName = hostName,
+                        )
+                        TodayCard(modifier = Modifier.weight(1f), host = dashboard.host, quota = dashboard.quota)
+                    }
                 }
-                TextButton(onClick = onExit) { Text("退出") }
-            }
-            if (threads.isEmpty()) {
-                Text(
-                    "暂无活跃线程。在 Mac 上开始一个 Codex 任务后，这里会实时亮起。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            ThreadPagingGrid(
-                threads = threads,
-                onTap = { container.remoteRepository.focusThread(it.threadId) },
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-            )
-            Row(
-                modifier = Modifier.height(150.dp).fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                QuotaStripCard(modifier = Modifier.weight(1f), quota = dashboard.quota)
-                HostCard(
-                    modifier = Modifier.weight(1f),
-                    host = dashboard.host,
-                    hostName = hostName,
-                )
-                TodayCard(modifier = Modifier.weight(1f), host = dashboard.host)
             }
         }
+    }
+}
+
+// 标题行：左侧标题与汇总，右侧可选时钟（横屏首屏要求）+ 连接态 + 刷新 + 退出。
+@Composable
+private fun DashboardTitleRow(
+    summary: String,
+    connected: Boolean,
+    onRefresh: () -> Unit,
+    onExit: () -> Unit,
+    showClock: Boolean,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Agent 副屏", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                summary,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (showClock) {
+            DashboardClock(modifier = Modifier.padding(end = 12.dp))
+        }
+        Text(
+            if (connected) "Mac 已连接" else "Mac 未连接",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
+        )
+        IconButton(
+            onClick = onRefresh,
+            modifier = Modifier.size(32.dp),
+        ) {
+            Icon(
+                Icons.Outlined.Refresh,
+                contentDescription = "手动刷新",
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onExit) { Text("退出") }
+    }
+}
+
+// 系统时钟：HH:mm 大字 + 中文日期，分钟级刷新（秒跳会让墨水屏疯狂全刷）。
+@Composable
+private fun DashboardClock(modifier: Modifier = Modifier) {
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        // 首帧后对齐到下一个整分边界，之后每 30s 校准一次。
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(30_000 - nowMs % 30_000)
+        }
+    }
+    val zoned = remember(nowMs) { java.time.Instant.ofEpochMilli(nowMs).atZone(java.time.ZoneId.systemDefault()) }
+    val timeText = remember(nowMs) { java.time.format.DateTimeFormatter.ofPattern("HH:mm").format(zoned) }
+    val dateText = remember(nowMs) {
+        java.time.format.DateTimeFormatter.ofPattern("M月d日 EEE", java.util.Locale.CHINESE).format(zoned)
+    }
+    Column(modifier = modifier, horizontalAlignment = Alignment.End) {
+        Text(timeText, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(
+            dateText,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -196,6 +335,7 @@ private fun ThreadPagingGrid(
                                     thread = thread,
                                     unread = false,
                                     onClick = { onTap(thread) },
+                                    modifier = Modifier.width(ThreadTileWidth),
                                 )
                             }
                             repeat(columns - rowThreads.size) { Spacer(modifier = Modifier.weight(1f)) }
@@ -225,10 +365,22 @@ private fun ThreadPagingGrid(
 }
 
 @Composable
-private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () -> Unit) {
+private fun ConsoleTile(
+    thread: DashboardThread,
+    unread: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    // 网格模式定高填充（页内两行等高）；列表模式包裹内容，摘要限三行。
+    fillHeight: Boolean = true,
+) {
     val accent = Color(dashboardToneArgb(dashboardTone(thread.status)))
-    Card(modifier = Modifier.width(ThreadTileWidth).combinedClickable(onClick = onClick)) {
-        Row(modifier = Modifier.fillMaxWidth().fillMaxHeight().heightIn(min = 96.dp)) {
+    Card(modifier = modifier.combinedClickable(onClick = onClick)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
+                .heightIn(min = 96.dp),
+        ) {
             Box(modifier = Modifier.width(14.dp).fillMaxHeight().background(accent))
             Column(
                 modifier = Modifier
@@ -237,7 +389,7 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.Top) {
                     Text(
                         thread.title,
                         style = MaterialTheme.typography.bodyLarge,
@@ -251,33 +403,37 @@ private fun ConsoleTile(thread: DashboardThread, unread: Boolean, onClick: () ->
                     if (unread) {
                         Box(
                             modifier = Modifier
-                                .padding(start = 8.dp)
+                                .padding(start = 8.dp, top = 4.dp)
                                 .size(8.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFFFF5C5C)),
                         )
                     }
-                    dashboardSourceLabel(thread).takeIf { it.isNotEmpty() }?.let { badge ->
+                    // 状态是卡片的第一信息：实色胶囊 + 高对比字（灰阶下靠明度差）。
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 8.dp, top = 2.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(accent)
+                            .padding(horizontal = 10.dp, vertical = 3.dp),
+                    ) {
                         Text(
-                            badge,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            statusPillLabel(thread),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (accent.luminance() > 0.5f) Color(0xFF101417) else Color.White,
                             maxLines = 1,
-                            modifier = Modifier.padding(start = 8.dp),
                         )
                     }
-                    Text(
-                        dashboardStatusLabel(thread),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = accent,
-                        maxLines = 1,
-                        modifier = Modifier.padding(start = 10.dp),
-                    )
                 }
-Row(verticalAlignment = Alignment.CenterVertically) {
-                    val place = thread.cwd?.substringAfterLast('/') ?: ""
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        listOf(place, dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs))
+                        listOf(
+                            dashboardSourceLabel(thread),
+                            thread.cwd?.substringAfterLast('/') ?: "",
+                            dashboardRelativeTime(System.currentTimeMillis(), thread.updatedAtMs),
+                            thread.note.orEmpty(),
+                        )
                             .filter { it.isNotBlank() }
                             .joinToString(" · "),
                         style = MaterialTheme.typography.labelSmall,
@@ -306,8 +462,9 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                         ?: "等待 agent 输出…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface,
-                    // 网格两行定高、卡片等高：weight 填充剩余空间，放不下自动省略。
-                    modifier = Modifier.weight(1f),
+                    // 网格模式 weight 填充剩余空间放不下自动省略；列表模式定三行。
+                    modifier = if (fillHeight) Modifier.weight(1f) else Modifier,
+                    maxLines = if (fillHeight) Int.MAX_VALUE else 3,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -327,7 +484,7 @@ private fun QuotaStripCard(modifier: Modifier = Modifier, quota: DashboardQuota?
     }
     Card(modifier = modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp).fillMaxWidth(),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -396,8 +553,8 @@ private fun HostCard(
 ) {
     Card(modifier = modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp).fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
         ) {
             Text(
                 "主机 · $hostName",
@@ -419,21 +576,35 @@ private fun HostCard(
     }
 }
 
-// 底部仪表带右格：今日卡（今日 turn / 连续 streak / 近 7 天 tokens）。
+// 底部仪表带右格：今日卡（今日 turn / 近 7 天 tokens；主额度归零时追加
+// 剩余/今日消耗 credits——promax 类计划额度耗尽后按 credits 计费）。
 @Composable
-private fun TodayCard(modifier: Modifier = Modifier, host: DashboardHost?) {
+private fun TodayCard(
+    modifier: Modifier = Modifier,
+    host: DashboardHost?,
+    quota: DashboardQuota? = null,
+) {
     Card(modifier = modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp).fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
         ) {
             Text("今日", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             InfoRow("turn", if (host != null && host.todayTurns > 0) "${host.todayTurns}" else "0")
-            InfoRow("连续 streak", if (host != null && host.streakDays > 0) "${host.streakDays} 天" else "—")
             InfoRow(
                 "近 7 天 tokens",
                 if (host == null || host.weekTokens <= 0) "—" else formatTokenCount(host.weekTokens),
             )
+            if ((quota?.remainingPercent ?: 100) <= 0 && quota?.creditsRemaining != null) {
+                InfoRow(
+                    "剩余 credits",
+                    String.format(java.util.Locale.US, "%,.2f", quota.creditsRemaining),
+                )
+                InfoRow(
+                    "今日消耗 credits",
+                    quota.creditsTodayUsed?.let { String.format(java.util.Locale.US, "%,.2f", it) } ?: "—",
+                )
+            }
         }
     }
 }
@@ -443,6 +614,18 @@ private fun formatTokenCount(tokens: Long): String = when {
     tokens >= 1_000_000 -> "%.1fM".format(tokens / 1_000_000.0)
     tokens >= 1_000 -> "%.1fk".format(tokens / 1_000.0)
     else -> tokens.toString()
+}
+
+// 状态胶囊的短词：只保留状态本身，approx 的诊断注记下沉到元信息行。
+private fun statusPillLabel(thread: DashboardThread): String {
+    val word = when (dashboardTone(thread.status)) {
+        DashboardTone.THINKING -> "思考中"
+        DashboardTone.RUNNING -> "运行中"
+        DashboardTone.DONE -> "已完成"
+        DashboardTone.ERROR -> "已中断"
+        DashboardTone.IDLE -> "空闲"
+    }
+    return if (thread.approx) "≈$word" else word
 }
 
 @Composable
