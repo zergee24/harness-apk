@@ -531,6 +531,7 @@ internal fun parseWorkspaceCandidates(event: RemoteEvent): List<WorkspaceCandida
 
 internal fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
 internal fun JsonObject.long(key: String): Long? = string(key)?.toLongOrNull()
+internal fun JsonObject.double(key: String): Double? = string(key)?.toDoubleOrNull()
 internal fun JsonObject.array(key: String): JsonArray = this[key]?.jsonArray ?: JsonArray(emptyList())
 internal fun JsonObject.boolean(key: String): Boolean? = this[key]?.jsonPrimitive?.booleanOrNull
 
@@ -566,6 +567,9 @@ data class DashboardQuota(
     val remainingPercent: Int,
     val resetsAtMs: Long = 0,
     val planType: String? = null,
+    // 主额度（百分比）归零后按量计费的 credits 余额与当日消耗；bridge 有值才下发。
+    val creditsRemaining: Double? = null,
+    val creditsTodayUsed: Double? = null,
 )
 
 data class DashboardState(
@@ -584,6 +588,8 @@ internal fun parseDashboardQuota(element: JsonElement?): DashboardQuota? {
         remainingPercent = item.long("remainingPercent")?.toInt() ?: (100 - used),
         resetsAtMs = item.long("resetsAtMs") ?: 0,
         planType = item.string("planType"),
+        creditsRemaining = item.double("creditsRemaining"),
+        creditsTodayUsed = item.double("creditsTodayUsed"),
     )
 }
 

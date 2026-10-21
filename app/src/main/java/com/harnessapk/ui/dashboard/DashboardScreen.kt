@@ -147,7 +147,7 @@ fun DashboardScreen(
                             host = dashboard.host,
                             hostName = hostName,
                         )
-                        TodayCard(modifier = Modifier.weight(1f).fillMaxHeight(), host = dashboard.host)
+                        TodayCard(modifier = Modifier.weight(1f).fillMaxHeight(), host = dashboard.host, quota = dashboard.quota)
                     }
                     // 横屏线程区：一行三卡（列数按可用宽自适应，海信横屏 696dp→3 列），
                     // 纵向滚动；IntrinsicSize.Min 让同排卡片等高；非 Lazy 全量组合（墨水屏约束）。
@@ -206,7 +206,7 @@ fun DashboardScreen(
                                 hostName = hostName,
                             )
                         }
-                        TodayCard(modifier = Modifier.fillMaxWidth(), host = dashboard.host)
+                        TodayCard(modifier = Modifier.fillMaxWidth(), host = dashboard.host, quota = dashboard.quota)
                     }
                 } else {
                     ThreadPagingGrid(
@@ -224,7 +224,7 @@ fun DashboardScreen(
                             host = dashboard.host,
                             hostName = hostName,
                         )
-                        TodayCard(modifier = Modifier.weight(1f), host = dashboard.host)
+                        TodayCard(modifier = Modifier.weight(1f), host = dashboard.host, quota = dashboard.quota)
                     }
                 }
             }
@@ -576,9 +576,14 @@ private fun HostCard(
     }
 }
 
-// 底部仪表带右格：今日卡（今日 turn / 连续 streak / 近 7 天 tokens）。
+// 底部仪表带右格：今日卡（今日 turn / 近 7 天 tokens；主额度归零时追加
+// 剩余/今日消耗 credits——promax 类计划额度耗尽后按 credits 计费）。
 @Composable
-private fun TodayCard(modifier: Modifier = Modifier, host: DashboardHost?) {
+private fun TodayCard(
+    modifier: Modifier = Modifier,
+    host: DashboardHost?,
+    quota: DashboardQuota? = null,
+) {
     Card(modifier = modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 8.dp),
@@ -590,6 +595,16 @@ private fun TodayCard(modifier: Modifier = Modifier, host: DashboardHost?) {
                 "近 7 天 tokens",
                 if (host == null || host.weekTokens <= 0) "—" else formatTokenCount(host.weekTokens),
             )
+            if ((quota?.remainingPercent ?: 100) <= 0 && quota?.creditsRemaining != null) {
+                InfoRow(
+                    "剩余 credits",
+                    String.format(java.util.Locale.US, "%,.2f", quota.creditsRemaining),
+                )
+                InfoRow(
+                    "今日消耗 credits",
+                    quota.creditsTodayUsed?.let { String.format(java.util.Locale.US, "%,.2f", it) } ?: "—",
+                )
+            }
         }
     }
 }
