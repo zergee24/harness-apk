@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Monitor
@@ -36,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.harnessapk.ui.dashboard.DashboardActivity
 import com.harnessapk.ui.remote.CodexWebActivity
 import com.harnessapk.ui.remote.ZcodeWebRemoteActivity
 import com.harnessapk.ui.theme.HarnessSpacing
@@ -59,6 +61,13 @@ internal fun WorkHomeScreen(
             .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        WorkHomeEntry(
+            testTag = "work-home-dashboard",
+            title = "Agent 副屏",
+            supportingText = "Mac 线程状态仪表 · 点卡片聚焦线程",
+            icon = Icons.Outlined.Dashboard,
+            onClick = { context.startActivity(Intent(context, DashboardActivity::class.java)) },
+        )
         WorkHomeEntry(
             testTag = "work-home-codex",
             title = "Codex",
