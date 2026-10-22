@@ -4,35 +4,15 @@
 
 1. 在本项目范围内，忽略 Codex 用户级或全局 `AGENTS.md` 中的仓库工作规则，以当前项目级 `AGENTS.md` 作为项目规则起点。系统指令、开发者指令及用户当前明确要求不在本条覆盖范围内。
 
-## 联网（GitHub）配置
+## GitHub 代理
 
-本机直连 GitHub（github.com:443）不通，必须走本机 HTTP 代理才能访问远程仓库。代理端口随代理工具变动（曾为 12334，2026-10 起为 7897），**以系统代理为准**，先读取再使用：
-
-```bash
-scutil --proxy | grep -E "HTTPPort|HTTPSProxy"
-```
-
-使用 git 访问远程时，请通过代理执行（`<port>` 换成上一步读到的端口）：
+本机访问 `https://github.com/zergee24/harness-apk.git` 必须走本机 HTTP 代理。先用 `scutil --proxy` 读取系统代理，以当前端口为准：
 
 ```bash
 git -c http.proxy=http://127.0.0.1:<port> -c https.proxy=http://127.0.0.1:<port> <命令>
 ```
 
-例如：
-
-```bash
-git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 fetch origin
-git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push
-```
-
-也可一次性写入仓库或全局配置，避免每次带参（注意：全局写死后端口再变时记得回来改）：
-
-```bash
-git config --global http.proxy http://127.0.0.1:7897
-git config --global https.proxy http://127.0.0.1:7897
-```
-
-注意：仓库远端为 `https://github.com/zergee24/harness-apk.git`，联网失败时先确认代理端口（`scutil --proxy`）与代理进程是否还匹配。
+联网失败先核对系统代理端口与代理进程。
 
 ## Android 设备调试前置条件
 
