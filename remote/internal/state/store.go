@@ -70,6 +70,8 @@ type BridgeData struct {
 	RegisteredWorkspaces    []string                      `json:"registeredWorkspaces,omitempty"`
 	ThreadContinuations     map[string]ThreadContinuation `json:"threadContinuations,omitempty"`
 	Backends                []BackendConfig               `json:"backends,omitempty"`
+	CreditsBaselineDay      string                        `json:"creditsBaselineDay,omitempty"`
+	CreditsBaselineBalance  float64                       `json:"creditsBaselineBalance,omitempty"`
 }
 
 // BackendConfig is the persisted serve-time backend list, reported by
