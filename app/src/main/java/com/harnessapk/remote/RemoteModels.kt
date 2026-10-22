@@ -658,13 +658,14 @@ fun zcodeWebRemoteStageLabel(stage: String?): String? = when (stage) {
     else -> "Mac 端自动化失败，可稍后重试"
 }
 
-/** 宽松结构校验：配对链接形如 https://…/remote/…?sid=…&hash=…。 */
+/** 底线校验：能提取出 https 链接，且路径含 remote 或主机含 zcode。
+ *  新版 ZCode 网页的链接参数代际变化大（旧版 sid+hash，新版形态不一），
+ *  严格结构校验会把手动粘贴的新链接挡在门外，这里只认 https + 关键词。 */
 fun looksLikeZcodeRemoteUrl(raw: String): Boolean {
     val token = raw.trim().lineSequence().flatMap { it.split(' ', '\t') }.firstOrNull { it.startsWith("https://") }
         ?: return false
-    val withoutQuery = token.substringBefore('?')
-    return withoutQuery.contains("/remote/") &&
-        token.contains("sid=") && token.contains("hash=")
+    val lower = token.lowercase()
+    return lower.contains("/remote/") || lower.contains("zcode")
 }
 
 // thread_items 的 item_json -> 远程时间线 item（复用既有渲染）。

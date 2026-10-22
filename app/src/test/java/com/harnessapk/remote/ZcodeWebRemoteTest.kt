@@ -51,12 +51,14 @@ class ZcodeWebRemoteTest {
     }
 
     @Test
-    fun `配对链接结构校验`() {
+    fun `配对链接底线校验`() {
+        // 新版 ZCode 链接参数代际变化大，底线 = https 链接 + 路径含 remote 或主机含 zcode。
         assertTrue(looksLikeZcodeRemoteUrl(validUrl))
         assertTrue(looksLikeZcodeRemoteUrl("说明文字\n$validUrl\n"))
-        assertFalse(looksLikeZcodeRemoteUrl("https://zcode.z.ai/other?sid=a&hash=b"))
+        assertTrue(looksLikeZcodeRemoteUrl("https://zcode.z.ai/other?sid=a&hash=b"))
+        assertTrue(looksLikeZcodeRemoteUrl("https://zcode.z.ai/remote/v4?sid=a"))
+        assertTrue(looksLikeZcodeRemoteUrl("https://example.com/remote/x?token=abc"))
         assertFalse(looksLikeZcodeRemoteUrl("http://zcode.z.ai/remote/v4?sid=a&hash=b"))
-        assertFalse(looksLikeZcodeRemoteUrl("https://zcode.z.ai/remote/v4?sid=a"))
         assertFalse(looksLikeZcodeRemoteUrl("随便一段话"))
         assertFalse(looksLikeZcodeRemoteUrl(""))
     }
