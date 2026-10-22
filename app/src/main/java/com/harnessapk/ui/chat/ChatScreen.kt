@@ -141,6 +141,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
@@ -1099,6 +1100,73 @@ fun ChatScreen(
     }
 
     var previousAutoScrollKey by remember(conversationId) { mutableStateOf<AutoScrollKey?>(null) }
+    val sendAnchor = remember(conversationId) { SendAnchorTracker() }
+    val sendAnchorViewportPx = remember(conversationId) { mutableIntStateOf(0) }
+    val baseBottomPaddingPx = with(LocalDensity.current) { CHAT_LIST_EDGE_PADDING_DP.dp.roundToPx() }
+    // 组合期锁存：与滚动 effect 同帧把留白撑到最大（本轮跨度未知先按 0 计），
+    // 让紧随其后的 scrollToItem 有足够内容可以把用户消息顶到视口顶部。
+    run {
+        val currentKey = autoScrollKey(messages)
+        if (sendAnchor.lastKey != currentKey) {
+            if (chatAutoScrollMode(sendAnchor.lastKey, currentKey) == ChatAutoScrollMode.NEW_USER_TO_TOP) {
+                sendAnchor.anchoredUserMessageId = messages.lastOrNull { it.role == MessageRole.USER }?.id
+                sendAnchor.tailPaddingPx =
+                    (sendAnchorViewportPx.intValue - CHAT_NEW_MESSAGE_TOP_TAIL_PX - baseBottomPaddingPx)
+                        .coerceAtLeast(0)
+            }
+            sendAnchor.lastKey = currentKey
+        }
+    }
+    LaunchedEffect(conversationId) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val viewport = info.viewportEndOffset - info.viewportStartOffset
+            val anchorId = sendAnchor.anchoredUserMessageId
+                ?: return@snapshotFlow SendAnchorGeometry(
+                    viewportPx = viewport,
+                    turnSpanPx = TURN_SPAN_KEEP,
+                    anchorIndex = null,
+                )
+            val userItem = info.visibleItemsInfo.firstOrNull { it.key == anchorId }
+                ?: return@snapshotFlow SendAnchorGeometry(
+                    viewportPx = viewport,
+                    turnSpanPx = TURN_SPAN_KEEP,
+                    anchorIndex = null,
+                )
+            val lastItem = info.visibleItemsInfo.last()
+            // 末条消息没进组合说明本轮已超出视口，留白归零交给常规跟底。
+            val span = if (lastItem.index == info.totalItemsCount - 1) {
+                lastItem.offset + lastItem.size - userItem.offset
+            } else {
+                TURN_SPAN_EXCEEDS
+            }
+            SendAnchorGeometry(viewportPx = viewport, turnSpanPx = span, anchorIndex = userItem.index)
+        }.collect { geometry ->
+            sendAnchorViewportPx.intValue = geometry.viewportPx
+            if (sendAnchor.anchoredUserMessageId == null) return@collect
+            // 视口变化（键盘收起等）会先把列表钳到底、留白随后才补上，锚定位置随之丢失；
+            // 锚定消息还在视口内时按原目标重新锚一次。
+            val viewportChanged = geometry.viewportPx != sendAnchor.anchoredViewportPx
+            sendAnchor.anchoredViewportPx = geometry.viewportPx
+            if (geometry.turnSpanPx == TURN_SPAN_KEEP) return@collect
+            val paddingPx = if (geometry.turnSpanPx == TURN_SPAN_EXCEEDS) {
+                0
+            } else {
+                (
+                    geometry.viewportPx -
+                        CHAT_NEW_MESSAGE_TOP_TAIL_PX -
+                        baseBottomPaddingPx -
+                        geometry.turnSpanPx
+                    ).coerceAtLeast(0)
+            }
+            if (sendAnchor.tailPaddingPx != paddingPx) sendAnchor.tailPaddingPx = paddingPx
+            if (viewportChanged && paddingPx > 0) {
+                geometry.anchorIndex?.let {
+                    listState.scrollToItem(it, -CHAT_NEW_MESSAGE_TOP_TAIL_PX)
+                }
+            }
+        }
+    }
     LaunchedEffect(conversationId) {
         snapshotFlow { listState.isScrollInProgress to listState.canFollowStreaming(messages.lastIndex) }
             .collect { (isScrollInProgress, isNearBottom) ->
@@ -1117,12 +1185,22 @@ fun ChatScreen(
         val scrollMode = chatAutoScrollMode(
             previous = previousAutoScrollKey,
             current = currentKey,
-            canFollowStreaming = streamingAutoScrollEnabled || listState.canFollowStreaming(messages.lastIndex),
+            // 留白还在收缩期时视口没满，跟底会来回抖动，等留白归零再恢复。
+            canFollowStreaming =
+                (streamingAutoScrollEnabled || listState.canFollowStreaming(messages.lastIndex)) &&
+                sendAnchor.tailPaddingPx == 0,
         )
         previousAutoScrollKey = currentKey
+        val lastUserMessageIndex = messages.indexOfLast { it.role == MessageRole.USER }
         when (scrollMode) {
             ChatAutoScrollMode.JUMP_TO_BOTTOM -> {
                 chatScrollTarget(scrollMode, messages.lastIndex)?.let {
+                    listState.scrollToItem(it.index, it.scrollOffset)
+                }
+            }
+            ChatAutoScrollMode.NEW_USER_TO_TOP -> {
+                streamingAutoScrollEnabled = true
+                chatScrollTarget(scrollMode, messages.lastIndex, lastUserMessageIndex)?.let {
                     listState.scrollToItem(it.index, it.scrollOffset)
                 }
             }
@@ -2837,7 +2915,13 @@ fun ChatScreen(
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
                 state = listState,
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                contentPadding = PaddingValues(
+                    start = CHAT_LIST_EDGE_PADDING_DP.dp,
+                    end = CHAT_LIST_EDGE_PADDING_DP.dp,
+                    top = CHAT_LIST_EDGE_PADDING_DP.dp,
+                    bottom = CHAT_LIST_EDGE_PADDING_DP.dp +
+                        with(LocalDensity.current) { sendAnchor.tailPaddingPx.toDp() },
+                ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 itemsIndexed(messages, key = { _, item -> item.id }) { index, message ->
@@ -3306,6 +3390,7 @@ internal data class AutoScrollKey(
     val lastMessageStatus: MessageStatus?,
     val lastMessageContentLength: Int,
     val lastMessageUpdatedAt: Long,
+    val lastMessageRole: MessageRole? = null,
 )
 
 internal fun autoScrollKey(messages: List<ChatMessage>): AutoScrollKey {
@@ -3316,6 +3401,7 @@ internal fun autoScrollKey(messages: List<ChatMessage>): AutoScrollKey {
         lastMessageStatus = lastMessage?.status,
         lastMessageContentLength = lastMessage?.content?.length ?: 0,
         lastMessageUpdatedAt = lastMessage?.updatedAt ?: 0L,
+        lastMessageRole = lastMessage?.role,
     )
 }
 
@@ -3324,6 +3410,7 @@ internal enum class ChatAutoScrollMode {
     JUMP_TO_BOTTOM,
     ANIMATE_TO_BOTTOM,
     STREAM_TO_BOTTOM,
+    NEW_USER_TO_TOP,
 }
 
 internal data class ChatScrollTarget(
@@ -3331,7 +3418,11 @@ internal data class ChatScrollTarget(
     val scrollOffset: Int,
 )
 
-internal fun chatScrollTarget(mode: ChatAutoScrollMode, lastMessageIndex: Int): ChatScrollTarget? {
+internal fun chatScrollTarget(
+    mode: ChatAutoScrollMode,
+    lastMessageIndex: Int,
+    lastUserMessageIndex: Int = lastMessageIndex,
+): ChatScrollTarget? {
     if (lastMessageIndex < 0) return null
     return when (mode) {
         ChatAutoScrollMode.JUMP_TO_BOTTOM,
@@ -3340,8 +3431,47 @@ internal fun chatScrollTarget(mode: ChatAutoScrollMode, lastMessageIndex: Int): 
             scrollOffset = CHAT_SCROLL_TO_BOTTOM_OFFSET_PX,
         )
         ChatAutoScrollMode.ANIMATE_TO_BOTTOM -> ChatScrollTarget(index = lastMessageIndex, scrollOffset = 0)
+        // 负偏移让刚发的消息顶部停在视口顶部下方一小段，上一轮回复的末尾露出来作为衔接。
+        ChatAutoScrollMode.NEW_USER_TO_TOP -> ChatScrollTarget(
+            index = if (lastUserMessageIndex >= 0) lastUserMessageIndex else lastMessageIndex,
+            scrollOffset = -CHAT_NEW_MESSAGE_TOP_TAIL_PX,
+        )
         ChatAutoScrollMode.NONE -> null
     }
+}
+
+// 发送后紧跟着会追加助手 PENDING 占位（内容为空），这一次追加同样要保持用户消息的顶部锚定，
+// 否则刚顶上去的消息立刻被滚回底部。
+private fun AutoScrollKey.isFreshSendTail(): Boolean =
+    lastMessageRole == MessageRole.USER ||
+        (
+            lastMessageRole == MessageRole.ASSISTANT &&
+                lastMessageStatus == MessageStatus.PENDING &&
+                lastMessageContentLength == 0
+            )
+
+internal data class SendAnchorGeometry(
+    val viewportPx: Int,
+    val turnSpanPx: Int,
+    val anchorIndex: Int?,
+)
+
+// turnSpanPx 语义：>=0 为实测跨度；TURN_SPAN_KEEP 表示本帧无法观测（锚定消息不在视口内，
+// 留白保持不动——锁存瞬态和用户上翻都会走到这里，归零会把刚撑起的留白误杀）；TURN_SPAN_EXCEEDS
+// 表示本轮内容已超出视口（留白归零，交回常规跟底）。
+private const val TURN_SPAN_KEEP = -1
+private const val TURN_SPAN_EXCEEDS = -2
+
+/**
+ * 发送锚定：把刚发送的用户消息停在视口顶部、上一轮末尾露出尾巴，依赖列表底部一段
+ * 动态留白（视口高 − 尾巴 − 本轮跨度）。答案流入时留白等量收缩、视图不动；缩到 0 后
+ * 恢复常规跟底。anchoredUserMessageId 只在本会话发送时更新，重开会话不产生留白。
+ */
+private class SendAnchorTracker {
+    var lastKey: AutoScrollKey? = null
+    var anchoredUserMessageId: String? = null
+    var anchoredViewportPx = 0
+    var tailPaddingPx by mutableIntStateOf(0)
 }
 
 internal fun chatAutoScrollMode(
@@ -3352,6 +3482,7 @@ internal fun chatAutoScrollMode(
     current.messageCount == 0 -> ChatAutoScrollMode.NONE
     previous == null -> ChatAutoScrollMode.JUMP_TO_BOTTOM
     previous.messageCount == 0 -> ChatAutoScrollMode.JUMP_TO_BOTTOM
+    current.messageCount > previous.messageCount && current.isFreshSendTail() -> ChatAutoScrollMode.NEW_USER_TO_TOP
     current.messageCount > previous.messageCount -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
     current.lastMessageId != previous.lastMessageId -> ChatAutoScrollMode.ANIMATE_TO_BOTTOM
     canFollowStreaming &&
@@ -4060,6 +4191,8 @@ internal const val MAX_CHAT_IMAGE_BYTES = 8L * 1024L * 1024L
 private const val MAX_CHAT_CONTENT_WIDTH_DP = 760
 private const val MAX_MESSAGE_BUBBLE_WIDTH_DP = 700
 internal const val CHAT_SCROLL_TO_BOTTOM_OFFSET_PX = 1_000_000
+internal const val CHAT_NEW_MESSAGE_TOP_TAIL_PX = 150
+private val CHAT_LIST_EDGE_PADDING_DP = 14
 private const val STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 640
 private const val MAX_FILE_CHANGE_CARD_ITEMS = 6
 private const val MAX_FILE_CHANGE_CONTEXT_MESSAGES = 12
