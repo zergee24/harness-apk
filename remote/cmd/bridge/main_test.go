@@ -3306,7 +3306,7 @@ func TestSuperviseBackendRestartsCrashedBackendAndLeavesOthersAlive(t *testing.T
 }
 
 func TestParseBackendSpecsKnownDSH(t *testing.T) {
-	specs, err := parseBackendSpecs([]string{"codex", "dsh"}, "codex-exec")
+	specs, err := parseBackendSpecs([]string{"codex", "dsh"}, "codex-exec", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3340,24 +3340,24 @@ func TestParseBackendSpecsKnownDSH(t *testing.T) {
 }
 
 func TestParseBackendSpecsCustomExecutableAndDefaults(t *testing.T) {
-	specs, err := parseBackendSpecs(nil, "codex-exec")
+	specs, err := parseBackendSpecs(nil, "codex-exec", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(specs) != 1 || specs[0].ID != "codex" || specs[0].Exec != "codex-exec" {
 		t.Fatalf("default specs = %#v", specs)
 	}
-	specs, err = parseBackendSpecs([]string{"aux=/opt/tools/appserver"}, "codex-exec")
+	specs, err = parseBackendSpecs([]string{"aux=/opt/tools/appserver"}, "codex-exec", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(specs) != 1 || specs[0].ID != "aux" || specs[0].Exec != "/opt/tools/appserver" {
 		t.Fatalf("custom specs = %#v", specs)
 	}
-	if _, err := parseBackendSpecs([]string{"nope"}, "codex-exec"); err == nil {
+	if _, err := parseBackendSpecs([]string{"nope"}, "codex-exec", ""); err == nil {
 		t.Fatal("unknown bare backend id must be rejected")
 	}
-	if _, err := parseBackendSpecs([]string{"codex", "codex"}, "codex-exec"); err == nil {
+	if _, err := parseBackendSpecs([]string{"codex", "codex"}, "codex-exec", ""); err == nil {
 		t.Fatal("duplicate backend ids must be rejected")
 	}
 }

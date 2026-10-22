@@ -291,10 +291,11 @@ func runServe(defaultPath string, args []string) {
 	flags := flag.NewFlagSet("serve", flag.ExitOnError)
 	statePath := flags.String("state", defaultPath, "bridge state file")
 	codex := flags.String("codex", "codex", "Codex executable")
+	codexProxy := flags.String("codex-proxy", "", "可选：codex 后端子进程的 HTTPS 代理（chatgpt.com 需国际网络时设置；dsh/relay 不受影响）")
 	var backendSpecs stringList
 	flags.Var(&backendSpecs, "backend", "backend <id> or <id>=<executable>; repeatable (default: codex)")
 	_ = flags.Parse(args)
-	specs, err := parseBackendSpecs(backendSpecs, *codex)
+	specs, err := parseBackendSpecs(backendSpecs, *codex, *codexProxy)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -388,7 +389,7 @@ func (s *stringList) Set(value string) error {
 // parseBackendSpecs turns --backend values into ordered backend specs. A bare
 // id resolves a known backend (codex); <id>=<executable> registers any
 // executable speaking the canonical app-server protocol under that id.
-func parseBackendSpecs(raw []string, codexExec string) ([]backend.Spec, error) {
+func parseBackendSpecs(raw []string, codexExec string, codexProxy string) ([]backend.Spec, error) {
 	if len(raw) == 0 {
 		raw = []string{"codex"}
 	}
@@ -428,9 +429,19 @@ func parseBackendSpecs(raw []string, codexExec string) ([]backend.Spec, error) {
 			capabilities = backend.DSHCapabilities()
 			args = []string{"--profile", "appserver", "--listen", "stdio://"}
 		}
-		specs = append(specs, backend.Spec{
+		spec := backend.Spec{
 			ID: id, Name: name, Capabilities: capabilities, Exec: exec, Args: args,
-		})
+		}
+		// codex 后端要直连 chatgpt.com（限额/credits 查询与对话流），国内环境
+		// 需要走代理；dsh（DeepSeek 国内 API）与 relay 通道保持直连不受影响。
+		if id == protocol.DefaultBackendID && codexProxy != "" {
+			spec.Env = append(os.Environ(),
+				"HTTPS_PROXY="+codexProxy,
+				"HTTP_PROXY="+codexProxy,
+				"NO_PROXY=localhost,127.0.0.1",
+			)
+		}
+		specs = append(specs, spec)
 	}
 	return specs, nil
 }

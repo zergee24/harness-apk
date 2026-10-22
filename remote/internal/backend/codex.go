@@ -22,6 +22,9 @@ type Spec struct {
 	Capabilities []string
 	Exec         string // executable
 	Args         []string
+	// Env 非空时作为子进程的完整环境（用于给需要国际网络的 codex 后端
+	// 注入代理变量）；为空时继承 bridge 自身环境。
+	Env []string
 }
 
 // Codex is a supervised stdio backend process speaking the canonical
@@ -50,6 +53,9 @@ func StartCodex(spec Spec) (*Codex, error) {
 		args = []string{"app-server", "--listen", "stdio://"}
 	}
 	cmd := exec.Command(spec.Exec, args...)
+	if len(spec.Env) > 0 {
+		cmd.Env = spec.Env
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
