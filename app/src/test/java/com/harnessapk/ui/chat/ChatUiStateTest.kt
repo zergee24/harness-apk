@@ -744,20 +744,83 @@ class ChatUiStateTest {
     }
 
     @Test
-    fun autoScrollModeAnimatesOnlyWhenANewMessageAppears() {
+    fun autoScrollModeAnchorsFreshUserMessageToTop() {
         val previous = autoScrollKey(
-            listOf(userMessage(id = "first", content = "第一条")),
+            listOf(
+                userMessage(id = "user-1", content = "第一条"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "上一轮回复"),
+            ),
         )
         val current = autoScrollKey(
             listOf(
-                userMessage(id = "first", content = "第一条"),
+                userMessage(id = "user-1", content = "第一条"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "上一轮回复"),
+                userMessage(id = "user-2", content = "新发送"),
+            ),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.NEW_USER_TO_TOP,
+            chatAutoScrollMode(previous = previous, current = current),
+        )
+    }
+
+    @Test
+    fun autoScrollModeKeepsTopAnchorWhenPendingPlaceholderFollowsSend() {
+        val previous = autoScrollKey(
+            listOf(userMessage(id = "user-1", content = "新发送")),
+        )
+        val current = autoScrollKey(
+            listOf(
+                userMessage(id = "user-1", content = "新发送"),
                 assistantMessage(status = MessageStatus.PENDING, content = ""),
+            ),
+        )
+
+        assertEquals(
+            ChatAutoScrollMode.NEW_USER_TO_TOP,
+            chatAutoScrollMode(previous = previous, current = current),
+        )
+    }
+
+    @Test
+    fun autoScrollModeAnimatesWhenNonSendAssistantMessageAppears() {
+        val previous = autoScrollKey(
+            listOf(userMessage(id = "user-1", content = "第一条")),
+        )
+        val current = autoScrollKey(
+            listOf(
+                userMessage(id = "user-1", content = "第一条"),
+                assistantMessage(status = MessageStatus.SUCCEEDED, content = "历史回复"),
             ),
         )
 
         assertEquals(
             ChatAutoScrollMode.ANIMATE_TO_BOTTOM,
             chatAutoScrollMode(previous = previous, current = current),
+        )
+    }
+
+    @Test
+    fun freshUserMessageScrollTargetLeavesPreviousTailAboveViewportTop() {
+        assertEquals(
+            ChatScrollTarget(
+                index = 4,
+                scrollOffset = -CHAT_NEW_MESSAGE_TOP_TAIL_PX,
+            ),
+            chatScrollTarget(
+                ChatAutoScrollMode.NEW_USER_TO_TOP,
+                lastMessageIndex = 5,
+                lastUserMessageIndex = 4,
+            ),
+        )
+    }
+
+    @Test
+    fun freshUserMessageScrollTargetFallsBackToLastMessageWhenNoUserMessage() {
+        assertEquals(
+            ChatScrollTarget(index = 2, scrollOffset = -CHAT_NEW_MESSAGE_TOP_TAIL_PX),
+            chatScrollTarget(ChatAutoScrollMode.NEW_USER_TO_TOP, lastMessageIndex = 2),
         )
     }
 

@@ -64,7 +64,7 @@ internal fun WorkHomeScreen(
         WorkHomeEntry(
             testTag = "work-home-dashboard",
             title = "Agent 副屏",
-            supportingText = "Mac 线程状态仪表 · 点卡片聚焦线程",
+            supportingText = null,
             icon = Icons.Outlined.Dashboard,
             onClick = { context.startActivity(Intent(context, DashboardActivity::class.java)) },
         )
@@ -73,26 +73,22 @@ internal fun WorkHomeScreen(
             title = "Codex",
             // Codex 入口改浏览器套壳：手机无官方 App（依赖 Google Play），
             // 浏览器登录同一 ChatGPT 账号即可用云端任务；与 Mac 远程连接独立。
-            supportingText = "Codex 网页 · 浏览器登录 ChatGPT 后云端任务",
-            icon = Icons.Outlined.Dns,
+            supportingText = null,
+            icon = CodexBrandIcon,
             onClick = { context.startActivity(Intent(context, CodexWebActivity::class.java)) },
         )
         WorkHomeEntry(
             testTag = "work-home-zcode",
             title = "ZCode",
-            supportingText = "远程控制网页 · 独立于节点配对",
-            icon = Icons.Outlined.Terminal,
+            supportingText = null,
+            icon = ZcodeBrandIcon,
             onClick = { context.startActivity(Intent(context, ZcodeWebRemoteActivity::class.java)) },
         )
         WorkHomeEntry(
             testTag = "work-home-dsh",
             title = "DSH",
-            supportingText = if (remotePaired) {
-                "DeepSeek Harness · 续接 Mac 上的会话"
-            } else {
-                "需先配对 Mac Bridge 节点"
-            },
-            icon = Icons.Outlined.Monitor,
+            supportingText = null,
+            icon = DshBrandIcon,
             onClick = onOpenDsh,
         )
         Spacer(modifier = Modifier.padding(top = 8.dp))
@@ -116,7 +112,7 @@ internal fun WorkHomeScreen(
 private fun WorkHomeEntry(
     testTag: String,
     title: String,
-    supportingText: String,
+    supportingText: String?,
     icon: ImageVector,
     onClick: (() -> Unit)?,
     modifier: Modifier = Modifier,
@@ -153,7 +149,7 @@ private fun WorkHomeEntry(
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = supportingText,
+                    text = supportingText.orEmpty(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
