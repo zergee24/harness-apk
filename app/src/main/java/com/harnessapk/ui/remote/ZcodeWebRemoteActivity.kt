@@ -32,6 +32,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material3.Button
@@ -43,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -149,6 +151,8 @@ fun ZcodeWebRemoteScreen(
     var loadedUrl by remember { mutableStateOf<String?>(null) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     var pairingText by remember { mutableStateOf("") }
+    var editingLink by remember { mutableStateOf(false) }
+    var newLinkText by remember { mutableStateOf("") }
     var pageZoom by rememberSaveable { mutableFloatStateOf(1f) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
@@ -283,17 +287,19 @@ fun ZcodeWebRemoteScreen(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        IconButton(onClick = { reconnect("refresh") }, enabled = !busy, modifier = Modifier.size(44.dp)) {
-                            if (busy) {
-                                CircularProgressIndicator(Modifier.size(18.dp))
-                            } else {
-                                Icon(
-                                    Icons.Outlined.Refresh,
-                                    contentDescription = "重连：让 Mac 刷新二维码并返回新链接",
-                                    modifier = Modifier.size(22.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
+                        IconButton(
+                            onClick = {
+                                newLinkText = ""
+                                editingLink = true
+                            },
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Edit,
+                                contentDescription = "输入新的远程连接",
+                                modifier = Modifier.size(22.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -352,7 +358,48 @@ fun ZcodeWebRemoteScreen(
                             view.destroy()
                         },
                     )
-                    if (webError) {
+                    if (editingLink) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(24.dp),
+                        tonalElevation = 2.dp,
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Column(
+                            Modifier.padding(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Text("输入新的远程连接", style = MaterialTheme.typography.titleSmall)
+                            OutlinedTextField(
+                                value = newLinkText,
+                                onValueChange = { newLinkText = it },
+                                label = { Text("粘贴 zcode 远程连接") },
+                                minLines = 2,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.align(Alignment.End),
+                            ) {
+                                TextButton(onClick = { editingLink = false; newLinkText = "" }) {
+                                    Text("取消")
+                                }
+                                Button(
+                                    onClick = {
+                                        saveAndLoad(newLinkText)
+                                        newLinkText = ""
+                                        editingLink = false
+                                    },
+                                    enabled = looksLikeZcodeRemoteUrl(newLinkText),
+                                ) {
+                                    Text("保存并打开")
+                                }
+                            }
+                        }
+                    }
+                }
+                if (webError) {
                         Surface(
                             modifier = Modifier.align(Alignment.Center).padding(24.dp),
                             tonalElevation = 2.dp,
