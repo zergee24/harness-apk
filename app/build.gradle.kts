@@ -304,10 +304,7 @@ android {
             buildConfigField(
                 "String",
                 "CONFIG_RELAY_OVERRIDE",
-                providers.gradleProperty("configRelayOverride")
-                    .orElse("http://localhost:8080")
-                    .get()
-                    .asBuildConfigString(),
+                providers.gradleProperty("configRelayOverride").orElse("").get().asBuildConfigString(),
             )
         }
     }
