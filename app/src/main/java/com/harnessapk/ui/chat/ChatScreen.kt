@@ -162,6 +162,9 @@ import com.harnessapk.chat.DraftImageAttachment
 import com.harnessapk.chat.DraftAttachmentState
 import com.harnessapk.chat.DraftAttachmentRecord
 import com.harnessapk.network.NetworkFailureHints
+import com.harnessapk.system.BackgroundPermissionGuide
+import com.harnessapk.system.backgroundPermissionGuide
+import com.harnessapk.system.openBackgroundPermissionSettings
 import com.harnessapk.chat.DraftAttachmentKind
 import com.harnessapk.chat.DraftImportOutcome
 import com.harnessapk.chat.DraftSaveResult
@@ -3045,6 +3048,14 @@ fun ChatScreen(
                                             )
                                         }
                                     },
+                                    onOpenBackgroundPermissions =
+                                        if (backgroundPermissionGuide() == BackgroundPermissionGuide.HONOR_HUAWEI) {
+                                            executionEntry?.takeIf {
+                                                message.role == MessageRole.ASSISTANT && it.interruptionReason != null
+                                            }?.let { { openBackgroundPermissionSettings(context) } }
+                                        } else {
+                                            null
+                                        },
                                     onOpenWikiCitation = onOpenWikiCitation,
                                     onOpenProjectSource = { evidenceId ->
                                         scope.launch {
@@ -5111,6 +5122,7 @@ private fun MessageBubble(
     onDeleteQueued: (() -> Unit)?,
     onRetryFailed: (() -> Unit)?,
     onOpenBatterySettings: (() -> Unit)?,
+    onOpenBackgroundPermissions: (() -> Unit)? = null,
     onOpenWikiCitation: (String) -> Unit,
     onOpenProjectSource: (String) -> Unit,
     reasoningStreaming: Boolean,
@@ -5282,6 +5294,11 @@ private fun MessageBubble(
                                     onOpenBatterySettings?.let { openSettings ->
                                         TextButton(onClick = openSettings) {
                                             Text("检查电池限制")
+                                        }
+                                    }
+                                    onOpenBackgroundPermissions?.let { openPermissions ->
+                                        TextButton(onClick = openPermissions) {
+                                            Text("去开启后台权限")
                                         }
                                     }
                                 }

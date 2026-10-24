@@ -16,6 +16,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.CancelPresentation
@@ -51,6 +52,8 @@ fun SettingsScreen(
     onOpenUpdates: () -> Unit,
     onOpenRemote: () -> Unit = {},
     onOpenConfigPackage: () -> Unit = {},
+    onOpenBackgroundPermissions: () -> Unit = {},
+    vendorBackgroundGuide: Boolean = false,
     simpleMode: Boolean = false,
     onSimpleModeChange: (Boolean) -> Unit = {},
     showUpdateBadge: Boolean = false,
@@ -63,7 +66,11 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        val visibleGroups = settingsDestinations(showUpdateBadge = showUpdateBadge, simpleMode = simpleMode)
+        val visibleGroups = settingsDestinations(
+            showUpdateBadge = showUpdateBadge,
+            simpleMode = simpleMode,
+            vendorBackgroundGuide = vendorBackgroundGuide,
+        )
         visibleGroups.forEach { (group, items) ->
             Text(
                 text = group.title,
@@ -87,6 +94,7 @@ fun SettingsScreen(
                         "wikis" -> onOpenWikiLibrary
                         "updates" -> onOpenUpdates
                         "config" -> onOpenConfigPackage
+                        "background" -> onOpenBackgroundPermissions
                         else -> ({})
                     },
                 )
@@ -171,5 +179,6 @@ private fun iconFor(id: String): ImageVector = when (id) {
     "wikis" -> Icons.AutoMirrored.Outlined.MenuBook
     "updates" -> Icons.Outlined.SystemUpdate
     "config" -> Icons.Outlined.IosShare
+    "background" -> Icons.Outlined.Bolt
     else -> Icons.Outlined.Settings
 }
