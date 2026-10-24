@@ -237,8 +237,19 @@ class ChatExecutionModelsTest {
     @Test
     fun automaticRetryBackoffIsBoundedAndIncreases() {
         assertEquals(1_000L, automaticRetryDelayMillis(1))
-        assertEquals(2_500L, automaticRetryDelayMillis(2))
-        assertEquals(2_500L, automaticRetryDelayMillis(3))
+        assertEquals(5_000L, automaticRetryDelayMillis(2))
+        assertEquals(20_000L, automaticRetryDelayMillis(3))
+        assertEquals(60_000L, automaticRetryDelayMillis(4))
+        assertEquals(60_000L, automaticRetryDelayMillis(9))
+    }
+
+    @Test
+    fun automaticRetryWindowSurvivesBackgroundNetworkStall() {
+        // 退后台被系统掐网的场景：4 发重试要撑出约一分半的窗口，
+        // 用户回前台时仍有一发可跑，而不是后台期间就打死。
+        val totalWindow = (1..MAX_AUTOMATIC_RETRIES).sumOf { automaticRetryDelayMillis(it) }
+        assertTrue(totalWindow >= 80_000L)
+        assertEquals(4, MAX_AUTOMATIC_RETRIES)
     }
 
     @Test

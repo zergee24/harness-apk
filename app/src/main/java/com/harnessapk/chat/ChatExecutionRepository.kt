@@ -381,5 +381,7 @@ private fun ChatExecutionEntry.toEntity(): ChatExecutionEntryEntity = ChatExecut
     updatedAt = updatedAt,
 )
 
-internal const val MAX_AUTOMATIC_RETRIES = 2
+// 退后台后系统可能掐断网络（ROM 速冻/Doze），重试窗口要撑到用户回前台时还剩一发，
+// 否则一次后台停顿就把整轮打死了。
+internal const val MAX_AUTOMATIC_RETRIES = 4
 internal const val BACKGROUND_INTERRUPTED_MESSAGE = "后台生成多次中断，请重试或检查系统电池限制。"

@@ -311,7 +311,9 @@ internal fun notifyAgentMemoryAfterTerminalPersistence(
 
 internal fun automaticRetryDelayMillis(retryCount: Int): Long = when (retryCount) {
     1 -> 1_000L
-    else -> 2_500L
+    2 -> 5_000L
+    3 -> 20_000L
+    else -> 60_000L
 }
 
 private const val GENERATION_ATTEMPT_TIMEOUT_MILLIS = 15 * 60 * 1_000L
