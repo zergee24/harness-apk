@@ -20,10 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Dashboard
-import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.Monitor
-import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -42,13 +39,42 @@ import com.harnessapk.ui.remote.CodexWebActivity
 import com.harnessapk.ui.remote.ZcodeWebRemoteActivity
 import com.harnessapk.ui.theme.HarnessSpacing
 
-// 工作模式首页：远程代理为主入口（Codex / ZCode / DSH），
-// 本地项目工作台（含自主 Git）降级为次级入口。
+// 工作模式入口卡片配置化：新增后端/工具 = 追加一条 WorkEntryConfig。
+// kind 分派启动方式；启动扩展项（远程后端预选）随条目声明。
+internal enum class WorkEntryKind {
+    Dashboard,     // 原生页面：Agent 副屏常显
+    CodexWeb,      // 浏览器套壳：dots 首页（桌面 UA）
+    ZcodeWeb,      // 浏览器套壳：配对存储里的 zcode 远程链接
+    RemoteBackend, // bridge 远程页：按预选后端打开
+}
+
+internal data class WorkEntryConfig(
+    val testTag: String,
+    val title: String,
+    val icon: ImageVector,
+    val kind: WorkEntryKind,
+    // 启动扩展项：RemoteBackend 的预选后端 id。
+    val backendId: String? = null,
+)
+
+// 远程代理入口按使用频率排序；本地项目工作台为次级分区。
+internal val workHomeEntries = listOf(
+    WorkEntryConfig("work-home-dashboard", "Agent 副屏", Icons.Outlined.Dashboard, WorkEntryKind.Dashboard),
+    WorkEntryConfig("work-home-codex", "Codex", CodexBrandIcon, WorkEntryKind.CodexWeb),
+    WorkEntryConfig("work-home-zcode", "ZCode", ZcodeBrandIcon, WorkEntryKind.ZcodeWeb),
+    WorkEntryConfig(
+        "work-home-dsh",
+        "DSH",
+        DshBrandIcon,
+        WorkEntryKind.RemoteBackend,
+        backendId = "dsh",
+    ),
+)
+
 @Composable
 internal fun WorkHomeScreen(
     contentPadding: PaddingValues,
-    remotePaired: Boolean,
-    onOpenDsh: () -> Unit,
+    onOpenRemoteBackend: (String) -> Unit,
     onOpenWorkbench: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -61,36 +87,35 @@ internal fun WorkHomeScreen(
             .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        WorkHomeEntry(
-            testTag = "work-home-dashboard",
-            title = "Agent 副屏",
-            supportingText = null,
-            icon = Icons.Outlined.Dashboard,
-            onClick = { context.startActivity(Intent(context, DashboardActivity::class.java)) },
-        )
-        WorkHomeEntry(
-            testTag = "work-home-codex",
-            title = "Codex",
-            // Codex 入口改浏览器套壳：手机无官方 App（依赖 Google Play），
-            // 浏览器登录同一 ChatGPT 账号即可用云端任务；与 Mac 远程连接独立。
-            supportingText = null,
-            icon = CodexBrandIcon,
-            onClick = { context.startActivity(Intent(context, CodexWebActivity::class.java)) },
-        )
-        WorkHomeEntry(
-            testTag = "work-home-zcode",
-            title = "ZCode",
-            supportingText = null,
-            icon = ZcodeBrandIcon,
-            onClick = { context.startActivity(Intent(context, ZcodeWebRemoteActivity::class.java)) },
-        )
-        WorkHomeEntry(
-            testTag = "work-home-dsh",
-            title = "DSH",
-            supportingText = null,
-            icon = DshBrandIcon,
-            onClick = onOpenDsh,
-        )
+        workHomeEntries.forEach { entry ->
+            val launch: () -> Unit = when (entry.kind) {
+                WorkEntryKind.Dashboard -> {
+                    {
+                        context.startActivity(Intent(context, DashboardActivity::class.java))
+                    }
+                }
+                WorkEntryKind.CodexWeb -> {
+                    {
+                        context.startActivity(Intent(context, CodexWebActivity::class.java))
+                    }
+                }
+                WorkEntryKind.ZcodeWeb -> {
+                    {
+                        context.startActivity(Intent(context, ZcodeWebRemoteActivity::class.java))
+                    }
+                }
+                WorkEntryKind.RemoteBackend -> {
+                    { onOpenRemoteBackend(entry.backendId.orEmpty()) }
+                }
+            }
+            WorkHomeEntry(
+                testTag = entry.testTag,
+                title = entry.title,
+                supportingText = null,
+                icon = entry.icon,
+                onClick = launch,
+            )
+        }
         Spacer(modifier = Modifier.padding(top = 8.dp))
         Text(
             text = "本地",

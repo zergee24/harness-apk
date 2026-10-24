@@ -35,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -65,29 +66,40 @@ fun SettingsScreen(
         val destinations = settingsDestinations(showUpdateBadge = showUpdateBadge)
         // 简洁模式（父母设备）只留检查更新与配置包：排障走配置包重导入，
         // 智能体/知识库从生活页 ⋯ 菜单进入，其余管理项对父母是噪音。
-        val visibleDestinations = if (simpleMode) {
-            destinations.filter { it.id == "updates" || it.id == "config" }
-        } else {
-            destinations
-        }
-        visibleDestinations.forEach { destination ->
-            SettingsRow(
-                destination = destination,
-                icon = iconFor(destination.id),
-                onClick = when (destination.id) {
-                    "remote" -> onOpenRemote
-                    "models" -> onOpenProviders
-                    "search" -> onOpenSearch
-                    "voice" -> onOpenVoice
-                    "git" -> onOpenGit
-                    "skills" -> onOpenSkills
-                    "agents" -> onOpenAgentPackages
-                    "wikis" -> onOpenWikiLibrary
-                    "updates" -> onOpenUpdates
-                    "config" -> onOpenConfigPackage
-                    else -> ({})
-                },
+        val visibleGroups = destinations.map { (group, items) ->
+            group to if (simpleMode) {
+                items.filter { it.id == "updates" || it.id == "config" }
+            } else {
+                items
+            }
+        }.filter { (_, items) -> items.isNotEmpty() }
+        visibleGroups.forEach { (group, items) ->
+            Text(
+                text = group.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
             )
+            items.forEach { destination ->
+                SettingsRow(
+                    destination = destination,
+                    icon = iconFor(destination.id),
+                    onClick = when (destination.id) {
+                        "remote" -> onOpenRemote
+                        "models" -> onOpenProviders
+                        "search" -> onOpenSearch
+                        "voice" -> onOpenVoice
+                        "git" -> onOpenGit
+                        "skills" -> onOpenSkills
+                        "agents" -> onOpenAgentPackages
+                        "wikis" -> onOpenWikiLibrary
+                        "updates" -> onOpenUpdates
+                        "config" -> onOpenConfigPackage
+                        else -> ({})
+                    },
+                )
+            }
         }
         SimpleModeRow(checked = simpleMode, onCheckedChange = onSimpleModeChange)
     }
