@@ -12,6 +12,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
+import com.harnessapk.common.SystemTimeProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
@@ -73,6 +74,10 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         val container = (application as HarnessApkApplication).container
         lifecycleScope.launch {
+            // 回前台先把后台掐网打死的失败项自动补跑一轮（豆包式续跑，窗口期内生效）
+            container.chatExecutionCoordinator.autoResumeNetworkFailures(
+                nowMillis = SystemTimeProvider.nowMillis(),
+            )
             if (container.chatExecutionRepository.hasOpenWork()) {
                 ChatExecutionService.start(this@MainActivity)
             }

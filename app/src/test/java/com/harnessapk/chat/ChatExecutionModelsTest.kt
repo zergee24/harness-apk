@@ -253,6 +253,40 @@ class ChatExecutionModelsTest {
     }
 
     @Test
+    fun onlyRecentNetworkFailuresAutoResumeOnForeground() {
+        val now = 1_000_000L
+        assertTrue(
+            networkFailureAutoResumable(
+                interruptionReason = ChatInterruptionReason.NETWORK,
+                updatedAt = now - NETWORK_AUTO_RESUME_WINDOW_MILLIS,
+                nowMillis = now,
+            ),
+        )
+        // 隔夜的旧失败不该在开 App 时突然补发，仍走手动重试。
+        assertFalse(
+            networkFailureAutoResumable(
+                interruptionReason = ChatInterruptionReason.NETWORK,
+                updatedAt = now - NETWORK_AUTO_RESUME_WINDOW_MILLIS - 1,
+                nowMillis = now,
+            ),
+        )
+        assertFalse(
+            networkFailureAutoResumable(
+                interruptionReason = ChatInterruptionReason.SERVICE_TIMEOUT,
+                updatedAt = now,
+                nowMillis = now,
+            ),
+        )
+        assertFalse(
+            networkFailureAutoResumable(
+                interruptionReason = null,
+                updatedAt = now,
+                nowMillis = now,
+            ),
+        )
+    }
+
+    @Test
     fun persistedReplyCompletionNotifiesMemoryOnlyForSuccessAndIsolatesCallbackFailure() {
         val notified = mutableListOf<String>()
 
