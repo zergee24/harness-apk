@@ -947,15 +947,13 @@ fun HarnessApkApp(
                     } else {
                         WorkHomeScreen(
                             contentPadding = padding,
-                            remotePaired = remoteProfile != null,
-                            onOpenDsh = {
-                                // The DSH card opens the remote screen with the
-                                // dsh backend preselected; pairing is shared
-                                // with the Codex entry, so an unpaired phone
-                                // still lands on the node pairing page.
+                            onOpenRemoteBackend = { backendId ->
+                                // The remote screen opens with the requested
+                                // backend preselected; an unpaired phone lands
+                                // on the node pairing page (pairing is shared).
                                 navController.navigate(
                                     if (remoteProfile != null) {
-                                        Routes.remoteControl(backendId = "dsh")
+                                        Routes.remoteControl(backendId = backendId)
                                     } else {
                                         Routes.RemoteSettings
                                     },
