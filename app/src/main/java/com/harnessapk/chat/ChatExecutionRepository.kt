@@ -212,12 +212,24 @@ class ChatExecutionRepository(
         val updated = entry.copy(
             status = ChatExecutionStatus.FAILED.name,
             assistantMessageId = assistantMessageId,
+            interruptionReason = if (isRetryableTransportFailure(failure)) {
+                ChatInterruptionReason.NETWORK.name
+            } else {
+                null
+            },
             errorMessage = errorMessage,
             updatedAt = timeProvider.nowMillis(),
         )
         dao.update(updated)
         updated.toDomain()
     }
+
+    // 回前台自动续跑的候选：因网络中断打死的失败项，且失败发生得还不够久——
+    // 刚退后台回来的人需要它自动补跑，隔夜的旧失败仍走手动重试。
+    suspend fun listAutoResumableNetworkFailures(nowMillis: Long): List<ChatExecutionEntry> =
+        dao.listByStatus(ChatExecutionStatus.FAILED.name)
+            .map(ChatExecutionEntryEntity::toDomain)
+            .filter { networkFailureAutoResumable(it.interruptionReason, it.updatedAt, nowMillis) }
 
     suspend fun recoverAfterProcessDeath(
         conversationId: String? = null,
@@ -385,3 +397,14 @@ private fun ChatExecutionEntry.toEntity(): ChatExecutionEntryEntity = ChatExecut
 // 否则一次后台停顿就把整轮打死了。
 internal const val MAX_AUTOMATIC_RETRIES = 4
 internal const val BACKGROUND_INTERRUPTED_MESSAGE = "后台生成多次中断，请重试或检查系统电池限制。"
+
+// 回前台自动续跑的判定：仅网络中断、且失败发生在窗口期内。
+internal const val NETWORK_AUTO_RESUME_WINDOW_MILLIS = 10 * 60 * 1_000L
+
+internal fun networkFailureAutoResumable(
+    interruptionReason: ChatInterruptionReason?,
+    updatedAt: Long,
+    nowMillis: Long,
+): Boolean =
+    interruptionReason == ChatInterruptionReason.NETWORK &&
+        updatedAt >= nowMillis - NETWORK_AUTO_RESUME_WINDOW_MILLIS

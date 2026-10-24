@@ -155,6 +155,19 @@ class ChatExecutionCoordinator(
         }
     }
 
+    // 回前台自动续跑：把后台期间因掐网打死的失败项重新入队一次（学豆包——用户不该
+    // 手动点重试才能拿回自己的回复）。每次回前台最多触发一轮，仍失败则留给手动重试。
+    fun autoResumeNetworkFailures(nowMillis: Long) {
+        scope.launch {
+            executionRepository.listAutoResumableNetworkFailures(nowMillis).forEach { entry ->
+                if (executionRepository.retryFailed(entry.id)) {
+                    ensureRunnerForEnqueue(entry.conversationId)
+                    onWorkScheduled()
+                }
+            }
+        }
+    }
+
     suspend fun close() {
         scope.coroutineContext[Job]?.cancelAndJoin()
     }
