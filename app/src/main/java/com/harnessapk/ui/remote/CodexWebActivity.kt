@@ -50,7 +50,8 @@ import com.harnessapk.ui.MainMode
 import com.harnessapk.ui.theme.ModeTheme
 
 /**
- * Codex 浏览器套壳：WebView 加载 Codex 网页入口（chatgpt.com/codex）。
+ * Codex 浏览器套壳：WebView 加载 dots 首页（chatgpt.com/dots/home，
+ * Mac 端 Quark 会话取证确认的实际使用入口；/codex 是旧落地页要多点一次）。
  * 手机上没有官方 Codex App（依赖 Google Play），浏览器登录同一 ChatGPT
  * 账号即可用云端任务；与 Mac 上 Codex 的远程连接（bridge 配对）是两条
  * 独立通道。顶栏 ✕/↻ + 页面缩放，交互同 ZCode 套壳。
@@ -95,7 +96,7 @@ class CodexWebActivity : ComponentActivity() {
     }
 }
 
-private const val CodexWebUrl = "https://chatgpt.com/codex"
+private const val CodexWebUrl = "https://chatgpt.com/dots/home"
 
 // Codex 网页端（dots）只对桌面环境开放：UA 伪装成 macOS Chrome，
 // 配合 navigator.platform/userAgentData 补丁（语义对齐 Chrome 桌面模式）。
