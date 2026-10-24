@@ -18,6 +18,7 @@ enum class SettingsGroup(val title: String) {
 fun settingsDestinations(
     showUpdateBadge: Boolean = false,
     simpleMode: Boolean = false,
+    vendorBackgroundGuide: Boolean = false,
 ): List<Pair<SettingsGroup, List<SettingsDestination>>> = listOf(
     SettingsGroup.Device to listOf(
         SettingsDestination(
@@ -30,6 +31,11 @@ fun settingsDestinations(
             title = "检查更新",
             description = "查看新版本并安装 APK 更新。",
             showBadge = showUpdateBadge,
+        ),
+        SettingsDestination(
+            id = "background",
+            title = "后台运行权限",
+            description = "允许退到主屏幕后继续联网生成，避免回复超时。",
         ),
     ),
     SettingsGroup.Conversation to listOf(
@@ -77,5 +83,13 @@ fun settingsDestinations(
         ),
     ),
 ).map { (group, items) ->
-    group to if (simpleMode) items.filter { it.id == "updates" || it.id == "config" } else items
+    group to if (simpleMode) {
+        items.filter {
+            it.id == "updates" || it.id == "config" || (it.id == "background" && vendorBackgroundGuide)
+        }
+    } else if (vendorBackgroundGuide) {
+        items
+    } else {
+        items.filterNot { it.id == "background" }
+    }
 }.filter { (_, items) -> items.isNotEmpty() }

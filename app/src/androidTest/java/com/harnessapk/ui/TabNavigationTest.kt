@@ -63,20 +63,20 @@ class TabNavigationTest {
     }
 
     @Test
-    fun dshEntryIsEnabledAndLeadsToPairingWhenUnpaired() {
+    fun dshEntryOpensTheBrowserShell() {
+        var opened = false
         composeRule.setContent {
             HarnessApkTheme {
-                HarnessApkApp()
+                HarnessApkApp(onOpenDshWeb = { opened = true })
             }
         }
         composeRule.onNodeWithTag("nav-WORK").performClick()
         composeRule.waitForIdle()
-        // The DSH card is a working entry, not a placeholder: an unpaired phone
-        // must reach the node pairing page rather than a dead card.
+        // DSH is a web UI entry: it opens the ZCode-style WebView shell
+        // instead of the app-server remote screen.
         composeRule.onNodeWithTag("work-home-dsh").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("在 Mac Bridge 上运行 pair 命令，然后扫描生成的二维码。节点默认不接受公开注册。")
-            .assertExists()
+        assertEquals(true, opened)
     }
 
     @Test

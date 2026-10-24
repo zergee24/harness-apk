@@ -287,12 +287,18 @@ async function turnsListResult(ctx, threadId, limit, sortDirection) {
 	const turns = projectTurns(resolved.events);
 	const data = turns.map((turn) => {
 		const timestamps = { startedAt: null, completedAt: null };
+		// dsh session events carry `time` (epoch milliseconds); `timestamp` is a
+		// codex-shaped alias some fixtures and older logs used. Read either, and
+		// keep a missing boundary null: the bridge maps an interrupted turn
+		// without completedAt to RUNNING instead of INTERRUPTED.
 		for (const event of resolved.events) {
 			if (turnID(event) !== turn.id) continue;
+			const time = event.time ?? event.timestamp;
+			const seconds = typeof time === "number" ? protocolSeconds(time) : null;
 			if (event.type === "turn/start" && timestamps.startedAt === null) {
-				timestamps.startedAt = protocolSeconds(event.timestamp ?? null);
+				timestamps.startedAt = seconds;
 			}
-			if (event.type === "turn/end") timestamps.completedAt = protocolSeconds(event.timestamp ?? null);
+			if (event.type === "turn/end") timestamps.completedAt = seconds;
 		}
 		return {
 			id: turn.id,

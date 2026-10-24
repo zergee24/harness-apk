@@ -82,4 +82,21 @@ class SettingsDestinationsTest {
 
         assertEquals(true, updates.showBadge)
     }
+
+    @Test
+    fun backgroundPermissionGuideOnlyShowsOnVendorsThatFreezeBackgroundApps() {
+        assertEquals(
+            listOf("remote", "updates", "background"),
+            settingsDestinations(vendorBackgroundGuide = true).first { it.first == SettingsGroup.Device }.second.map { it.id },
+        )
+        // 简洁模式（父母机器）也要能找到这个入口，而且不出现在非荣耀/华为机型上。
+        assertEquals(
+            listOf("updates", "background", "config"),
+            settingsDestinations(simpleMode = true, vendorBackgroundGuide = true).flatMap { it.second }.map { it.id },
+        )
+        assertEquals(
+            listOf("updates", "config"),
+            settingsDestinations(simpleMode = true, vendorBackgroundGuide = false).flatMap { it.second }.map { it.id },
+        )
+    }
 }

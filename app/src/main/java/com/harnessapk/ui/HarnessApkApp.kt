@@ -1,5 +1,6 @@
 package com.harnessapk.ui
 
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
@@ -83,6 +84,9 @@ import com.harnessapk.chat.LifeConversationOverviewState
 import com.harnessapk.storage.LifeConversationOrigin
 import com.harnessapk.project.Project
 import com.harnessapk.remote.RemoteConnectionService
+import com.harnessapk.system.BackgroundPermissionGuide
+import com.harnessapk.system.backgroundPermissionGuide
+import com.harnessapk.system.openBackgroundPermissionSettings
 import com.harnessapk.ui.capture.CaptureDestinationSheet
 import com.harnessapk.ui.capture.CaptureTransferOverlay
 import com.harnessapk.ui.agent.AgentPackagesScreen
@@ -119,6 +123,7 @@ import com.harnessapk.ui.wiki.WikiRoutes
 import com.harnessapk.ui.wiki.WikiSearchScreen
 import com.harnessapk.ui.wiki.WikiSourceReaderScreen
 import com.harnessapk.ui.dashboard.DashboardActivity
+import com.harnessapk.ui.remote.DshWebRemoteActivity
 import com.harnessapk.ui.remote.RemoteScreen
 import com.harnessapk.ui.remote.RemoteSettingsScreen
 import com.harnessapk.ui.work.WorkHomeScreen
@@ -236,6 +241,9 @@ fun HarnessApkApp(
     onIncomingConfigPackageUriConsumed: () -> Unit = {},
     incomingRemoteRunId: String? = null,
     onIncomingRemoteRunConsumed: () -> Unit = {},
+    // Test seam: the DSH card opens the browser-UI shell; instrumented tests
+    // can observe the route without launching an Activity.
+    onOpenDshWeb: (() -> Unit)? = null,
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -974,16 +982,29 @@ fun HarnessApkApp(
                         WorkHomeScreen(
                             contentPadding = padding,
                             onOpenRemoteBackend = { backendId ->
-                                // The remote screen opens with the requested
-                                // backend preselected; an unpaired phone lands
-                                // on the node pairing page (pairing is shared).
-                                navController.navigate(
-                                    if (remoteProfile != null) {
-                                        Routes.remoteControl(backendId = backendId)
+                                if (backendId == "dsh") {
+                                    // DSH is a browser UI, not the app-server
+                                    // remote screen: the ZCode-style WebView
+                                    // shell loads the hardened relay entry.
+                                    if (onOpenDshWeb != null) {
+                                        onOpenDshWeb()
                                     } else {
-                                        Routes.RemoteSettings
-                                    },
-                                )
+                                        context.startActivity(
+                                            Intent(context, DshWebRemoteActivity::class.java),
+                                        )
+                                    }
+                                } else {
+                                    // Other backends keep the remote screen,
+                                    // preselected; an unpaired phone lands on
+                                    // the node pairing page (pairing is shared).
+                                    navController.navigate(
+                                        if (remoteProfile != null) {
+                                            Routes.remoteControl(backendId = backendId)
+                                        } else {
+                                            Routes.RemoteSettings
+                                        },
+                                    )
+                                }
                             },
                             onOpenWorkbench = { workWorkbenchActive = true },
                         )
@@ -1003,6 +1024,9 @@ fun HarnessApkApp(
                         onOpenUpdates = { navController.navigate(Routes.Updates) },
                         onOpenRemote = { navController.navigate(Routes.RemoteSettings) },
                         onOpenConfigPackage = { navController.navigate(Routes.ConfigPackageExport) },
+                        onOpenBackgroundPermissions = { openBackgroundPermissionSettings(context) },
+                        vendorBackgroundGuide =
+                            backgroundPermissionGuide() == BackgroundPermissionGuide.HONOR_HUAWEI,
                         simpleMode = simpleMode,
                         onSimpleModeChange = { value ->
                             scope.launch { container.settingsStore.setSimpleMode(value) }

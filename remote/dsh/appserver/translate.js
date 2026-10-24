@@ -98,8 +98,10 @@ export function turnTimestamps(events, turnId) {
 	let completedAt = null;
 	for (const event of events) {
 		if (turnID(event) !== turnId) continue;
-		if (event.type === "turn/start" && startedAt === null) startedAt = event.timestamp ?? null;
-		if (event.type === "turn/end") completedAt = event.timestamp ?? null;
+		// dsh events use `time` (epoch ms); `timestamp` is a codex-shaped alias.
+		const time = event.time ?? event.timestamp ?? null;
+		if (event.type === "turn/start" && startedAt === null) startedAt = time;
+		if (event.type === "turn/end") completedAt = time;
 	}
 	return { startedAt, completedAt };
 }
