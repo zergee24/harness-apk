@@ -133,6 +133,13 @@
             android:windowSoftInputMode="adjustResize"
             android:label="ZCode 远程" />
 
+        <activity
+            android:name=".ui.remote.DshWebRemoteActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize"
+            android:label="DSH 网页" />
+
         <!-- Spike-画布 可行性试点：仅 debug 构建可用（onCreate 里非 debug 直接 finish） -->
         <activity
             android:name=".spike.canvas.SpikeCanvasActivity"

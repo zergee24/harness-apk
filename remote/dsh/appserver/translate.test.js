@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cardText, protocolSeconds } from "./thread-list.js";
-import { projectTurns, turnStatusFromReason, turnStatusString } from "./translate.js";
+import { projectTurns, turnStatusFromReason, turnStatusString, turnTimestamps } from "./translate.js";
 
 test("protocolSeconds converts milliseconds to the seconds the mobile wire expects", () => {
 	assert.equal(protocolSeconds(1_700_000_000_000), 1_700_000_000);
@@ -31,16 +31,31 @@ test("turn status vocabulary matches what the mobile client compares", () => {
 
 test("projectTurns reports an interrupted turn as interrupted, not failed", () => {
 	const events = [
-		{ seq: 1, type: "turn/start", data: { turn: { id: 7 } }, timestamp: 1_700_000_000_000 },
+		{ seq: 1, type: "turn/start", data: { turn: { id: 7 } }, time: 1_700_000_000_000 },
 		{ seq: 2, type: "user/message", data: { content: [{ type: "text", text: "hi" }] } },
 		{ seq: 3, type: "assistant/message", data: { message: { content: [{ type: "text", text: "partial" }] } } },
-		{ seq: 4, type: "turn/end", data: { reason: { kind: "interrupted" } }, timestamp: 1_700_000_005_000 },
+		{ seq: 4, type: "turn/end", data: { reason: { kind: "interrupted" } }, time: 1_700_000_005_000 },
 	];
 	const turns = projectTurns(events);
 	assert.equal(turns.length, 1);
 	assert.equal(turns[0].id, "7");
 	assert.equal(turns[0].status, "interrupted");
 	assert.deepEqual(turns[0].items.map((item) => item.type), ["userMessage", "agentMessage"]);
+});
+
+test("turnTimestamps reads dsh `time` and keeps missing boundaries null", () => {
+	const complete = turnTimestamps([
+		{ seq: 1, type: "turn/start", data: { turn: { id: 7 } }, time: 1_700_000_000_000 },
+		{ seq: 2, type: "turn/end", data: { turn: 7, reason: { kind: "completed" } }, time: 1_700_000_005_000 },
+	], "7");
+	assert.deepEqual(complete, { startedAt: 1_700_000_000_000, completedAt: 1_700_000_005_000 });
+
+	// A missing boundary must stay null, not 0: the bridge treats an
+	// interrupted turn without completedAt as still running.
+	const open = turnTimestamps([
+		{ seq: 1, type: "turn/start", data: { turn: { id: 7 } } },
+	], "7");
+	assert.deepEqual(open, { startedAt: null, completedAt: null });
 });
 
 test("projectTurns leaves an open turn as inProgress", () => {

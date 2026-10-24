@@ -11,6 +11,7 @@ This script copies the requested packages out of the bundle. Every asar entry
 carries a two-byte prefix before its real content; the payload starts after it.
 
 Usage:
+    vendor_from_bundle.py --version
     vendor_from_bundle.py <destination-node-modules> [package ...]
 
 With no package names it copies every `@deepseek-ai/*` package except the
@@ -58,6 +59,36 @@ def load_index(asar: str) -> tuple[dict, int]:
 def scope_dir(index: dict) -> dict:
     node = index["files"]["dsh"]["files"]["node_modules"]["files"]
     return node[SCOPE]["files"]
+
+
+def read_entry(index: dict, data_offset: int, node: dict) -> bytes:
+    """Read one asar entry's payload (the payload starts after a 2-byte prefix)."""
+    offset = node.get("offset")
+    if offset is None:
+        raise SystemExit("error: entry lives in app.asar.unpacked; read it from there")
+    with open(ASAR, "rb") as archive:
+        archive.seek(data_offset + int(offset) + PREFIX_BYTES)
+        return archive.read(int(node.get("size") or 0))
+
+
+def bundle_version(index: dict, data_offset: int) -> str:
+    """Version of the dsh CLI package shipped inside the Desktop bundle.
+
+    The profile and the CLI the bridge launches must belong to this generation;
+    a stale pair silently fails to read session logs written by a newer Desktop
+    app (dsh's session format rejects unknown event types).
+    """
+    entry = scope_dir(index).get("dsh")
+    if entry is None:
+        raise SystemExit("error: the Desktop bundle does not contain @deepseek-ai/dsh")
+    package = (entry.get("files") or {}).get("package.json")
+    if package is None:
+        raise SystemExit("error: the Desktop bundle dsh package has no package.json")
+    document = json.loads(read_entry(index, data_offset, package).decode("utf-8"))
+    version = document.get("version")
+    if not isinstance(version, str) or version == "":
+        raise SystemExit("error: the Desktop bundle dsh package has no version")
+    return version
 
 
 def walk_files(node: dict, prefix: str, out: list[tuple[str, int, int]]) -> None:
@@ -123,6 +154,10 @@ def vendor(packages: list[str], destination: str) -> int:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) >= 2 and argv[1] == "--version":
+        index, data_offset = load_index(ASAR)
+        print(bundle_version(index, data_offset))
+        return 0
     if len(argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2

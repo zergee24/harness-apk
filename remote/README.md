@@ -76,14 +76,27 @@ The launch agent uses a restrictive umask and throttles restart loops. If `codex
 
 The bridge can drive a second backend on the same Mac — DeepSeek Harness —
 through the same canonical app-server JSON-RPC surface, so one phone controls
-Codex and dsh side by side. Install the dsh appserver profile once:
+Codex and dsh side by side. Install the dsh appserver profile once. The profile
+and the CLI must come from the same generation as the installed Desktop app;
+the macOS bridge launcher in this repository runs
+`~/.dsh/cli/node_modules/@deepseek-ai/dsh/lib/bin.js`, so upgrade that copy
+first (re-run this whenever the Desktop app auto-updates):
 
 ```bash
 cd remote
-bash dsh/install-appserver.sh
+VERSION="$(python3 dsh/vendor_from_bundle.py --version)"
+npm install --prefix ~/.dsh/cli @deepseek-ai/dsh@"$VERSION"
+DSH_CLI="$HOME/.dsh/cli/node_modules/.bin/dsh" bash dsh/install-appserver.sh
 ```
 
-Then start the bridge with both backends:
+Then restart the bridge so it respawns the backend on the new profile:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.harnessapk.remote-bridge
+```
+
+Then start the bridge with both backends (or keep the LaunchAgent's existing
+`ProgramArguments`):
 
 ```bash
 harness-bridge serve --backend codex --backend dsh
@@ -94,13 +107,24 @@ Behavior notes for the dsh backend (v1):
 - It advertises the canonical capabilities minus `approvals.v1` and
   `user-input.v1`: dsh's permission model is sandbox presets, not interactive
   server requests, so the phone shows no approval entry for dsh runs.
-- `turn/interrupt` is not mapped yet (the turn keeps running on the Mac);
-  thread history, steering, streaming deltas and completion all work.
+- `turn/interrupt` maps to dsh's own `agent.cancel({kind:"user"}, {keepInbox:true})`
+  (the same primitive as the Desktop stop button); history, steering, streaming
+  deltas and completion all work.
 - Sessions persist in `~/.dsh/sessions` and survive bridge restarts; the
   plugin loads them through dsh's own persistence service.
-- Requires dsh 0.1.0-rc.6 or newer on PATH; the plugin package lives in
-  `remote/dsh/appserver/` (source of truth; the profile copy is installed by
-  the script).
+- **The appserver profile and the CLI launched by the bridge must belong to the
+  same dsh generation as the Desktop bundle.** The profile vendors its packages
+  from `/Applications/DeepSeek Harness.app/.../app.asar`, and the install script
+  reads the expected version from that bundle instead of pinning one. A stale
+  pair fails when the Desktop app updates: its newer session logs contain event
+  types the old generation does not know, so `thread/read` and
+  `thread/turns/list` return `SESSION_QUERY_PERSISTENCE_FAILED` (the phone then
+  shows dsh threads with no history and "状态未同步"). After a Desktop update,
+  re-run `bash dsh/install-appserver.sh` with `DSH_CLI` pointing at the CLI the
+  bridge uses, then restart the bridge. The script verifies the profile
+  packages and the CLI version and refuses to install a mismatched pair.
+- The plugin package lives in `remote/dsh/appserver/` (source of truth; the
+  profile copy is installed by the script).
 
 ## 3. Pair Harness
 
