@@ -573,6 +573,9 @@ data class DashboardQuota(
 )
 
 data class DashboardState(
+    val lastContactAtMs: Long = 0,
+    val lastSnapshotAtMs: Long = 0,
+    val connectionStartedAtMs: Long = 0,
     val threads: List<DashboardThread> = emptyList(),
     val quota: DashboardQuota? = null,
     val host: DashboardHost? = null,
@@ -661,12 +664,16 @@ fun zcodeWebRemoteStageLabel(stage: String?): String? = when (stage) {
 /** 底线校验：能提取出 https 链接，且路径含 remote 或主机含 zcode。
  *  新版 ZCode 网页的链接参数代际变化大（旧版 sid+hash，新版形态不一），
  *  严格结构校验会把手动粘贴的新链接挡在门外，这里只认 https + 关键词。 */
-fun looksLikeZcodeRemoteUrl(raw: String): Boolean {
-    val token = raw.trim().lineSequence().flatMap { it.split(' ', '\t') }.firstOrNull { it.startsWith("https://") }
-        ?: return false
+fun extractZcodeRemoteUrl(raw: String): String? {
+    val token = raw.trim().lineSequence().flatMap { it.split(' ', '\t') }
+        .firstOrNull { it.startsWith("https://") } ?: return null
+    val uri = runCatching { java.net.URI(token) }.getOrNull() ?: return null
+    if (uri.host.isNullOrBlank()) return null
     val lower = token.lowercase()
-    return lower.contains("/remote/") || lower.contains("zcode")
+    return token.takeIf { lower.contains("/remote/") || lower.contains("zcode") }
 }
+
+fun looksLikeZcodeRemoteUrl(raw: String): Boolean = extractZcodeRemoteUrl(raw) != null
 
 // thread_items 的 item_json -> 远程时间线 item（复用既有渲染）。
 internal fun parseDashboardDetailItems(payload: JsonElement?): List<RemoteTimelineItem> {

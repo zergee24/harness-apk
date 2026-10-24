@@ -44,9 +44,12 @@ def main() -> int:
     parser.add_argument("--version-code", required=True, type=int)
     parser.add_argument("--version-name", required=True)
     parser.add_argument("--artifact-name")
-    parser.add_argument("--min-supported-version-code", type=int)
+    parser.add_argument("--min-supported-version-code", type=int, default=1)
     parser.add_argument("--release-notes-file", type=Path)
     args = parser.parse_args()
+
+    if not 1 <= args.min_supported_version_code <= args.version_code:
+        parser.error("minimum supported version must be positive and not exceed the release version")
 
     apk_path = args.apk
     if not apk_path.is_file():
@@ -80,7 +83,7 @@ def main() -> int:
     manifest = {
         "versionCode": args.version_code,
         "versionName": args.version_name,
-        "minSupportedVersionCode": args.min_supported_version_code or args.version_code,
+        "minSupportedVersionCode": args.min_supported_version_code,
         "apkUrl": f"{base_url}/{release_prefix.as_posix()}/{artifact_name}",
         "apkChunks": [
             f"{base_url}/{release_prefix.as_posix()}/chunks/{name}"
@@ -88,7 +91,7 @@ def main() -> int:
         ],
         "sha256": sha256(apk_path),
         "releaseNotes": read_notes(args.release_notes_file)
-        or [f"更新测试版本到 {args.version_name}"],
+        or [f"更新至 {args.version_name}"],
         "publishedAt": datetime.now(timezone.utc)
         .replace(microsecond=0)
         .isoformat()

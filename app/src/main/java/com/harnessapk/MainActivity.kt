@@ -34,6 +34,7 @@ class MainActivity : ComponentActivity() {
     private var incomingWikiPackageUri by mutableStateOf<String?>(null)
     private var incomingConfigPackageUri by mutableStateOf<String?>(null)
     private var incomingRemoteRunId by mutableStateOf<String?>(null)
+    private var incomingOpenRemoteSettings by mutableStateOf(false)
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -50,6 +51,11 @@ class MainActivity : ComponentActivity() {
                     onIncomingWikiPackageUriConsumed = { incomingWikiPackageUri = null },
                     incomingConfigPackageUri = incomingConfigPackageUri?.let(Uri::parse),
                     onIncomingConfigPackageUriConsumed = { incomingConfigPackageUri = null },
+                    incomingOpenRemoteSettings = incomingOpenRemoteSettings,
+                    onIncomingOpenRemoteSettingsConsumed = {
+                        incomingOpenRemoteSettings = false
+                        intent.removeExtra(EXTRA_OPEN_REMOTE_SETTINGS)
+                    },
                     incomingRemoteRunId = incomingRemoteRunId,
                     onIncomingRemoteRunConsumed = { incomingRemoteRunId = null },
                 )
@@ -82,6 +88,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun acceptIncomingIntent(intent: Intent) {
+        incomingOpenRemoteSettings = intent.getBooleanExtra(EXTRA_OPEN_REMOTE_SETTINGS, false)
         incomingRemoteRunId = intent.getStringExtra(EXTRA_REMOTE_RUN_ID)?.takeIf(String::isNotBlank)
         incomingAgentBundleUri = null
         incomingWikiPackageUri = null
@@ -142,6 +149,7 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        const val EXTRA_OPEN_REMOTE_SETTINGS = "com.harnessapk.extra.OPEN_REMOTE_SETTINGS"
         const val EXTRA_REMOTE_RUN_ID = "com.harnessapk.extra.REMOTE_RUN_ID"
     }
 }

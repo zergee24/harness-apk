@@ -13,6 +13,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DashboardRepositoryTest {
+    @Test
+    fun fullSnapshotIsRequiredAndDisconnectPreservesOnlyCachedData() {
+        val repo = repository()
+        repo.handleEvent(event("host.status", "{}"))
+        assertTrue(repo.dashboard.value.lastContactAtMs > 0)
+        assertEquals(0L, repo.dashboard.value.lastSnapshotAtMs)
+        repo.handleEvent(event("dashboard.threads", """{"threads":[]}"""))
+        val received = repo.dashboard.value.lastSnapshotAtMs
+        assertTrue(received > 0)
+        repo.disconnect()
+        assertEquals(0L, repo.dashboard.value.lastContactAtMs)
+        assertEquals(received, repo.dashboard.value.lastSnapshotAtMs)
+    }
+
     private val profile = RemoteProfile(
         relayUrl = "https://relay.example.com",
         hostId = "mac",

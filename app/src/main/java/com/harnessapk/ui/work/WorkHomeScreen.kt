@@ -5,6 +5,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -79,15 +80,9 @@ internal fun WorkHomeScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(contentPadding)
-            .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        workHomeEntries.forEach { entry ->
+    BoxWithConstraints(modifier.fillMaxSize().padding(contentPadding)) {
+        val compact = maxWidth > maxHeight
+        val entryContent: @Composable (WorkEntryConfig, Modifier) -> Unit = { entry, tileModifier ->
             val launch: () -> Unit = when (entry.kind) {
                 WorkEntryKind.Dashboard -> {
                     {
@@ -114,9 +109,24 @@ internal fun WorkHomeScreen(
                 supportingText = null,
                 icon = entry.icon,
                 onClick = launch,
+                compact = compact,
+                modifier = tileModifier,
             )
         }
-        Spacer(modifier = Modifier.padding(top = 8.dp))
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = HarnessSpacing.pageHorizontal, vertical = if (compact) 8.dp else 16.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp),
+        ) {
+        if (compact) {
+            workHomeEntries.chunked(2).forEach { entries ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    entries.forEach { entryContent(it, Modifier.weight(1f)) }
+                    if (entries.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        } else workHomeEntries.forEach { entryContent(it, Modifier.fillMaxWidth()) }
+        if (!compact) Spacer(modifier = Modifier.padding(top = 8.dp))
         Text(
             text = "本地",
             style = MaterialTheme.typography.titleSmall,
@@ -126,10 +136,12 @@ internal fun WorkHomeScreen(
         WorkHomeEntry(
             testTag = "work-home-workbench",
             title = "项目工作台",
-            supportingText = "本地项目 · 文件 · Git",
+            supportingText = if (compact) null else "本地项目 · 文件 · Git",
             icon = Icons.Outlined.Folder,
             onClick = onOpenWorkbench,
+            compact = compact,
         )
+        }
     }
 }
 
@@ -141,6 +153,7 @@ private fun WorkHomeEntry(
     icon: ImageVector,
     onClick: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     val enabled = onClick != null
     Surface(
@@ -155,14 +168,14 @@ private fun WorkHomeEntry(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 76.dp)
+                .heightIn(min = if (compact) 48.dp else 76.dp)
                 .clickable(enabled = enabled) { onClick?.invoke() }
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(horizontal = 16.dp, vertical = if (compact) 8.dp else 14.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
-                modifier = Modifier.size(40.dp),
+                modifier = Modifier.size(if (compact) 32.dp else 40.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(icon, contentDescription = null, modifier = Modifier.size(26.dp))

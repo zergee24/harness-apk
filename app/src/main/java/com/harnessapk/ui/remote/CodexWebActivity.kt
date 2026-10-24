@@ -9,12 +9,18 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.WebResourceResponse
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,6 +38,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -112,7 +119,13 @@ private fun CodexWebScreen(
     onFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams) -> Boolean,
     onExit: () -> Unit,
 ) {
-    var webError by remember { mutableStateOf(false) }
+    var webUnavailable by remember { mutableStateOf(!systemWebViewAvailable()) }
+    if (webUnavailable) {
+        WebViewUnavailableScreen(onRetry = { webUnavailable = !systemWebViewAvailable() }, onExit = onExit)
+        return
+    }
+    var webError by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(true) }
     var reloadKey by rememberSaveable { mutableIntStateOf(0) }
     var appliedKey by remember { mutableIntStateOf(0) }
     var pageZoom by rememberSaveable { mutableFloatStateOf(1f) }
@@ -126,7 +139,7 @@ private fun CodexWebScreen(
 
     fun reload() {
         reloadKey += 1
-        webError = false
+        webError = null
     }
 
     Box(
@@ -137,7 +150,7 @@ private fun CodexWebScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 24.dp),
+                .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
             Row(
                 modifier = Modifier
@@ -203,7 +216,7 @@ private fun CodexWebScreen(
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
-                        WebView(ctx).apply {
+                        createSystemWebView(ctx)?.apply {
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -226,21 +239,28 @@ private fun CodexWebScreen(
                                     url: String?,
                                     favicon: android.graphics.Bitmap?,
                                 ) {
+                                    loading = true
                                     // 尽早打上桌面环境补丁，抢在页面脚本探测之前。
                                     view.evaluateJavascript(DesktopSpoofJs, null)
                                 }
 
-                                override fun onReceivedError(
-                                    view: WebView,
-                                    errorCode: Int,
-                                    description: String?,
-                                    failingUrl: String?,
-                                ) {
-                                    webError = true
+                                override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                                    if (request.isForMainFrame) {
+                                        loading = false
+                                        webError = "网络连接失败，请检查网络后重试。"
+                                    }
+                                }
+
+                                override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                                    if (request.isForMainFrame) {
+                                        loading = false
+                                        webError = "服务返回 ${response.statusCode}，请稍后重试或重新登录。"
+                                    }
                                 }
 
                                 // 页面每次加载完重放当前缩放（登录跳转/刷新不丢）。
                                 override fun onPageFinished(view: WebView, url: String?) {
+                                    loading = false
                                     view.evaluateJavascript(
                                         "document.documentElement.style.zoom='$pageZoom'",
                                         null,
@@ -256,21 +276,22 @@ private fun CodexWebScreen(
                             }
                             webViewRef = this
                             loadUrl(CodexWebUrl)
-                        }
+                        } ?: android.widget.FrameLayout(ctx).also { webUnavailable = true }
                     },
                     update = { view ->
                         if (appliedKey != reloadKey) {
                             appliedKey = reloadKey
-                            webError = false
-                            view.reload()
+                            webError = null
+                            (view as? WebView)?.reload()
                         }
                     },
                     onRelease = { view ->
                         if (webViewRef === view) webViewRef = null
-                        view.destroy()
+                        (view as? WebView)?.destroy()
                     },
                 )
-                if (webError) {
+                if (loading && webError == null) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
+                if (webError != null) {
                     Surface(
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -281,7 +302,7 @@ private fun CodexWebScreen(
                         Column(Modifier.padding(20.dp)) {
                             Text("页面加载失败", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                "chatgpt.com 需要国际网络可达；浏览器登录同一 ChatGPT 账号后即可使用 Codex 云端任务（与 Mac 远程连接是两条独立通道）。",
+                                webError.orEmpty(),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 6.dp),

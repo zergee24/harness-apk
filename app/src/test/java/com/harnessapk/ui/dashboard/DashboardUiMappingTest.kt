@@ -6,6 +6,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DashboardUiMappingTest {
+    @Test
+    fun transportConnectionDoesNotPretendThatMacHasResponded() {
+        val connected = com.harnessapk.remote.RemoteConnectionStatus.CONNECTED
+        val empty = com.harnessapk.remote.DashboardState()
+        assertEquals(DashboardConnectionState.UNPAIRED, dashboardConnectionState(false, connected, empty, 100_000))
+        assertEquals(DashboardConnectionState.WAITING, dashboardConnectionState(true, connected, empty, 100_000))
+        val snapshot = empty.copy(lastContactAtMs = 95_000, lastSnapshotAtMs = 95_000, connectionStartedAtMs = 90_000)
+        assertEquals(DashboardConnectionState.ONLINE, dashboardConnectionState(true, connected, snapshot, 100_000))
+        assertEquals(DashboardConnectionState.STALE, dashboardConnectionState(true, connected, snapshot, 190_000))
+        assertEquals(DashboardConnectionState.OFFLINE, dashboardConnectionState(true, com.harnessapk.remote.RemoteConnectionStatus.ERROR, snapshot, 100_000))
+        assertEquals(DashboardConnectionState.STALE, dashboardConnectionState(true, connected, snapshot.copy(connectionStartedAtMs = 99_000), 100_000))
+    }
+
     private fun thread(
         status: String,
         approx: Boolean = false,

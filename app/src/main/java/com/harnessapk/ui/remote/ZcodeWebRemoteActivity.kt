@@ -9,6 +9,10 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.WebResourceResponse
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -74,8 +78,8 @@ import kotlinx.coroutines.launch
 
 /**
  * ZCode 远程（二维码套壳）：WebView 加载 ZCode 桌面端「移动端远程控制」配对
- * 网页；「重连」经 bridge 让 Mac 自动刷新二维码并把新链接回推回来。
- * 掉线的默认恢复是页面自刷新，重连按钮用于 relay 互踢/链接作废场景。
+ * 网页；网络错误可重试当前链接，链接失效时手动粘贴新链接。
+ * 首次配对仍可在 Mac 已连接时主动请求现有链接。
  *
  * 视觉基准是页面本体（深色、全出血）：套壳只提供同色底和两个图标位
  * （关闭/重连），不再叠加标题、常驻提示条等自己的 chrome。
@@ -124,12 +128,14 @@ class ZcodeWebRemoteActivity : ComponentActivity() {
         setContent {
             // 工作模式的科技深色方案：与 zcode.z.ai 页面底色同族，chrome 不再割裂。
             ModeTheme(MainMode.WORK) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 ZcodeWebRemoteScreen(
                     container = container,
                     store = store,
                     onFileChooser = ::onWebViewFileChooser,
                     onExit = { finish() },
                 )
+                }
             }
         }
     }
@@ -147,7 +153,12 @@ fun ZcodeWebRemoteScreen(
     val connection by container.remoteRepository.state.collectAsState()
     var busy by remember { mutableStateOf(false) }
     var feedback by remember { mutableStateOf<String?>(null) }
-    var webError by remember { mutableStateOf(false) }
+    var webUnavailable by remember { mutableStateOf(!systemWebViewAvailable()) }
+    if (webUnavailable) {
+        WebViewUnavailableScreen(onRetry = { webUnavailable = !systemWebViewAvailable() }, onExit = onExit)
+        return
+    }
+    var webError by remember { mutableStateOf<String?>(null) }
     var loadedUrl by remember { mutableStateOf<String?>(null) }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     var pairingText by remember { mutableStateOf("") }
@@ -163,10 +174,13 @@ fun ZcodeWebRemoteScreen(
     }
 
     fun saveAndLoad(raw: String) {
-        store.save(raw)
+        if (!store.save(raw)) {
+            feedback = "未找到有效的远程连接，请重新粘贴"
+            return
+        }
         pendingUrl = store.url.value
         feedback = null
-        webError = false
+        webError = null
     }
 
     fun reconnect(action: String) {
@@ -207,6 +221,8 @@ fun ZcodeWebRemoteScreen(
             }
         }
     }
+
+    BackHandler(enabled = editingLink) { editingLink = false; newLinkText = "" }
 
     // 反馈浮层化：出现后数秒自动消散，不再常驻挤压页面。
     LaunchedEffect(feedback) {
@@ -307,7 +323,7 @@ fun ZcodeWebRemoteScreen(
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     AndroidView(
                         factory = { ctx ->
-                            WebView(ctx).apply {
+                            createSystemWebView(ctx)?.apply {
                                 layoutParams = ViewGroup.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -318,13 +334,12 @@ fun ZcodeWebRemoteScreen(
                                 // 深底消白闪：页面首帧绘制前 WebView 默认白底会割裂。
                                 setBackgroundColor(android.graphics.Color.parseColor("#101417"))
                                 webViewClient = object : WebViewClient() {
-                                    override fun onReceivedError(
-                                        view: WebView,
-                                        errorCode: Int,
-                                        description: String?,
-                                        failingUrl: String?,
-                                    ) {
-                                        webError = true
+                                    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                                        if (request.isForMainFrame) webError = "网络连接失败，请检查网络后重试。"
+                                    }
+
+                                    override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                                        if (request.isForMainFrame) webError = "服务返回 ${response.statusCode}，可重试；链接失效时请更换连接。"
                                     }
 
                                     // 页面每次加载完重放当前缩放，SPA 内部跳转/重连换链不丢。
@@ -343,19 +358,19 @@ fun ZcodeWebRemoteScreen(
                                     ): Boolean = onFileChooser(callback, params)
                                 }
                                 webViewRef = this
-                            }
+                            } ?: android.widget.FrameLayout(ctx).also { webUnavailable = true }
                         },
                         modifier = Modifier.fillMaxSize(),
                         update = { view ->
                             if (loadedUrl != target) {
                                 loadedUrl = target
-                                webError = false
-                                view.loadUrl(target)
+                                webError = null
+                                (view as? WebView)?.loadUrl(target)
                             }
                         },
                         onRelease = { view ->
                             if (webViewRef === view) webViewRef = null
-                            view.destroy()
+                            (view as? WebView)?.destroy()
                         },
                     )
                     if (editingLink) {
@@ -399,7 +414,7 @@ fun ZcodeWebRemoteScreen(
                         }
                     }
                 }
-                if (webError) {
+                if (webError != null && !editingLink) {
                         Surface(
                             modifier = Modifier.align(Alignment.Center).padding(24.dp),
                             tonalElevation = 2.dp,
@@ -412,11 +427,12 @@ fun ZcodeWebRemoteScreen(
                             ) {
                                 Text("页面加载失败", style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "链接可能已被踢出或作废；重连会让 Mac 刷新二维码并换新链接。",
+                                    webError.orEmpty(),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
-                                Button(onClick = { reconnect("refresh") }, enabled = !busy) {
-                                    Text("重连")
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TextButton(onClick = { newLinkText = ""; editingLink = true }) { Text("更换链接") }
+                                    Button(onClick = { webError = null; webViewRef?.reload() }) { Text("重试当前链接") }
                                 }
                             }
                         }

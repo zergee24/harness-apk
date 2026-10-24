@@ -103,16 +103,12 @@ if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
   echo "version-code must be a positive integer: $VERSION_CODE" >&2
   exit 64
 fi
-NOTES_DIR="build/release-notes"
-mkdir -p "$NOTES_DIR"
-NOTES_FILE="$NOTES_DIR/${CHANNEL}.txt"
-if [ ! -s "$NOTES_FILE" ]; then
-  git log --pretty=format:'%s' -n 8 > "$NOTES_FILE"
-fi
+NOTES_FILE="${APK_RELEASE_NOTES_FILE:-docs/releases/latest.txt}"
 
 case "$CHANNEL" in
   test)
     require_signing_env ANDROID_TEST
+    MIN_SUPPORTED_VERSION_CODE="${APK_MIN_SUPPORTED_VERSION_CODE:-2000191}"
     BUILD_TASK=":app:assembleDebug"
     APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
     ARTIFACT_NAME="app-debug.apk"
@@ -123,6 +119,7 @@ case "$CHANNEL" in
     ;;
   prod)
     require_signing_env ANDROID_RELEASE
+    MIN_SUPPORTED_VERSION_CODE="${APK_MIN_SUPPORTED_VERSION_CODE:-2000188}"
     BUILD_TASK=":app:assembleRelease"
     ARTIFACT_NAME="app-release.apk"
     VERSION_NAME="${BASE_VERSION_NAME}"
@@ -164,7 +161,7 @@ python3 scripts/prepare_apk_release.py \
   --version-code "$VERSION_CODE" \
   --version-name "$VERSION_NAME" \
   --artifact-name "$ARTIFACT_NAME" \
-  --min-supported-version-code "$VERSION_CODE" \
+  --min-supported-version-code "$MIN_SUPPORTED_VERSION_CODE" \
   --release-notes-file "$NOTES_FILE"
 
 python3 -m json.tool "$OUTPUT_DIR/update.json" >/dev/null

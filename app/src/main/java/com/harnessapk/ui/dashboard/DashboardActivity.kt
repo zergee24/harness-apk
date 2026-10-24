@@ -1,5 +1,7 @@
 package com.harnessapk.ui.dashboard
 
+import android.content.Intent
+import com.harnessapk.MainActivity
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -42,6 +44,12 @@ class DashboardActivity : ComponentActivity() {
                     container = container,
                     viewedStore = viewedStore,
                     onExit = { finish() },
+                    onConnect = {
+                        startActivity(Intent(this, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            .putExtra(MainActivity.EXTRA_OPEN_REMOTE_SETTINGS, true))
+                        finish()
+                    },
                 )
             }
         }

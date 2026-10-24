@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -55,6 +56,27 @@ class LifePanelQuickEntryTest {
         } as LifeConversationOverviewState.Content
         assertFalse(items.items.any { it.conversationId == id })
         assertEquals(id, HomeModeStore(context).lifeConversationId.value)
+    }
+
+    @Test
+    fun openingAnotherLifeConversationMakesItTheHomeConversation() {
+        openHome()
+        val title = "继续历史问题-${System.nanoTime()}"
+        val target = runBlocking {
+            val id = container.chatRepository.createConversation(title = title)
+            container.chatRepository.insertUserMessage(id, "已保存的问题", emptyList())
+            container.lifeConversationOverviewRepository.recordOrigin(id, com.harnessapk.storage.LifeConversationOrigin.STANDARD)
+            id
+        }
+        composeRule.onNodeWithText("历史", substring = false).performClick()
+        composeRule.waitUntil(10_000) { composeRule.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty() }
+        composeRule.onNodeWithText(title).performClick()
+        composeRule.waitUntil(10_000) { container.homeModeStore.lifeConversationId.value == target }
+        composeRule.onNodeWithContentDescription("返回").performClick()
+        composeRule.onNodeWithContentDescription("返回").performClick()
+        waitForInput()
+        assertEquals(target, container.homeModeStore.lifeConversationId.value)
+        assertEquals(target, HomeModeStore(context).lifeConversationId.value)
     }
 
     @Test

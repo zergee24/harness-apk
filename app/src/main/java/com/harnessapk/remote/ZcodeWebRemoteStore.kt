@@ -11,13 +11,14 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 class ZcodeWebRemoteStore(context: Context) {
     private val preferences = context.getSharedPreferences("zcode_web_remote", Context.MODE_PRIVATE)
-    private val _url = MutableStateFlow(preferences.getString("pairing_url", null))
+    private val _url = MutableStateFlow(preferences.getString("pairing_url", null)?.let(::extractZcodeRemoteUrl))
     val url: StateFlow<String?> = _url.asStateFlow()
 
-    fun save(raw: String) {
-        val link = raw.trim()
+    fun save(raw: String): Boolean {
+        val link = extractZcodeRemoteUrl(raw) ?: return false
         preferences.edit().putString("pairing_url", link).apply()
         _url.value = link
+        return true
     }
 
     fun clear() {

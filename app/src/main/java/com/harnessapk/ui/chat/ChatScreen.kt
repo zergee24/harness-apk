@@ -342,6 +342,7 @@ fun ChatScreen(
     moreRequestKey: Int = 0,
     onMoreRequestConsumed: () -> Unit = {},
     onOpenProviderSettings: () -> Unit = {},
+    onOpenConfigImport: () -> Unit = {},
     backRequestKey: Int = 0,
     onBackRequestConsumed: () -> Unit = {},
     onNavigateBack: (() -> Unit)? = null,
@@ -3187,11 +3188,13 @@ fun ChatScreen(
         } else if (draftSaveError != null) ResponsiveChatContentRail {
             LifeChatStatus(draftSaveError.orEmpty(), "重试保存", error = true,
                 onAction = { scope.launch { persistDraft(currentDraftSnapshot()) } })
+        } else if (!voiceOwnsDraft && persistentDraftLoaded && identityMessageStateKnown &&
+            (selectedProvider == null || selectedModel.isBlank())) ResponsiveChatContentRail {
+            LifeChatStatus("还没完成模型设置，设置后就能提问", "配置模型",
+                onAction = { leaveAfterSaving(onOpenProviderSettings) })
+            TextButton(onClick = { leaveAfterSaving(onOpenConfigImport) }) { Text("已有配置包？导入配置") }
         } else if (simpleMode && !voiceOwnsDraft) ResponsiveChatContentRail {
             when {
-                selectedProvider == null || selectedModel.isBlank() -> if (persistentDraftLoaded && identityMessageStateKnown) LifeChatStatus(
-                    "还没完成模型设置，设置后就能提问", "去设置", onAction = { leaveAfterSaving(onOpenProviderSettings) },
-                )
                 imageModelUnsupported -> LifeChatStatus("当前模型不能查看照片，请选择支持图片的模型或移除照片", "选择模型", onAction = { showModelPicker = true })
                 documentExtracting -> Unit // The composer provides progress and cancellation.
                 attachmentProblems.isNotEmpty() -> Unit // Each unavailable attachment owns its recovery action.

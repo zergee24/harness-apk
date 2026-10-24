@@ -12,7 +12,11 @@ on:
           - test
           - prod
       release_notes:
-        description: "Release notes, one item per line. Empty uses recent commit titles."
+        description: "Release notes, one item per line. Empty uses the current user-facing release notes."
+        required: false
+        type: string
+      min_supported_version_code:
+        description: "Optional minimum supported version; only raise for incompatible releases."
         required: false
         type: string
       version_code:
@@ -65,6 +69,9 @@ jobs:
       ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
       ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
       INPUT_CHANNEL: ${{ github.event.inputs.channel || '' }}
+      INPUT_MIN_SUPPORTED_VERSION_CODE: ${{ github.event.inputs.min_supported_version_code || '' }}
+      TEST_MIN_SUPPORTED_VERSION_CODE: ${{ vars.TEST_MIN_SUPPORTED_VERSION_CODE }}
+      PROD_MIN_SUPPORTED_VERSION_CODE: ${{ vars.PROD_MIN_SUPPORTED_VERSION_CODE }}
       INPUT_VERSION_CODE: ${{ github.event.inputs.version_code || '' }}
       INPUT_VERSION_NAME: ${{ github.event.inputs.version_name || '' }}
       TEST_VERSION_CODE_BASE: ${{ vars.TEST_VERSION_CODE_BASE }}
@@ -134,6 +141,7 @@ jobs:
           if [ "$CHANNEL" = "prod" ]; then
             OSS_PREFIX="${OSS_PROD_PREFIX:-harness-apk/prod}"
             OSS_PUBLIC_BASE_URL="${OSS_PROD_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-}}"
+            MIN_SUPPORTED_VERSION_CODE="${INPUT_MIN_SUPPORTED_VERSION_CODE:-${PROD_MIN_SUPPORTED_VERSION_CODE:-2000188}}"
             BUILD_TASK=":app:assembleRelease"
             BUILD_TYPE="release"
             ARTIFACT_NAME="app-release.apk"
@@ -142,6 +150,7 @@ jobs:
           else
             OSS_PREFIX="${OSS_TEST_PREFIX:-${OSS_PREFIX:-harness-apk/test}}"
             OSS_PUBLIC_BASE_URL="${OSS_TEST_PUBLIC_BASE_URL:-${OSS_PUBLIC_BASE_URL:-}}"
+            MIN_SUPPORTED_VERSION_CODE="${INPUT_MIN_SUPPORTED_VERSION_CODE:-${TEST_MIN_SUPPORTED_VERSION_CODE:-2000191}}"
             BUILD_TASK=":app:assembleDebug"
             BUILD_TYPE="debug"
             ARTIFACT_NAME="app-debug.apk"
@@ -165,6 +174,7 @@ jobs:
             echo "ARTIFACT_NAME=${ARTIFACT_NAME}"
             echo "MANIFEST_PROPERTY=${MANIFEST_PROPERTY}"
             echo "VERSION_CODE=${VERSION_CODE}"
+            echo "MIN_SUPPORTED_VERSION_CODE=${MIN_SUPPORTED_VERSION_CODE}"
             echo "BASE_VERSION_NAME=${BASE_VERSION_NAME}"
             echo "VERSION_NAME=${VERSION_NAME}"
           } >> "$GITHUB_ENV"
@@ -248,7 +258,7 @@ jobs:
           if [ -n "$INPUT_RELEASE_NOTES" ]; then
             printf '%s\n' "$INPUT_RELEASE_NOTES" > build/release-notes/notes.txt
           else
-            git log --pretty=format:'%s' -n 8 > build/release-notes/notes.txt
+            cp docs/releases/latest.txt build/release-notes/notes.txt
           fi
 
       - name: Prepare release files
@@ -260,7 +270,7 @@ jobs:
             --version-code "$VERSION_CODE" \
             --version-name "$VERSION_NAME" \
             --artifact-name "$ARTIFACT_NAME" \
-            --min-supported-version-code "$VERSION_CODE" \
+            --min-supported-version-code "$MIN_SUPPORTED_VERSION_CODE" \
             --release-notes-file build/release-notes/notes.txt
 
       - name: Upload release files to OSS

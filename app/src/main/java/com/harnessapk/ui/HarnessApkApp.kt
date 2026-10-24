@@ -226,6 +226,8 @@ internal fun projectWorkbenchTarget(
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun HarnessApkApp(
+    incomingOpenRemoteSettings: Boolean = false,
+    onIncomingOpenRemoteSettingsConsumed: () -> Unit = {},
     incomingAgentBundleUri: Uri? = null,
     onIncomingAgentBundleUriConsumed: () -> Unit = {},
     incomingWikiPackageUri: Uri? = null,
@@ -436,6 +438,12 @@ fun HarnessApkApp(
             onIncomingConfigPackageUriConsumed()
         }
     }
+    LaunchedEffect(incomingOpenRemoteSettings) {
+        if (incomingOpenRemoteSettings) {
+            navController.navigate(Routes.RemoteSettings) { launchSingleTop = true }
+            onIncomingOpenRemoteSettingsConsumed()
+        }
+    }
     LaunchedEffect(incomingRemoteRunId) {
         incomingRemoteRunId?.let { runId ->
             navController.navigate(Routes.remoteRun(runId)) { launchSingleTop = true }
@@ -578,6 +586,23 @@ fun HarnessApkApp(
         embeddedHome: Boolean = false,
     ) {
         androidx.compose.runtime.key(conversationId) {
+            LaunchedEffect(conversationId, embeddedHome, projectId) {
+                if (!embeddedHome && projectId == null) {
+                    try {
+                        withContext(container.dispatchers.io) {
+                            val opened = container.chatRepository.conversation(conversationId)
+                            if (opened != null && opened.projectId == null && !opened.isArchived &&
+                                homeModeStore.lifeConversationId.value != opened.id) {
+                                homeModeStore.saveLifeConversation(opened.id)
+                            }
+                        }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        android.widget.Toast.makeText(context, "会话已打开，但最近会话记录未保存，请稍后重试", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
             val voiceInput = rememberVoiceInput(container)
             ChatScreen(
                 container = container,
@@ -601,6 +626,7 @@ fun HarnessApkApp(
                     else chatContextSummaries[conversationId] = it
                 },
                 onOpenProviderSettings = { navController.navigate(Routes.Providers) },
+                onOpenConfigImport = { navController.navigate(Routes.configPackageImport(null)) },
                 sessionConfigRequestKey = chatSessionConfigRequestKey,
                 onSessionConfigRequestConsumed = { chatSessionConfigRequestKey = 0 },
                 onOpenProjectFiles = { projectId, path ->

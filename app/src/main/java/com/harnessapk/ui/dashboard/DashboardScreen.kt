@@ -61,6 +61,9 @@ import com.harnessapk.remote.DashboardQuota
 import com.harnessapk.remote.DashboardThread
 import com.harnessapk.remote.DashboardViewedStore
 import com.harnessapk.remote.RemoteConnectionStatus
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 
 private val ThreadTileWidth = 260.dp
@@ -73,18 +76,34 @@ fun DashboardScreen(
     container: AppContainer,
     viewedStore: DashboardViewedStore,
     onExit: () -> Unit,
+    onConnect: () -> Unit = {},
 ) {
     val dashboard by container.remoteRepository.dashboard.collectAsState()
     val connection by container.remoteRepository.state.collectAsState()
     val profile by container.remoteProfileStore.profile.collectAsState()
     val hostName = profile?.hostName ?: "Mac"
     val snackbarHostState = remember { SnackbarHostState() }
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(profile, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                nowMs = System.currentTimeMillis()
+                if (profile != null) {
+                    container.remoteRepository.connect()
+                    if (container.remoteRepository.state.value.connectionStatus == RemoteConnectionStatus.CONNECTED) {
+                        container.remoteRepository.requestDashboardSnapshot()
+                    }
+                }
+                delay(30_000)
+            }
+        }
+    }
+    val connectionState = dashboardConnectionState(profile != null, connection.connectionStatus, dashboard, nowMs)
+    val currentData = connectionState == DashboardConnectionState.ONLINE
 
     LaunchedEffect(Unit) {
-        // 副屏可能脱离远程页直接进入（进程被杀后冷启），先确保 WSS 连接。
-        container.remoteRepository.connect()
-        container.remoteRepository.requestDashboardSnapshot()
-            container.remoteRepository.focusResults.collect { result ->
+        container.remoteRepository.focusResults.collect { result ->
                 snackbarHostState.showSnackbar(
                     // zcode 卡聚焦打开的是工作区，措辞不绑「线程」。
                     if (result.ok) "已在 Mac 前台打开" else "聚焦失败：${result.message ?: "未知原因"}",
@@ -121,15 +140,28 @@ fun DashboardScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 DashboardTitleRow(
-                    summary = dashboardSummaryLabel(threads),
-                    connected = connection.connectionStatus == RemoteConnectionStatus.CONNECTED,
+                    summary = if (currentData) dashboardSummaryLabel(threads) else if (dashboard.lastSnapshotAtMs > 0) {
+                        "上次更新：${dashboardRelativeTime(nowMs, dashboard.lastSnapshotAtMs)} · 缓存数据"
+                    } else "尚未取得任务数据",
+                    connectionState = connectionState,
                     onRefresh = { container.remoteRepository.requestDashboardSnapshot() },
                     onExit = onExit,
                     showClock = shortHeight,
                 )
-                if (threads.isEmpty()) {
+                if (!currentData) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (profile == null) "连接 Mac 后查看任务和用量。" else "等待连接恢复，已有数据仅供参考。",
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = onConnect) { Text(if (profile == null) "连接设备" else "连接设置") }
+                    }
+                }
+                if (threads.isEmpty() && currentData) {
                     Text(
-                        "暂无活跃线程。在 Mac 上开始一个 Codex 任务后，这里会实时亮起。",
+                        "暂无活跃线程。在 Mac 上开始一个任务后，这里会实时显示。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -236,7 +268,7 @@ fun DashboardScreen(
 @Composable
 private fun DashboardTitleRow(
     summary: String,
-    connected: Boolean,
+    connectionState: DashboardConnectionState,
     onRefresh: () -> Unit,
     onExit: () -> Unit,
     showClock: Boolean,
@@ -254,9 +286,9 @@ private fun DashboardTitleRow(
             DashboardClock(modifier = Modifier.padding(end = 12.dp))
         }
         Text(
-            if (connected) "Mac 已连接" else "Mac 未连接",
+            dashboardConnectionLabel(connectionState),
             style = MaterialTheme.typography.labelSmall,
-            color = if (connected) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
+            color = if (connectionState == DashboardConnectionState.ONLINE) Color(0xFF34C77B) else MaterialTheme.colorScheme.error,
         )
         IconButton(
             onClick = onRefresh,
@@ -590,7 +622,7 @@ private fun TodayCard(
             verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
         ) {
             Text("今日", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            InfoRow("turn", if (host != null && host.todayTurns > 0) "${host.todayTurns}" else "0")
+            InfoRow("turn", host?.todayTurns?.toString() ?: "—")
             InfoRow(
                 "近 7 天 tokens",
                 if (host == null || host.weekTokens <= 0) "—" else formatTokenCount(host.weekTokens),

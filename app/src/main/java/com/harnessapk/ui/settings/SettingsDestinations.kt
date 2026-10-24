@@ -17,6 +17,7 @@ enum class SettingsGroup(val title: String) {
 
 fun settingsDestinations(
     showUpdateBadge: Boolean = false,
+    simpleMode: Boolean = false,
 ): List<Pair<SettingsGroup, List<SettingsDestination>>> = listOf(
     SettingsGroup.Device to listOf(
         SettingsDestination(
@@ -75,4 +76,6 @@ fun settingsDestinations(
             description = "导入、管理并浏览离线原文资料。",
         ),
     ),
-)
+).map { (group, items) ->
+    group to if (simpleMode) items.filter { it.id == "updates" || it.id == "config" } else items
+}.filter { (_, items) -> items.isNotEmpty() }

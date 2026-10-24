@@ -63,16 +63,7 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        val destinations = settingsDestinations(showUpdateBadge = showUpdateBadge)
-        // 简洁模式（父母设备）只留检查更新与配置包：排障走配置包重导入，
-        // 智能体/知识库从生活页 ⋯ 菜单进入，其余管理项对父母是噪音。
-        val visibleGroups = destinations.map { (group, items) ->
-            group to if (simpleMode) {
-                items.filter { it.id == "updates" || it.id == "config" }
-            } else {
-                items
-            }
-        }.filter { (_, items) -> items.isNotEmpty() }
+        val visibleGroups = settingsDestinations(showUpdateBadge = showUpdateBadge, simpleMode = simpleMode)
         visibleGroups.forEach { (group, items) ->
             Text(
                 text = group.title,

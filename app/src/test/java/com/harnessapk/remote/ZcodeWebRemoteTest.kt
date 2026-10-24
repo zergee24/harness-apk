@@ -9,6 +9,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ZcodeWebRemoteTest {
+    @Test
+    fun pastedExplanationIsNotPartOfTheOpenedUrl() {
+        val url = "https://zcode.z.ai/remote/v4?sid=abc&hash=def"
+        assertEquals(url, extractZcodeRemoteUrl("说明文字\n$url\n"))
+        assertNull(extractZcodeRemoteUrl("https:///remote/no-host"))
+        assertNull(extractZcodeRemoteUrl("http://zcode.z.ai/remote/v4"))
+    }
+
 
     private val validUrl =
         "https://zcode.z.ai/remote/v4?sid=d_ABC123&hash=AbCd%2F0%3D&t=1789404212550&mid=m1&name=mac&app_version=3.11.2"

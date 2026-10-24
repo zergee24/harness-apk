@@ -98,3 +98,33 @@ fun dashboardSummaryLabel(threads: List<DashboardThread>): String {
     }
     return if (parts.isEmpty()) "全部空闲" else parts.joinToString(" · ")
 }
+
+
+// Transport reachability alone is not evidence that the Mac has responded.
+enum class DashboardConnectionState { UNPAIRED, CONNECTING, OFFLINE, WAITING, ONLINE, STALE }
+
+fun dashboardConnectionState(
+    paired: Boolean,
+    transport: com.harnessapk.remote.RemoteConnectionStatus,
+    state: com.harnessapk.remote.DashboardState,
+    nowMs: Long,
+): DashboardConnectionState = when {
+    !paired -> DashboardConnectionState.UNPAIRED
+    transport == com.harnessapk.remote.RemoteConnectionStatus.CONNECTING -> DashboardConnectionState.CONNECTING
+    transport != com.harnessapk.remote.RemoteConnectionStatus.CONNECTED -> DashboardConnectionState.OFFLINE
+    state.lastContactAtMs == 0L -> DashboardConnectionState.WAITING
+    state.lastSnapshotAtMs == 0L -> DashboardConnectionState.WAITING
+    state.lastSnapshotAtMs < state.connectionStartedAtMs ||
+        nowMs - state.lastSnapshotAtMs > 90_000L ||
+        nowMs - state.lastContactAtMs > 90_000L -> DashboardConnectionState.STALE
+    else -> DashboardConnectionState.ONLINE
+}
+
+fun dashboardConnectionLabel(state: DashboardConnectionState): String = when (state) {
+    DashboardConnectionState.UNPAIRED -> "尚未连接设备"
+    DashboardConnectionState.CONNECTING -> "正在连接"
+    DashboardConnectionState.OFFLINE -> "连接已断开"
+    DashboardConnectionState.WAITING -> "等待 Mac 响应"
+    DashboardConnectionState.ONLINE -> "Mac 已连接"
+    DashboardConnectionState.STALE -> "数据待更新"
+}

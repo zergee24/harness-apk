@@ -106,6 +106,7 @@ class RemoteRepository(
     }
 
     fun disconnect() {
+        _dashboard.value = _dashboard.value.copy(lastContactAtMs = 0)
         explicitDisconnect = true
         reconnectAttempt = 0
         reconnectJob?.cancel()
@@ -139,7 +140,10 @@ class RemoteRepository(
 
     /** 副屏：请求当前整帧线程快照（bridge 以 dashboard.threads plain 帧应答）。 */
     fun requestDashboardSnapshot() {
-        send(RemoteCommand(type = "dashboard.snapshot", requestId = requestId("dashboard.snapshot")))
+        // Snapshot replies are events, not request-correlated RPC responses.
+        // Do not leave an unacknowledgeable command in the timeout/outbox map.
+        val id = "dashboard.snapshot:${UUID.randomUUID()}"
+        sendPayload(id, RemoteCommand(type = "dashboard.snapshot", requestId = id).toJson())
     }
 
     /** 副屏卡片唯一动作：让 Mac 主屏聚焦对应线程；失败经 focusResults 通知。 */
@@ -353,6 +357,7 @@ class RemoteRepository(
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (socket !== webSocket) return
             reconnectAttempt = 0
+            _dashboard.value = _dashboard.value.copy(lastContactAtMs = 0, connectionStartedAtMs = System.currentTimeMillis())
             _state.value = _state.value.copy(connectionStatus = RemoteConnectionStatus.CONNECTED, errorMessage = null)
             send(RemoteCommand(type = "host.status", requestId = requestId("host.status")))
             refreshThreads()
@@ -382,6 +387,7 @@ class RemoteRepository(
     }
 
     private fun scheduleReconnect(reason: String) {
+        _dashboard.value = _dashboard.value.copy(lastContactAtMs = 0)
         socket = null
         _state.value = _state.value.copy(
             connectionStatus = if (explicitDisconnect) RemoteConnectionStatus.DISCONNECTED else RemoteConnectionStatus.ERROR,
@@ -467,6 +473,9 @@ class RemoteRepository(
     }
 
     internal fun handleEvent(event: RemoteEvent) {
+        if (event.type == "host.status" || event.type.startsWith("dashboard.")) {
+            _dashboard.value = _dashboard.value.copy(lastContactAtMs = System.currentTimeMillis())
+        }
         when (event.type) {
             "host.status" -> {
                 val parsed = parseRemoteBackends(event)
@@ -520,7 +529,8 @@ class RemoteRepository(
             }
             "dashboard.threads" -> {
                 val parsed = parseDashboardThreads(event.payload).sortedByDescending { it.updatedAtMs }
-                _dashboard.value = DashboardState(
+                _dashboard.value = _dashboard.value.copy(
+                    lastSnapshotAtMs = System.currentTimeMillis(),
                     threads = parsed,
                     quota = parseDashboardQuota(event.payload?.jsonObject?.get("quota")),
                     host = parseDashboardHost(event.payload),
