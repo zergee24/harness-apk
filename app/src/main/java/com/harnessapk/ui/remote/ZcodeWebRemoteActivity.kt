@@ -170,7 +170,8 @@ fun ZcodeWebRemoteScreen(
     fun applyZoom(value: Float) {
         val clamped = value.coerceIn(0.5f, 2f)
         pageZoom = clamped
-        webViewRef?.evaluateJavascript("document.documentElement.style.zoom='$clamped'", null)
+        // textZoom 是 WebSettings 级常驻值：跨页面跳转不丢，也不碰固定底栏定位。
+        webViewRef?.settings?.let { it.textZoom = (clamped * 100).toInt() }
     }
 
     fun saveAndLoad(raw: String) {
@@ -273,7 +274,7 @@ fun ZcodeWebRemoteScreen(
                     }
                     Box(Modifier.weight(1f))
                     if (savedUrl != null) {
-                        // 页面缩放：CSS zoom 步进 0.1，范围 50%–200%；onPageFinished 重放。
+                        // 页面缩放：文字缩放步进 0.1，范围 50%–200%（布局与底栏不动）。
                         IconButton(
                             onClick = { applyZoom(pageZoom - 0.1f) },
                             enabled = pageZoom > 0.55f,
@@ -342,13 +343,6 @@ fun ZcodeWebRemoteScreen(
                                         if (request.isForMainFrame) webError = "服务返回 ${response.statusCode}，可重试；链接失效时请更换连接。"
                                     }
 
-                                    // 页面每次加载完重放当前缩放，SPA 内部跳转/重连换链不丢。
-                                    override fun onPageFinished(view: WebView, url: String?) {
-                                        view.evaluateJavascript(
-                                            "document.documentElement.style.zoom='$pageZoom'",
-                                            null,
-                                        )
-                                    }
                                 }
                                 webChromeClient = object : WebChromeClient() {
                                     override fun onShowFileChooser(
