@@ -105,8 +105,8 @@ class CodexWebActivity : ComponentActivity() {
 
 private const val CodexWebUrl = "https://chatgpt.com/dots/home"
 
-// Codex 网页端（dots）只对桌面环境开放：UA 伪装成 macOS Chrome，
-// 配合 navigator.platform/userAgentData 补丁（语义对齐 Chrome 桌面模式）。
+// dots 网页端只对桌面环境开放：UA 伪装成 macOS Chrome + navigator 补丁
+// （语义对齐 Chrome 桌面模式）。移动 UA 会被挡在 dots 门外。
 private const val DesktopUa =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -224,14 +224,8 @@ private fun CodexWebScreen(
                             @SuppressLint("SetJavaScriptEnabled")
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
-                            // 桌面 UA + 宽视口概览缩放：桌面版布局缩到手机宽度内呈现，
-                            // 配合 pinch 与顶栏 ± 按钮查看细节。
+                            // 桌面 UA：dots 网页端仅桌面环境开放。
                             settings.userAgentString = DesktopUa
-                            settings.useWideViewPort = true
-                            settings.loadWithOverviewMode = true
-                            settings.setSupportZoom(true)
-                            settings.builtInZoomControls = true
-                            settings.displayZoomControls = false
                             setBackgroundColor(android.graphics.Color.parseColor("#101417"))
                             webViewClient = object : WebViewClient() {
                                 override fun onPageStarted(
@@ -274,6 +268,7 @@ private fun CodexWebScreen(
                                     params: FileChooserParams,
                                 ): Boolean = onFileChooser(callback, params)
                             }
+                            installWebShellDownload(ctx)
                             webViewRef = this
                             loadUrl(CodexWebUrl)
                         } ?: android.widget.FrameLayout(ctx).also { webUnavailable = true }
