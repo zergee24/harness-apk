@@ -25,8 +25,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
-	appserverrpc "github.com/harnessapk/remote/internal/appserver"
 	"github.com/harnessapk/remote/internal/agent"
+	appserverrpc "github.com/harnessapk/remote/internal/appserver"
 	"github.com/harnessapk/remote/internal/backend"
 	"github.com/harnessapk/remote/internal/commandcache"
 	"github.com/harnessapk/remote/internal/completion"
@@ -78,6 +78,7 @@ type bridge struct {
 	terminals             *completion.TerminalRunStore
 	workspaces            *workspace.Registry
 	seen                  map[string]time.Time
+	deviceActivity        map[string]time.Time
 	dashboard             *observer.Supervisor
 	dashboardMu           sync.Mutex
 	dashboardLastSent     map[string]string
@@ -483,6 +484,20 @@ func (b *bridge) run(ctx context.Context, specs []backend.Spec) error {
 	if err := b.resendPending(ctx); err != nil {
 		return err
 	}
+	// 定期丢弃过期的补发条目：resendPending 只在重连时跑，长期在线时内存里
+	// 会一直保留 5 分钟窗口内的全部消息（10 台设备时曾堆到 1.1 万条）。
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.prunePendingOutbound()
+			}
+		}
+	}()
 	errorsCh := make(chan error, 2)
 	// Keepalive: ping the relay every 30s and fail the connection if the pong
 	// doesn't arrive within 15s. Without this, a half-dead TCP connection (NAT
@@ -763,9 +778,9 @@ func (b *bridge) broadcastHostStatus(ctx context.Context) {
 // —— 副屏 dashboard（只读 observer）：状态推送与聚焦指令 ——
 
 const (
-	dashboardTopThreads      = 18
-	dashboardPollInterval    = 5 * time.Second
-	dashboardQuotaPollTicks  = 12
+	dashboardTopThreads     = 18
+	dashboardPollInterval   = 5 * time.Second
+	dashboardQuotaPollTicks = 12
 )
 
 func (b *bridge) superviseDashboard(ctx context.Context) {
@@ -939,6 +954,15 @@ func (b *bridge) pollDashboardQuota(ctx context.Context) *observer.QuotaSnapshot
 	if !ok {
 		log.Printf("dashboard host: unparseable rateLimits payload %.200s", raw)
 		return nil
+	}
+	if parsed.CreditsRemaining == nil {
+		// rateLimits 里没有 credits（部分账号/计费形态不带该字段）时算不出
+		// 「今日消耗」。这里必须避开空指针：否则新的一天首次配额轮询会把整个
+		// bridge 进程 panic 掉。
+		b.dashboardMu.Lock()
+		b.dashboardQuota = &parsed
+		b.dashboardMu.Unlock()
+		return &parsed
 	}
 	// credits 今日消耗 = 当日基线余额与当前的差值。基线取当日首次采样并持久化
 	// 进 state（BridgeData），bridge 重启后从 state 读回，当日消耗不因重启清零。
@@ -1291,6 +1315,8 @@ func (b *bridge) handleWire(ctx context.Context, raw []byte) error {
 		return err
 	}
 	b.mu.Lock()
+	// 任何入站报文都说明这台设备在线；离线设备的事件不进补发队列。
+	b.touchDeviceLocked(wire.DeviceID)
 	secretEncoded := b.state.DeviceSecrets[wire.DeviceID]
 	if secretEncoded == "" && wire.PairingTicket != "" {
 		var err error
@@ -1330,9 +1356,52 @@ func (b *bridge) acknowledge(deviceID, messageID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if pending := b.state.PendingOutbound[deviceID]; pending != nil {
-		if _, exists := pending[messageID]; exists {
-			delete(pending, messageID)
-			_ = b.persistStateLocked()
+		// 补发队列只在内存里，删条目不需要写盘。
+		delete(pending, messageID)
+	}
+}
+
+// deviceActiveWindow 内收到过该设备的任何入站报文，就认为它在线。
+const deviceActiveWindow = 2 * time.Minute
+
+// touchDeviceLocked 记录设备最近一次入站时间（调用方需持有 b.mu）。
+func (b *bridge) touchDeviceLocked(deviceID string) {
+	if deviceID == "" {
+		return
+	}
+	if b.deviceActivity == nil {
+		b.deviceActivity = map[string]time.Time{}
+	}
+	now := time.Now()
+	b.deviceActivity[deviceID] = now
+	for id, seenAt := range b.deviceActivity {
+		if now.Sub(seenAt) > time.Hour {
+			delete(b.deviceActivity, id)
+		}
+	}
+}
+
+// deviceActiveLocked 判断设备是否在活跃窗口内（调用方需持有 b.mu）。
+func (b *bridge) deviceActiveLocked(deviceID string) bool {
+	seenAt, ok := b.deviceActivity[deviceID]
+	return ok && time.Since(seenAt) <= deviceActiveWindow
+}
+
+// prunePendingOutbound 清掉已过期的补发条目，避免长期在线的进程一直攒着
+// 5 分钟窗口内的全部消息（每台离线设备上千条，状态会跟着一起膨胀）。
+func (b *bridge) prunePendingOutbound() {
+	now := time.Now().UnixMilli()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for deviceID, pending := range b.state.PendingOutbound {
+		for id, raw := range pending {
+			var wire protocol.WireMessage
+			if json.Unmarshal([]byte(raw), &wire) != nil || wire.ExpiresAt <= now {
+				delete(pending, id)
+			}
+		}
+		if len(pending) == 0 {
+			delete(b.state.PendingOutbound, deviceID)
 		}
 	}
 }
@@ -1378,6 +1447,9 @@ func (b *bridge) enqueueRecoveryWork(key string, run func()) {
 }
 
 func (b *bridge) executeCommand(ctx context.Context, deviceID string, command protocol.Command) error {
+	b.mu.Lock()
+	b.touchDeviceLocked(deviceID)
+	b.mu.Unlock()
 	backendID := backend.NormalizeID(command.BackendID)
 	if command.Type == "approval.respond" && b.routes != nil {
 		if approval, ok := b.routes.Approval(command.ApprovalID); ok && approval.BackendID != "" {
@@ -1444,7 +1516,7 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 	case "rpc":
 		return b.sendCommandEvent(ctx, deviceID, command, protocol.Event{
 			Type: "error", RequestID: command.RequestID, Message: "不支持通用后端调用",
-			Payload: mustJSON(map[string]string{"code": "RAW_RPC_DISABLED", "latestLine": "不支持通用后端调用"}),
+			Payload:   mustJSON(map[string]string{"code": "RAW_RPC_DISABLED", "latestLine": "不支持通用后端调用"}),
 			CreatedAt: time.Now().UnixMilli(),
 		}, "")
 	}
@@ -4796,6 +4868,9 @@ func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.
 	encoded := b.state.DeviceSecrets[deviceID]
 	b.state.Sequences[deviceID]++
 	sequence := b.state.Sequences[deviceID]
+	// 只有近期活跃过的设备才值得进补发队列：离线设备收不到，留着只会让内存
+	// 和状态体积一路膨胀。
+	queueForResend := b.deviceActiveLocked(deviceID)
 	_ = b.persistStateLocked()
 	b.mu.Unlock()
 	secret, err := protocol.DecodeSecret(encoded)
@@ -4810,15 +4885,16 @@ func (b *bridge) sendEvent(ctx context.Context, deviceID string, event protocol.
 		return err
 	}
 	raw, _ := json.Marshal(wire)
-	b.mu.Lock()
-	pending := b.state.PendingOutbound[deviceID]
-	if pending == nil {
-		pending = map[string]string{}
-		b.state.PendingOutbound[deviceID] = pending
+	if queueForResend {
+		b.mu.Lock()
+		pending := b.state.PendingOutbound[deviceID]
+		if pending == nil {
+			pending = map[string]string{}
+			b.state.PendingOutbound[deviceID] = pending
+		}
+		pending[wire.MessageID] = string(raw)
+		b.mu.Unlock()
 	}
-	pending[wire.MessageID] = string(raw)
-	_ = b.persistStateLocked()
-	b.mu.Unlock()
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
 	if b.conn == nil {

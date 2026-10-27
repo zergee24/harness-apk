@@ -100,6 +100,14 @@ func LoadBridge(path string) (BridgeData, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return BridgeData{}, err
 	}
+	// pendingOutbound 只是「重连后 5 分钟内补发」的临时队列，永不落盘。旧版本把
+	// 它持久化之后，长期在线的连接会把队列堆到上万条、bridge.json 涨到十几 MB，
+	// 并且每次状态保存都要整份重写（实测约 15 MB × 1 次/秒）。载入时直接丢弃，
+	// 交给首次 SaveBridge 把文件缩回去。
+	if data.SchemaVersion < BridgeSchemaVersion && len(data.PendingOutbound) > 0 {
+		data.NeedsInitialGapSnapshot = true
+	}
+	data.PendingOutbound = map[string]map[string]string{}
 	migrated, err := normalizeBridge(&data, true)
 	if err != nil {
 		return BridgeData{}, err
@@ -116,6 +124,8 @@ func SaveBridge(path string, data BridgeData) error {
 	if _, err := normalizeBridge(&data, false); err != nil {
 		return err
 	}
+	// 临时补发队列只活在本进程内（见 LoadBridge 注释），不写盘。
+	data.PendingOutbound = nil
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
