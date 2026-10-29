@@ -132,6 +132,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import com.harnessapk.remote.AliyunPushManager
 import com.harnessapk.remote.DashboardViewedStore
+import com.harnessapk.remote.ImageGenerateStore
 import com.harnessapk.remote.RemoteEnrollmentClient
 import com.harnessapk.remote.RemoteBindingRepository
 import com.harnessapk.remote.RemoteApprovalCommandCoordinator
@@ -212,6 +213,10 @@ class AppContainer(
     val remoteEnrollmentClient = RemoteEnrollmentClient(remoteHttpClient)
     val aliyunPushManager = AliyunPushManager(appContext)
     val remoteRepository = RemoteRepository(remoteProfileStore, remoteHttpClient, applicationScope)
+    val imageGenerateStore = ImageGenerateStore(
+        scope = applicationScope,
+        sendCommand = { requestId, command -> remoteRepository.sendHostCommand(requestId, command) },
+    )
     val zcodeWebRemoteStore = ZcodeWebRemoteStore(appContext)
     val dashboardViewedStore = DashboardViewedStore(appContext)
     val remoteBindingRepository = RemoteBindingRepository(database.remoteDao())
@@ -235,6 +240,7 @@ class AppContainer(
     init {
         remoteRepository.attachSyncCoordinator(remoteSyncCoordinator)
         remoteRepository.attachConnectedHandler { _, _ -> remoteTransport.flush() }
+        remoteRepository.attachImageGenerateStore(imageGenerateStore)
         // 用 DataStore 真值校正 simpleMode 的 SharedPreferences 镜像（见 AppSettingsStore）。
         // 正常路径由 setSimpleMode 双写，这里只处理"镜像还不存在"的升级安装，
         // 否则镜像会一直停在默认的 false，导致首帧模式反复错乱。

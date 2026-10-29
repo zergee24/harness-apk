@@ -85,10 +85,24 @@ class RemoteRepository(
     private var syncCoordinator: RemoteSyncCoordinator? = null
     @Volatile
     private var connectedHandler: (suspend (hostId: String, deviceId: String) -> Unit)? = null
+    @Volatile
+    private var imageGenerateStore: ImageGenerateStore? = null
 
     fun attachSyncCoordinator(coordinator: RemoteSyncCoordinator) {
         syncCoordinator = coordinator
     }
+
+    /** 生图仓库：命令发送走本仓库的加密通道，图片事件在 handleEvent 里转发过去。 */
+    fun attachImageGenerateStore(store: ImageGenerateStore) {
+        imageGenerateStore = store
+    }
+
+    /**
+     * 发送 host 级命令（如 image.generate）：不注入 backendId，也不进入 rpc 看门狗
+     * （这类命令以事件回包，且 bridge 生图耗时远超普通命令的 30s 预算）。
+     */
+    fun sendHostCommand(requestId: String, command: JsonObject): Boolean =
+        sendPayload(requestId, command, includeBackendId = false)
 
     fun attachConnectedHandler(handler: suspend (hostId: String, deviceId: String) -> Unit) {
         connectedHandler = handler
@@ -287,13 +301,17 @@ class RemoteRepository(
     override fun send(command: JsonObject): Boolean =
         sendPayload(command.string("requestId") ?: "sync:${UUID.randomUUID()}", command)
 
-    private fun sendPayload(requestId: String, payload: JsonObject): Boolean {
+    private fun sendPayload(requestId: String, payload: JsonObject, includeBackendId: Boolean = true): Boolean {
         val profile = profileStore.profile.value
         if (profile == null) {
             pendingCommands.remove(requestId)
             return false
         }
-        val effectivePayload = injectBackendId(payload, _state.value.selectedBackendId)
+        val effectivePayload = if (includeBackendId) {
+            injectBackendId(payload, _state.value.selectedBackendId)
+        } else {
+            payload
+        }
         val activeSocket = socket
         if (activeSocket == null) {
             pendingCommands.remove(requestId)
@@ -558,6 +576,8 @@ class RemoteRepository(
                 )
             }
             "zcode.webremote" -> _webRemoteResults.tryEmit(parseZcodeWebRemoteResult(event.payload))
+            // 生图：host 级命令以 image.generated / image.error 事件回包（requestId 关联）。
+            IMAGE_GENERATED_EVENT_TYPE, IMAGE_ERROR_EVENT_TYPE -> imageGenerateStore?.onEvent(event)
         }
     }
 
