@@ -24,6 +24,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HTTPS_PROXY</key><string>http://127.0.0.1:7897</string>
   </dict>
   <key>StandardOutPath</key><string>/tmp/harness-remote-bridge.log</string>
   <key>StandardErrorPath</key><string>/tmp/harness-remote-bridge.error.log</string>
