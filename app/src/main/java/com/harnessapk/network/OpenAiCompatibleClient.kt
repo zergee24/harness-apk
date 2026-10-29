@@ -11,6 +11,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonArrayBuilder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -102,6 +103,15 @@ class OpenAiCompatibleClient(
             put("temperature", JsonPrimitive(request.temperature))
             request.reasoningEffort?.let { put("reasoning_effort", JsonPrimitive(it)) }
             addNativeWebSearch(request.nativeWebSearchMode)
+            // 服务端 web_search 工具与 function tools 共用同一个 tools 数组，必须合并而不是互相覆盖。
+            val tools = buildJsonArray {
+                request.tools.forEach { tool -> add(tool.toOpenAiFunctionTool()) }
+                addNativeWebSearchTool(request.nativeWebSearchMode)
+            }
+            if (tools.isNotEmpty()) {
+                put("tools", tools)
+                request.toolChoice?.takeIf { it.isNotBlank() }?.let { put("tool_choice", JsonPrimitive(it)) }
+            }
             put("messages", buildJsonArray {
                 request.messages.forEach { message ->
                     add(buildMessage(message))
@@ -131,30 +141,66 @@ class OpenAiCompatibleClient(
             NativeWebSearchMode.ENABLE_SEARCH_BOOLEAN -> {
                 put("enable_search", JsonPrimitive(true))
             }
-            NativeWebSearchMode.GLM_WEB_SEARCH_TOOL -> {
-                put("tools", buildJsonArray {
-                    add(
-                        buildJsonObject {
-                            put("type", JsonPrimitive("web_search"))
-                            put(
-                                "web_search",
-                                buildJsonObject {
-                                    put("enable", JsonPrimitive(true))
-                                    put("search_engine", JsonPrimitive("search_std"))
-                                },
-                            )
-                        },
-                    )
-                })
-            }
+            // GLM 的服务端搜索是 provider-native tool，统一在 addNativeWebSearchTool 里合并进 tools 数组。
+            NativeWebSearchMode.GLM_WEB_SEARCH_TOOL,
             NativeWebSearchMode.EXTERNAL_BING,
             NativeWebSearchMode.DISABLED,
             null -> Unit
         }
     }
 
+    private fun JsonArrayBuilder.addNativeWebSearchTool(mode: NativeWebSearchMode?) {
+        if (mode != NativeWebSearchMode.GLM_WEB_SEARCH_TOOL) return
+        add(
+            buildJsonObject {
+                put("type", JsonPrimitive("web_search"))
+                put(
+                    "web_search",
+                    buildJsonObject {
+                        put("enable", JsonPrimitive(true))
+                        put("search_engine", JsonPrimitive("search_std"))
+                    },
+                )
+            },
+        )
+    }
+
+    private fun ChatToolDefinition.toOpenAiFunctionTool(): JsonObject = buildJsonObject {
+        put("type", JsonPrimitive("function"))
+        put(
+            "function",
+            buildJsonObject {
+                put("name", JsonPrimitive(name))
+                put("description", JsonPrimitive(description))
+                put("parameters", parameters)
+            },
+        )
+    }
+
     private fun buildMessage(message: OutgoingChatMessage): JsonObject = buildJsonObject {
         put("role", JsonPrimitive(message.role))
+        if (message.toolCalls.isNotEmpty()) {
+            put("content", JsonPrimitive(message.text))
+            put("tool_calls", buildJsonArray {
+                message.toolCalls.forEach { call ->
+                    add(
+                        buildJsonObject {
+                            put("id", JsonPrimitive(call.id))
+                            put("type", JsonPrimitive("function"))
+                            put(
+                                "function",
+                                buildJsonObject {
+                                    put("name", JsonPrimitive(call.name))
+                                    put("arguments", JsonPrimitive(call.arguments))
+                                },
+                            )
+                        },
+                    )
+                }
+            })
+            return@buildJsonObject
+        }
+        message.toolCallId?.takeIf { it.isNotBlank() }?.let { put("tool_call_id", JsonPrimitive(it)) }
         if (message.imageDataUrls.isEmpty()) {
             put("content", JsonPrimitive(message.text))
         } else {
@@ -194,6 +240,7 @@ class OpenAiCompatibleClient(
             events += StreamEvent.ReasoningDelta(it)
         }
         delta?.get("content")?.let { content -> events += content.toStreamEvents() }
+        delta?.get("tool_calls")?.let { toolCalls -> events += toolCalls.toToolCallDeltas() }
         delta?.imageStreamEvent()?.let { events += it }
         root["usage"]?.jsonObject?.let { usage ->
             events += StreamEvent.Usage(
@@ -228,6 +275,28 @@ class OpenAiCompatibleClient(
             .map(StreamEvent::TextDelta)
         is JsonArray -> flatMap { it.toContentPartEvents() }
         else -> emptyList()
+    }
+
+    /**
+     * 解析 `choices[0].delta.tool_calls[]`：同一个调用会按 index 分多片到达，
+     * id / function.name 通常只在第一片出现，arguments 是增量字符串，交给上层按 index 拼接。
+     */
+    private fun JsonElement.toToolCallDeltas(): List<StreamEvent.ToolCallDelta> {
+        val array = this as? JsonArray ?: return emptyList()
+        return array.mapNotNull { element ->
+            val call = element as? JsonObject ?: return@mapNotNull null
+            val function = call["function"] as? JsonObject
+            val id = call.getString("id").orEmpty()
+            val name = function?.getString("name")?.takeIf { it.isNotBlank() }
+            val argumentsDelta = function?.getString("arguments").orEmpty()
+            if (id.isBlank() && name == null && argumentsDelta.isEmpty()) return@mapNotNull null
+            StreamEvent.ToolCallDelta(
+                id = id,
+                name = name,
+                argumentsDelta = argumentsDelta,
+                index = call.getString("index")?.trim()?.toIntOrNull() ?: 0,
+            )
+        }
     }
 
     private fun JsonElement.toContentPartEvents(): List<StreamEvent> {
