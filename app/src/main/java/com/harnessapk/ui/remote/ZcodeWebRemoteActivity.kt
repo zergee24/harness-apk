@@ -351,6 +351,7 @@ fun ZcodeWebRemoteScreen(
                                         params: FileChooserParams,
                                     ): Boolean = onFileChooser(callback, params)
                                 }
+                                installWebShellDownload(ctx)
                                 webViewRef = this
                             } ?: android.widget.FrameLayout(ctx).also { webUnavailable = true }
                         },
