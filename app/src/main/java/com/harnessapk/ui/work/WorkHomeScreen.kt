@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -77,6 +78,7 @@ internal fun WorkHomeScreen(
     contentPadding: PaddingValues,
     onOpenRemoteBackend: (String) -> Unit,
     onOpenWorkbench: () -> Unit,
+    onOpenImageGenerate: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -139,6 +141,20 @@ internal fun WorkHomeScreen(
             supportingText = if (compact) null else "本地项目 · 文件 · Git",
             icon = Icons.Outlined.Folder,
             onClick = onOpenWorkbench,
+            compact = compact,
+        )
+        Text(
+            text = "工具",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        WorkHomeEntry(
+            testTag = "work-home-imagegen",
+            title = "AI 生图",
+            supportingText = if (compact) null else "文字生成图片 · 保存到相册",
+            icon = Icons.Outlined.Palette,
+            onClick = onOpenImageGenerate,
             compact = compact,
         )
         }

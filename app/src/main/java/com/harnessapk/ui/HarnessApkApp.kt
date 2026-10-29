@@ -97,6 +97,7 @@ import com.harnessapk.ui.chat.ChatScreen
 import com.harnessapk.ui.conversation.ConversationListScreen
 import com.harnessapk.ui.conversation.ArchivedConversationListScreen
 import com.harnessapk.ui.git.GitSettingsScreen
+import com.harnessapk.ui.imagegen.ImageGenerateScreen
 import com.harnessapk.ui.project.ProjectWorkbenchDestination
 import com.harnessapk.ui.project.ProjectScreen
 import com.harnessapk.ui.workbrief.WorkBriefCaptureScreen
@@ -146,6 +147,7 @@ object Routes {
     const val Updates = "updates"
     const val RemoteSettings = "remote-settings"
     const val RemoteControl = "remote-control"
+    const val ImageGenerate = "image-generate"
 
     /**
      * Remote control with one Mac backend preselected, so a hub entry opens the
@@ -414,6 +416,7 @@ fun HarnessApkApp(
         Routes.RemoteControl -> remoteUiState.threads
             .firstOrNull { it.id == remoteUiState.selectedThreadId }?.title ?: "远程控制"
         Routes.Activity -> "任务动态"
+        Routes.ImageGenerate -> "AI 生图"
         Routes.ChatPattern -> (lifeOverview as? LifeConversationOverviewState.Content)?.items
             ?.firstOrNull { it.conversationId == currentConversationId }?.title
             ?: chatTopBarTitle(conversations, currentConversationId)
@@ -747,6 +750,9 @@ fun HarnessApkApp(
                                 DropdownMenuItem(text = { Text("知识库") }, onClick = {
                                     leaveHomeChat { navController.navigate(Routes.WikiLibrary) }
                                 })
+                                DropdownMenuItem(text = { Text("AI 生图") }, onClick = {
+                                    leaveHomeChat { navController.navigate(Routes.ImageGenerate) }
+                                })
                                 DropdownMenuItem(text = { Text("会话设置") }, onClick = {
                                     lifeMenuExpanded = false
                                     chatSessionConfigRequestKey += 1
@@ -1007,6 +1013,7 @@ fun HarnessApkApp(
                                 }
                             },
                             onOpenWorkbench = { workWorkbenchActive = true },
+                            onOpenImageGenerate = { navController.navigate(Routes.ImageGenerate) },
                         )
                     }
                     MainMode.ME -> SettingsScreen(
@@ -1302,6 +1309,9 @@ fun HarnessApkApp(
             }
             composable(Routes.RemoteControl) {
                 RemoteScreen(container = container, contentPadding = padding)
+            }
+            composable(Routes.ImageGenerate) {
+                ImageGenerateScreen(container = container, contentPadding = padding)
             }
             composable(
                 route = Routes.RemoteControlBackendPattern,

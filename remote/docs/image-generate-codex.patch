@@ -1,0 +1,1694 @@
+diff --git a/remote/cmd/bridge/image.go b/remote/cmd/bridge/image.go
+new file mode 100644
+index 0000000..3f089e2
+--- /dev/null
++++ b/remote/cmd/bridge/image.go
+@@ -0,0 +1,277 @@
++package main
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"log"
++	"sync"
++	"time"
++
++	"github.com/harnessapk/remote/internal/imagegen"
++	"github.com/harnessapk/remote/internal/protocol"
++)
++
++// imageGenerator is the bridge-side image backend. *imagegen.Service implements
++// it in production; tests substitute a fake so command dispatch and rate
++// limiting can be exercised without network access.
++type imageGenerator interface {
++	Generate(ctx context.Context, request imagegen.Request) (imagegen.Result, error)
++}
++
++// imageError codes that are produced by the bridge itself (the imagegen package
++// has its own for upstream failures).
++const (
++	codeImageInvalidParams = "INVALID_PARAMS"
++	codeImageBusy          = "IMAGE_BUSY"
++	codeImageRateLimited   = "IMAGE_RATE_LIMITED"
++	codeImageDailyLimit    = "IMAGE_DAILY_LIMIT"
++)
++
++// Per-device limits. The protocol keeps them in bridge memory, so a restart
++// clears the counters (explicitly acceptable in remote/docs/image-generate.md).
++const (
++	imageConcurrentPerDevice = 1
++	imagePerMinutePerDevice  = 4
++	imagePerDayPerDevice     = 200
++)
++
++// imageCommandError is a bridge-side (validation/rate limit) error that the APK
++// receives as image.error with the same code and Chinese message.
++type imageCommandError struct {
++	code    string
++	message string
++}
++
++func (e *imageCommandError) Error() string { return e.message }
++
++// imageGeneratedPayload is the image.generated payload defined by
++// remote/docs/image-generate.md §2.
++type imageGeneratedPayload struct {
++	ID              string  `json:"id"`
++	Prompt          string  `json:"prompt"`
++	Model           string  `json:"model"`
++	Size            string  `json:"size"`
++	Quality         string  `json:"quality"`
++	MimeType        string  `json:"mimeType"`
++	DataBase64      string  `json:"dataBase64"`
++	Bytes           int     `json:"bytes"`
++	Width           int     `json:"width"`
++	Height          int     `json:"height"`
++	DurationMs      int64   `json:"durationMs"`
++	CostEstimateUsd float64 `json:"costEstimateUsd"`
++	SavedPath       string  `json:"savedPath,omitempty"`
++}
++
++// newImageService builds the production image generator. proxyURL is the
++// optional --image-proxy override; empty means HARNESS_IMAGE_PROXY (or the
++// standard HTTPS_PROXY/HTTP_PROXY lookup inside the service).
++func newImageService(proxyURL string) imageGenerator {
++	return imagegen.New(imagegen.Config{ProxyURL: proxyURL})
++}
++
++// imageGeneratorOrDefault mirrors imagegen.Service lazily when serve did not
++// install one (mainly tests). executeCommand is serialized by the relay read
++// loop, so lazy initialization needs no extra lock.
++func (b *bridge) imageGeneratorOrDefault() imageGenerator {
++	if b.imageGen == nil {
++		b.imageGen = newImageService("")
++	}
++	return b.imageGen
++}
++
++// imageLimiterOrDefault installs the in-memory per-device limiter on first use
++// (see imageGeneratorOrDefault for the locking argument).
++func (b *bridge) imageLimiterOrDefault() *imageRateLimiter {
++	if b.imageLimiter == nil {
++		b.imageLimiter = newImageRateLimiter(time.Now)
++	}
++	return b.imageLimiter
++}
++
++// sendImageEvent emits one image event. Tests replace imageSend to capture
++// events without a websocket connection.
++func (b *bridge) sendImageEvent(ctx context.Context, deviceID string, event protocol.Event) error {
++	if b.imageSend != nil {
++		return b.imageSend(ctx, deviceID, event)
++	}
++	return b.sendEvent(ctx, deviceID, event, "")
++}
++
++// handleImageGenerate runs one host-level image.generate command. Request
++// validation and quota reservation happen synchronously so a bad or blocked
++// request fails fast, then generation continues in the background: an image can
++// take 5-30s and the relay read loop must keep processing other messages.
++func (b *bridge) handleImageGenerate(ctx context.Context, deviceID string, command protocol.Command) error {
++	request := imagegen.Request{}
++	if len(command.Params) > 0 {
++		if err := json.Unmarshal(command.Params, &request); err != nil {
++			return b.sendImageError(ctx, deviceID, command.RequestID,
++				&imageCommandError{code: codeImageInvalidParams, message: "生图参数格式错误"})
++		}
++	}
++	request = request.Normalize()
++	if err := request.Validate(); err != nil {
++		return b.sendImageError(ctx, deviceID, command.RequestID, err)
++	}
++	generator := b.imageGeneratorOrDefault()
++	limiter := b.imageLimiterOrDefault()
++	if err := limiter.acquire(deviceID); err != nil {
++		return b.sendImageError(ctx, deviceID, command.RequestID, err)
++	}
++	go func() {
++		defer limiter.release(deviceID)
++		result, err := generator.Generate(ctx, request)
++		if err != nil {
++			code, _ := imageErrorDetails(err)
++			// Never log the prompt or the API key: only requestId/deviceId
++			// prefixes plus the classification are allowed.
++			log.Printf("image.generate failed requestId=%s deviceId=%s code=%s",
++				shortID(command.RequestID), shortID(deviceID), code)
++			if sendErr := b.sendImageError(ctx, deviceID, command.RequestID, err); sendErr != nil {
++				log.Printf("image.generate send error requestId=%s: %v", shortID(command.RequestID), sendErr)
++			}
++			return
++		}
++		payload := imageGeneratedPayload{
++			ID:              result.ID,
++			Prompt:          request.Prompt,
++			Model:           firstNonEmpty(result.Model, request.Model),
++			Size:            firstNonEmpty(result.Size, request.Size),
++			Quality:         firstNonEmpty(result.Quality, request.Quality),
++			MimeType:        result.MimeType,
++			DataBase64:      base64.StdEncoding.EncodeToString(result.Data),
++			Bytes:           len(result.Data),
++			Width:           result.Width,
++			Height:          result.Height,
++			DurationMs:      result.DurationMs,
++			CostEstimateUsd: result.CostEstimateUsd,
++			SavedPath:       result.SavedPath,
++		}
++		log.Printf("image.generate done requestId=%s deviceId=%s model=%s size=%s quality=%s bytes=%d durationMs=%d",
++			shortID(command.RequestID), shortID(deviceID), payload.Model, payload.Size, payload.Quality,
++			payload.Bytes, payload.DurationMs)
++		if sendErr := b.sendImageEvent(ctx, deviceID, protocol.Event{
++			Type: "image.generated", RequestID: command.RequestID,
++			Payload: mustJSON(payload), CreatedAt: time.Now().UnixMilli(),
++		}); sendErr != nil {
++			log.Printf("image.generate send result requestId=%s: %v", shortID(command.RequestID), sendErr)
++		}
++	}()
++	return nil
++}
++
++// sendImageError emits image.error with a Chinese message and the machine
++// readable code in payload.code.
++func (b *bridge) sendImageError(ctx context.Context, deviceID, requestID string, cause error) error {
++	code, message := imageErrorDetails(cause)
++	return b.sendImageEvent(ctx, deviceID, protocol.Event{
++		Type: "image.error", RequestID: requestID, Message: message,
++		Payload: mustJSON(map[string]string{"code": code}), CreatedAt: time.Now().UnixMilli(),
++	})
++}
++
++// imageErrorDetails classifies a failure for the APK without exposing prompts or
++// keys.
++func imageErrorDetails(err error) (code, message string) {
++	var generatorError *imagegen.Error
++	if errors.As(err, &generatorError) {
++		return generatorError.Code, generatorError.Message
++	}
++	var commandError *imageCommandError
++	if errors.As(err, &commandError) {
++		return commandError.code, commandError.message
++	}
++	return "IMAGE_ERROR", "生图失败，请稍后重试"
++}
++
++// shortID truncates ids in logs to their first 8 bytes.
++func shortID(id string) string {
++	if len(id) > 8 {
++		return id[:8]
++	}
++	return id
++}
++
++// imageRateLimiter is the in-memory per-device ledger: one in-flight request,
++// a 4-requests-per-minute sliding window and 200 requests per local day.
++type imageRateLimiter struct {
++	mu        sync.Mutex
++	perMinute int
++	perDay    int
++	now       func() time.Time
++	devices   map[string]*imageDeviceUsage
++}
++
++// imageDeviceUsage is the accounting for one device.
++type imageDeviceUsage struct {
++	inFlight int
++	recent   []time.Time
++	day      string
++	dayCount int
++}
++
++func newImageRateLimiter(now func() time.Time) *imageRateLimiter {
++	if now == nil {
++		now = time.Now
++	}
++	return &imageRateLimiter{
++		perMinute: imagePerMinutePerDevice,
++		perDay:    imagePerDayPerDevice,
++		now:       now,
++		devices:   map[string]*imageDeviceUsage{},
++	}
++}
++
++// acquire reserves one slot; it returns a user-facing error when the device is
++// busy, over the sliding window or over the daily quota.
++func (l *imageRateLimiter) acquire(deviceID string) error {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	usage := l.devices[deviceID]
++	if usage == nil {
++		usage = &imageDeviceUsage{}
++		l.devices[deviceID] = usage
++	}
++	now := l.now()
++	cutoff := now.Add(-time.Minute)
++	recent := usage.recent[:0]
++	for _, at := range usage.recent {
++		if at.After(cutoff) {
++			recent = append(recent, at)
++		}
++	}
++	usage.recent = recent
++	if day := now.Format("2006-01-02"); usage.day != day {
++		usage.day = day
++		usage.dayCount = 0
++	}
++	switch {
++	case usage.inFlight >= imageConcurrentPerDevice:
++		return &imageCommandError{code: codeImageBusy, message: "已有生图任务正在进行，请等待完成后再试"}
++	case len(usage.recent) >= l.perMinute:
++		return &imageCommandError{
++			code:    codeImageRateLimited,
++			message: fmt.Sprintf("生图请求太频繁（每分钟最多 %d 次），请稍后再试", l.perMinute),
++		}
++	case usage.dayCount >= l.perDay:
++		return &imageCommandError{
++			code:    codeImageDailyLimit,
++			message: fmt.Sprintf("今日生图次数已达上限（%d 次），请明天再试", l.perDay),
++		}
++	}
++	usage.inFlight++
++	usage.recent = append(usage.recent, now)
++	usage.dayCount++
++	return nil
++}
++
++func (l *imageRateLimiter) release(deviceID string) {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if usage := l.devices[deviceID]; usage != nil && usage.inFlight > 0 {
++		usage.inFlight--
++	}
++}
+diff --git a/remote/cmd/bridge/main.go b/remote/cmd/bridge/main.go
+index f9f1349..e7e6f5e 100644
+--- a/remote/cmd/bridge/main.go
++++ b/remote/cmd/bridge/main.go
+@@ -96,6 +96,12 @@ type bridge struct {
+ 	dashboardSender       func(ctx context.Context, deviceID string, event protocol.Event) error
+ 	updateState           func(string, func(*bridgeState) error) error
+ 	backendBackoff        time.Duration
++
++	// Host-level image generation (image.generate). imageSend is a test seam,
++	// mirroring updateState above.
++	imageGen     imageGenerator
++	imageLimiter *imageRateLimiter
++	imageSend    func(context.Context, string, protocol.Event) error
+ 	turnTransitions       map[string][]turnTransition
+ 	turnTransitionCounter uint64
+ 	turnCallTails         map[string]chan struct{}
+@@ -293,6 +299,7 @@ func runServe(defaultPath string, args []string) {
+ 	statePath := flags.String("state", defaultPath, "bridge state file")
+ 	codex := flags.String("codex", "codex", "Codex executable")
+ 	codexProxy := flags.String("codex-proxy", "", "可选：codex 后端子进程的 HTTPS 代理（chatgpt.com 需国际网络时设置；dsh/relay 不受影响）")
++	imageProxy := flags.String("image-proxy", "", "proxy URL for OpenAI image requests (default: HARNESS_IMAGE_PROXY, then HTTPS_PROXY)")
+ 	var backendSpecs stringList
+ 	flags.Var(&backendSpecs, "backend", "backend <id> or <id>=<executable>; repeatable (default: codex)")
+ 	_ = flags.Parse(args)
+@@ -322,6 +329,10 @@ func runServe(defaultPath string, args []string) {
+ 		names = append(names, fmt.Sprintf("%s=%s", spec.ID, spec.Exec))
+ 	}
+ 	log.Printf("serve backends: %s", strings.Join(names, ", "))
++	// Host-level image generation state survives relay reconnects; only a
++	// process restart resets the in-memory rate limits (acceptable per spec).
++	imageService := newImageService(*imageProxy)
++	imageRate := newImageRateLimiter(time.Now)
+ 	for {
+ 		journalKey, err := base64.RawURLEncoding.DecodeString(state.JournalKey)
+ 		if err != nil {
+@@ -363,6 +374,7 @@ func runServe(defaultPath string, args []string) {
+ 			state: state, path: *statePath, journal: journalStore,
+ 			commandCache: commandStore, routes: routeStore, terminals: terminalStore, workspaces: workspaceRegistry,
+ 			seen: map[string]time.Time{},
++			imageGen: imageService, imageLimiter: imageRate,
+ 		}
+ 		if err := b.recoverThreadContinuationsFromCommands(); err != nil {
+ 			log.Printf("recover lazy continuations: %v", err)
+@@ -1480,6 +1492,10 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
+ 			}
+ 		}()
+ 		return nil
++	// image.generate is a host-level command (backendId stays empty) handled
++	// before backend resolution: it needs no codex/dsh backend.
++	case "image.generate":
++		return b.handleImageGenerate(ctx, deviceID, command)
+ 	case "event.ack":
+ 		if b.journal == nil {
+ 			return errors.New("logical journal is unavailable")
+diff --git a/remote/docs/image-generate.md b/remote/docs/image-generate.md
+new file mode 100644
+index 0000000..48a8dec
+--- /dev/null
++++ b/remote/docs/image-generate.md
+@@ -0,0 +1,93 @@
++# 生图命令协议（image.generate）
++
++> 2026-10-29 定义。链路：`Harness APK ⇄ 阿里云 relay（只转发 AES-GCM 密文）⇄ Mac bridge → OpenAI Images API`。
++> **relay 与 `internal/protocol` 结构体都不需要改动**：命令参数走 `Command.Params`（`json.RawMessage`），
++> 结果走 `Event.Payload`（`json.RawMessage`），命令/事件类型用普通字符串标识（与 `host.status` 同风格）。
++
++## 1. 命令：`image.generate`（APK → bridge）
++
++```jsonc
++{
++  "type": "image.generate",
++  "requestId": "<客户端生成的唯一 id>",
++  "params": {
++    "prompt": "A minimal flat-design icon of ...", // 必填，≤ 4000 字符
++    "size": "1024x1024",                          // 可选；枚举 1024x1024 | 1024x1536 | 1536x1024；默认 1024x1024
++    "quality": "medium",                          // 可选；枚举 low | medium | high；默认 medium
++    "model": "gpt-image-2.5-flare"                // 可选；枚举 gpt-image-2.5-flare | gpt-image-2.5-sunburst | gpt-image-2；默认 flare
++  }
++}
++```
++
++- `backendId` 留空：这是 **host 级命令**，不依赖 codex/dsh 后端（与 `host.status` 同一层分发）。
++- 已配对设备才能发命令（消息本身按设备密钥加密），bridge 额外做**每设备限流**。
++
++## 2. 成功事件：`image.generated`（bridge → APK）
++
++```jsonc
++{
++  "type": "image.generated",
++  "requestId": "<原样回传>",
++  "payload": {
++    "id": "<bridge 生成的 id>",
++    "prompt": "<原 prompt>",
++    "model": "gpt-image-2.5-flare",
++    "size": "1024x1024",
++    "quality": "medium",
++    "mimeType": "image/png",       // image/png | image/jpeg（超预算时 bridge 转 JPEG）
++    "dataBase64": "<图片本体 base64，不带 data: 前缀>",
++    "bytes": 864733,                // 返回图片的原始字节数
++    "width": 1024,
++    "height": 1024,
++    "durationMs": 8123,             // bridge 侧从请求到拿到图片的耗时
++    "costEstimateUsd": 0.053,       // 粗估（按 quality+size 的公开价），仅用于展示
++    "savedPath": "/Users/tony/.harness-remote/imagegen/<id>.png" // Mac 上归档的原图路径（仅调试用）
++  }
++}
++```
++
++## 3. 失败事件：`image.error`（bridge → APK）
++
++```jsonc
++{
++  "type": "image.error",
++  "requestId": "<原样回传>",
++  "message": "人类可读中文错误，例如：OpenAI 401 / 额度耗尽 / prompt 过长 / 限流",
++  "payload": { "code": "OPENAI_HTTP_401" } // 可选
++}
++```
++
++## 4. 尺寸预算（关键约束）
++
++relay 的 WS 单帧上限 `maxWireMessageBytes = 8 << 20`（8 MiB，`remote/cmd/relay/main.go:22`）。
++一次回包的膨胀链：`PNG → JSON base64(×4/3) → AES-GCM 密文 → WireMessage.ciphertext base64(×4/3)`，
++总膨胀约 **×2.37**。因此在 bridge 侧：
++
++- 原始图片 ≤ **2.2 MB**：直接回 PNG；
++- 超过：bridge 用 Go 标准库解码后压成 **JPEG（q=85，长边 ≤ 2048）** 回传，保证线上帧 ≈ < 2 MB；
++- 原始 > **8 MB**：直接报 `image.error`（`IMAGE_TOO_LARGE`），不冒险发超大帧。
++
++## 5. bridge 侧实现约束
++
++- **key 解析顺序**：`OPENAI_API_KEY` 环境变量 → `~/.dsh/.credentials.yaml` 的 `refs.OPENAI_API_KEY`（每次请求现读）。
++- **代理**：Go 标准库 `http.Transport` 默认读 `HTTPS_PROXY/HTTP_PROXY`，所以只需给 bridge 进程注入
++  `HTTPS_PROXY=http://127.0.0.1:7897`（写进 `remote/deploy/com.harnessapk.remote-bridge.plist` 的 EnvironmentVariables，
++  同时提供 `--image-proxy` 或 env `HARNESS_IMAGE_PROXY` 作为显式覆盖，缺省走 env）。
++- **端点**：`POST {OPENAI_BASE_URL:-https://api.openai.com/v1}/images/generations`
++  body：`{ model, prompt, size, quality }`（gpt-image 系列默认返回 `b64_json`）。
++- **限流**：每设备同时最多 1 个生图请求；滑动窗口 4 次/分钟；每日 200 次（bridge 内存记账即可，重启清零可接受）。
++- **落盘**：原图归档到 `~/.harness-remote/imagegen/<id>.png`（目录 0700），失败不落盘。
++- **日志**：只记 `requestId/deviceId 前 8 位/model/size/quality/bytes/durationMs`，**不要记 prompt 全文与 key**。
++
++## 6. APK 侧实现约束
++
++- 发送：复用现有远程命令通道（`RemoteClient`/`RemoteConnectionService` 现成的加密 + outbox + 重试链路），
++  新增 `image.generate` 命令封装；`requestId` 自己生成并用于关联事件。
++- 接收：订阅 `image.generated` / `image.error`（走现有事件分发/reducer），交给 UI 的 StateFlow。
++- 展示：`dataBase64` → `BitmapFactory.decodeByteArray`；保存走 MediaStore（`Pictures/Harness`），分享用 `FileProvider`。
++- 超时：bridge 生图可能 5–30s（high 更久），UI 侧给 ≥ 120s 的超时与明确的"仍在生成"状态。
++
++## 7. 不需要改动的东西
++
++- relay（`cmd/relay`）与 `internal/protocol` 结构体：零改动。
++- DSH / MCP 生图工具：与本链路无关（那边是 Mac 本地工具，供桌面会话用）。
+diff --git a/remote/internal/imagegen/convert.go b/remote/internal/imagegen/convert.go
+new file mode 100644
+index 0000000..092feee
+--- /dev/null
++++ b/remote/internal/imagegen/convert.go
+@@ -0,0 +1,67 @@
++package imagegen
++
++import (
++	"bytes"
++	"image"
++	"image/jpeg"
++	"image/png"
++)
++
++// decodePNG decodes the upstream PNG so the bridge can report dimensions and
++// re-encode it when the payload exceeds the relay frame budget.
++func decodePNG(raw []byte) (image.Image, error) {
++	decoded, err := png.Decode(bytes.NewReader(raw))
++	if err != nil {
++		return nil, &Error{Code: CodeDecodeFailed, Message: "无法解码 OpenAI 返回的 PNG 图片", Err: err}
++	}
++	return decoded, nil
++}
++
++// encodeJPEG re-encodes an image as JPEG q85 with the long edge capped at 2048
++// px. The protocol only accepts sizes up to 1536 px on the long edge, so the
++// downscale is a safety net for unexpected upstream dimensions.
++func encodeJPEG(source image.Image) ([]byte, int, int, error) {
++	bounds := source.Bounds()
++	width, height := bounds.Dx(), bounds.Dy()
++	if width <= 0 || height <= 0 {
++		return nil, 0, 0, &Error{Code: CodeEncodeFailed, Message: "图片尺寸无效"}
++	}
++	longEdge := width
++	if height > longEdge {
++		longEdge = height
++	}
++	if longEdge > maxLongEdge {
++		width = scaledDimension(width, longEdge)
++		height = scaledDimension(height, longEdge)
++		source = scaleNearest(source, width, height)
++	}
++	var buffer bytes.Buffer
++	if err := jpeg.Encode(&buffer, source, &jpeg.Options{Quality: jpegQuality}); err != nil {
++		return nil, 0, 0, &Error{Code: CodeEncodeFailed, Message: "图片转码为 JPEG 失败", Err: err}
++	}
++	return buffer.Bytes(), width, height, nil
++}
++
++// scaledDimension rounds one edge to its proportional size, never below 1 px.
++func scaledDimension(edge, longEdge int) int {
++	scaled := (edge*maxLongEdge + longEdge/2) / longEdge
++	if scaled < 1 {
++		return 1
++	}
++	return scaled
++}
++
++// scaleNearest resamples with nearest-neighbour sampling, keeping the bridge on
++// the standard library only.
++func scaleNearest(source image.Image, width, height int) image.Image {
++	bounds := source.Bounds()
++	scaled := image.NewRGBA(image.Rect(0, 0, width, height))
++	for y := 0; y < height; y++ {
++		sourceY := bounds.Min.Y + y*bounds.Dy()/height
++		for x := 0; x < width; x++ {
++			sourceX := bounds.Min.X + x*bounds.Dx()/width
++			scaled.Set(x, y, source.At(sourceX, sourceY))
++		}
++	}
++	return scaled
++}
+diff --git a/remote/internal/imagegen/convert_test.go b/remote/internal/imagegen/convert_test.go
+new file mode 100644
+index 0000000..bc5b279
+--- /dev/null
++++ b/remote/internal/imagegen/convert_test.go
+@@ -0,0 +1,44 @@
++package imagegen
++
++import (
++	"bytes"
++	"image"
++	"image/color"
++	"image/jpeg"
++	"testing"
++)
++
++func TestEncodeJPEGKeepsAcceptedSizesAndDownscalesUnexpectedOnes(t *testing.T) {
++	// Sizes the protocol accepts never need downscaling.
++	accepted := image.NewRGBA(image.Rect(0, 0, 1024, 1536))
++	data, width, height, err := encodeJPEG(accepted)
++	if err != nil {
++		t.Fatalf("encodeJPEG accepted size: %v", err)
++	}
++	if width != 1024 || height != 1536 {
++		t.Fatalf("dimensions = %dx%d", width, height)
++	}
++	if len(data) < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF {
++		t.Fatal("result is not a JPEG")
++	}
++
++	// An unexpected 3000x1500 response is capped at 2048 px on the long edge.
++	unexpected := image.NewRGBA(image.Rect(0, 0, 3000, 1500))
++	for x := 0; x < 3000; x += 11 {
++		unexpected.Set(x, x/2, color.RGBA{R: 240, G: 120, B: 30, A: 255})
++	}
++	data, width, height, err = encodeJPEG(unexpected)
++	if err != nil {
++		t.Fatalf("encodeJPEG oversized: %v", err)
++	}
++	if width != 2048 || height != 1024 {
++		t.Fatalf("scaled dimensions = %dx%d", width, height)
++	}
++	decoded, err := jpeg.Decode(bytes.NewReader(data))
++	if err != nil {
++		t.Fatalf("decode scaled JPEG: %v", err)
++	}
++	if decoded.Bounds().Dx() != 2048 || decoded.Bounds().Dy() != 1024 {
++		t.Fatalf("decoded dimensions = %dx%d", decoded.Bounds().Dx(), decoded.Bounds().Dy())
++	}
++}
+diff --git a/remote/internal/imagegen/credentials.go b/remote/internal/imagegen/credentials.go
+new file mode 100644
+index 0000000..142ff04
+--- /dev/null
++++ b/remote/internal/imagegen/credentials.go
+@@ -0,0 +1,102 @@
++package imagegen
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++)
++
++// credentialsFileName is the DSH credential store consulted after the
++// environment. Only the flat "refs:\n  KEY: value" subset is parsed so the
++// bridge needs no YAML dependency.
++const credentialsFileName = ".dsh/.credentials.yaml"
++
++// ResolveAPIKey returns the OpenAI key for one generation request:
++// OPENAI_API_KEY first, then refs.OPENAI_API_KEY from
++// ~/.dsh/.credentials.yaml. homeDir may be empty to use the current home. The
++// file is re-read on every call so a rotated key needs no restart.
++func ResolveAPIKey(homeDir string) (string, error) {
++	if key := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); key != "" {
++		return key, nil
++	}
++	path, err := credentialsPath(homeDir)
++	if err != nil {
++		return "", missingAPIKeyError(err)
++	}
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		return "", missingAPIKeyError(err)
++	}
++	key := strings.TrimSpace(parseCredentialRefs(raw)["OPENAI_API_KEY"])
++	if key == "" {
++		return "", missingAPIKeyError(nil)
++	}
++	return key, nil
++}
++
++func missingAPIKeyError(cause error) error {
++	return &Error{
++		Code:    CodeMissingAPIKey,
++		Message: "未配置 OPENAI_API_KEY：请设置环境变量，或在 ~/.dsh/.credentials.yaml 的 refs 中添加 OPENAI_API_KEY",
++		Err:     cause,
++	}
++}
++
++func credentialsPath(homeDir string) (string, error) {
++	if homeDir == "" {
++		home, err := os.UserHomeDir()
++		if err != nil {
++			return "", err
++		}
++		homeDir = home
++	}
++	return filepath.Join(homeDir, filepath.FromSlash(credentialsFileName)), nil
++}
++
++// parseCredentialRefs extracts the refs section of the credentials file. Quoted
++// values, single-quoted values and trailing " # comment" are understood;
++// everything outside refs is ignored.
++func parseCredentialRefs(raw []byte) map[string]string {
++	refs := map[string]string{}
++	section := ""
++	for _, line := range strings.Split(string(raw), "\n") {
++		line = strings.TrimRight(line, "\r")
++		trimmed := strings.TrimSpace(line)
++		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
++			continue
++		}
++		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
++			section = ""
++			if name, ok := strings.CutSuffix(trimmed, ":"); ok {
++				section = strings.TrimSpace(name)
++			}
++			continue
++		}
++		if section != "refs" {
++			continue
++		}
++		key, value, ok := strings.Cut(trimmed, ":")
++		if !ok {
++			continue
++		}
++		key = strings.TrimSpace(key)
++		if key == "" {
++			continue
++		}
++		refs[key] = unquoteCredentialValue(strings.TrimSpace(value))
++	}
++	return refs
++}
++
++func unquoteCredentialValue(value string) string {
++	if len(value) >= 2 {
++		first, last := value[0], value[len(value)-1]
++		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
++			return value[1 : len(value)-1]
++		}
++	}
++	if index := strings.Index(value, " #"); index >= 0 {
++		value = strings.TrimSpace(value[:index])
++	}
++	return value
++}
+diff --git a/remote/internal/imagegen/credentials_test.go b/remote/internal/imagegen/credentials_test.go
+new file mode 100644
+index 0000000..e48d114
+--- /dev/null
++++ b/remote/internal/imagegen/credentials_test.go
+@@ -0,0 +1,79 @@
++package imagegen
++
++import (
++	"errors"
++	"strings"
++	"testing"
++)
++
++func TestResolveAPIKeyPrefersEnvironmentOverCredentialsFile(t *testing.T) {
++	home := t.TempDir()
++	writeCredentials(t, home, "sk-from-file")
++	t.Setenv("OPENAI_API_KEY", "")
++
++	key, err := ResolveAPIKey(home)
++	if err != nil {
++		t.Fatalf("ResolveAPIKey: %v", err)
++	}
++	if key != "sk-from-file" {
++		t.Fatalf("key = %q", key)
++	}
++
++	t.Setenv("OPENAI_API_KEY", "sk-from-env")
++	key, err = ResolveAPIKey(home)
++	if err != nil {
++		t.Fatalf("ResolveAPIKey with env: %v", err)
++	}
++	if key != "sk-from-env" {
++		t.Fatalf("environment did not win: %q", key)
++	}
++}
++
++func TestResolveAPIKeyMissingEverywhere(t *testing.T) {
++	t.Setenv("OPENAI_API_KEY", "")
++	home := t.TempDir()
++	_, err := ResolveAPIKey(home)
++	var generationError *Error
++	if !errors.As(err, &generationError) || generationError.Code != CodeMissingAPIKey {
++		t.Fatalf("err = %v", err)
++	}
++	if !strings.Contains(generationError.Message, "OPENAI_API_KEY") {
++		t.Fatalf("message = %q", generationError.Message)
++	}
++}
++
++func TestResolveAPIKeyIgnoresEmptyRef(t *testing.T) {
++	t.Setenv("OPENAI_API_KEY", "")
++	home := t.TempDir()
++	writeCredentials(t, home, "''")
++	if _, err := ResolveAPIKey(home); err == nil {
++		t.Fatal("empty ref must be treated as a missing key")
++	}
++}
++
++func TestParseCredentialRefsHandlesQuotesCommentsAndOtherSections(t *testing.T) {
++	raw := []byte(strings.Join([]string{
++		"version: 1",
++		"refs:",
++		"  OPENAI_API_KEY: \"sk-double\"",
++		"  OTHER_KEY: 'sk-single'",
++		"  COMMENTED: value # a comment",
++		"  EMPTY:",
++		"other:",
++		"  IGNORED: nope",
++		"",
++	}, "\n"))
++	refs := parseCredentialRefs(raw)
++	if refs["OPENAI_API_KEY"] != "sk-double" {
++		t.Fatalf("double-quoted key = %q", refs["OPENAI_API_KEY"])
++	}
++	if refs["OTHER_KEY"] != "sk-single" {
++		t.Fatalf("single-quoted key = %q", refs["OTHER_KEY"])
++	}
++	if refs["COMMENTED"] != "value" {
++		t.Fatalf("commented value = %q", refs["COMMENTED"])
++	}
++	if _, exists := refs["IGNORED"]; exists {
++		t.Fatal("keys outside refs must be ignored")
++	}
++}
+diff --git a/remote/internal/imagegen/imagegen.go b/remote/internal/imagegen/imagegen.go
+new file mode 100644
+index 0000000..8764c56
+--- /dev/null
++++ b/remote/internal/imagegen/imagegen.go
+@@ -0,0 +1,508 @@
++// Package imagegen backs the bridge's host-level image.generate command: it
++// validates the request, resolves the OpenAI API key, calls the Images API,
++// returns the image (PNG, or JPEG when the payload would exceed the relay frame
++// budget) and archives the original PNG on the Mac.
++//
++// The protocol is defined in remote/docs/image-generate.md; this package only
++// implements the Mac side of it. It never logs or sends prompts or API keys
++// beyond the fields the protocol explicitly asks for.
++package imagegen
++
++import (
++	"bytes"
++	"context"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"math"
++	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strings"
++	"time"
++	"unicode/utf8"
++)
++
++const (
++	// DefaultModel is used when the APK omits model.
++	DefaultModel = "gpt-image-2.5-flare"
++	// DefaultSize is used when the APK omits size.
++	DefaultSize = "1024x1024"
++	// DefaultQuality is used when the APK omits quality.
++	DefaultQuality = "medium"
++	// DefaultBaseURL is used when OPENAI_BASE_URL is not set.
++	DefaultBaseURL = "https://api.openai.com/v1"
++	// DefaultTimeout bounds one upstream image generation request.
++	DefaultTimeout = 180 * time.Second
++	// MaxPromptChars is the protocol limit on prompt length, counted in runes.
++	MaxPromptChars = 4000
++
++	// MaxInlinePNGBytes is the largest original PNG the bridge forwards as-is.
++	// Above it the image is re-encoded as JPEG to stay inside the relay frame
++	// budget (see remote/docs/image-generate.md §4).
++	MaxInlinePNGBytes = 400 << 10
++	// MaxOriginalBytes is the largest upstream image the bridge accepts. Bigger
++	// payloads are rejected instead of risking an oversized wire frame.
++	MaxOriginalBytes = 8 << 20
++
++	jpegQuality      = 85
++	maxLongEdge      = 2048
++	maxResponseBytes = 16 << 20
++)
++
++// AllowedSizes are the sizes the protocol accepts.
++var AllowedSizes = []string{"1024x1024", "1024x1536", "1536x1024"}
++
++// AllowedQualities are the qualities the protocol accepts.
++var AllowedQualities = []string{"low", "medium", "high"}
++
++// AllowedModels are the models the protocol accepts.
++var AllowedModels = []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2"}
++
++// Error codes returned to the APK in the image.error payload.
++const (
++	CodeInvalidParams    = "INVALID_PARAMS"
++	CodeMissingAPIKey    = "MISSING_API_KEY"
++	CodeImageTooLarge    = "IMAGE_TOO_LARGE"
++	CodeDecodeFailed     = "IMAGE_DECODE_FAILED"
++	CodeEncodeFailed     = "IMAGE_ENCODE_FAILED"
++	CodeUpstreamResponse = "UPSTREAM_INVALID_RESPONSE"
++	CodeNetwork          = "OPENAI_NETWORK"
++	CodeTimeout          = "IMAGE_TIMEOUT"
++	CodeInternal         = "IMAGE_INTERNAL_ERROR"
++)
++
++// sizeDimensions maps the accepted size strings to pixel dimensions.
++var sizeDimensions = map[string][2]int{
++	"1024x1024": {1024, 1024},
++	"1024x1536": {1024, 1536},
++	"1536x1024": {1536, 1024},
++}
++
++// qualityPriceUSD maps quality to the published 1024x1024 price; other sizes are
++// scaled by area. The estimate is for display only.
++var qualityPriceUSD = map[string]float64{
++	"low":    0.006,
++	"medium": 0.053,
++	"high":   0.211,
++}
++
++// Error is a generation failure that can travel back to the APK as image.error:
++// Code goes into payload.code and Message is a human-readable Chinese error.
++// Prompts and API keys must never appear in either field.
++type Error struct {
++	Code       string
++	Message    string
++	HTTPStatus int
++	Err        error
++}
++
++func (e *Error) Error() string {
++	if e.Err == nil {
++		return fmt.Sprintf("%s: %s", e.Code, e.Message)
++	}
++	return fmt.Sprintf("%s: %s: %v", e.Code, e.Message, e.Err)
++}
++
++// Unwrap exposes the underlying cause for errors.Is/errors.As.
++func (e *Error) Unwrap() error { return e.Err }
++
++// Request is one image.generate params object.
++type Request struct {
++	Prompt  string `json:"prompt"`
++	Size    string `json:"size,omitempty"`
++	Quality string `json:"quality,omitempty"`
++	Model   string `json:"model,omitempty"`
++}
++
++// Normalize applies the protocol defaults and trims enum fields.
++func (r Request) Normalize() Request {
++	r.Model = strings.TrimSpace(r.Model)
++	if r.Model == "" {
++		r.Model = DefaultModel
++	}
++	r.Size = strings.TrimSpace(r.Size)
++	if r.Size == "" {
++		r.Size = DefaultSize
++	}
++	r.Quality = strings.TrimSpace(r.Quality)
++	if r.Quality == "" {
++		r.Quality = DefaultQuality
++	}
++	return r
++}
++
++// Validate checks the protocol bounds before any quota, key or network work.
++func (r Request) Validate() error {
++	if strings.TrimSpace(r.Prompt) == "" {
++		return &Error{Code: CodeInvalidParams, Message: "prompt 不能为空"}
++	}
++	if utf8.RuneCountInString(r.Prompt) > MaxPromptChars {
++		return &Error{Code: CodeInvalidParams, Message: fmt.Sprintf("prompt 过长（最多 %d 字符）", MaxPromptChars)}
++	}
++	if !containsString(AllowedSizes, r.Size) {
++		return &Error{
++			Code:    CodeInvalidParams,
++			Message: fmt.Sprintf("不支持的尺寸 %q（仅支持 %s）", r.Size, strings.Join(AllowedSizes, "、")),
++		}
++	}
++	if !containsString(AllowedQualities, r.Quality) {
++		return &Error{
++			Code:    CodeInvalidParams,
++			Message: fmt.Sprintf("不支持的质量 %q（仅支持 %s）", r.Quality, strings.Join(AllowedQualities, "、")),
++		}
++	}
++	if !containsString(AllowedModels, r.Model) {
++		return &Error{
++			Code:    CodeInvalidParams,
++			Message: fmt.Sprintf("不支持的模型 %q（仅支持 %s）", r.Model, strings.Join(AllowedModels, "、")),
++		}
++	}
++	return nil
++}
++
++// Result is one successful generation. Data is what the bridge sends to the APK
++// (PNG, or JPEG when the original exceeded MaxInlinePNGBytes) and SavedPath
++// points at the archived original PNG on the Mac (empty when archiving failed).
++type Result struct {
++	ID              string
++	Model           string
++	Size            string
++	Quality         string
++	MimeType        string
++	Data            []byte
++	Width           int
++	Height          int
++	DurationMs      int64
++	CostEstimateUsd float64
++	SavedPath       string
++}
++
++// Config configures a Service. Zero values fall back to the environment:
++// OPENAI_BASE_URL for the endpoint, HARNESS_IMAGE_PROXY (then
++// HTTPS_PROXY/HTTP_PROXY via http.ProxyFromEnvironment) for the proxy, $HOME for
++// archiving, and a 180s timeout. OPENAI_API_KEY is deliberately not read here:
++// the key is resolved per request.
++type Config struct {
++	APIKey     string        // optional test override; otherwise resolved per request
++	BaseURL    string        // optional; OPENAI_BASE_URL otherwise
++	ProxyURL   string        // optional; HARNESS_IMAGE_PROXY otherwise
++	Timeout    time.Duration // optional; DefaultTimeout otherwise
++	HomeDir    string        // optional; the current user's home otherwise
++	HTTPClient *http.Client  // optional; a proxy-aware client is built otherwise
++}
++
++// Service calls the OpenAI Images API.
++type Service struct {
++	apiKey  string
++	baseURL string
++	timeout time.Duration
++	homeDir string
++	client  *http.Client
++}
++
++// New builds a Service. Only the base URL, proxy and timeout are read at
++// construction time, so a proxy change needs a bridge restart while a rotated
++// API key does not.
++func New(config Config) *Service {
++	baseURL := strings.TrimSpace(config.BaseURL)
++	if baseURL == "" {
++		baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
++	}
++	if baseURL == "" {
++		baseURL = DefaultBaseURL
++	}
++	timeout := config.Timeout
++	if timeout <= 0 {
++		timeout = DefaultTimeout
++	}
++	client := config.HTTPClient
++	if client == nil {
++		client = newHTTPClient(config.ProxyURL, timeout)
++	}
++	return &Service{
++		apiKey:  strings.TrimSpace(config.APIKey),
++		baseURL: strings.TrimRight(baseURL, "/"),
++		timeout: timeout,
++		homeDir: config.HomeDir,
++		client:  client,
++	}
++}
++
++// Generate runs one image generation: validate, resolve the key, call the
++// upstream API, then decode/convert/archive the returned PNG.
++func (s *Service) Generate(ctx context.Context, request Request) (Result, error) {
++	started := time.Now()
++	request = request.Normalize()
++	if err := request.Validate(); err != nil {
++		return Result{}, err
++	}
++	apiKey, err := s.apiKeyForRequest()
++	if err != nil {
++		return Result{}, err
++	}
++	requestCtx, cancel := context.WithTimeout(ctx, s.timeout)
++	defer cancel()
++	raw, err := s.requestImage(requestCtx, apiKey, request)
++	if err != nil {
++		return Result{}, err
++	}
++	result, err := s.buildResult(raw, request)
++	if err != nil {
++		return Result{}, err
++	}
++	result.DurationMs = time.Since(started).Milliseconds()
++	return result, nil
++}
++
++// apiKeyForRequest prefers the configured override, then the per-request
++// resolver (env, then ~/.dsh/.credentials.yaml).
++func (s *Service) apiKeyForRequest() (string, error) {
++	if s.apiKey != "" {
++		return s.apiKey, nil
++	}
++	return ResolveAPIKey(s.homeDir)
++}
++
++// generationRequest is the JSON body of POST /images/generations.
++type generationRequest struct {
++	Model   string `json:"model"`
++	Prompt  string `json:"prompt"`
++	Size    string `json:"size"`
++	Quality string `json:"quality"`
++}
++
++// generationResponse is the subset of the Images API response the bridge needs.
++type generationResponse struct {
++	Data []struct {
++		B64JSON string `json:"b64_json"`
++		URL     string `json:"url"`
++	} `json:"data"`
++}
++
++// requestImage posts the generation request and returns the decoded PNG bytes.
++func (s *Service) requestImage(ctx context.Context, apiKey string, request Request) ([]byte, error) {
++	body, err := json.Marshal(generationRequest{
++		Model: request.Model, Prompt: request.Prompt, Size: request.Size, Quality: request.Quality,
++	})
++	if err != nil {
++		return nil, &Error{Code: CodeInternal, Message: "构造生图请求失败", Err: err}
++	}
++	endpoint := s.baseURL + "/images/generations"
++	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
++	if err != nil {
++		return nil, &Error{Code: CodeInternal, Message: "构造生图请求失败", Err: err}
++	}
++	httpRequest.Header.Set("Content-Type", "application/json")
++	httpRequest.Header.Set("Authorization", "Bearer "+apiKey)
++	response, err := s.client.Do(httpRequest)
++	if err != nil {
++		return nil, upstreamRequestError(ctx, err)
++	}
++	defer response.Body.Close()
++	rawBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
++	if err != nil {
++		return nil, &Error{Code: CodeNetwork, Message: "读取 OpenAI 响应失败", Err: err}
++	}
++	if len(rawBody) > maxResponseBytes {
++		return nil, &Error{Code: CodeImageTooLarge, Message: "OpenAI 返回的图片数据过大"}
++	}
++	if response.StatusCode != http.StatusOK {
++		return nil, upstreamStatusError(response.StatusCode, rawBody)
++	}
++	var decoded generationResponse
++	if err := json.Unmarshal(rawBody, &decoded); err != nil {
++		return nil, &Error{Code: CodeUpstreamResponse, Message: "OpenAI 返回了无法解析的结果", Err: err}
++	}
++	if len(decoded.Data) == 0 {
++		return nil, &Error{Code: CodeUpstreamResponse, Message: "OpenAI 没有返回图片数据"}
++	}
++	encoded := strings.TrimSpace(decoded.Data[0].B64JSON)
++	if encoded == "" {
++		if decoded.Data[0].URL != "" {
++			return nil, &Error{Code: CodeUpstreamResponse, Message: "OpenAI 只返回了图片 URL（预期 b64_json）"}
++		}
++		return nil, &Error{Code: CodeUpstreamResponse, Message: "OpenAI 没有返回图片数据"}
++	}
++	raw, err := base64.StdEncoding.DecodeString(encoded)
++	if err != nil {
++		raw, err = base64.RawStdEncoding.DecodeString(encoded)
++	}
++	if err != nil || len(raw) == 0 {
++		return nil, &Error{Code: CodeUpstreamResponse, Message: "OpenAI 返回的图片数据无法解码", Err: err}
++	}
++	return raw, nil
++}
++
++// upstreamRequestError converts transport failures into protocol errors without
++// leaking the API key or prompt.
++func upstreamRequestError(ctx context.Context, err error) error {
++	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
++		return &Error{Code: CodeTimeout, Message: "生图超时，请稍后重试", Err: err}
++	}
++	if errors.Is(err, context.Canceled) {
++		return &Error{Code: CodeNetwork, Message: "生图请求已取消", Err: err}
++	}
++	return &Error{Code: CodeNetwork, Message: "无法连接 OpenAI 图片服务（请检查网络或代理设置）", Err: err}
++}
++
++// upstreamStatusError maps an HTTP error to a protocol error. The upstream body
++// is kept only on Err for debugging; it is never forwarded to the APK because it
++// may echo request content.
++func upstreamStatusError(status int, body []byte) error {
++	message := fmt.Sprintf("OpenAI 请求失败（HTTP %d），请稍后重试", status)
++	switch status {
++	case http.StatusUnauthorized:
++		message = "OpenAI 鉴权失败（HTTP 401），请检查 OPENAI_API_KEY"
++	case http.StatusTooManyRequests:
++		message = "OpenAI 限流或额度不足（HTTP 429），请稍后再试"
++	case http.StatusBadRequest:
++		message = "OpenAI 拒绝了请求（HTTP 400），请检查 prompt、尺寸与质量"
++	}
++	detail := strings.TrimSpace(string(body))
++	if len(detail) > 200 {
++		detail = detail[:200]
++	}
++	var cause error
++	if detail != "" {
++		cause = errors.New(detail)
++	}
++	return &Error{
++		Code:       fmt.Sprintf("OPENAI_HTTP_%d", status),
++		Message:    message,
++		HTTPStatus: status,
++		Err:        cause,
++	}
++}
++
++// buildResult decodes the upstream PNG, converts it to JPEG when needed and
++// archives the untouched original. Nothing is archived when the image is
++// rejected, matching "失败不落盘".
++func (s *Service) buildResult(raw []byte, request Request) (Result, error) {
++	if len(raw) > MaxOriginalBytes {
++		return Result{}, &Error{
++			Code:    CodeImageTooLarge,
++			Message: fmt.Sprintf("图片体积过大（%.1f MB），超过 %d MB 上限", float64(len(raw))/(1<<20), MaxOriginalBytes>>20),
++		}
++	}
++	image, err := decodePNG(raw)
++	if err != nil {
++		return Result{}, err
++	}
++	id, err := newID()
++	if err != nil {
++		return Result{}, &Error{Code: CodeInternal, Message: "生成图片 id 失败", Err: err}
++	}
++	bounds := image.Bounds()
++	result := Result{
++		ID: id, Model: request.Model, Size: request.Size, Quality: request.Quality,
++		Width: bounds.Dx(), Height: bounds.Dy(),
++		CostEstimateUsd: EstimateCost(request.Quality, request.Size),
++	}
++	if len(raw) <= MaxInlinePNGBytes {
++		result.MimeType = "image/png"
++		result.Data = raw
++	} else {
++		data, width, height, err := encodeJPEG(image)
++		if err != nil {
++			return Result{}, err
++		}
++		result.MimeType = "image/jpeg"
++		result.Data = data
++		result.Width = width
++		result.Height = height
++	}
++	// Archive failures are non-fatal: the phone still gets the image, it just
++	// misses the debug-only savedPath.
++	if path, err := s.archiveOriginal(id, raw); err == nil {
++		result.SavedPath = path
++	}
++	return result, nil
++}
++
++// archiveOriginal writes the untouched upstream PNG to
++// ~/.harness-remote/imagegen/<id>.png (directory 0700).
++func (s *Service) archiveOriginal(id string, raw []byte) (string, error) {
++	home, err := s.userHome()
++	if err != nil {
++		return "", err
++	}
++	dir := filepath.Join(home, ".harness-remote", "imagegen")
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return "", err
++	}
++	path := filepath.Join(dir, id+".png")
++	if err := os.WriteFile(path, raw, 0o600); err != nil {
++		return "", err
++	}
++	return path, nil
++}
++
++func (s *Service) userHome() (string, error) {
++	if s.homeDir != "" {
++		return s.homeDir, nil
++	}
++	home, err := os.UserHomeDir()
++	if err != nil {
++		return "", &Error{Code: CodeInternal, Message: "无法定位用户主目录", Err: err}
++	}
++	return home, nil
++}
++
++// EstimateCost returns the rough USD price shown to the user: the published
++// 1024x1024 price for the quality, scaled by image area.
++func EstimateCost(quality, size string) float64 {
++	price, ok := qualityPriceUSD[quality]
++	if !ok {
++		return 0
++	}
++	dimensions, ok := sizeDimensions[size]
++	if !ok {
++		return 0
++	}
++	areaRatio := float64(dimensions[0]*dimensions[1]) / (1024.0 * 1024.0)
++	return math.Round(price*areaRatio*10000) / 10000
++}
++
++// newHTTPClient builds a proxy-aware client. HARNESS_IMAGE_PROXY explicitly
++// overrides the standard HTTPS_PROXY/HTTP_PROXY lookup.
++func newHTTPClient(proxyOverride string, timeout time.Duration) *http.Client {
++	proxyURL := strings.TrimSpace(proxyOverride)
++	if proxyURL == "" {
++		proxyURL = strings.TrimSpace(os.Getenv("HARNESS_IMAGE_PROXY"))
++	}
++	proxy := http.ProxyFromEnvironment
++	if proxyURL != "" {
++		if parsed, err := url.Parse(proxyURL); err == nil && parsed.Host != "" {
++			proxy = http.ProxyURL(parsed)
++		}
++	}
++	transport := &http.Transport{}
++	if base, ok := http.DefaultTransport.(*http.Transport); ok {
++		transport = base.Clone()
++	}
++	transport.Proxy = proxy
++	return &http.Client{Transport: transport, Timeout: timeout}
++}
++
++// newID returns a 128-bit random id for one archived image.
++func newID() (string, error) {
++	raw := make([]byte, 18)
++	if _, err := rand.Read(raw); err != nil {
++		return "", err
++	}
++	return base64.RawURLEncoding.EncodeToString(raw), nil
++}
++
++func containsString(values []string, value string) bool {
++	for _, candidate := range values {
++		if candidate == value {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/remote/internal/imagegen/imagegen_test.go b/remote/internal/imagegen/imagegen_test.go
+new file mode 100644
+index 0000000..0350fc8
+--- /dev/null
++++ b/remote/internal/imagegen/imagegen_test.go
+@@ -0,0 +1,364 @@
++package imagegen
++
++import (
++	"bytes"
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"image"
++	"image/color"
++	"image/jpeg"
++	"image/png"
++	"io"
++	"math"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++// TestMain keeps the tests hermetic: a developer's proxy configuration must not
++// intercept the fake OpenAI servers. Tests that exercise proxying set
++// HARNESS_IMAGE_PROXY themselves.
++func TestMain(m *testing.M) {
++	_ = os.Unsetenv("HARNESS_IMAGE_PROXY")
++	_ = os.Setenv("NO_PROXY", "127.0.0.1,localhost,::1")
++	_ = os.Setenv("no_proxy", "127.0.0.1,localhost,::1")
++	os.Exit(m.Run())
++}
++
++// testPNG encodes a PNG of the requested size. randomPixels fills it with
++// incompressible data so the encoded payload grows past MaxInlinePNGBytes.
++func testPNG(t *testing.T, width, height int, randomPixels bool) []byte {
++	t.Helper()
++	imageBytes := image.NewRGBA(image.Rect(0, 0, width, height))
++	if randomPixels {
++		state := uint32(1)
++		next := func() byte {
++			state = state*1664525 + 1013904223
++			return byte(state >> 24)
++		}
++		for offset := 0; offset < len(imageBytes.Pix); offset += 4 {
++			imageBytes.Pix[offset] = next()
++			imageBytes.Pix[offset+1] = next()
++			imageBytes.Pix[offset+2] = next()
++			imageBytes.Pix[offset+3] = 255
++		}
++	} else {
++		imageBytes.Set(0, 0, color.RGBA{R: 200, G: 30, B: 30, A: 255})
++	}
++	var buffer bytes.Buffer
++	if err := png.Encode(&buffer, imageBytes); err != nil {
++		t.Fatalf("encode test png: %v", err)
++	}
++	return buffer.Bytes()
++}
++
++// jsonImageResponse builds the Images API response carrying one b64 PNG.
++func jsonImageResponse(t *testing.T, imageBytes []byte) []byte {
++	t.Helper()
++	payload, err := json.Marshal(map[string]any{
++		"data": []map[string]string{{"b64_json": base64.StdEncoding.EncodeToString(imageBytes)}},
++	})
++	if err != nil {
++		t.Fatalf("encode fake response: %v", err)
++	}
++	return payload
++}
++
++// writeCredentials writes a DSH-shaped credentials file into home.
++func writeCredentials(t *testing.T, home, key string) {
++	t.Helper()
++	dir := filepath.Join(home, ".dsh")
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	content := "version: 1\nrefs:\n  OPENAI_API_KEY: " + key + "\n"
++	if err := os.WriteFile(filepath.Join(dir, ".credentials.yaml"), []byte(content), 0o600); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestGenerateSuccessReturnsPNGAndArchivesOriginal(t *testing.T) {
++	imageBytes := testPNG(t, 1, 1, false)
++	var requestPath, authorization, requestBody string
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requestPath = r.URL.Path
++		authorization = r.Header.Get("Authorization")
++		body, _ := io.ReadAll(r.Body)
++		requestBody = string(body)
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write(jsonImageResponse(t, imageBytes))
++	}))
++	defer server.Close()
++	home := t.TempDir()
++	service := New(Config{APIKey: "sk-test", BaseURL: server.URL + "/v1/", HomeDir: home, Timeout: 5 * time.Second})
++
++	result, err := service.Generate(context.Background(), Request{
++		Prompt: "a flat red fox icon", Size: "1024x1536", Quality: "low",
++	})
++	if err != nil {
++		t.Fatalf("Generate: %v", err)
++	}
++	if requestPath != "/v1/images/generations" {
++		t.Fatalf("path = %q", requestPath)
++	}
++	if authorization != "Bearer sk-test" {
++		t.Fatalf("authorization = %q", authorization)
++	}
++	var sent generationRequest
++	if err := json.Unmarshal([]byte(requestBody), &sent); err != nil {
++		t.Fatalf("decode request body: %v", err)
++	}
++	if sent.Model != DefaultModel || sent.Size != "1024x1536" || sent.Quality != "low" || sent.Prompt != "a flat red fox icon" {
++		t.Fatalf("request body = %#v", sent)
++	}
++	if result.MimeType != "image/png" || !bytes.Equal(result.Data, imageBytes) {
++		t.Fatalf("result mime=%q bytes=%d", result.MimeType, len(result.Data))
++	}
++	if result.Width != 1 || result.Height != 1 {
++		t.Fatalf("dimensions = %dx%d", result.Width, result.Height)
++	}
++	// low @ 1024x1536 = 0.006 * 1.5
++	if result.CostEstimateUsd != 0.009 {
++		t.Fatalf("cost = %v", result.CostEstimateUsd)
++	}
++	if result.ID == "" || result.DurationMs < 0 {
++		t.Fatalf("id=%q durationMs=%d", result.ID, result.DurationMs)
++	}
++	wantPath := filepath.Join(home, ".harness-remote", "imagegen", result.ID+".png")
++	if result.SavedPath != wantPath {
++		t.Fatalf("savedPath = %q, want %q", result.SavedPath, wantPath)
++	}
++	saved, err := os.ReadFile(wantPath)
++	if err != nil {
++		t.Fatalf("read archived image: %v", err)
++	}
++	if !bytes.Equal(saved, imageBytes) {
++		t.Fatal("archived image differs from the upstream PNG")
++	}
++	if info, err := os.Stat(filepath.Dir(wantPath)); err != nil {
++		t.Fatal(err)
++	} else if info.Mode().Perm() != 0o700 {
++		t.Fatalf("archive dir mode = %v", info.Mode().Perm())
++	}
++}
++
++func TestGenerateResolvesKeyFromCredentialsWhenEnvMissing(t *testing.T) {
++	t.Setenv("OPENAI_API_KEY", "")
++	imageBytes := testPNG(t, 1, 1, false)
++	var authorization string
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		authorization = r.Header.Get("Authorization")
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write(jsonImageResponse(t, imageBytes))
++	}))
++	defer server.Close()
++	home := t.TempDir()
++	writeCredentials(t, home, "sk-from-credentials")
++	service := New(Config{BaseURL: server.URL, HomeDir: home, Timeout: 5 * time.Second})
++
++	if _, err := service.Generate(context.Background(), Request{Prompt: "a fox"}); err != nil {
++		t.Fatalf("Generate: %v", err)
++	}
++	if authorization != "Bearer sk-from-credentials" {
++		t.Fatalf("authorization = %q", authorization)
++	}
++}
++
++func TestGenerateConvertsOversizedPNGToJPEG(t *testing.T) {
++	largePNG := testPNG(t, 1024, 1024, true)
++	if len(largePNG) <= MaxInlinePNGBytes {
++		t.Fatalf("test PNG is only %d bytes; expected more than %d", len(largePNG), MaxInlinePNGBytes)
++	}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write(jsonImageResponse(t, largePNG))
++	}))
++	defer server.Close()
++	home := t.TempDir()
++	service := New(Config{APIKey: "sk-test", BaseURL: server.URL, HomeDir: home, Timeout: 15 * time.Second})
++
++	result, err := service.Generate(context.Background(), Request{Prompt: "noise", Size: "1024x1024", Quality: "medium"})
++	if err != nil {
++		t.Fatalf("Generate: %v", err)
++	}
++	if result.MimeType != "image/jpeg" {
++		t.Fatalf("mimeType = %q", result.MimeType)
++	}
++	if len(result.Data) < 3 || result.Data[0] != 0xFF || result.Data[1] != 0xD8 || result.Data[2] != 0xFF {
++		t.Fatal("result is not a JPEG")
++	}
++	if len(result.Data) >= len(largePNG) {
++		t.Fatalf("converted JPEG (%d) is not smaller than the original PNG (%d)", len(result.Data), len(largePNG))
++	}
++	decoded, err := jpeg.Decode(bytes.NewReader(result.Data))
++	if err != nil {
++		t.Fatalf("decode returned JPEG: %v", err)
++	}
++	if result.Width != 1024 || result.Height != 1024 || decoded.Bounds().Dx() != 1024 || decoded.Bounds().Dy() != 1024 {
++		t.Fatalf("dimensions = %dx%d", result.Width, result.Height)
++	}
++	// The archive keeps the untouched original PNG, not the converted JPEG.
++	saved, err := os.ReadFile(result.SavedPath)
++	if err != nil {
++		t.Fatalf("read archived image: %v", err)
++	}
++	if !bytes.Equal(saved, largePNG) {
++		t.Fatal("archived image is not the original PNG")
++	}
++	if result.CostEstimateUsd != 0.053 {
++		t.Fatalf("cost = %v", result.CostEstimateUsd)
++	}
++}
++
++func TestGenerateRejectsImageAboveEightMiB(t *testing.T) {
++	oversized := bytes.Repeat([]byte{0x89}, MaxOriginalBytes+1)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write(jsonImageResponse(t, oversized))
++	}))
++	defer server.Close()
++	home := t.TempDir()
++	service := New(Config{APIKey: "sk-test", BaseURL: server.URL, HomeDir: home, Timeout: 15 * time.Second})
++
++	_, err := service.Generate(context.Background(), Request{Prompt: "too big"})
++	var generationError *Error
++	if !errors.As(err, &generationError) || generationError.Code != CodeImageTooLarge {
++		t.Fatalf("err = %v", err)
++	}
++	if _, statErr := os.Stat(filepath.Join(home, ".harness-remote", "imagegen")); !os.IsNotExist(statErr) {
++		t.Fatalf("rejected image was archived: %v", statErr)
++	}
++}
++
++func TestGenerateMapsHTTPError(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusUnauthorized)
++		_, _ = io.WriteString(w, `{"error":{"message":"Incorrect API key provided"}}`)
++	}))
++	defer server.Close()
++	service := New(Config{APIKey: "sk-test", BaseURL: server.URL, HomeDir: t.TempDir(), Timeout: 5 * time.Second})
++
++	_, err := service.Generate(context.Background(), Request{Prompt: "a fox"})
++	var generationError *Error
++	if !errors.As(err, &generationError) {
++		t.Fatalf("err = %v", err)
++	}
++	if generationError.Code != "OPENAI_HTTP_401" || generationError.HTTPStatus != http.StatusUnauthorized {
++		t.Fatalf("code=%q status=%d", generationError.Code, generationError.HTTPStatus)
++	}
++	// The APK-facing message must not leak the key or the upstream body.
++	if strings.Contains(generationError.Message, "sk-test") || strings.Contains(generationError.Message, "Incorrect API key") {
++		t.Fatalf("message leaks detail: %q", generationError.Message)
++	}
++}
++
++func TestGenerateMissingAPIKeyFailsBeforeNetwork(t *testing.T) {
++	t.Setenv("OPENAI_API_KEY", "")
++	service := New(Config{HomeDir: t.TempDir(), BaseURL: "http://127.0.0.1:1/v1", Timeout: time.Second})
++
++	_, err := service.Generate(context.Background(), Request{Prompt: "a fox"})
++	var generationError *Error
++	if !errors.As(err, &generationError) || generationError.Code != CodeMissingAPIKey {
++		t.Fatalf("err = %v", err)
++	}
++}
++
++func TestGenerateRejectsInvalidParameters(t *testing.T) {
++	longPrompt := strings.Repeat("字", MaxPromptChars+1)
++	cases := []struct {
++		name    string
++		request Request
++	}{
++		{"blank prompt", Request{Prompt: "   "}},
++		{"long prompt", Request{Prompt: longPrompt}},
++		{"bad size", Request{Prompt: "a fox", Size: "512x512"}},
++		{"bad quality", Request{Prompt: "a fox", Quality: "ultra"}},
++		{"bad model", Request{Prompt: "a fox", Model: "dall-e-3"}},
++	}
++	for _, testCase := range cases {
++		t.Run(testCase.name, func(t *testing.T) {
++			service := New(Config{APIKey: "sk-test", BaseURL: "http://127.0.0.1:1/v1", HomeDir: t.TempDir()})
++			_, err := service.Generate(context.Background(), testCase.request)
++			var generationError *Error
++			if !errors.As(err, &generationError) || generationError.Code != CodeInvalidParams {
++				t.Fatalf("err = %v", err)
++			}
++			if generationError.Message == "" {
++				t.Fatal("error message is empty")
++			}
++		})
++	}
++}
++
++func TestGenerateUsesDefaultModelSizeQuality(t *testing.T) {
++	imageBytes := testPNG(t, 1, 1, false)
++	var sent generationRequest
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		_ = json.Unmarshal(body, &sent)
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write(jsonImageResponse(t, imageBytes))
++	}))
++	defer server.Close()
++	service := New(Config{APIKey: "sk-test", BaseURL: server.URL, HomeDir: t.TempDir(), Timeout: 5 * time.Second})
++
++	result, err := service.Generate(context.Background(), Request{Prompt: "a fox"})
++	if err != nil {
++		t.Fatalf("Generate: %v", err)
++	}
++	if sent.Model != DefaultModel || sent.Size != DefaultSize || sent.Quality != DefaultQuality {
++		t.Fatalf("defaults not sent: %#v", sent)
++	}
++	if result.Model != DefaultModel || result.Size != DefaultSize || result.Quality != DefaultQuality {
++		t.Fatalf("result defaults = %#v", result)
++	}
++}
++
++func TestHARNESSImageProxyOverridesDefaultTransport(t *testing.T) {
++	imageBytes := testPNG(t, 1, 1, false)
++	var proxied atomic.Bool
++	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		proxied.Store(true)
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write(jsonImageResponse(t, imageBytes))
++	}))
++	defer proxy.Close()
++	t.Setenv("HARNESS_IMAGE_PROXY", proxy.URL)
++	// The target host does not resolve: only the explicit proxy can deliver.
++	service := New(Config{APIKey: "sk-test", BaseURL: "http://images.invalid/v1", HomeDir: t.TempDir(), Timeout: 5 * time.Second})
++
++	if _, err := service.Generate(context.Background(), Request{Prompt: "a fox"}); err != nil {
++		t.Fatalf("Generate through proxy: %v", err)
++	}
++	if !proxied.Load() {
++		t.Fatal("image request did not go through HARNESS_IMAGE_PROXY")
++	}
++}
++
++func TestEstimateCostScalesByArea(t *testing.T) {
++	cases := []struct {
++		quality string
++		size    string
++		want    float64
++	}{
++		{"low", "1024x1024", 0.006},
++		{"medium", "1024x1024", 0.053},
++		{"high", "1024x1024", 0.211},
++		{"medium", "1024x1536", 0.0795},
++		{"high", "1536x1024", 0.3165},
++		{"unknown", "1024x1024", 0},
++		{"low", "512x512", 0},
++	}
++	for _, testCase := range cases {
++		if got := EstimateCost(testCase.quality, testCase.size); math.Abs(got-testCase.want) > 1e-9 {
++			t.Fatalf("EstimateCost(%q, %q) = %v, want %v", testCase.quality, testCase.size, got, testCase.want)
++		}
++	}
++}
+diff --git a/remote/internal/imagegen/real_e2e_test.go b/remote/internal/imagegen/real_e2e_test.go
+new file mode 100644
+index 0000000..ea96edb
+--- /dev/null
++++ b/remote/internal/imagegen/real_e2e_test.go
+@@ -0,0 +1,51 @@
++package imagegen
++
++// 真实 OpenAI 调用（默认跳过）。手动跑：
++//   REAL_IMAGE_E2E=1 HTTPS_PROXY=http://127.0.0.1:7897 \
++//     go test ./internal/imagegen -run TestRealOpenAI -v -timeout 300s
++// 成本：1024x1024 low ≈ $0.006。
++
++import (
++	"context"
++	"os"
++	"testing"
++	"time"
++)
++
++func TestRealOpenAI(t *testing.T) {
++	if os.Getenv("REAL_IMAGE_E2E") == "" {
++		t.Skip("set REAL_IMAGE_E2E=1 to call the real OpenAI Images API")
++	}
++	if _, err := ResolveAPIKey(""); err != nil {
++		t.Fatalf("no api key: %v", err)
++	}
++	service := New(Config{Timeout: 240 * time.Second})
++	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
++	defer cancel()
++	started := time.Now()
++	result, err := service.Generate(ctx, Request{
++		Prompt:  "A single flat-design blue circle on white background, minimal, no text",
++		Size:    "1024x1024",
++		Quality: "low",
++	})
++	if err != nil {
++		t.Fatalf("Generate: %v", err)
++	}
++	t.Logf("id=%s mime=%s bytes=%d size=%dx%d cost=%.4f took=%s saved=%q",
++		result.ID, result.MimeType, len(result.Data), result.Width, result.Height,
++		result.CostEstimateUsd, time.Since(started).Round(100*time.Millisecond), result.SavedPath)
++	if len(result.Data) < 1024 {
++		t.Fatalf("image too small: %d bytes", len(result.Data))
++	}
++	if result.Width <= 0 || result.Height <= 0 {
++		t.Fatalf("bad dimensions: %dx%d", result.Width, result.Height)
++	}
++	if result.MimeType != "image/png" && result.MimeType != "image/jpeg" {
++		t.Fatalf("unexpected mime: %s", result.MimeType)
++	}
++	if result.SavedPath != "" {
++		if info, statErr := os.Stat(result.SavedPath); statErr != nil || info.Size() == 0 {
++			t.Fatalf("archived file missing: %v", statErr)
++		}
++	}
++}

@@ -54,6 +54,12 @@ type bridge struct {
 	seen           map[string]time.Time
 	updateState    func(string, func(*bridgeState) error) error
 	backendBackoff time.Duration
+
+	// Host-level image generation (image.generate). imageSend is a test seam,
+	// mirroring updateState above.
+	imageGen     imageGenerator
+	imageLimiter *imageRateLimiter
+	imageSend    func(context.Context, string, protocol.Event) error
 }
 
 func main() {
@@ -241,6 +247,7 @@ func runServe(defaultPath string, args []string) {
 	flags := flag.NewFlagSet("serve", flag.ExitOnError)
 	statePath := flags.String("state", defaultPath, "bridge state file")
 	codex := flags.String("codex", "codex", "Codex executable")
+	imageProxy := flags.String("image-proxy", "", "proxy URL for OpenAI image requests (default: HARNESS_IMAGE_PROXY, then HTTPS_PROXY)")
 	var backendSpecs stringList
 	flags.Var(&backendSpecs, "backend", "backend <id> or <id>=<executable>; repeatable (default: codex)")
 	_ = flags.Parse(args)
@@ -270,6 +277,10 @@ func runServe(defaultPath string, args []string) {
 		names = append(names, fmt.Sprintf("%s=%s", spec.ID, spec.Exec))
 	}
 	log.Printf("serve backends: %s", strings.Join(names, ", "))
+	// Host-level image generation state survives relay reconnects; only a
+	// process restart resets the in-memory rate limits (acceptable per spec).
+	imageService := newImageService(*imageProxy)
+	imageRate := newImageRateLimiter(time.Now)
 	for {
 		journalKey, err := base64.RawURLEncoding.DecodeString(state.JournalKey)
 		if err != nil {
@@ -310,7 +321,9 @@ func runServe(defaultPath string, args []string) {
 		b := &bridge{
 			state: state, path: *statePath, journal: journalStore,
 			commandCache: commandStore, routes: routeStore, terminals: terminalStore, workspaces: workspaceRegistry,
-			seen: map[string]time.Time{},
+			seen:         map[string]time.Time{},
+			imageGen:     imageService,
+			imageLimiter: imageRate,
 		}
 		if err := b.recoverThreadContinuationsFromCommands(); err != nil {
 			log.Printf("recover lazy continuations: %v", err)
@@ -654,6 +667,10 @@ func (b *bridge) executeCommand(ctx context.Context, deviceID string, command pr
 			Type: "host.status", RequestID: command.RequestID, Message: "online",
 			Payload: b.hostStatusPayload(), CreatedAt: time.Now().UnixMilli(),
 		}, "")
+	// image.generate is a host-level command (backendId stays empty) handled
+	// before backend resolution: it needs no codex/dsh backend.
+	case "image.generate":
+		return b.handleImageGenerate(ctx, deviceID, command)
 	case "event.ack":
 		if b.journal == nil {
 			return errors.New("logical journal is unavailable")
