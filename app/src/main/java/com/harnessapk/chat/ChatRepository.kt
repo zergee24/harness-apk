@@ -216,6 +216,55 @@ class ChatRepository(
         return id
     }
 
+    /**
+     * 插入一条「已生成图片」的 assistant 消息。
+     *
+     * - content 写历史友好的简短说明（后续轮次会作为普通文本历史进入请求，不含图片二进制）；
+     * - 图片走 message_attachments（ChatScreen 复用现有图片渲染与「保存图片」）；
+     * - [parts] 用来落 TOOL_CALL / TOOL_RESULT 等过程 part（复用现有 part 表）。
+     */
+    suspend fun insertAssistantImageMessage(
+        conversationId: String,
+        providerId: String?,
+        model: String?,
+        content: String,
+        image: GeneratedImageFile,
+        parts: List<UiMessagePartDraft> = emptyList(),
+    ): String {
+        val now = timeProvider.nowMillis()
+        val id = UUID.randomUUID().toString()
+        messageDao.insert(
+            MessageEntity(
+                id = id,
+                conversationId = conversationId,
+                role = MessageRole.ASSISTANT.name,
+                content = content,
+                status = MessageStatus.SUCCEEDED.name,
+                providerId = providerId,
+                model = model,
+                createdAt = now,
+                updatedAt = now,
+                errorCode = null,
+                errorMessage = null,
+            ),
+        )
+        attachmentDao.insert(
+            MessageAttachmentEntity(
+                id = UUID.randomUUID().toString(),
+                messageId = id,
+                type = "image",
+                uri = image.uri,
+                mimeType = image.mimeType,
+                createdAt = now,
+            ),
+        )
+        if (parts.isNotEmpty()) {
+            messagePartDao.replaceForMessage(id, parts.toPartEntities(messageId = id, createdAt = now, updatedAt = now))
+        }
+        touchConversation(conversationId, now)
+        return id
+    }
+
     suspend fun insertSystemEvent(
         conversationId: String,
         content: String,
@@ -317,20 +366,10 @@ class ChatRepository(
     ) {
         val current = messageDao.findById(messageId) ?: return
         val now = timeProvider.nowMillis()
-        val parts = snapshot.parts.map { part ->
-            MessagePartEntity(
-                id = "$messageId:${part.index}",
-                messageId = messageId,
-                partIndex = part.index,
-                type = part.type.name,
-                content = part.content,
-                metadataJson = part.metadata.toMetadataString(),
-                stable = part.stable,
-                createdAt = current.createdAt,
-                updatedAt = now,
-            )
-        }
-        messagePartDao.replaceForMessage(messageId, parts)
+        messagePartDao.replaceForMessage(
+            messageId,
+            snapshot.parts.toPartEntities(messageId = messageId, createdAt = current.createdAt, updatedAt = now),
+        )
         messageDao.update(
             current.copy(
                 content = snapshot.legacyVisibleText(),
@@ -461,6 +500,24 @@ private fun MessagePartEntity.toPartDraft(): UiMessagePartDraft = UiMessagePartD
     metadata = metadataJson.toMetadataMap(),
     stable = stable,
 )
+
+private fun List<UiMessagePartDraft>.toPartEntities(
+    messageId: String,
+    createdAt: Long,
+    updatedAt: Long,
+): List<MessagePartEntity> = map { part ->
+    MessagePartEntity(
+        id = "$messageId:${part.index}",
+        messageId = messageId,
+        partIndex = part.index,
+        type = part.type.name,
+        content = part.content,
+        metadataJson = part.metadata.toMetadataString(),
+        stable = part.stable,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+    )
+}
 
 private fun Map<String, String>.toMetadataString(): String =
     entries.joinToString("\n") { "${it.key}=${it.value}" }

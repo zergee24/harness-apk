@@ -15,6 +15,8 @@ sealed interface StreamEvent {
         val id: String,
         val name: String?,
         val argumentsDelta: String,
+        /** 同一响应内多个工具调用的序号；id/name 可能只在第一片出现，拼接时以 index 为准。 */
+        val index: Int = 0,
     ) : StreamEvent
     data class ToolResult(val toolCallId: String, val content: String) : StreamEvent
     data class SearchResult(val title: String, val url: String, val snippet: String) : StreamEvent

@@ -2,6 +2,7 @@ package com.harnessapk.chat
 
 import com.harnessapk.common.AppError
 import com.harnessapk.network.ChatRequest
+import com.harnessapk.network.ChatToolDefinition
 import com.harnessapk.network.OutgoingChatMessage
 import com.harnessapk.provider.CapabilitySource
 import com.harnessapk.provider.NativeWebSearchMode
@@ -17,6 +18,8 @@ class ModelAwareRequestBuilder {
         temperature: Double,
         selectedReasoningEffort: ReasoningEffort,
         webSearchRequested: Boolean,
+        tools: List<ChatToolDefinition> = emptyList(),
+        toolChoice: String? = null,
     ): ModelAwareChatRequest {
         val droppedOptions = mutableListOf<String>()
         if (messages.any { it.imageDataUrls.isNotEmpty() } && !capability.supportsInput("image")) {
@@ -56,6 +59,8 @@ class ModelAwareRequestBuilder {
                 customBodyJson = provider.customBodyJson,
                 apiProtocol = provider.apiProtocol,
                 maxOutputTokens = capability.maxOutputTokens,
+                tools = tools,
+                toolChoice = toolChoice,
             ),
             diagnostics = ModelAwareRequestDiagnostics(
                 capabilitySource = capability.source,

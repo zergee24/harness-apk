@@ -7,8 +7,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -96,6 +98,45 @@ class ImageGenerateStore(
         IMAGE_GENERATED_EVENT_TYPE -> onGenerated(event)
         IMAGE_ERROR_EVENT_TYPE -> onImageError(event)
         else -> false
+    }
+
+    /**
+     * 提交一次生图并挂起等待最终态（SUCCESS / ERROR），供本地聊天的 function calling 工具循环使用。
+     *
+     * - 提交失败 / 参数非法 / 未连接：立即抛 [ImageGenerateException]（message 为可直接展示的中文）；
+     * - 等待超过 [timeoutMillis]：抛 TIMEOUT；bridge 迟到的回包仍会照常写进 state/history，可重试；
+     * - 协程取消：结束等待，不影响 bridge 侧任务（与 UI 侧行为一致）。
+     */
+    suspend fun generateAndAwait(
+        params: ImageGenerateParams,
+        timeoutMillis: Long = DEFAULT_IMAGE_GENERATE_TIMEOUT_MILLIS,
+    ): ImageGenerateResult {
+        if (!generate(params)) {
+            val current = _state.value
+            throw ImageGenerateException(
+                code = current.errorCode ?: "SUBMIT_FAILED",
+                message = current.errorMessage ?: "生图请求提交失败，请稍后重试",
+            )
+        }
+        val requestId = _state.value.request?.requestId
+            ?: throw ImageGenerateException("SUBMIT_FAILED", "生图请求提交失败，请稍后重试")
+        val settled = withTimeoutOrNull(timeoutMillis.coerceAtLeast(1L)) {
+            state.first { snapshot ->
+                snapshot.request?.requestId == requestId &&
+                    (snapshot.phase == ImageGeneratePhase.SUCCESS || snapshot.phase == ImageGeneratePhase.ERROR)
+            }
+        } ?: throw ImageGenerateException(
+            code = "TIMEOUT",
+            message = "生图等待超时（${timeoutMillis / 1000} 秒），图片可能仍在 Mac 上生成，请稍后重试",
+        )
+        if (settled.phase == ImageGeneratePhase.SUCCESS) {
+            return settled.result?.takeIf { it.requestId == requestId }
+                ?: throw ImageGenerateException("BAD_PAYLOAD", "生图结果解析失败，请稍后重试")
+        }
+        throw ImageGenerateException(
+            code = settled.errorCode ?: "ERROR",
+            message = settled.errorMessage ?: "生图失败，请稍后重试",
+        )
     }
 
     /** 清掉错误提示并回到 idle（历史与上一张结果保留）。 */
@@ -228,3 +269,10 @@ data class ImageGenerateState(
     val errorMessage: String? = null,
     val history: List<ImageGenerateResult> = emptyList(),
 )
+
+/** 生图失败（提交失败 / bridge 报错 / 本地等待超时）；[message] 可直接展示。 */
+class ImageGenerateException(
+    val code: String?,
+    override val message: String,
+    cause: Throwable? = null,
+) : Exception(message, cause)

@@ -28,6 +28,8 @@ import com.harnessapk.agentmemory.agentMemoryCompletionGateway
 import com.harnessapk.agent.ConversationIdentityRepository
 import com.harnessapk.BuildConfig
 import com.harnessapk.chat.ChatImageStore
+import com.harnessapk.chat.ChatImageStoreGeneratedImageFileWriter
+import com.harnessapk.chat.RemoteImageGenerateTool
 import com.harnessapk.chat.AgentSourcePartWriter
 import com.harnessapk.chat.ChatRepository
 import com.harnessapk.chat.ChatExecutionCoordinator
@@ -148,6 +150,7 @@ import com.harnessapk.remote.RemoteSyncCoordinator
 import com.harnessapk.remote.RoomRemoteSyncState
 import com.harnessapk.remote.RemoteProfileStore
 import com.harnessapk.remote.RemoteRepository
+import com.harnessapk.remote.RemoteConnectionStatus
 import com.harnessapk.remote.ZcodeWebRemoteStore
 import com.harnessapk.ui.HomeModeStore
 
@@ -542,6 +545,16 @@ class AppContainer(
                 unknownTokensJson = JsonArray(unknownTokens.map(::JsonPrimitive)).toString(),
             )
         },
+        // 本地聊天（生活/工作共用管线）的真 function calling：只有 Mac 已配对且远程通道在线，
+        // 才向模型声明 image_generate；生成图片落盘后复用 ChatScreen 的附件渲染与「保存图片」。
+        imageGenerateTool = RemoteImageGenerateTool(
+            store = imageGenerateStore,
+            isRemoteReady = {
+                remoteProfileStore.profile.value != null &&
+                    remoteRepository.state.value.connectionStatus == RemoteConnectionStatus.CONNECTED
+            },
+        ),
+        generatedImageFileWriter = ChatImageStoreGeneratedImageFileWriter(chatImageStore),
         lifecycleCoordinator = agentLifecycleCoordinator,
     )
     val chatExecutionRepository = ChatExecutionRepository(

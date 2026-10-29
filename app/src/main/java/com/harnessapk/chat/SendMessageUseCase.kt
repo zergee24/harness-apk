@@ -15,9 +15,11 @@ import com.harnessapk.common.AppError
 import com.harnessapk.common.toUserMessage
 import com.harnessapk.network.ChatStreamClient
 import com.harnessapk.network.OutgoingChatMessage
+import com.harnessapk.network.OutgoingToolCall
 import com.harnessapk.provider.ModelCapabilityResolver
 import com.harnessapk.provider.ModelConfig
 import com.harnessapk.provider.NativeWebSearchMode
+import com.harnessapk.provider.ProviderApiProtocol
 import com.harnessapk.provider.ProviderCapabilityCatalog
 import com.harnessapk.provider.ProviderRepository
 import com.harnessapk.provider.ProviderProfile
@@ -40,6 +42,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.IOException
+import java.util.Locale
 import java.util.UUID
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -69,6 +72,14 @@ class SendMessageUseCase(
     private val projectCitationAuditWriter:
         suspend (executionId: String, status: String, unknownTokens: List<String>) -> Unit = { _, _, _ -> },
     private val lifecycleCoordinator: AgentLifecycleCoordinator = AgentLifecycleCoordinator(),
+    /** 远程生图工具；为 null 或 [ImageGenerateTool.isAvailable] 为假时不声明 function tools。 */
+    private val imageGenerateTool: ImageGenerateTool? = null,
+    /** 生成图片落盘能力；缺省时不声明工具（没有地方展示结果）。 */
+    private val generatedImageFileWriter: GeneratedImageFileWriter? = null,
+    /** 工具调用的诊断日志出口；默认写 logcat，测试可替换为 no-op。 */
+    private val toolCallLogger: (String) -> Unit = { message ->
+        android.util.Log.w(TAG, message)
+    },
 ) {
     suspend fun send(
         conversationId: String,
@@ -243,10 +254,12 @@ class SendMessageUseCase(
                 status = MessageStatus.PENDING,
                 parts = emptyList(),
             )
-            val modelAwareRequest = requestBuilder.build(
-                provider = provider.profile,
-                apiKey = provider.apiKey,
-                capability = resolvedCapability,
+            // 工具声明只对 OpenAI 兼容协议生效；Anthropic Messages 本轮保持现状（见 AnthropicMessagesClient 的注释）。
+            val imageToolAvailable = imageGenerateTool?.isAvailable() == true &&
+                generatedImageFileWriter != null &&
+                provider.profile.apiProtocol == ProviderApiProtocol.OPENAI_COMPATIBLE
+            // 不可用时不声明 tools、也不在系统提示里承诺生图能力，避免模型空调用。
+            var requestMessages = appendSystemInstruction(
                 messages = buildSessionOutgoingMessages(
                     context = sessionContextOutsideAgentPrompt(entry.requestContext.sessionContext, agentContext),
                     baseMessages = requestBaseMessages(compressed, agentContext),
@@ -255,32 +268,73 @@ class SendMessageUseCase(
                     wikiSystemContext = wikiContext?.systemContext,
                     projectSystemContext = projectContext?.systemContext,
                 ),
-                temperature = temperatureForModel(requestModel),
-                selectedReasoningEffort = entry.reasoningEffort,
-                webSearchRequested = effectiveSearchContexts.nativeWebSearchMode != null,
+                instruction = if (imageToolAvailable) IMAGE_GENERATE_TOOL_SYSTEM_PROMPT else null,
             )
-            requestDiagnostics = modelAwareRequest.diagnostics
-            onPhaseChanged(ChatExecutionPhase.GENERATING)
-            streamCompleted = false
-            val activeStreamClock = TimeSource.Monotonic.markNow()
-            val activeAccumulator = StreamingMessageAccumulator()
-            streamClock = activeStreamClock
-            accumulator = activeAccumulator
-            val outputTransformerPipeline = outputTransformerPipelineFactory()
-            client.streamChatEvents(modelAwareRequest.request).collect { event ->
-                outputTransformerPipeline.transform(event).forEach { transformedEvent ->
-                    receivedChars += transformedEvent.visiblePayloadLength()
-                    activeAccumulator.onEvent(
-                        transformedEvent,
-                        activeStreamClock.elapsedNow().inWholeMilliseconds,
-                    )?.let { flush ->
-                        flushCount += 1
-                        latestSnapshot = flush.snapshot
-                        chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, flush.snapshot)
+            var imageToolRounds = 0
+            while (true) {
+                val declaredTools = if (imageToolAvailable && imageToolRounds < MAX_IMAGE_TOOL_ROUNDS) {
+                    listOf(imageGenerateToolDefinition())
+                } else {
+                    emptyList()
+                }
+                val modelAwareRequest = requestBuilder.build(
+                    provider = provider.profile,
+                    apiKey = provider.apiKey,
+                    capability = resolvedCapability,
+                    messages = requestMessages,
+                    temperature = temperatureForModel(requestModel),
+                    selectedReasoningEffort = entry.reasoningEffort,
+                    webSearchRequested = effectiveSearchContexts.nativeWebSearchMode != null,
+                    tools = declaredTools,
+                    toolChoice = TOOL_CHOICE_AUTO.takeIf { declaredTools.isNotEmpty() },
+                )
+                requestDiagnostics = modelAwareRequest.diagnostics
+                onPhaseChanged(ChatExecutionPhase.GENERATING)
+                streamCompleted = false
+                val activeStreamClock = TimeSource.Monotonic.markNow()
+                val activeAccumulator = StreamingMessageAccumulator()
+                streamClock = activeStreamClock
+                accumulator = activeAccumulator
+                val outputTransformerPipeline = outputTransformerPipelineFactory()
+                val toolCallCollector = ToolCallCollector()
+                client.streamChatEvents(modelAwareRequest.request).collect { event ->
+                    outputTransformerPipeline.transform(event).forEach { transformedEvent ->
+                        receivedChars += transformedEvent.visiblePayloadLength()
+                        if (transformedEvent is StreamEvent.ToolCallDelta) {
+                            // 工具调用增量不落 UI part：整轮结束后统一把 TOOL_CALL/TOOL_RESULT 落到图片消息。
+                            toolCallCollector.accept(transformedEvent)
+                        } else {
+                            activeAccumulator.onEvent(
+                                transformedEvent,
+                                activeStreamClock.elapsedNow().inWholeMilliseconds,
+                            )?.let { flush ->
+                                flushCount += 1
+                                latestSnapshot = flush.snapshot
+                                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, flush.snapshot)
+                            }
+                        }
                     }
                 }
+                streamCompleted = true
+                val toolCalls = toolCallCollector.completedCalls()
+                if (toolCalls.isEmpty() || imageToolRounds >= MAX_IMAGE_TOOL_ROUNDS) break
+                imageToolRounds += 1
+                // 执行本轮工具调用，并把 assistant.tool_calls + tool 回执追加进下一轮请求。
+                val toolOutcomes = executeToolCalls(
+                    calls = toolCalls,
+                    conversationId = entry.conversationId,
+                    providerId = provider.profile.id,
+                    requestModel = requestModel,
+                )
+                requestMessages = requestMessages +
+                    OutgoingChatMessage(
+                        role = "assistant",
+                        text = "",
+                        toolCalls = toolOutcomes.map(ToolExecutionOutcome::toOutgoingToolCall),
+                    ) +
+                    toolOutcomes.map(ToolExecutionOutcome::toToolMessage)
+                onPhaseChanged(ChatExecutionPhase.GENERATING)
             }
-            streamCompleted = true
             onPhaseChanged(ChatExecutionPhase.FINALIZING)
             effectiveSearchContexts.webSearchContext?.toVisibleSourcesMarkdown()?.takeIf { it.isNotBlank() }?.let {
                 latestSnapshot = appendVisibleTextPart(requireNotNull(latestSnapshot), it)
@@ -431,6 +485,143 @@ class SendMessageUseCase(
         }
     }
 
+    /**
+     * 执行一次响应里的全部工具调用。
+     * 只执行认识的工具；不认识的记日志并作为失败回执交给模型，不中断整次发送。
+     */
+    private suspend fun executeToolCalls(
+        calls: List<CollectedToolCall>,
+        conversationId: String,
+        providerId: String?,
+        requestModel: String,
+    ): List<ToolExecutionOutcome> = calls.map { call ->
+        if (call.name == IMAGE_GENERATE_TOOL_NAME) {
+            executeImageGenerateTool(call, conversationId, providerId, requestModel)
+        } else {
+            val displayName = call.name.ifBlank { "(空)" }
+            toolCallLogger("未知工具调用：name=$displayName id=${call.id}")
+            ToolExecutionOutcome(
+                call = call,
+                receipt = "工具 $displayName 不存在，本应用只支持 $IMAGE_GENERATE_TOOL_NAME。请直接用文字回答用户。",
+            )
+        }
+    }
+
+    /** 执行 `image_generate`：解析参数 → 远程生图 → 落盘 → 插入会话图片消息。 */
+    private suspend fun executeImageGenerateTool(
+        call: CollectedToolCall,
+        conversationId: String,
+        providerId: String?,
+        requestModel: String,
+    ): ToolExecutionOutcome {
+        val tool = imageGenerateTool
+        val fileWriter = generatedImageFileWriter
+        if (tool == null || fileWriter == null || !tool.isAvailable()) {
+            return ToolExecutionOutcome(
+                call = call,
+                receipt = "生图工具当前不可用（Mac 未连接或未完成配对），无法生成图片。请用文字向用户说明，不要重复调用。",
+            )
+        }
+        val params = parseImageToolArguments(call.argumentsJson).getOrElse { error ->
+            return ToolExecutionOutcome(
+                call = call,
+                receipt = "image_generate 参数错误：${error.message ?: "参数无效"}。请修正参数后重试，或改用文字回答。",
+            )
+        }.params
+        // 一次生图可能要 1~3 分钟，超时/离线都只作为工具回执，不让整次发送失败。
+        val result = try {
+            tool.generate(params)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            toolCallLogger("image_generate 执行失败：${error::class.java.name} ${error.message.orEmpty()}")
+            return ToolExecutionOutcome(
+                call = call,
+                receipt = "image_generate 执行失败：${error.message?.takeIf { it.isNotBlank() } ?: "未知错误"}。请用文字向用户说明失败原因，不要重复调用。",
+            )
+        }
+        val savedFile = try {
+            fileWriter.write(result.data, result.mimeType)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            toolCallLogger("image_generate 结果落盘失败：${error.message.orEmpty()}")
+            return ToolExecutionOutcome(
+                call = call,
+                receipt = "图片已生成但保存到会话失败（${error.message?.takeIf { it.isNotBlank() } ?: "未知错误"}）。请用文字向用户说明失败原因。",
+            )
+        }
+        return try {
+            persistGeneratedImageMessage(
+                call = call,
+                result = result,
+                savedFile = savedFile,
+                conversationId = conversationId,
+                providerId = providerId,
+                requestModel = requestModel,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            toolCallLogger("生成图片消息写入失败：${error.message.orEmpty()}")
+            ToolExecutionOutcome(
+                call = call,
+                receipt = "图片已生成但写入会话失败（${error.message?.takeIf { it.isNotBlank() } ?: "未知错误"}）。请用文字向用户说明。",
+            )
+        }
+    }
+
+    /**
+     * 把生成结果插入为一条 ASSISTANT 消息：content 是历史友好的纯文本说明，
+     * 图片走 attachment（ChatScreen 复用图片渲染与「保存图片」），
+     * TOOL_CALL / TOOL_RESULT 过程 part 复用到同一条消息的 part 表里。
+     */
+    private suspend fun persistGeneratedImageMessage(
+        call: CollectedToolCall,
+        result: com.harnessapk.remote.ImageGenerateResult,
+        savedFile: GeneratedImageFile,
+        conversationId: String,
+        providerId: String?,
+        requestModel: String,
+    ): ToolExecutionOutcome {
+        val duration = result.durationLabel()
+        val messageText = "[已生成图片：${result.prompt.trim().take(MAX_IMAGE_PROMPT_PREVIEW_CHARS)}" +
+            "（${result.width}×${result.height}，${result.quality}，${result.model}，耗时 $duration）]"
+        val receipt = "图片已生成并展示给用户（${result.width}×${result.height}，质量 ${result.quality}，" +
+            "模型 ${result.model}，耗时 $duration）。请用一句简短的话告知用户图片已生成，不要重复调用。"
+        chatRepository.insertAssistantImageMessage(
+            conversationId = conversationId,
+            providerId = providerId,
+            model = requestModel,
+            content = messageText,
+            image = savedFile,
+            parts = listOf(
+                UiMessagePartDraft(
+                    index = 0,
+                    type = UiMessagePartType.TEXT,
+                    content = messageText,
+                    metadata = emptyMap(),
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 1,
+                    type = UiMessagePartType.TOOL_CALL,
+                    content = call.argumentsJson,
+                    metadata = mapOf("id" to call.id, "name" to IMAGE_GENERATE_TOOL_NAME),
+                    stable = true,
+                ),
+                UiMessagePartDraft(
+                    index = 2,
+                    type = UiMessagePartType.TOOL_RESULT,
+                    content = receipt,
+                    metadata = mapOf("toolCallId" to call.id),
+                    stable = true,
+                ),
+            ),
+        )
+        return ToolExecutionOutcome(call = call, receipt = receipt)
+    }
+
     private suspend fun persistProjectTerminal(
         assistantMessageId: String,
         executionId: String,
@@ -501,8 +692,31 @@ class SendMessageUseCase(
         return inSampleSize
     }
 
+    /** 单次工具调用的执行结果：[receipt] 作为 tool 角色消息回给模型。 */
+    private data class ToolExecutionOutcome(
+        val call: CollectedToolCall,
+        val receipt: String,
+    ) {
+        fun toOutgoingToolCall(): OutgoingToolCall = OutgoingToolCall(
+            id = call.id,
+            name = call.name.ifBlank { UNKNOWN_TOOL_NAME },
+            arguments = call.argumentsJson,
+        )
+
+        fun toToolMessage(): OutgoingChatMessage = OutgoingChatMessage(
+            role = "tool",
+            text = receipt,
+            toolCallId = call.id,
+        )
+    }
+
     companion object {
         private const val MAX_IMAGE_BYTES = 8 * 1024 * 1024
+        private const val MAX_IMAGE_TOOL_ROUNDS = 2
+        private const val TOOL_CHOICE_AUTO = "auto"
+        private const val UNKNOWN_TOOL_NAME = "unknown_tool"
+        private const val MAX_IMAGE_PROMPT_PREVIEW_CHARS = 80
+        private const val TAG = "SendMessageUseCase"
     }
 }
 
@@ -641,6 +855,26 @@ internal fun appendVisibleTextPart(
         ),
     )
 }
+
+/**
+ * 把工具能力说明合进已有 system 消息；没有 system 消息则新建一条。
+ * [instruction] 为空时原样返回：工具不可用时不向模型承诺任何能力。
+ */
+internal fun appendSystemInstruction(
+    messages: List<OutgoingChatMessage>,
+    instruction: String?,
+): List<OutgoingChatMessage> {
+    val text = instruction?.trim().orEmpty()
+    if (text.isEmpty()) return messages
+    val systemIndex = messages.indexOfFirst { it.role.equals("system", ignoreCase = true) }
+    if (systemIndex < 0) return listOf(OutgoingChatMessage(role = "system", text = text)) + messages
+    return messages.mapIndexed { index, message ->
+        if (index == systemIndex) message.copy(text = message.text.trimEnd() + "\n\n" + text) else message
+    }
+}
+
+private fun com.harnessapk.remote.ImageGenerateResult.durationLabel(): String =
+    String.format(Locale.US, "%.1fs", durationMs / 1000.0)
 
 internal fun appendAgentSourcesPart(
     snapshot: StreamingMessageSnapshot,

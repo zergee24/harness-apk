@@ -109,6 +109,9 @@ class AnthropicMessagesClient(
     }.flowOn(Dispatchers.IO)
 
     private fun buildBody(request: ChatRequest): JsonObject {
+        // Anthropic Messages 协议本轮不支持 function calling：ChatRequest.tools / tool_calls 只由
+        // OpenAI 兼容路径下发（见 SendMessageUseCase 的 image_generate 工具声明），这里刻意忽略，
+        // 保持既有请求体形状不变；tool 角色消息也会被下面的 user/assistant 过滤器丢弃。
         val systemText = request.messages
             .filter { it.role.equals("system", ignoreCase = true) }
             .joinToString("\n\n") { it.text }
