@@ -7,8 +7,6 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.job
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonArrayBuilder
@@ -56,10 +54,7 @@ class OpenAiCompatibleClient(
             .build()
 
         val call = okHttpClient.forRequest(request).newCall(httpRequest)
-        val cancellation = currentCoroutineContext().job.invokeOnCompletion {
-            if (it != null) call.cancel()
-        }
-        try {
+        withCallCancellation(call) {
             call.execute().use { response ->
                 if (!response.isSuccessful) {
                     throw ChatHttpException(buildErrorMessage(response.code, response.body.string(), request))
@@ -91,8 +86,6 @@ class OpenAiCompatibleClient(
                     throw ChatHttpException("LLM 返回为空：未收到可显示内容")
                 }
             }
-        } finally {
-            cancellation.dispose()
         }
     }.flowOn(Dispatchers.IO)
 

@@ -2,6 +2,7 @@ package com.harnessapk.websearch
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.harnessapk.network.withCallCancellation
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
@@ -16,9 +17,13 @@ class JinaWebSearchClient(
             .url(searchUrl(normalizedQuery))
             .get()
             .build()
-        val body = okHttpClient.newCall(httpRequest).execute().use { response ->
-            if (!response.isSuccessful) throw WebSearchException("联网搜索失败：HTTP ${response.code}")
-            response.body.string()
+        val call = okHttpClient.newCall(httpRequest)
+        // 协程超时/取消时立即断开连接，调用方的等待上限才真正生效。
+        val body = withCallCancellation(call) {
+            call.execute().use { response ->
+                if (!response.isSuccessful) throw WebSearchException("联网搜索失败：HTTP ${response.code}")
+                response.body.string()
+            }
         }
         val accessedAt = System.currentTimeMillis()
         val sources = parseJinaMarkdown(body, normalizedQuery, accessedAt)

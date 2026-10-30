@@ -94,6 +94,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -5320,7 +5321,11 @@ private fun MessageBubble(
                     // Coze 式执行状态：处理中计时 + 当前步骤行，一次播报不重复
                     ProcessingStatusLines(executionEntry = executionEntry)
                 }
-                if (isUser && executionEntry?.status == ChatExecutionStatus.QUEUED) {
+                if (isUser && executionEntry != null && userSidePendingStatusVisible(executionEntry)) {
+                    // 回答气泡还没建出来（联网搜索/资料检索/自动重试退避）时，在提问下方就地显示进度，
+                    // 不让用户对着一条没有任何反馈的提问干等。
+                    ProcessingStatusLines(executionEntry = executionEntry)
+                } else if (isUser && executionEntry?.status == ChatExecutionStatus.QUEUED) {
                     Text(
                         text = "排队中，等当前回答完成",
                         style = MaterialTheme.typography.bodySmall,
@@ -5430,41 +5435,41 @@ private fun MessageBubble(
 
 @Composable
 private fun ProcessingStatusLines(executionEntry: ChatExecutionEntry?) {
-    var elapsedSeconds by remember { mutableIntStateOf(0) }
+    // 计时从提问入队算起：状态行从提问下方移到回答气泡时不会归零重算。
+    val startedAt = remember(executionEntry?.id) {
+        executionEntry?.createdAt?.takeIf { it > 0L } ?: System.currentTimeMillis()
+    }
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(executionEntry?.id) {
         while (true) {
+            nowMillis = System.currentTimeMillis()
             delay(1_000)
-            elapsedSeconds += 1
         }
     }
+    val elapsedSeconds = ((nowMillis - startedAt) / 1_000L).coerceAtLeast(0L)
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = "处理中 ${elapsedSeconds}秒",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+            Text(
+                text = "处理中 ${elapsedSeconds}秒",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         executionEntry?.let { entry ->
-            val stepLabel = when (entry.status) {
-                ChatExecutionStatus.QUEUED -> "排队等待处理"
-                ChatExecutionStatus.RUNNING -> when (entry.phase) {
-                    ChatExecutionPhase.PREPARING_CONTEXT, null -> "正在准备上下文"
-                    ChatExecutionPhase.SEARCHING_WEB -> "已搜索网页"
-                    ChatExecutionPhase.RETRIEVING_KNOWLEDGE -> "已检索知识库"
-                    ChatExecutionPhase.GENERATING -> "正在生成回答"
-                    ChatExecutionPhase.FINALIZING -> "正在整理上下文"
-                }
-                else -> null
-            }
-            stepLabel?.let {
+            processingStepLabel(entry)?.let {
                 Text(
                     text = it,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if ((entry.automaticRetryCount ?: 0) > 0) {
+            processingSlowHint(entry, elapsedSeconds)?.let {
                 Text(
-                    text = "自动重试中 ${entry.automaticRetryCount}/2",
+                    text = it,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -5472,6 +5477,45 @@ private fun ProcessingStatusLines(executionEntry: ChatExecutionEntry?) {
         }
     }
 }
+
+internal fun processingStepLabel(entry: ChatExecutionEntry): String? = when (entry.status) {
+    ChatExecutionStatus.QUEUED -> if (entry.automaticRetryCount > 0) {
+        "网络中断，正在自动重试（第 ${entry.automaticRetryCount}/$MAX_AUTOMATIC_RETRIES_DISPLAY 次）"
+    } else {
+        "排队等待处理"
+    }
+    ChatExecutionStatus.RUNNING -> when (entry.phase) {
+        ChatExecutionPhase.PREPARING_CONTEXT, null -> "正在准备上下文"
+        ChatExecutionPhase.SEARCHING_WEB -> "正在联网搜索"
+        ChatExecutionPhase.RETRIEVING_KNOWLEDGE -> "正在检索资料"
+        ChatExecutionPhase.GENERATING -> "已发给模型，等待回复"
+        ChatExecutionPhase.FINALIZING -> "正在整理回答"
+    }.let { label ->
+        if (entry.automaticRetryCount > 0) "$label · 第 ${entry.automaticRetryCount} 次重试" else label
+    }
+    else -> null
+}
+
+/** 等待超过阈值时解释原因，让用户知道没卡死、可以怎么办。 */
+internal fun processingSlowHint(entry: ChatExecutionEntry, elapsedSeconds: Long): String? {
+    if (entry.status != ChatExecutionStatus.RUNNING) return null
+    return when {
+        entry.phase == ChatExecutionPhase.GENERATING && elapsedSeconds >= 45 ->
+            "模型还在思考，推理强度较高时会更久；可在模型选择里调低推理强度"
+        entry.phase == ChatExecutionPhase.GENERATING && elapsedSeconds >= 15 ->
+            "模型正在思考，首个字出来前需要一点时间"
+        else -> null
+    }
+}
+
+/** 回答气泡尚未创建时，状态显示在提问下方（联网搜索、资料检索、重试退避都发生在这段）。 */
+internal fun userSidePendingStatusVisible(entry: ChatExecutionEntry): Boolean = when (entry.status) {
+    ChatExecutionStatus.RUNNING -> entry.assistantMessageId == null
+    ChatExecutionStatus.QUEUED -> entry.automaticRetryCount > 0
+    else -> false
+}
+
+private const val MAX_AUTOMATIC_RETRIES_DISPLAY = 4
 
 @Composable
 private fun InlineMessageAction(

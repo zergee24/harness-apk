@@ -28,6 +28,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 class ChatExecutionCoordinator(
     private val executionRepository: ChatExecutionRepository,
@@ -44,6 +45,8 @@ class ChatExecutionCoordinator(
         suspend (requestId: String, attachments: List<PendingImageAttachment>) -> Boolean =
         executionRepository::isAttachmentBatchReferenced,
     internal val enqueueRunnerStarter: (suspend (conversationId: String) -> Unit)? = null,
+    /** 首字前联网搜索的等待上限；超时不带搜索结果直接回答。 */
+    private val webSearchBudgetMillis: Long = WEB_SEARCH_BUDGET_MILLIS,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
     private val runners = mutableMapOf<String, Job>()
@@ -268,13 +271,19 @@ class ChatExecutionCoordinator(
         val query = entryUserText(entry)
         val nativeMode = nativeWebSearchModeFor(entry)
         if (!shouldUseExternalWebSearch(query, entry.requestContext.webSearchEnabled, settings, nativeMode)) return null
-        return runCatching {
-            WebSearchContext(
+        // 联网搜索是首字前的阻塞步骤：超过上限就放弃搜索结果直接回答，不让用户干等（原先最长 60 秒）。
+        val result = try {
+            withTimeoutOrNull(webSearchBudgetMillis) {
                 webSearchClient.searchKeywords(
                     WebSearchRequest(query = query, maxResults = settings.maxResults),
-                ),
-            )
-        }.getOrNull()?.takeIf { it.results.results.isNotEmpty() }
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        return result?.let(::WebSearchContext)?.takeIf { it.results.results.isNotEmpty() }
     }
 
     private suspend fun nativeWebSearchModeFor(entry: ChatExecutionEntry): NativeWebSearchMode? {
@@ -330,3 +339,4 @@ internal fun automaticRetryDelayMillis(retryCount: Int): Long = when (retryCount
 }
 
 private const val GENERATION_ATTEMPT_TIMEOUT_MILLIS = 15 * 60 * 1_000L
+internal const val WEB_SEARCH_BUDGET_MILLIS = 8_000L

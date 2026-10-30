@@ -33,17 +33,21 @@ import com.harnessapk.wiki.WikiRef
 import com.harnessapk.wiki.WikiRuntimeContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.IOException
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
@@ -79,6 +83,12 @@ class SendMessageUseCase(
     /** 工具调用的诊断日志出口；默认写 logcat，测试可替换为 no-op。 */
     private val toolCallLogger: (String) -> Unit = { message ->
         android.util.Log.w(TAG, message)
+    },
+    /** 已开始输出后允许的最长静默；超时按网络中断处理并自动重试。 */
+    private val streamIdleTimeoutMillis: Long = DEFAULT_STREAM_IDLE_TIMEOUT_MILLIS,
+    /** 分段耗时日志出口（logcat tag `ChatTiming`）；单测里 android.util.Log 不可用时静默跳过。 */
+    private val timingLogger: (String) -> Unit = { line ->
+        runCatching { android.util.Log.i(CHAT_TIMING_TAG, line) }
     },
 ) {
     suspend fun send(
@@ -128,6 +138,7 @@ class SendMessageUseCase(
         onAssistantCreated: suspend (String) -> Unit = {},
         onPhaseChanged: suspend (ChatExecutionPhase) -> Unit = {},
     ): ChatExecutionResult = withContext(dispatchers.io) {
+        val timing = ChatTimingTrace(entry.id)
         val conversation = requireNotNull(chatRepository.conversation(entry.conversationId)) {
             "待执行的会话不存在"
         }
@@ -151,6 +162,10 @@ class SendMessageUseCase(
         val resolvedCapability = ModelCapabilityResolver(
             remoteCatalog = remoteCapabilityCatalog(),
         ).resolve(provider.profile, requestModel)
+        timing.label("model", requestModel)
+        timing.label("effort", entry.reasoningEffort.wireValue)
+        timing.label("retry", entry.automaticRetryCount.takeIf { it > 0 }?.toString())
+        timing.mark("setup")
         if (attachments.isNotEmpty() && !resolvedCapability.supportsImageInput()) {
             val assistantId = chatRepository.insertAssistantPending(
                 entry.conversationId,
@@ -202,6 +217,7 @@ class SendMessageUseCase(
                     )
                 }
             }
+            timing.mark("context")
             val memoryForAgent = compressed.memoryToSave ?: existingMemory
             agentContext = agentContextProvider(
                 entry.conversationId,
@@ -212,6 +228,7 @@ class SendMessageUseCase(
                 ),
             )
             if (fixedAgentConversation && agentContext == null) throw AppError.AgentUnavailable()
+            timing.mark("agent")
             val wikiScope = entry.requestContext.wikiScopeSnapshot.orEmpty()
             if (wikiScope.isNotEmpty()) onPhaseChanged(ChatExecutionPhase.RETRIEVING_KNOWLEDGE)
             wikiContext = if (wikiScope.isEmpty()) {
@@ -225,6 +242,7 @@ class SendMessageUseCase(
                     }
                 }
             }
+            timing.mark("wiki")
             val effectiveSearchContexts = effectiveAgentSearchContexts(
                 agentContext = agentContext,
                 webSearchContext = webSearchContext,
@@ -249,6 +267,7 @@ class SendMessageUseCase(
                         projectId,
                     )
                 }.getOrNull()
+                timing.mark("project")
             }
             latestSnapshot = StreamingMessageSnapshot(
                 status = MessageStatus.PENDING,
@@ -297,22 +316,53 @@ class SendMessageUseCase(
                 accumulator = activeAccumulator
                 val outputTransformerPipeline = outputTransformerPipelineFactory()
                 val toolCallCollector = ToolCallCollector()
-                client.streamChatEvents(modelAwareRequest.request).collect { event ->
-                    outputTransformerPipeline.transform(event).forEach { transformedEvent ->
-                        receivedChars += transformedEvent.visiblePayloadLength()
-                        if (transformedEvent is StreamEvent.ToolCallDelta) {
-                            // 工具调用增量不落 UI part：整轮结束后统一把 TOOL_CALL/TOOL_RESULT 落到图片消息。
-                            toolCallCollector.accept(transformedEvent)
-                        } else {
-                            activeAccumulator.onEvent(
-                                transformedEvent,
-                                activeStreamClock.elapsedNow().inWholeMilliseconds,
-                            )?.let { flush ->
-                                flushCount += 1
-                                latestSnapshot = flush.snapshot
-                                chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, flush.snapshot)
+                if (imageToolRounds == 0) timing.mark("request")
+                // 卡流看门狗：开始输出后超过 streamIdleTimeoutMillis 没有任何新事件就断开，
+                // 抛 IOException 子类以复用网络中断自动重试，不再干等 readTimeout（默认 180 秒）。
+                val lastStreamEventAt = AtomicLong(monotonicMillis())
+                val streamOutputStarted = AtomicBoolean(false)
+                var firstEventSeen = false
+                coroutineScope {
+                    val watchdog = launch {
+                        while (isActive) {
+                            delay(minOf(STREAM_WATCHDOG_TICK_MILLIS, streamIdleTimeoutMillis))
+                            val idleMillis = monotonicMillis() - lastStreamEventAt.get()
+                            if (streamOutputStarted.get() && idleMillis >= streamIdleTimeoutMillis) {
+                                throw ChatStreamStalledException(idleMillis)
                             }
                         }
+                    }
+                    try {
+                        client.streamChatEvents(modelAwareRequest.request).collect { event ->
+                            lastStreamEventAt.set(monotonicMillis())
+                            if (!firstEventSeen) {
+                                firstEventSeen = true
+                                if (imageToolRounds == 0) timing.milestone("firstEvent")
+                            }
+                            outputTransformerPipeline.transform(event).forEach { transformedEvent ->
+                                val payloadLength = transformedEvent.visiblePayloadLength()
+                                receivedChars += payloadLength
+                                if (payloadLength > 0 && !streamOutputStarted.get()) {
+                                    streamOutputStarted.set(true)
+                                    if (imageToolRounds == 0) timing.milestone("firstOutput")
+                                }
+                                if (transformedEvent is StreamEvent.ToolCallDelta) {
+                                    // 工具调用增量不落 UI part：整轮结束后统一把 TOOL_CALL/TOOL_RESULT 落到图片消息。
+                                    toolCallCollector.accept(transformedEvent)
+                                } else {
+                                    activeAccumulator.onEvent(
+                                        transformedEvent,
+                                        activeStreamClock.elapsedNow().inWholeMilliseconds,
+                                    )?.let { flush ->
+                                        flushCount += 1
+                                        latestSnapshot = flush.snapshot
+                                        chatRepository.replaceMessagePartsFromSnapshot(nextAssistantId, flush.snapshot)
+                                    }
+                                }
+                            }
+                        }
+                    } finally {
+                        watchdog.cancel()
                     }
                 }
                 streamCompleted = true
@@ -380,6 +430,7 @@ class SendMessageUseCase(
             }
             currentCoroutineContext().ensureActive()
             chatRepository.markAssistantSucceeded(nextAssistantId)
+            timingLogger(timing.summary("succeeded chars=$receivedChars flushes=$flushCount"))
             ChatExecutionResult(
                 status = ChatExecutionStatus.SUCCEEDED,
                 assistantMessageId = nextAssistantId,
@@ -421,8 +472,10 @@ class SendMessageUseCase(
             } catch (_: Throwable) {
                 // Preserve the original cancellation even if best-effort cleanup fails.
             }
+            timingLogger(timing.summary("cancelled chars=$receivedChars"))
             throw cancelled
         } catch (error: Throwable) {
+            timingLogger(timing.summary("failed chars=$receivedChars error=${error.javaClass.simpleName}"))
             val failedAssistantId = assistantId ?: chatRepository.insertAssistantPending(
                 entry.conversationId,
                 provider.profile.id,
@@ -717,6 +770,8 @@ class SendMessageUseCase(
         private const val UNKNOWN_TOOL_NAME = "unknown_tool"
         private const val MAX_IMAGE_PROMPT_PREVIEW_CHARS = 80
         private const val TAG = "SendMessageUseCase"
+        private const val CHAT_TIMING_TAG = "ChatTiming"
+        private const val STREAM_WATCHDOG_TICK_MILLIS = 1_000L
     }
 }
 

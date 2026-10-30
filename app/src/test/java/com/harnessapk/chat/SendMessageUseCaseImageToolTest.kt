@@ -439,7 +439,7 @@ private class ImageToolGeneratedFileWriter : GeneratedImageFileWriter {
     }
 }
 
-private fun imageToolProviderRepository(apiProtocol: ProviderApiProtocol): ProviderRepository = ProviderRepository(
+internal fun imageToolProviderRepository(apiProtocol: ProviderApiProtocol): ProviderRepository = ProviderRepository(
     dao = ImageToolProviderProfileDao().apply {
         row = ProviderProfileEntity(
             id = "provider-1",
@@ -466,7 +466,7 @@ private fun imageToolProviderRepository(apiProtocol: ProviderApiProtocol): Provi
     timeProvider = TimeProvider { 1L },
 )
 
-private fun imageToolRepository(): ChatRepository = ChatRepository(
+internal fun imageToolRepository(): ChatRepository = ChatRepository(
     conversationDao = ImageToolConversationDao(),
     messageDao = ImageToolMessageDao(),
     messagePartDao = ImageToolMessagePartDao(),
